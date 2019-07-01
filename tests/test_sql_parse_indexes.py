@@ -11,7 +11,7 @@ class TestCase(unittest.TestCase):
         sql = 'CREATE INDEX foo ON bar (baz)'
         expectation = {
             'columns': [{'name': 'baz', 'null_order': None, 'order': None}],
-            'condition': None,
+            'where': None,
             'name': 'foo',
             'options': {},
             'relation': {'inh': True,
@@ -30,7 +30,7 @@ class TestCase(unittest.TestCase):
                 {'name': 'baz', 'null_order': None, 'order': None},
                 {'name': 'qux', 'null_order': None, 'order': None}
             ],
-            'condition': None,
+            'where': None,
             'name': 'foo',
             'options': {},
             'relation': {'inh': True,
@@ -49,7 +49,7 @@ class TestCase(unittest.TestCase):
                 {'name': 'baz', 'null_order': None, 'order': None},
                 {'name': 'qux', 'null_order': None, 'order': None}
             ],
-            'condition': None,
+            'where': 'baz IS NULL',
             'name': 'foo',
             'options': {},
             'relation': {'inh': True,
@@ -70,7 +70,7 @@ class TestCase(unittest.TestCase):
                 {'name': 'baz', 'null_order': None, 'order': None},
                 {'name': 'qux', 'null_order': None, 'order': None}
             ],
-            'condition': None,
+            'where': 'baz IS NULL AND qux IS NOT NULL',
             'name': 'foo',
             'options': {},
             'relation': {'inh': True,
@@ -91,7 +91,7 @@ class TestCase(unittest.TestCase):
                 {'name': 'baz', 'null_order': None, 'order': None},
                 {'name': 'qux', 'null_order': None, 'order': None}
             ],
-            'condition': None,
+            'where': 'baz IS NULL OR qux IS NULL',
             'name': 'foo',
             'options': {},
             'relation': {'inh': True,
@@ -110,7 +110,7 @@ class TestCase(unittest.TestCase):
                 {'name': 'baz', 'null_order': None, 'order': 'ASC'},
                 {'name': 'qux', 'null_order': None, 'order': 'DESC'}
             ],
-            'condition': None,
+            'where': None,
             'name': 'foo',
             'options': {},
             'relation': {'inh': True,
@@ -130,7 +130,7 @@ class TestCase(unittest.TestCase):
                 {'name': 'baz', 'null_order': 'LAST', 'order': 'ASC'},
                 {'name': 'qux', 'null_order': 'FIRST', 'order': 'DESC'}
             ],
-            'condition': None,
+            'where': None,
             'name': 'foo',
             'options': {},
             'relation': {'inh': True,
@@ -146,7 +146,7 @@ class TestCase(unittest.TestCase):
         sql = 'CREATE UNIQUE INDEX foo ON bar (baz)'
         expectation = {
             'columns': [{'name': 'baz', 'null_order': None, 'order': None}],
-            'condition': None,
+            'where': None,
             'name': 'foo',
             'options': {},
             'relation': {'inh': True,
@@ -162,7 +162,7 @@ class TestCase(unittest.TestCase):
         sql = 'CREATE INDEX foo ON bar (baz) TABLESPACE qux'
         expectation = {
             'columns': [{'name': 'baz', 'null_order': None, 'order': None}],
-            'condition': None,
+            'where': None,
             'name': 'foo',
             'options': {},
             'relation': {'inh': True,
@@ -178,7 +178,7 @@ class TestCase(unittest.TestCase):
         sql = 'CREATE INDEX foo ON bar (baz) WITH (fillfactor = 50)'
         expectation = {
             'columns': [{'name': 'baz', 'null_order': None, 'order': None}],
-            'condition': None,
+            'where': None,
             'name': 'foo',
             'options': {
                 'fillfactor': 50

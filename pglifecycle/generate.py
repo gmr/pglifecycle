@@ -247,6 +247,8 @@ class Generate:
                 columns=parsed['columns'],
                 type=parsed['type'] if parsed['type'] != 'btree' else None,
                 options=parsed.get('options'),
+                transitions=parsed.get('transitions') or None,
+                where=parsed.get('where'),
                 tablespace=parsed.get('tablespace'),
                 unique=parsed['unique'] or None)
             self._remove_null_values(indexes[parsed['name']])

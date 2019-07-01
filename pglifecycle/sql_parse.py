@@ -326,7 +326,7 @@ def _parse_index_stmt(value: dict) -> dict:
         'relation': _parse(value['relation']),
         'type': value['accessMethod'],
         'columns': columns,
-        'condition': _parse(value.get('condition')),
+        'where': _parse(value.get('whereClause')),
         'options': {r['defname']: r['arg'] for r in options},
         'tablespace': value.get('tableSpace'),
         'unique': value.get('unique', False)
@@ -338,7 +338,7 @@ def _parse_integer(value: dict) -> int:
 
 
 def _parse_null_test(value: dict) -> str:
-    return '{} IS {}'.format(
+    return '{} {} NULL'.format(
         _parse(value['arg']), _NULLTEST[value['nulltesttype']])
 
 
