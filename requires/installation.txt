@@ -1,0 +1,4 @@
+arrow
+pgdumplib>=1.0.1,<2
+psqlparse==1.0rc7
+pyyaml>=5.1.1,<6

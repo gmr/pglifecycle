@@ -1,0 +1,12 @@
+*.egg
+*.egg-info
+*.pyc
+*.pyo
+.coverage
+.idea
+.vscode
+build/
+dist/
+env/
+docs/_build
+test-project/
