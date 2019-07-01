@@ -41,7 +41,7 @@ INSERT INTO test.addresses
 USER_SQL = """\
 INSERT INTO test.users
             (created_at, last_modified_at, state, email, name, surname,
-             display_name, locale, password_salt, password, signup_ip, icon)
+             display_name, locale, password_salt, password, signup_ip)
      VALUES (%(created_at)s, %(last_modified_at)s, %(state)s, %(email)s,
              %(name)s, %(surname)s, %(display_name)s, %(locale)s,
              %(password_salt)s, %(password)s, %(signup_ip)s)
