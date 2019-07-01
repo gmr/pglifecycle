@@ -6,7 +6,7 @@ import pkg_resources
 
 sys.path.insert(0, os.path.abspath('..'))
 master_doc = 'index'
-project = 'pgdumplib'
+project = 'pglifecycle'
 release = version = pkg_resources.get_distribution(project).version
 copyright = '{}, Gavin M. Roy'.format(datetime.date.today().year)
 

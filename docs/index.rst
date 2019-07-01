@@ -1,5 +1,5 @@
 pglifecycle
-=========
+===========
 
 A PostgreSQL schema management tool
 
