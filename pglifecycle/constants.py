@@ -64,6 +64,7 @@ VIEW = 'VIEW'
 INSERT = 'INSERT'
 UPDATE = 'UPDATE'
 DELETE = 'DELETE'
+SELECT = 'SELECT'
 TRUNCATE = 'TRUNCATE'
 
 AFTER = 'AFTER'
@@ -88,7 +89,7 @@ CHILD_OBJ_TYPES = [
 ]
 
 PATHS = {
-    AGGREGATE: pathlib.Path('./functions'),
+    AGGREGATE: pathlib.Path('functions'),
     CAST: pathlib.Path('casts'),
     COLLATION: pathlib.Path('collations'),
     CONVERSION: pathlib.Path('conversions'),
@@ -113,7 +114,6 @@ PATHS = {
     TABLESPACE: pathlib.Path('tablespaces'),
     TEXT_SEARCH_CONFIGURATION: pathlib.Path('text_search'),
     TEXT_SEARCH_DICTIONARY: pathlib.Path('text_search'),
-    TRIGGER: pathlib.Path('triggers'),
     TYPE: pathlib.Path('types'),
     VIEW: pathlib.Path('views')
 }

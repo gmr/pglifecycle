@@ -12,11 +12,21 @@ from pglifecycle import constants
 
 LOGGER = logging.getLogger(__name__)
 
+_ACL_OBJECT_TYPE = {
+    1: 'TABLE',
+    10: 'SCHEMA'}
+_ACL_ROLE_TYPE = {
+    0: 'USER',
+    3: 'PUBLIC'}
 _BOOLOP = {0: ' AND ', 1: ' OR '}
-_FK_ACTION = {'a': None,  # NO ACTION
-              'c': 'CASCADE',
-              'n': 'SET NULL',
-              'r': 'RESTRICT'}
+_BOOL_TEST = {1: 'TRUE', 2: 'FALSE'}
+_DEFINE_TYPES = {
+    45: 'TYPE'}
+_FK_ACTION = {
+    'a': None,  # NO ACTION
+    'c': 'CASCADE',
+    'n': 'SET NULL',
+    'r': 'RESTRICT'}
 _FK_MATCH = {'f': 'FULL', 'p': 'PARTIAL', 's': None}
 _GENERATED = {'a': 'ALWAYS', 'd': 'BY DEFAULT'}
 _INTERVAL_FIELDS = {
@@ -37,7 +47,12 @@ _INTERVAL_FIELDS = {
 _NULLORDERING = {0: None, 1: 'FIRST', 2: 'LAST'}
 _NULLTEST = {0: 'IS', 1: 'IS NOT'}
 _ORDERING = {0: None, 1: 'ASC', 2: 'DESC'}
-
+_RULE_EVENTS = {
+    1: constants.SELECT,
+    2: constants.UPDATE,
+    3: constants.INSERT,
+    4: constants.DELETE,
+}
 _TRIGGER_INSERT = (1 << 2)
 _TRIGGER_DELETE = (1 << 3)
 _TRIGGER_UPDATE = (1 << 4)
@@ -135,6 +150,10 @@ def _parse_a_star(_value: dict) -> str:
     return '*'
 
 
+def _parse_access_priv(value: dict) -> str:
+    return value['priv_name'].upper()
+
+
 def _parse_alter_table_cmd(value: dict) -> typing.Optional[dict]:
     if value['subtype'] == 14:  # Foreign Key
         return _parse(value['def'])
@@ -156,6 +175,13 @@ def _parse_alter_table_stmt(value: dict) -> dict:
 
 def _parse_bool_expr(value: dict) -> str:
     return _BOOLOP[value['boolop']].join(_parse(value['args']))
+
+
+def _parse_boolean_test(value: dict) -> str:
+    return ' {} '.format(
+        _BOOLOP[value.get('boolop', 0)]).join(
+            '{} IS {}'.format(_parse(f), _BOOL_TEST[value['booltesttype']])
+            for f in value['arg'])
 
 
 def _parse_case_expr(value: dict) -> dict:
@@ -204,11 +230,21 @@ def _parse_column_ref(value: dict):
 
 
 def _parse_comment_stmt(value: dict) -> dict:
-    LOGGER.debug('Parsing %r', value)
-    val = {'owner': _parse(value['object']),
-           'value': _parse(value['comment'])}
-    LOGGER.debug('Returning %r', val)
-    return val
+    return {'owner': _parse(value['object']),
+            'value': _parse(value['comment'])}
+
+
+def _parse_composite_type_stmt(value: dict) -> dict:
+    output = {
+        'name': _parse(value['typevar'])['relname']
+    }
+    if 'coldeflist' in value:
+        parsed = _parse(value['coldeflist'])
+        if not isinstance(parsed, list):
+            parsed = [parsed]
+        output['attributes'] = [{'name': e['name'], 'type': e['type']}
+                                for e in parsed]
+    return output
 
 
 def _parse_constraint(value: dict) -> dict:
@@ -253,6 +289,29 @@ def _parse_constraint(value: dict) -> dict:
     raise RuntimeError
 
 
+def _parse_createdb_stmt(value: dict) -> dict:
+    return {'name': value['dbname'],
+            'options': {e['defname']: e['arg']
+                        for e in _parse(value['options'])}}
+
+
+def _parse_create_domain_stmt(value: dict) -> dict:
+    return {
+        'name': _parse(value['domainname']),
+        'type': _parse(value['typeName']),
+        'constraints': _parse(value['constraints'])
+    }
+
+
+def _parse_create_enum_stmt(value: dict) -> dict:
+    return {'name': _parse(value['typeName']), 'values': _parse(value['vals'])}
+
+
+def _parse_create_range_stmt(value: dict) -> dict:
+    return {'name': _parse(value['typeName']),
+            'range': {e['defname']: e['arg'] for e in _parse(value['params'])}}
+
+
 def _parse_create_stmt(value: dict):
     return {k: _parse(v) for k, v in value.items()}
 
@@ -295,14 +354,55 @@ def _parse_def_elem(value: dict) -> dict:
     return {'arg': _parse(value['arg']), 'defname': value['defname']}
 
 
+def _parse_define_stmt(value: dict) -> dict:
+    return {
+        'name': _parse(value['defnames']),
+        'definition': {e['defname']: e['arg']
+                       for e in _parse(value['definition'])}}
+
+
+def _parse_delete_stmt(value: dict) -> str:
+    parts = ['DELETE', 'FROM', _relation_name(_parse(value['relation']))]
+    if 'whereClause' in value:
+        parts += ['WHERE', _parse(value['whereClause'])]
+    for unsupported in ['usingClause', 'returningList']:
+        if unsupported in value:
+            LOGGER.error('Unsupported keyword: %r', value)
+            raise RuntimeError('{} in value'.format(unsupported))
+    return ' '.join(parts)
+
+
+
+def _parse_float(value: dict) -> int:
+    return _parse(value)
+
+
 def _parse_func_call(value: dict) -> str:
-    args = _parse(value.get('args', []))
+    LOGGER.debug('func_call: %r', value)
+    args = ['.'.join(a) if isinstance(a, list) else a
+            for a in _parse(value.get('args', []))]
+    LOGGER.debug('Args: %r', args)
     if isinstance(args, list):
         args = ', '.join(args)
+
+
     funcname = _parse(value['funcname'])
     if isinstance(funcname, list):
         funcname = '.'.join(funcname)
     return '{}({})'.format(funcname, args)
+
+
+def _parse_grant_stmt(value: dict) -> dict:
+    privileges = _parse(value.get('privileges', 'ALL'))
+    if not isinstance(privileges, list):
+        privileges = [privileges]
+    return {
+        'action': 'GRANT' if value.get('is_grant') else 'REVOKE',
+        'grantees': _parse(value['grantees']),
+        'objects': _parse(value['objects']),
+        'object_type': _ACL_OBJECT_TYPE[value['objtype']],
+        'privileges': privileges
+    }
 
 
 def _parse_index_elem(value: dict) -> dict:
@@ -337,6 +437,10 @@ def _parse_integer(value: dict) -> int:
     return value['ival']
 
 
+def _parse_notify_stmt(value: dict) -> str:
+    return 'NOTIFY {}'.format(value['conditionname'])
+
+
 def _parse_null_test(value: dict) -> str:
     return '{} {} NULL'.format(
         _parse(value['arg']), _NULLTEST[value['nulltesttype']])
@@ -353,6 +457,44 @@ def _parse_relation(value: dict):
 
 def _parse_raw_stmt(value: dict) -> str:
     return _parse(value['stmt'])
+
+
+def _parse_res_target(value: dict) -> str:
+    return _parse(value['val'])
+
+
+def _parse_role_spec(value: dict) -> str:
+    return value.get('rolename', _ACL_ROLE_TYPE[value['roletype']])
+
+
+def _parse_rule_stmt(value: dict) -> dict:
+    return {
+        'name': _parse(value['rulename']),
+        'table': _relation_name(_parse(value['relation'])),
+        'event': _RULE_EVENTS[value['event']],
+        'instead': value.get('instead', False),
+        'replace': value.get('replace', False),
+        'where': _parse(value.get('whereClause')),
+        'action': _parse(value['actions'])}
+
+
+def _parse_select_stmt(value: dict) -> str:
+    target = _parse(value['targetList'])
+    if not isinstance(target, list):
+        target = [target]
+    parts = ['SELECT', ','.join(target)]
+    if 'fromClause' in value:
+        parts += ['FROM', _relation_name(_parse(value['fromClause']))]
+    if 'whereClause' in value:
+        parts += ['WHERE', _parse(value['whereClause'])]
+    for unsupported in ['intoClause', 'groupClause', 'havingClause',
+                        'windowClause', 'valueLists', 'sortClause',
+                        'limitOffset', 'limitCount', 'lockingClause',
+                        'withClause']:
+        if unsupported in value:
+            LOGGER.error('Unsupported keyword: %r', value)
+            raise RuntimeError('{} in value'.format(unsupported))
+    return ' '.join(parts)
 
 
 def _parse_stmt(value: dict) -> str:
@@ -404,27 +546,45 @@ def _passthrough(value):
     return value
 
 
+def _relation_name(value: dict) -> str:
+    if 'schemaname' in value:
+        return '{}.{}'.format(value['relname'], value['relname'])
+    return value['relname']
+
+
 _PARSERS = {
     'A_ArrayExpr': _parse_a_arrayexpr,
     'A_Const': _parse_a_const,
     'A_Expr': _parse_a_expr,
     'A_Star': _parse_a_star,
+    'AccessPriv': _parse_access_priv,
     'AlterTableCmd': _parse_alter_table_cmd,
     'AlterTableStmt': _parse_alter_table_stmt,
     'BoolExpr': _parse_bool_expr,
+    'BooleanTest': _parse_boolean_test,
     'CaseExpr': _parse_case_expr,
     'CaseWhen': _parse_case_when,
     'ColumnDef': _parse_column_def,
     'ColumnRef': _parse_column_ref,
     'CommentStmt': _parse_comment_stmt,
+    'CompositeTypeStmt': _parse_composite_type_stmt,
     'Constraint': _parse_constraint,
+    'CreatedbStmt': _parse_createdb_stmt,
+    'CreateDomainStmt': _parse_create_domain_stmt,
+    'CreateEnumStmt': _parse_create_enum_stmt,
+    'CreateRangeStmt': _parse_create_range_stmt,
     'CreateStmt': _parse_create_stmt,
     'CreateTrigStmt': _parse_create_trig_stmt,
     'DefElem': _parse_def_elem,
+    'DefineStmt': _parse_define_stmt,
+    'DeleteStmt': _parse_delete_stmt,
+    'Float': _parse_float,
     'FuncCall': _parse_func_call,
+    'GrantStmt': _parse_grant_stmt,
     'IndexElem': _parse_index_elem,
     'IndexStmt': _parse_index_stmt,
     'Integer': _parse_integer,
+    'NotifyStmt': _parse_notify_stmt,
     'Null': lambda _x: None,
     'NullTest': _parse_null_test,
     'options': _parse_options,
@@ -432,6 +592,10 @@ _PARSERS = {
     'stmt': _parse_stmt,
     'RangeVar': _passthrough,
     'RawStmt': _parse_raw_stmt,
+    'ResTarget': _parse_res_target,
+    'RoleSpec': _parse_role_spec,
+    'RuleStmt': _parse_rule_stmt,
+    'SelectStmt': _parse_select_stmt,
     'String': _parse_string,
     'TriggerTransition': _parse_trigger_transition,
     'TypeCast': _parse_type_cast,
