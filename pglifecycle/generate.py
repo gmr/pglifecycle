@@ -277,6 +277,23 @@ class Generate:
                     parsed = parsed[0]
                 return parsed['primary_key']
 
+    def _find_rules(self, parent: dump.Entry) -> list:
+        rules = []
+        for entry in self._get_entries(constants.RULE, parent.dump_id):
+            self._mark_processed(entry.dump_id)
+            parsed = sql_parse.parse(entry.defn)
+            data = collections.OrderedDict(
+                event=parsed['event'],
+                instead=parsed['instead'],
+                table=parsed['table'],
+                where=parsed['where'],
+                action=parsed['action'],
+                comment=self._find_comment(entry)
+            )
+            self._remove_null_values(data)
+            rules.append(data)
+        return rules
+
     def _find_triggers(self, parent: dump.Entry) -> dict:
         parent_name = self._parent_name(parent)
         triggers = {}
@@ -343,7 +360,6 @@ class Generate:
         self._generate_project_file()
         self._generate_schema_files()
         self._generate_domains()
-        self._generate_rules()
         self._collect_indexes()
         self._generate_table_files()
         self._generate_types()
@@ -371,29 +387,6 @@ class Generate:
                 match = SET_PATTERN.match(entry.defn)
                 project[entry.tag.lower()] = match.group(1)
         self._yaml_dump('project.yaml', project)
-
-    def _generate_rules(self):
-        LOGGER.info('Generating rules')
-        for entry in self._get_entries(constants.RULE):
-            LOGGER.debug('Parsing %s.%s', entry.namespace, entry.tag)
-            self._mark_processed(entry.dump_id)
-            parsed = sql_parse.parse(entry.defn)
-            data = collections.OrderedDict(
-                define=constants.RULE,
-                name=entry.tag,
-                namespace=entry.namespace,
-                owner=entry.owner,
-                comment=self._find_comment(entry),
-                event=parsed['event'],
-                instead=parsed['instead'],
-                table=parsed['table'],
-                where=parsed['where'],
-                action=parsed['action']
-            )
-            self._remove_null_values(data)
-            self._yaml_dump(
-                constants.PATHS[constants.RULE] / entry.namespace /
-                '{}.yaml'.format(entry.tag), data)
 
     def _generate_schema_files(self) -> typing.NoReturn:
         """Generate the schema files"""
@@ -586,11 +579,15 @@ class Generate:
         :rtype: list
 
         """
-        return [
-            collections.OrderedDict(
-                type=e.desc, schema=e.namespace, name=e.tag)
-            for e in self.dump.entries
-            if e.dump_id in dependencies and e.desc != constants.SCHEMA]
+        LOGGER.debug('Resolving dependencies: %r', dependencies)
+        values = []
+        for entry in [e for e in self.dump.entries
+                      if e.dump_id in dependencies]:
+            value = collections.OrderedDict(
+                type=entry.desc, schema=entry.namespace, name=entry.tag)
+            self._remove_null_values(value)
+            values.append(value)
+        return values
 
     def _yaml_dump(self, path: str, data: dict,
                    remove_empty=True) -> typing.NoReturn:
