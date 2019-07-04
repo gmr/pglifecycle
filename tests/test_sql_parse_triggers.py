@@ -55,7 +55,7 @@ class TestCase(unittest.TestCase):
             'name': 'log_update',
             'transitions': [],
             'row': True,
-            'condition': 'old.* IS DISTINCT FROM new.*',
+            'condition': 'OLD.* IS DISTINCT FROM NEW.*',
             'function': 'log_account_update()'
         }
         self.assertDictEqual(sql_parse.parse(sql), expectation)

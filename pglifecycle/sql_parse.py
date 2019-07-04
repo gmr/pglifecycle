@@ -84,9 +84,8 @@ def parse(value: str) -> typing.Union[dict, int, list, str]:
     return result
 
 
-def _capitalize_keywords(values: list) -> list:
-    return [v.upper() if isinstance(v, str) and v in ['old', 'new'] else v
-            for v in values]
+def _capitalize_keywords(value: list) -> list:
+    return [v.upper() if v in ['excluded', 'old', 'new'] else v for v in value]
 
 
 def _ensure_list(value: typing.Any) -> list:
@@ -159,14 +158,7 @@ def _parse_a_expr_side(value: dict) -> str:
         rexpr = 'A_Expr' in value['A_Expr']['rexpr']
         if lexpr and rexpr:
             return '({})'.format(_parse(value))
-        return _parse(value)
-    parsed = _parse(value)
-    if isinstance(parsed, list):
-        if all(isinstance(v, str) for v in parsed):
-            return '.'.join(_capitalize_keywords(parsed))
-        LOGGER.error('Unsupported Format: %r', parsed)
-        raise ValueError
-    return parsed
+    return _parse(value)
 
 
 def _parse_a_indices(value: dict) -> str:
@@ -254,7 +246,7 @@ def _parse_column_def(value: dict):
 def _parse_column_ref(value: dict):
     if 'fields' in value:
         fields = _ensure_list(_parse(value['fields']))
-        return '.'.join(fields)
+        return '.'.join(_capitalize_keywords(fields))
     LOGGER.error('Unsupported ColumnRef: %r', value)
     raise RuntimeError
 
@@ -527,12 +519,11 @@ def _parse_null_test(value: dict) -> str:
 
 def _parse_on_conflict_clause(value: dict) -> str:
     parts = ['ON CONFLICT']
-    if 'infer' in value:
-        infer = _parse(value['infer'])
-        if isinstance(infer, list):
-            parts.append('({})'.format(', '.join(infer)))
-        else:
-            parts.append(infer)
+    infer = _parse(value['infer'])
+    if isinstance(infer, list):
+        parts.append('({})'.format(', '.join(infer)))
+    else:
+        parts.append(infer)
     parts.append(_ON_CONFLICT[value['action']])
     if 'targetList' in value:
         _set_res_target_mode(value['targetList'], 'update')

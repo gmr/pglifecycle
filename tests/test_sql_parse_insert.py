@@ -104,7 +104,7 @@ class TestCase(unittest.TestCase):
         expectation = ('INSERT INTO distributors (did, dname) VALUES (5, '
                        "'Gizmo Transglobal'), (6, 'Associated Computing, Inc')"
                        ' ON CONFLICT (did) DO UPDATE SET dname = '
-                       'excluded.dname')
+                       'EXCLUDED.dname')
         self.assertEqual(sql_parse.parse(sql), expectation)
 
     def test_example11(self):
@@ -127,7 +127,7 @@ class TestCase(unittest.TestCase):
                   WHERE d.zipcode <> '21201';"""
         expectation = ('INSERT INTO distributors AS d (did, dname) VALUES '
                        "(8, 'Anvil Distribution') ON CONFLICT (did) DO UPDATE "
-                       "SET dname = excluded.dname || ' (formerly ' || d.dname"
+                       "SET dname = EXCLUDED.dname || ' (formerly ' || d.dname"
                        " || ')' WHERE d.zipcode <> '21201'")
         self.assertEqual(sql_parse.parse(sql), expectation)
 
