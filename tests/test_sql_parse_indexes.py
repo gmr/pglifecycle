@@ -14,10 +14,7 @@ class TestCase(unittest.TestCase):
             'where': None,
             'name': 'foo',
             'options': {},
-            'relation': {'inh': True,
-                         'location': 20,
-                         'relname': 'bar',
-                         'relpersistence': 'p'},
+            'relation': 'bar',
             'tablespace': None,
             'type': 'btree',
             'unique': False}
@@ -33,10 +30,7 @@ class TestCase(unittest.TestCase):
             'where': None,
             'name': 'foo',
             'options': {},
-            'relation': {'inh': True,
-                         'location': 20,
-                         'relname': 'bar',
-                         'relpersistence': 'p'},
+            'relation': 'bar',
             'tablespace': None,
             'type': 'btree',
             'unique': False}
@@ -52,10 +46,7 @@ class TestCase(unittest.TestCase):
             'where': 'baz IS NULL',
             'name': 'foo',
             'options': {},
-            'relation': {'inh': True,
-                         'location': 20,
-                         'relname': 'bar',
-                         'relpersistence': 'p'},
+            'relation': 'bar',
             'tablespace': None,
             'type': 'btree',
             'unique': False}
@@ -73,10 +64,7 @@ class TestCase(unittest.TestCase):
             'where': 'baz IS NULL AND qux IS NOT NULL',
             'name': 'foo',
             'options': {},
-            'relation': {'inh': True,
-                         'location': 28,
-                         'relname': 'bar',
-                         'relpersistence': 'p'},
+            'relation': 'bar',
             'tablespace': None,
             'type': 'btree',
             'unique': False}
@@ -94,10 +82,7 @@ class TestCase(unittest.TestCase):
             'where': 'baz IS NULL OR qux IS NULL',
             'name': 'foo',
             'options': {},
-            'relation': {'inh': True,
-                         'location': 32,
-                         'relname': 'bar',
-                         'relpersistence': 'p'},
+            'relation': 'bar',
             'tablespace': None,
             'type': 'btree',
             'unique': False}
@@ -113,10 +98,7 @@ class TestCase(unittest.TestCase):
             'where': None,
             'name': 'foo',
             'options': {},
-            'relation': {'inh': True,
-                         'location': 20,
-                         'relname': 'bar',
-                         'relpersistence': 'p'},
+            'relation': 'bar',
             'tablespace': None,
             'type': 'btree',
             'unique': False}
@@ -133,10 +115,7 @@ class TestCase(unittest.TestCase):
             'where': None,
             'name': 'foo',
             'options': {},
-            'relation': {'inh': True,
-                         'location': 32,
-                         'relname': 'bar',
-                         'relpersistence': 'p'},
+            'relation': 'bar',
             'tablespace': None,
             'type': 'btree',
             'unique': False}
@@ -149,26 +128,20 @@ class TestCase(unittest.TestCase):
             'where': None,
             'name': 'foo',
             'options': {},
-            'relation': {'inh': True,
-                         'location': 27,
-                         'relname': 'bar',
-                         'relpersistence': 'p'},
+            'relation': 'bar',
             'tablespace': None,
             'type': 'btree',
             'unique': True}
         self.assertDictEqual(sql_parse.parse(sql), expectation)
 
     def test_tablespace(self):
-        sql = 'CREATE INDEX foo ON bar (baz) TABLESPACE qux'
+        sql = 'CREATE INDEX foo ON v1.bar (baz) TABLESPACE qux'
         expectation = {
             'columns': [{'name': 'baz', 'null_order': None, 'order': None}],
             'where': None,
             'name': 'foo',
             'options': {},
-            'relation': {'inh': True,
-                         'location': 20,
-                         'relname': 'bar',
-                         'relpersistence': 'p'},
+            'relation': 'v1.bar',
             'tablespace': 'qux',
             'type': 'btree',
             'unique': False}
@@ -183,10 +156,7 @@ class TestCase(unittest.TestCase):
             'options': {
                 'fillfactor': 50
             },
-            'relation': {'inh': True,
-                         'location': 20,
-                         'relname': 'bar',
-                         'relpersistence': 'p'},
+            'relation': 'bar',
             'tablespace': None,
             'type': 'btree',
             'unique': False}

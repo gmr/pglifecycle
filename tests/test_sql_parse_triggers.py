@@ -15,10 +15,7 @@ class TestCase(unittest.TestCase):
             'when': 'BEFORE',
             'events': ['UPDATE'],
             'name': 'check_update',
-            'relation': {'inh': True,
-                         'location': 73,
-                         'relname': 'accounts',
-                         'relpersistence': 'p'},
+            'relation': 'accounts',
             'transitions': [],
             'row': True,
             'condition': None,
@@ -36,10 +33,7 @@ class TestCase(unittest.TestCase):
             'when': 'AFTER',
             'events': ['INSERT', 'UPDATE', 'DELETE'],
             'name': 'replicate',
-            'relation': {'inh': True,
-                         'location': 89,
-                         'relname': 'accounts',
-                         'relpersistence': 'p'},
+            'relation': 'accounts',
             'transitions': [],
             'row': True,
             'condition': None,
@@ -57,14 +51,11 @@ class TestCase(unittest.TestCase):
         expectation = {
             'when': 'AFTER',
             'events': ['UPDATE'],
-            'relation': {'inh': True,
-                         'location': 70,
-                         'relname': 'accounts',
-                         'relpersistence': 'p'},
+            'relation': 'accounts',
             'name': 'log_update',
             'transitions': [],
             'row': True,
-            'condition': 'OLD.* IS DISTINCT FROM NEW.*',
+            'condition': 'old.* IS DISTINCT FROM new.*',
             'function': 'log_account_update()'
         }
         self.assertDictEqual(sql_parse.parse(sql), expectation)
@@ -78,10 +69,7 @@ class TestCase(unittest.TestCase):
         expectation = {
             'when': 'INSTEAD OF',
             'events': ['INSERT'],
-            'relation': {'inh': True,
-                         'location': 76,
-                         'relname': 'my_view',
-                         'relpersistence': 'p'},
+            'relation': 'my_view',
             'name': 'view_insert',
             'transitions': [],
             'row': True,
@@ -100,10 +88,7 @@ class TestCase(unittest.TestCase):
         expectation = {
             'when': 'AFTER',
             'events': ['INSERT'],
-            'relation': {'inh': True,
-                         'location': 75,
-                         'relname': 'transfer',
-                         'relpersistence': 'p'},
+            'relation': 'transfer',
             'name': 'transfer_insert',
             'transitions': [{
                 'name': 'inserted',
@@ -126,10 +111,7 @@ class TestCase(unittest.TestCase):
         expectation = {
             'when': 'AFTER',
             'events': ['UPDATE'],
-            'relation': {'inh': True,
-                         'location': 79,
-                         'relname': 'paired_items',
-                         'relpersistence': 'p'},
+            'relation': 'paired_items',
             'name': 'paired_items_update',
             'transitions': [
                 {
