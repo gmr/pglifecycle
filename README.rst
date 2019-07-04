@@ -17,7 +17,7 @@ Installation
    :target: https://pypi.python.org/pypi/pglifecycle
    :alt: Package Version
 
-.. |Status| image:: https://img.shields.io/circleci/build/gh/gmr/pglifecycle/master.svg?token=46593b052a2e0ff4720cfa2fc52bd6ef738ec989
+.. |Status| image:: https://img.shields.io/circleci/build/gh/gmr/pglifecycle/master.svg?token=c3849913c4986985d81c280ec863e060fe59c82e
    :target: https://circleci.com/gh/gmr/pglifecycle/tree/master
    :alt: Build Status
 
