@@ -36,6 +36,9 @@ def add_actions_to_parser(parser):
         '-e', '--extract', action='store_true',
         help='Extract schema from an existing database')
     parser.add_argument(
+        '-r', '--extract-roles', action='store_true',
+        help='Extract roles (and users) from an existing cluster')
+    parser.add_argument(
         '--force', action='store_true',
         help='Write to destination path even if it already exists')
     parser.add_argument(

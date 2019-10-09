@@ -4,6 +4,7 @@ Common Constants
 """
 import pathlib
 
+
 ALTER = 'ALTER'
 COMMENT = 'COMMENT'
 CREATE = 'CREATE'
@@ -29,13 +30,16 @@ ENCODING = 'ENCODING'
 EVENT_TRIGGER = 'EVENT TRIGGER'
 EXTENSION = 'EXTENSION'
 FOREIGN_DATA_WRAPPER = 'FOREIGN DATA WRAPPER'
+FOREIGN_SERVER = 'FOREIGN SERVER'
 FOREIGN_TABLE = 'FOREIGN TABLE'
 FK_CONSTRAINT = 'FK CONSTRAINT'
 FUNCTION = 'FUNCTION'
+GROUP = 'GROUP'
 INDEX = 'INDEX'
+LARGE_OBJECT = 'LARGE OBJECT'
 MATERIALIZED_VIEW = 'MATERIALIZED VIEW'
 OPERATOR = 'OPERATOR'
-OPERATORS = 'OPERATORS'
+OPERATOR_CLASS = 'OPERATOR CLASS'
 POLICY = 'POLICY'
 PROCEDURE = 'PROCEDURE'
 PROCEDURAL_LANGUAGE = 'PROCEDURAL LANGUAGE'
@@ -58,6 +62,7 @@ TEXT_SEARCH_DICTIONARY = 'TEXT SEARCH DICTIONARY'
 TEXT_SEARCH_CONFIGURATION = 'TEXT SEARCH CONFIGURATION'
 TRIGGER = 'TRIGGER'
 TYPE = 'TYPE'
+USER = 'USER'
 USER_MAPPING = 'USER MAPPING'
 VIEW = 'VIEW'
 
@@ -71,23 +76,6 @@ AFTER = 'AFTER'
 BEFORE = 'BEFORE'
 INSTEAD = 'INSTEAD OF'
 
-CHILD_OBJ_TYPES = [
-    DEFAULT,
-    COMMENT,
-    POLICY,
-    CHECK_CONSTRAINT,
-    CONSTRAINT,
-    FK_CONSTRAINT,
-    INDEX,
-    ACL,
-    SECURITY_LABEL,
-    SEQUENCE_OWNED_BY,
-    SERVER,
-    FOREIGN_TABLE,
-    USER_MAPPING,
-    PUBLICATION_TABLE
-]
-
 PATHS = {
     AGGREGATE: pathlib.Path('functions'),
     CAST: pathlib.Path('casts'),
@@ -95,27 +83,26 @@ PATHS = {
     CONVERSION: pathlib.Path('conversions'),
     DOMAIN: pathlib.Path('domains'),
     EVENT_TRIGGER: pathlib.Path('event_triggers'),
-    EXTENSION: pathlib.Path('extensions'),
     FOREIGN_DATA_WRAPPER: pathlib.Path('foreign_data_wrappers'),
     FUNCTION: pathlib.Path('functions'),
+    GROUP: pathlib.Path('groups'),
     MATERIALIZED_VIEW: pathlib.Path('materialized_views'),
     OPERATOR: pathlib.Path('operators'),
     PROCEDURE: pathlib.Path('procedures'),
-    PROCEDURAL_LANGUAGE: pathlib.Path('extensions'),
     PUBLICATION: pathlib.Path('publications'),
     ROLE: pathlib.Path('roles'),
-    RULE: pathlib.Path('rules'),
     SCHEMA: pathlib.Path('schemata'),
     SEQUENCE: pathlib.Path('sequences'),
     SERVER: pathlib.Path('servers'),
-    SHELL_TYPE: pathlib.Path('types'),
     SUBSCRIPTION: pathlib.Path('subscriptions'),
     TABLE: pathlib.Path('tables'),
     TABLESPACE: pathlib.Path('tablespaces'),
     TEXT_SEARCH_CONFIGURATION: pathlib.Path('text_search'),
     TEXT_SEARCH_DICTIONARY: pathlib.Path('text_search'),
     TYPE: pathlib.Path('types'),
-    VIEW: pathlib.Path('views')
+    USER: pathlib.Path('users'),
+    USER_MAPPING: pathlib.Path('user_mappings'),
+    VIEW: pathlib.Path('views'),
 }
 
 SECTION_NONE: str = 'None'
