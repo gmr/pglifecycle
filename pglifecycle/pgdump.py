@@ -21,8 +21,8 @@ class _PGDump:
         exit with a code of ``3``
 
         """
-        LOGGER.info('Dumping postgresql://%s:%s/%s to %s',
-                    self.args.host, self.args.port, self.args.dbname, path)
+        LOGGER.debug('Dumping postgresql://%s:%s/%s to %s',
+                     self.args.host, self.args.port, self.args.dbname, path)
         self._execute(self._dump_command(path))
 
     def _dump_command(self, path: pathlib.Path) -> list:
