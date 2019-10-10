@@ -9,7 +9,7 @@ import os
 from os import path
 import pwd
 
-from pglifecycle import common, generate, version
+from pglifecycle import common, generate_artifact, generate_project, version
 
 LOGGER = logging.getLogger(__name__)
 LOGGING_FORMAT = '[%(asctime)-15s] %(levelname)-8s %(message)s'
@@ -28,9 +28,21 @@ def add_actions_to_parser(parser):
         required=True,
         metavar='ACTION')
 
-    parser = sp.add_parser('generate-project', help='Generate a project')
+    parser = sp.add_parser(
+        'generate-artifact',
+        help='Generate a pg_dump compatible artifact from the project')
     parser.add_argument(
-        '-d', '--dump', action='store',
+        '-f', '--file', action='store',
+        help='The path to the file to create')
+    parser.add_argument(
+        'project', metavar='PROJECT', nargs='?', action='store',
+        help='The path to the pglifecycle project')
+
+    parser = sp.add_parser('generate-project', help='Generate a project')
+    add_connection_options_to_parser(parser)
+    add_ddl_options_to_parser(parser)
+    parser.add_argument(
+        '-D', '--dump', action='store',
         help='Use a pre-existing pg_dump file')
     parser.add_argument(
         '-e', '--extract', action='store_true',
@@ -48,7 +60,10 @@ def add_actions_to_parser(parser):
         '--remove-empty-dirs', action='store_true',
         help='Remove empty directories after generation')
     parser.add_argument(
-        'dest', nargs=1, metavar='DEST',
+        '--save-remaining', action='store_true',
+        help='Save any unparsed/unprocessed dump items to remaining.yaml')
+    parser.add_argument(
+        'dest', nargs='?', metavar='DEST',
         help='Destination directory for the new project')
 
 
@@ -58,7 +73,8 @@ def add_connection_options_to_parser(parser):
     :param argparse.ArgumentParser parser: The parser to add the args to
 
     """
-    conn = parser.add_argument_group('Connection Options')
+    conn = parser.add_argument_group(
+        'Connection Options', conflict_handler='resolve')
     conn.add_argument(
         '-d', '--dbname', action='store',
         default=os.environ.get('PGDATABASE', get_username()),
@@ -165,15 +181,13 @@ def parse_cli_arguments():
         description='PostgreSQL Schema Management',
         conflict_handler='resolve',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    add_connection_options_to_parser(parser)
-    add_ddl_options_to_parser(parser)
     add_logging_options_to_parser(parser)
+    add_actions_to_parser(parser)
     parser.add_argument(
         '-V',
         '--version',
         action='store_true',
         help='output version information, then exit')
-    add_actions_to_parser(parser)
     return parser.parse_args()
 
 
@@ -182,10 +196,17 @@ def run():
     args = parse_cli_arguments()
     configure_logging(args)
     LOGGER.info('pglifecycle v%s starting %s', version, args.action)
-    if args.action == 'generate-project':
+    if args.action == 'generate-artifact':
+        try:
+            generate_artifact.Generate(args).run()
+        except RuntimeError as error:
+            common.exit_application(str(error), 4)
+    elif args.action == 'generate-project':
+        if not args.dest:
+            common.exit_application('Destination not specified', 2)
         if args.gitkeep and args.remove_empty_dirs:
             common.exit_application(
                 'Can not specify --gitkeep and --remove-empty-dirs', 2)
-        generate.Generate(args).run()
+        generate_project.Generate(args).run()
     else:
         common.exit_application('Invalid action specified', 1)
