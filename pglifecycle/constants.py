@@ -25,6 +25,7 @@ DATABASE = 'DATABASE'
 DEFAULT = 'DEFAULT'
 DIRECTIVE = 'DIRECTIVE'
 DIRECTIVES = 'DIRECTIVES'
+DML = 'DML'
 DOMAIN = 'DOMAIN'
 ENCODING = 'ENCODING'
 EVENT_TRIGGER = 'EVENT TRIGGER'
@@ -77,10 +78,11 @@ BEFORE = 'BEFORE'
 INSTEAD = 'INSTEAD OF'
 
 PATHS = {
-    AGGREGATE: pathlib.Path('functions'),
+    AGGREGATE: pathlib.Path('aggregates'),
     CAST: pathlib.Path('casts'),
     COLLATION: pathlib.Path('collations'),
     CONVERSION: pathlib.Path('conversions'),
+    DML: pathlib.Path('dml'),
     DOMAIN: pathlib.Path('domains'),
     EVENT_TRIGGER: pathlib.Path('event_triggers'),
     FOREIGN_DATA_WRAPPER: pathlib.Path('foreign_data_wrappers'),
