@@ -51,6 +51,9 @@ def add_actions_to_parser(parser):
         '-r', '--extract-roles', action='store_true',
         help='Extract roles (and users) from an existing cluster')
     parser.add_argument(
+        '-i', '--ignore', action='store',
+        help='Specify a file with files skip writing')
+    parser.add_argument(
         '--force', action='store_true',
         help='Write to destination path even if it already exists')
     parser.add_argument(

@@ -3,3 +3,4 @@ pgdumplib>=1.0.1,<2
 pglast
 ruamel.yaml
 stringcase
+toposort>=1.5,<2

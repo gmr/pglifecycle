@@ -21,6 +21,7 @@ from pglifecycle import common, constants, parse, pgdump, storage
 LOGGER = logging.getLogger(__name__)
 
 DEFAULT_NAMESPACE = 'public'
+ISO_FORMAT = 'YYYY-MM-DD HH:mm:ss ZZ'
 SET_PATTERN = re.compile(r"SET .* = '(?P<value>.*)'")
 YAML_EXTENSION = 'yaml'
 
@@ -101,6 +102,7 @@ class Generate:
 
     def __init__(self, args):
         self.args = args
+        self.ignore = set()
         self.project_path = pathlib.Path(args.dest)
         self.tempdir = tempfile.TemporaryDirectory()
         self.dump = None
@@ -125,7 +127,15 @@ class Generate:
         LOGGER.info('Generating project in %s', self.project_path)
         LOGGER.debug('args: %r', self.args)
 
+        if self.args.ignore:
+            with open(self.args.ignore, 'r') as handle:
+                for line in handle:
+                    self.ignore.add(line.strip())
+            LOGGER.info('Ignoring %i files', len(self.ignore))
+
         if self.args.extract:
+            LOGGER.info('Dumping schema from postgresql://%s:%s/%s',
+                        self.args.host, self.args.port, self.args.dbname)
             pgdump.dump(self.args, self.dump_path)
 
         LOGGER.debug('Loading dump from %s', self.dump_path)
@@ -204,12 +214,9 @@ class Generate:
         temp = [e for e in self.dump.entries if e.desc == constants.DATABASE]
         self._mark_processed(temp[0].dump_id)
         comments = {
-            'pg_dump version':
-            self.dump.dump_version,
-            'postgres version':
-            self.dump.server_version,
-            'dumped at':
-            arrow.get(self.dump.timestamp).format('YYYY-MM-DD HH:mm:ss ZZ')
+            'pg_dump version': self.dump.dump_version,
+            'postgres version': self.dump.server_version,
+            'dumped at': arrow.get(self.dump.timestamp).format(ISO_FORMAT)
         }
         project = {
             'name': self.dump.dbname
@@ -221,6 +228,7 @@ class Generate:
                 project[entry.tag.lower()] = match.group(1)
         project.update({
             'extensions': self._find_extensions(),
+            'languages': self._find_languages(),
             'shell_types': self._find_shell_types()
         })
         project = _remove_null_values(project)
@@ -242,9 +250,12 @@ class Generate:
             if entry.desc in _FILENAME_MAP:
                 filename = _FILENAME_MAP[entry.desc](
                     entry.tag, self.files_created)
+            file_path = self._object_path(entry, filename)
+            if str(file_path) in self.ignore:
+                LOGGER.debug('Skipping %s', file_path)
+                continue
             self.files_created.append(
-                storage.save(self.project_path,
-                             self._object_path(entry, filename), entry.desc,
+                storage.save(self.project_path, file_path, entry.desc,
                              entry.tag, data))
 
     def _create_group_files(self) -> typing.NoReturn:
@@ -266,10 +277,13 @@ class Generate:
                 'options': role.get('options'),
                 'settings': role.get('settings')
             }
+            file_path = constants.PATHS[constants.GROUP] / '{}.{}'.format(
+                role['role'], YAML_EXTENSION)
+            if str(file_path) in self.ignore:
+                LOGGER.debug('Skipping %s', file_path)
+                continue
             self.files_created.append(
-                storage.save(self.project_path,
-                             constants.PATHS[constants.GROUP] / '{}.{}'.format(
-                                 role['role'], YAML_EXTENSION),
+                storage.save(self.project_path, file_path,
                              constants.GROUP, role['role'], data))
 
     def _create_namespace_files(self, object_type: str) -> typing.NoReturn:
@@ -288,12 +302,14 @@ class Generate:
             namespace[entry.namespace].append(data)
         for value in namespace.keys():
             key = '{}S'.format(object_type)
+            file_path = constants.PATHS[object_type] / '{}.{}'.format(
+                value, YAML_EXTENSION)
+            if str(file_path) in self.ignore:
+                LOGGER.debug('Skipping %s', file_path)
+                continue
             self.files_created.append(
                 storage.save(
-                    self.project_path,
-                    constants.PATHS[object_type] / '{}.{}'.format(
-                        value, YAML_EXTENSION),
-                    key, value, {
+                    self.project_path, file_path, key, value, {
                         'schema': value,
                         key.lower(): namespace[value]}))
 
@@ -449,16 +465,25 @@ class Generate:
                             not self._roles[parsed['role']][key]:
                         self._roles[parsed['role']][key] = value
 
-    def _find_extensions(self) -> dict:
-        extensions = {}
-        for extension_type in {constants.EXTENSION,
-                               constants.PROCEDURAL_LANGUAGE}:
-            for entry in _filter(self.dump.entries, extension_type):
-                self._mark_processed(entry.dump_id)
-                extensions[entry.tag] = {
-                    'type': entry.desc,
-                    'sql': entry.defn.strip()}
+    def _find_extensions(self) -> list:
+        extensions = []
+        for entry in _filter(self.dump.entries, constants.EXTENSION):
+            self._mark_processed(entry.dump_id)
+            # parsed = parse.sql(entry.defn) @ TODO work through this
+            extensions.append(
+                {
+                    'name': entry.tag,
+                    'schema': entry.namespace
+                }
+            )
         return extensions
+
+    def _find_languages(self) -> list:
+        languages = []
+        for entry in _filter(self.dump.entries, constants.PROCEDURAL_LANGUAGE):
+            languages.append(parse.sql(entry.defn))
+            self._mark_processed(entry.dump_id)
+        return languages
 
     def _find_shell_types(self) -> list:
         values = []
@@ -590,10 +615,14 @@ class Structure:
     def sequence(self, entry: dump.Entry) -> dict:
         """Return a data structure for for the entry"""
         value = self.generic(entry)
-        value['relation'] = self._find_children(entry,
-                                                constants.SEQUENCE_OWNED_BY)
-        if value['relation'] and len(value['relation']) == 1:
-            value['relation'] = value['relation'][0]
+        children = self._find_children(entry, constants.SEQUENCE_OWNED_BY)
+        for child in children:
+            parsed = parse.sql(child['sql'])
+            if parsed.get('options', {}).get('name') == 'owned_by':
+                value['owned_by'] = '.'.join(parsed['options']['arg'])
+            else:
+                LOGGER.error('Unsupported seq child: %r', child)
+                raise RuntimeError
         return value
 
     def server(self, entry: dump.Entry) -> dict:
@@ -686,8 +715,8 @@ class Structure:
                     elif parsed_child is None:
                         raise RuntimeError
             if add_child:
-                LOGGER.debug('Adding %s child %s to %s', entry_type,
-                             self._object_name(entry), parent_name)
+                LOGGER.debug('Adding %s child %s to %s - %r', entry_type,
+                             self._object_name(entry), parent_name, entry)
                 self._mark_processed(entry.dump_id)
                 deps = self._resolve_dependencies(entry.dependencies)
                 try:
@@ -696,6 +725,8 @@ class Structure:
                     pass
                 child = {
                     'name': entry.tag,
+                    'schema': entry.namespace,
+                    'owner': entry.owner,
                     'tablespace': entry.tablespace,
                     'comment': self._find_comment(entry),
                     'sql': _prettify(entry.defn),

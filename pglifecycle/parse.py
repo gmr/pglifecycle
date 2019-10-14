@@ -429,6 +429,17 @@ class _SQLParser:
         raise RuntimeError
 
     @staticmethod
+    def _create_p_lang_stmt(value: dict) -> dict:
+        return {
+            'name': value['plname'],
+            'handler': value.get('plhandler'),
+            'inline_handler': value.get('plinline'),
+            'replace': value.get('replace', False),
+            'trusted': value.get('pltrusted'),
+            'validator': value.get('plvalidator')
+        }
+
+    @staticmethod
     def _create_role_stmt(value: dict) -> dict:
         return {
             'type': _RoleType(value['stmt_type']).name,
