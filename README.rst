@@ -17,9 +17,10 @@ Installation
    :target: https://pypi.python.org/pypi/pglifecycle
    :alt: Package Version
 
-.. |Status| image:: https://img.shields.io/circleci/build/gh/gmr/pglifecycle/master.svg?token=c3849913c4986985d81c280ec863e060fe59c82e
-   :target: https://circleci.com/gh/gmr/pglifecycle/tree/master
+.. |Status| image:: https://github.com/gmr/pglifecycle/workflows/Testing/badge.svg?
+   :target: https://codecov.io/github/gmr/pglifecycle?branch=master
    :alt: Build Status
+
 
 .. |Coverage| image:: https://codecov.io/gh/gmr/pglifecycle/branch/master/graph/badge.svg
    :target: https://codecov.io/github/gmr/pglifecycle?branch=master
