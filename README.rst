@@ -18,7 +18,7 @@ Installation
    :alt: Package Version
 
 .. |Status| image:: https://github.com/gmr/pglifecycle/workflows/Testing/badge.svg?
-   :target: https://codecov.io/github/gmr/pglifecycle?branch=master
+   :target: https://github.com/gmr/pglifecycle/actions?workflow=Testing
    :alt: Build Status
 
 .. |Coverage| image:: https://codecov.io/gh/gmr/pglifecycle/branch/master/graph/badge.svg
