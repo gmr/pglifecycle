@@ -9,7 +9,7 @@ import os
 from os import path
 import pwd
 
-from pglifecycle import common, generate_artifact, generate_project, version
+from pglifecycle import common, generate_dump, generate_project, version
 
 LOGGER = logging.getLogger(__name__)
 LOGGING_FORMAT = '[%(asctime)-15s] %(levelname)-8s %(message)s'
@@ -29,11 +29,14 @@ def add_actions_to_parser(parser):
         metavar='ACTION')
 
     parser = sp.add_parser(
-        'generate-artifact',
-        help='Generate a pg_dump compatible artifact from the project')
+        'generate-dump',
+        help='Generate a pg_dump compatible file from the project')
     parser.add_argument(
         '-f', '--file', action='store',
         help='The path to the file to create')
+    parser.add_argument(
+        '-s', '--suppress-warnings', action='store_true',
+        help='Do not show warnings about the project')
     parser.add_argument(
         'project', metavar='PROJECT', nargs='?', action='store',
         help='The path to the pglifecycle project')
@@ -163,6 +166,7 @@ def configure_logging(args):
             filename = None
     logging.basicConfig(
         level=level, filename=filename, format=LOGGING_FORMAT)
+    logging.getLogger('pgdumplib.dump').setLevel(logging.INFO)
 
 
 def get_username():
@@ -198,10 +202,10 @@ def run():
     """Main entry-point to the pg_lifecycle application"""
     args = parse_cli_arguments()
     configure_logging(args)
-    LOGGER.info('pglifecycle v%s starting %s', version, args.action)
-    if args.action == 'generate-artifact':
+    LOGGER.info('pglifecycle v%s running %s', version, args.action)
+    if args.action == 'generate-dump':
         try:
-            generate_artifact.Generate(args).run()
+            generate_dump.Generate(args).run()
         except RuntimeError as error:
             common.exit_application(str(error), 4)
     elif args.action == 'generate-project':

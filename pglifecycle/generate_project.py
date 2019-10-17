@@ -436,7 +436,7 @@ class Generate:
         dump_path = pathlib.Path(self.tempdir.name) / \
             'pg-lifecycle-{}-roles'.format(os.getpid())
         pgdump.dump_roles(self.args, dump_path)
-        with open(dump_path, 'r') as handle:
+        with open(dump_path) as handle:
             for line in handle.readlines():
                 line = line.rstrip()
                 if not line or line.startswith('--') or line.startswith('SET'):

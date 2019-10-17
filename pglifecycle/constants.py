@@ -4,7 +4,6 @@ Common Constants
 """
 import pathlib
 
-
 ALTER = 'ALTER'
 COMMENT = 'COMMENT'
 CREATE = 'CREATE'
@@ -105,18 +104,6 @@ PATHS = {
     USER: pathlib.Path('users'),
     USER_MAPPING: pathlib.Path('user_mappings'),
     VIEW: pathlib.Path('views'),
-}
-
-SECTION_NONE: str = 'None'
-SECTION_PRE_DATA: str = 'Pre-Data'
-SECTION_DATA: str = 'DATA'
-SECTION_POST_DATA: str = 'Post-Data'
-
-OBJECT_SECTIONS = {
-    CONSTRAINT: SECTION_POST_DATA,
-    FK_CONSTRAINT: SECTION_POST_DATA,
-    INDEX: SECTION_POST_DATA,
-    TRIGGER: SECTION_POST_DATA
 }
 
 TABLE_KEYS = {
