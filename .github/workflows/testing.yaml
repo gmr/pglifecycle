@@ -41,6 +41,9 @@ jobs:
       - name: Install library dependencies
         run: python setup.py develop
 
+      - name: Create build directory
+        run: mkdir build
+
       - name: Run flake8 tests
         run: flake8 --output build/flake8.txt --tee
 
