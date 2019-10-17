@@ -21,7 +21,6 @@ Installation
    :target: https://codecov.io/github/gmr/pglifecycle?branch=master
    :alt: Build Status
 
-
 .. |Coverage| image:: https://codecov.io/gh/gmr/pglifecycle/branch/master/graph/badge.svg
    :target: https://codecov.io/github/gmr/pglifecycle?branch=master
    :alt: Code Coverage
