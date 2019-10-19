@@ -701,7 +701,7 @@ class _SQLParser:
             if 'pg_catalog' in name:
                 name.remove('pg_catalog')
             if len(name) > 1:
-                name = '.'.join(name)
+                name = ['.'.join(name)]
             name = name[0]
         if name == 'bpchar':
             name = 'char'
