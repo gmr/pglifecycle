@@ -204,6 +204,8 @@ def run():
     configure_logging(args)
     LOGGER.info('pglifecycle v%s running %s', version, args.action)
     if args.action == 'generate-dump':
+        if not args.project:
+            common.exit_application('Project not specified', 2)
         try:
             generate_dump.Generate(args).run()
         except RuntimeError as error:
