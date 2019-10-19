@@ -208,10 +208,10 @@ class Generate:
                      or file_path.name.endswith('.yml')))
 
     @staticmethod
-    def _lookup_desc_from_path_name(path: str) -> typing.Optional[str]:
-        for key, value in constants.PATHS.items():
-            if value.name == path:
-                return key
+    def _lookup_desc_from_grant_key(key):
+        for desc, value in constants.GRANT_KEYS.items():
+            if key == value:
+                return desc
 
     def _lookup_entry(self, obj_type: str, schema: str, name: str) -> _Item:
         schema = obj_type if schema == '' else schema
@@ -494,16 +494,13 @@ class Generate:
                         raise
         return dependencies
 
-    def _process_role_acls(self,
-                           entry: pgdumplib.dump.Entry,
+    def _process_role_acls(self, dump_id: int,
                            grants: dict) -> typing.NoReturn:
+        _desc, _schema, role_name = self._reverse_lookup[dump_id]
         for grant_type in grants:
             if grant_type in {'groups', 'roles', 'users'}:
                 continue
-            elif grant_type == 'schemas':
-                obj_type = constants.SCHEMA
-            else:
-                obj_type = self._lookup_desc_from_path_name(grant_type)
+            obj_type = self._lookup_desc_from_grant_key(grant_type)
             for name, perms in grants[grant_type].items():
                 if 'ALL' in perms:
                     perms = ['ALL']
@@ -513,7 +510,7 @@ class Generate:
                     sql.append(obj_type)
                 sql.append(name)
                 sql.append('TO')
-                sql.append(entry.tag)
+                sql.append(role_name)
                 if '.' in name:
                     schema = name[:name.find('.')]
                     name = name[name.find('.') + 1:]
@@ -524,13 +521,14 @@ class Generate:
                 except RuntimeError:
                     if not self._args.suppress_warnings:
                         LOGGER.warning(
-                            'Can not find %s %s.%s for %s %s, skipping',
-                            obj_type, schema, name, entry.desc, entry.tag)
+                            'Can not find %s %s.%s for %s, skipping',
+                            obj_type, schema, name, role_name)
                     continue
+                deps = [item.dump_id]
                 acl = self._dump.add_entry(
-                    constants.ACL, tag=entry.tag,
+                    constants.ACL, tag=role_name,
                     defn='{};\n'.format(' '.join(sql)),
-                    dependencies=[entry.dump_id, item.dump_id],
+                    dependencies=deps,
                     dump_id=self._next_dump_id())
                 self._processed.add(acl.dump_id)
                 self._objects += 1
@@ -539,37 +537,39 @@ class Generate:
                              dependencies: dict) -> pgdumplib.dump.Entry:
         desc, schema, name = self._reverse_lookup[dump_id]
         definition = self._inventory[desc][schema][name].definition
-        sql = [
-            'CREATE', desc, definition.get('name', name), 'WITH'
-        ]
-        sql += definition.get('options', [])
-        if 'password' in definition:
-            if definition['password'].startswith('md5'):
-                sql.append('ENCRYPTED')
-            sql.append('PASSWORD')
-            sql.append('$${}$$'.format(definition['password']))
-        entry = self._dump.add_entry(
-            desc, tag=definition.get('name', name),
-            defn='{};\n'.format(' '.join(sql)),
-            dependencies=list(dependencies[dump_id]), dump_id=dump_id)
-        self._maybe_add_comment(entry, definition)
-        self._processed.add(dump_id)
-        self._objects += 1
-        return entry
+        if definition.get('create', True):
+            sql = [
+                'CREATE', desc, definition.get('name', name), 'WITH'
+            ]
+            sql += definition.get('options', [])
+            if 'password' in definition:
+                if definition['password'].startswith('md5'):
+                    sql.append('ENCRYPTED')
+                sql.append('PASSWORD')
+                sql.append('$${}$$'.format(definition['password']))
+            entry = self._dump.add_entry(
+                desc, tag=definition.get('name', name),
+                defn='{};\n'.format(' '.join(sql)),
+                dependencies=list(dependencies[dump_id]), dump_id=dump_id)
+            self._maybe_add_comment(entry, definition)
+            self._processed.add(dump_id)
+            self._objects += 1
+            return entry
 
     def _process_role_drop(self, dump_id: int, dependencies: dict) -> int:
         desc, schema, name = self._reverse_lookup[dump_id]
         definition = self._inventory[desc][schema][name].definition
-        drop_if_exists = self._dump.add_entry(
-            desc, tag=definition.get('name', name),
-            defn='DROP {} IF EXISTS {};\n'.format(
-                desc, self._inventory[desc][schema][name].definition.get(
-                    'name', name)),
-            dependencies=list(dependencies[dump_id]),
-            dump_id=self._next_dump_id())
-        self._processed.add(drop_if_exists.dump_id)
-        self._objects += 1
-        return drop_if_exists.dump_id
+        if definition.get('create', True):
+            drop_if_exists = self._dump.add_entry(
+                desc, tag=definition.get('name', name),
+                defn='DROP {} IF EXISTS {};\n'.format(
+                    desc, self._inventory[desc][schema][name].definition.get(
+                        'name', name)),
+                dependencies=list(dependencies[dump_id]),
+                dump_id=self._next_dump_id())
+            self._processed.add(drop_if_exists.dump_id)
+            self._objects += 1
+            return drop_if_exists.dump_id
 
     def _process_role_settings(self, entry: pgdumplib.dump.Entry,
                                settings: list) -> typing.NoReturn:
@@ -604,7 +604,7 @@ class Generate:
             definition = self._inventory[desc][schema][name].definition
             if definition.get('settings'):
                 self._process_role_settings(entry, definition['settings'])
-            self._process_role_acls(entry, definition.get('grants', {}))
+            self._process_role_acls(dump_id, definition.get('grants', {}))
 
     def _process_schemas(self) -> typing.NoReturn:
         for schema, _name, definition in self._iterate_files(constants.SCHEMA):
@@ -715,7 +715,7 @@ class Generate:
                                   constants.USER]:
                         schema = ''
                     entry = self._dump.lookup_entry(obj_type, schema, name)
-                    if not entry:
+                    if not entry and name not in ['postgres', 'PUBLIC']:
                         LOGGER.error('Missing %s %s.%s',
                                      obj_type, schema, name)
                         errors += 1
