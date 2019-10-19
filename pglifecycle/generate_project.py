@@ -404,27 +404,11 @@ class Generate:
 
     @staticmethod
     def _empty_grant() -> dict:
-        return {
-            constants.COLUMN: {},
-            constants.TABLE: {},
-            constants.SEQUENCE: {},
-            constants.DATABASE: {},
-            constants.DOMAIN: {},
-            constants.FOREIGN_DATA_WRAPPER: {},
-            constants.FOREIGN_SERVER: {},
-            constants.FUNCTION: {},
-            constants.PROCEDURAL_LANGUAGE: {},
-            constants.LARGE_OBJECT: {},
-            constants.SCHEMA: {},
-            constants.ROLE: [],
-            constants.TABLESPACE: {},
-            constants.TYPE: {}
-        }
+        return {v: {} for v in constants.GRANT_KEYS.values()}
 
     def _empty_role(self) -> dict:
         return {
             'role': None,
-            'type': None,
             'grant': self._empty_grant(),
             'revoke': self._empty_grant(),
             'options': [],

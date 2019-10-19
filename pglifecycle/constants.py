@@ -106,6 +106,57 @@ PATHS = {
     VIEW: pathlib.Path('views'),
 }
 
+GRANT_KEYS = {
+    COLUMN: 'columns',
+    DATABASE: 'databases',
+    DOMAIN: 'domains',
+    FOREIGN_DATA_WRAPPER: 'foreign data wrappers',
+    FOREIGN_SERVER: 'foreign servers',
+    FUNCTION: 'functions',
+    GROUP: 'groups',
+    PROCEDURAL_LANGUAGE: 'languages',
+    LARGE_OBJECT: 'large objects',
+    ROLE: 'roles',
+    SEQUENCE: 'sequences',
+    SCHEMA: 'schemata',
+    TABLE: 'tables',
+    TABLESPACE: 'tablespaces',
+    TYPE: 'types',
+    VIEW: 'views'
+}
+
+GRANT_SORT_WEIGHTS = {
+    'ALL': -1,
+    'SELECT': 0,
+    'INSERT': 1,
+    'UPDATE': 2,
+    'DELETE': 3,
+    'USAGE': 4,
+    'TRUNCATE': 5,
+    'REFERENCES': 6,
+    'TRIGGER': 7,
+    'CREATE': 0,
+    'CONNECT': 1,
+    'TEMPORARY': 2
+}
+
+OPTIONS_WEIGHTS = {
+    'SUPERUSER': 0,
+    'NOSUPERUSER': 0,
+    'CREATEDB': 1,
+    'NOCREATEDB': 1,
+    'CREATEROLE': 2,
+    'NOCREATEROLE': 2,
+    'INHERIT': 3,
+    'NOINHERIT': 3,
+    'LOGIN': 4,
+    'NOLOGIN': 4,
+    'REPLICATION': 5,
+    'NOREPLICATION': 5,
+    'BYPASSRLS': 6,
+    'NOBYPASSRLS': 6
+}
+
 TABLE_KEYS = {
     ACL: 'acls',
     CHECK_CONSTRAINT: 'check constraints',
