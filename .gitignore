@@ -5,6 +5,7 @@
 .coverage
 .idea
 .vscode
+bak/
 build/
 dist/
 env/
