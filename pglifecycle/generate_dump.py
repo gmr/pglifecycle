@@ -40,6 +40,7 @@ class Generate:
     """Generate Project Structure"""
 
     def __init__(self, args):
+        self._acls = {}
         self._args = args
         self._dependencies = {}
         self._dump_id = None
@@ -72,6 +73,9 @@ class Generate:
 
         LOGGER.info('Processing groups, roles, and users')
         self._process_roles()
+
+        LOGGER.info('Processing ACLs')
+        self._process_acls()
 
         LOGGER.info('Processing DML')
         self._process_dml()
@@ -125,6 +129,47 @@ class Generate:
         LOGGER.debug('Added %s %s.%s: %r', obj_type, schema, name,
                      self._inventory[obj_type][schema][name])
 
+    def _build_acls_for_object(self, entry: pgdumplib.dump.Entry) \
+            -> typing.Tuple[list, str]:
+        dependencies = set({})
+        if entry.desc in [constants.DATABASE,
+                          constants.PROCEDURAL_LANGUAGE,
+                          constants.SCHEMA]:
+            name = '{} {}'.format(entry.desc, entry.tag)
+        elif entry.desc in [constants.TABLE, constants.VIEW]:
+            name = '{}.{}'.format(entry.namespace, entry.tag)
+        else:
+            name = '{} {}.{}'.format(entry.desc, entry.namespace, entry.tag)
+        sql = [
+            'REVOKE ALL ON {} FROM PUBLIC;'.format(name),
+            'REVOKE ALL ON {} FROM {};'.format(name, self._project.superuser)
+        ]
+        for role_name in sorted(self._acls[entry.dump_id].keys()):
+            sql.append('GRANT {} ON {} TO {};'.format(
+                ', '.join(
+                    sorted(
+                        self._acls[entry.dump_id][role_name],
+                        key=lambda k: constants.GRANT_SORT_WEIGHTS[k])),
+                name, role_name))
+            if not self._system_role(role_name):
+                dependency = self._lookup_role_entry(role_name)
+                if dependency:
+                    dependencies.add(dependency.dump_id)
+        return list(dependencies), '\n'.join(sql)
+
+    def _build_acls_for_role(self, dump_id: int, tag: str) \
+            -> typing.Tuple[list, str]:
+        dependencies, sql = set({}), []
+        for role_name in sorted(self._acls[dump_id]):
+            sql.append('GRANT {} TO {};'.format(tag, role_name))
+            if not self._system_role(tag):
+                dependencies.add(dump_id)
+            if not self._system_role(role_name):
+                dependency = self._lookup_role_entry(role_name)
+                if dependency:
+                    dependencies.add(dependency.dump_id)
+        return list(dependencies), '\n'.join(sql)
+
     def _create_inventory(self) -> typing.NoReturn:
         counter = 0
         for obj_type in constants.PATHS:
@@ -166,6 +211,18 @@ class Generate:
                 counter += 1
 
         LOGGER.info('Processed %i files', counter)
+
+    def _find_sequence_for_table(self, schema: str, table: str) \
+            -> typing.Optional[typing.Tuple[int, str, str, str]]:
+        for s_schema in self._inventory[constants.SEQUENCE]:
+            for s_name in self._inventory[constants.SEQUENCE][s_schema]:
+                item = self._inventory[constants.SEQUENCE][s_schema][s_name]
+                prefix = '{}.{}.'.format(schema, table)
+                if item.definition.get('owned_by', '').startswith(prefix):
+                    return (item.dump_id,
+                            item.definition['owned_by'].split('.')[2],
+                            item.definition.get('schema', s_schema),
+                            item.definition.get('name', s_name))
 
     def _get_owner(self, definition):
         if not definition:
@@ -222,6 +279,15 @@ class Generate:
             LOGGER.debug('Could not find %s %s.%s in inventory',
                          obj_type, schema, name)
             raise RuntimeError
+
+    def _lookup_role_entry(self, name):
+        for desc in [constants.GROUP, constants.ROLE, constants.USER]:
+            try:
+                return self._lookup_entry(desc, '', name)
+            except RuntimeError:
+                pass
+        if not self._args.suppress_warnings:
+            LOGGER.warning('No defined role, group, or user named %s', name)
 
     def _maybe_add_comment(self,
                            entry: pgdumplib.dump.Entry,
@@ -286,6 +352,37 @@ class Generate:
         self._dump_id += 1
         return self._dump_id
 
+    def _process_acls(self):
+        for dump_id in self._acls:
+            desc, tag = None, None
+            entry = self._dump.get_entry(dump_id)
+            if not entry:
+                LOGGER.debug('Failed to get entry for dump_id %i', dump_id)
+                desc, _schema, tag = self._reverse_lookup[dump_id]
+                if not tag:
+                    LOGGER.critical('Could not lookup reverse of dump_id %i',
+                                    dump_id)
+                    raise RuntimeError
+                elif not self._system_role(tag):
+                    LOGGER.critical(
+                        '%s %s - %i is missing and not a sytem role',
+                        desc, tag, dump_id)
+                    raise RuntimeError
+            else:
+                desc = entry.desc
+            if desc in [constants.GROUP, constants.ROLE, constants.USER]:
+                dependencies, sql = self._build_acls_for_role(
+                    dump_id, entry.tag if entry else tag)
+            else:
+                dependencies, sql = self._build_acls_for_object(entry)
+            acl = self._dump.add_entry(
+                constants.ACL,
+                entry.namespace if entry else '', entry.tag if entry else tag,
+                defn=sql, dependencies=list(dependencies),
+                dump_id=self._next_dump_id())
+            self._processed.add(acl.dump_id)
+            self._objects += 1
+
     def _process_child(self, ct, cs, cn, dump_id):
         pt, ps, pn = self._reverse_lookup[self._inventory[ct][cs][cn].parent]
         parent = self._inventory[pt][ps][pn].definition
@@ -341,18 +438,35 @@ class Generate:
     def _process_dml_file(self, path: pathlib.Path):
         schema = path.parent.name
         table = path.name[:-4]
-        entry = self._dump.lookup_entry(constants.TABLE, schema, table)
-        if not entry:
-            LOGGER.error('Failed to find table definition for %s.%s',
-                         schema, table)
-            raise RuntimeError
+        try:
+            entry = self._dump.lookup_entry(constants.TABLE, schema, table)
+        except RuntimeError:
+            LOGGER.critical('Failed to find table entry for DML: %s', path)
+            raise
+        sequence = self._find_sequence_for_table(schema, table)
         with path.open() as handle:
+            max_value, seq_column = 0, -1
             fields = handle.readline().strip().split(',')
+            if sequence:
+                seq_column = fields.index(sequence[1])
             reader = csv.reader(handle)
             with self._dump.table_data_writer(entry, fields) as writer:
                 for row in reader:
-                    LOGGER.debug('Row: %r', row)
                     writer.append(*row)
+                    if sequence:
+                        if int(row[seq_column]) > max_value:
+                            max_value = int(row[seq_column])
+            self._dump_id = None  # Reset the dump_id to get max from pgdumplib
+            if sequence:
+                acl = self._dump.add_entry(
+                    constants.SEQUENCE_SET,
+                    sequence[2], sequence[3],
+                    defn='ALTER SEQUENCE {}.{} RESTART WITH {};\n'.format(
+                        sequence[2], sequence[3], max_value + 1),
+                    dependencies=[sequence[0]],
+                    dump_id=self._next_dump_id())
+                self._processed.add(acl.dump_id)
+                self._objects += 1
 
     def _process_extensions(self) -> typing.NoReturn:
         for extension in self._project.extensions:
@@ -423,13 +537,19 @@ class Generate:
             self._maybe_add_comment(entry, definition)
             self._processed.add(dump_id)
             self._objects += 1
+        self._process_sequence_set_owned_by()
 
     def _process_item_dependencies(self, schema: str, dump_id: int,
                                    definition: dict) -> typing.NoReturn:
         if schema != 'public':
             LOGGER.debug('Adding schema %r as a dependency', schema)
-            self._dependencies[dump_id].add(
-                self._lookup_entry(constants.SCHEMA, '', schema).dump_id)
+            try:
+                self._dependencies[dump_id].add(
+                    self._lookup_entry(constants.SCHEMA, '', schema).dump_id)
+            except RuntimeError:
+                LOGGER.error('Failed to lookup SCHEMA %s', schema)
+                raise
+
         for dep in definition.get('dependencies', []):
             obj_type, name = list(dep.items())[0]
             if '.' in name:
@@ -474,64 +594,40 @@ class Generate:
                 '{};'.format(' '.join(sql)))
             self._maybe_add_comment(entry, language)
 
-    def _process_role_dependencies(self) -> dict:
-        dependencies = {}
-        for desc in [constants.GROUP, constants.ROLE, constants.USER]:
-            for name in self._inventory[desc][desc]:
-                definition = self._inventory[desc][desc][name].definition
-                dump_id = self._inventory[desc][desc][name].dump_id
-                dependencies[dump_id] = set({})
-                for dependency in definition['dependencies']:
-                    dt, dn = dependency.split(':')
-                    if dn == self._project.superuser:
-                        continue
-                    try:
-                        dependencies[dump_id].add(
-                            self._lookup_entry(dt, dt, dn).dump_id)
-                    except RuntimeError:
-                        LOGGER.error('%s %s has missing dependency: %s %s',
-                                     desc, name, dt, dn)
-                        raise
-        return dependencies
-
     def _process_role_acls(self, dump_id: int,
                            grants: dict) -> typing.NoReturn:
         _desc, _schema, role_name = self._reverse_lookup[dump_id]
         for grant_type in grants:
-            if grant_type in {'groups', 'roles', 'users'}:
-                continue
-            obj_type = self._lookup_desc_from_grant_key(grant_type)
-            for name, perms in grants[grant_type].items():
-                if 'ALL' in perms:
-                    perms = ['ALL']
-                sql = [constants.GRANT, ', '.join(perms), 'ON']
-                if obj_type not in [constants.TABLE,
-                                    constants.VIEW]:
-                    sql.append(obj_type)
-                sql.append(name)
-                sql.append('TO')
-                sql.append(role_name)
-                if '.' in name:
-                    schema = name[:name.find('.')]
-                    name = name[name.find('.') + 1:]
-                else:  # We dont care about public or the default
-                    continue
-                try:
-                    item = self._lookup_entry(obj_type, schema, name)
-                except RuntimeError:
-                    if not self._args.suppress_warnings:
-                        LOGGER.warning(
-                            'Can not find %s %s.%s for %s, skipping',
-                            obj_type, schema, name, role_name)
-                    continue
-                deps = [item.dump_id]
-                acl = self._dump.add_entry(
-                    constants.ACL, tag=role_name,
-                    defn='{};\n'.format(' '.join(sql)),
-                    dependencies=deps,
-                    dump_id=self._next_dump_id())
-                self._processed.add(acl.dump_id)
-                self._objects += 1
+            desc = self._lookup_desc_from_grant_key(grant_type)
+            if desc in [constants.GROUP, constants.ROLE, constants.USER]:
+                for value in grants[grant_type]:
+                    try:
+                        entry = self._lookup_entry(desc, '', value)
+                    except RuntimeError:
+                        LOGGER.error('Failed to lookup %s %s', desc, value)
+                        raise
+                    if entry.dump_id not in self._acls:
+                        self._acls[entry.dump_id] = set({})
+                    self._acls[entry.dump_id].add(role_name)
+            else:
+                for name, perms in grants[grant_type].items():
+                    schema = ''
+                    if '.' in name:
+                        schema = name[:name.find('.')]
+                        name = name[name.find('.') + 1:]
+                    try:
+                        item = self._lookup_entry(desc, schema, name)
+                    except RuntimeError:
+                        if not self._args.suppress_warnings:
+                            LOGGER.warning(
+                                'Can not find %s %s.%s for %s, skipping',
+                                desc, schema, name, role_name)
+                        continue
+                    if item.dump_id not in self._acls:
+                        self._acls[item.dump_id] = {}
+                    if role_name not in self._acls[item.dump_id]:
+                        self._acls[item.dump_id][role_name] = set({})
+                    self._acls[item.dump_id][role_name] |= set(perms)
 
     def _process_role_create(self, dump_id: int,
                              dependencies: dict) -> pgdumplib.dump.Entry:
@@ -555,6 +651,26 @@ class Generate:
             self._processed.add(dump_id)
             self._objects += 1
             return entry
+
+    def _process_role_dependencies(self) -> dict:
+        dependencies = {}
+        for desc in [constants.GROUP, constants.ROLE, constants.USER]:
+            for name in self._inventory[desc][desc]:
+                definition = self._inventory[desc][desc][name].definition
+                dump_id = self._inventory[desc][desc][name].dump_id
+                dependencies[dump_id] = set({})
+                for dependency in definition['dependencies']:
+                    dt, dn = dependency.split(':')
+                    if dn == self._project.superuser:
+                        continue
+                    try:
+                        dependencies[dump_id].add(
+                            self._lookup_entry(dt, dt, dn).dump_id)
+                    except RuntimeError:
+                        LOGGER.error('%s %s has missing dependency: %s %s',
+                                     desc, name, dt, dn)
+                        raise
+        return dependencies
 
     def _process_role_drop(self, dump_id: int, dependencies: dict) -> int:
         desc, schema, name = self._reverse_lookup[dump_id]
@@ -607,8 +723,16 @@ class Generate:
             self._process_role_acls(dump_id, definition.get('grants', {}))
 
     def _process_schemas(self) -> typing.NoReturn:
+        # Add the public schema
+        self._add_generic_item(
+            constants.SCHEMA, '', 'public', '-- No DDL required',
+            self._project.superuser)
+
         for schema, _name, definition in self._iterate_files(constants.SCHEMA):
             name = definition.get('name', schema)
+            if name == 'public':
+                LOGGER.warning('Skipping project declared public schema')
+                continue
             if 'sql' in definition:
                 sql = '{}\n'.format(definition['sql']).strip()
             else:
@@ -619,6 +743,36 @@ class Generate:
             entry = self._add_generic_item(
                 constants.SCHEMA, '', name, sql, definition.get('owner'))
             self._maybe_add_comment(entry, definition)
+
+    def _process_sequence_set_owned_by(self) -> typing.NoReturn:
+        for schema in self._inventory[constants.SEQUENCE]:
+            for name in self._inventory[constants.SEQUENCE][schema]:
+                item = self._inventory[constants.SEQUENCE][schema][name]
+                if 'owned_by' in item.definition:
+                    parts = item.definition['owned_by'].split('.')
+                    try:
+                        parent = self._lookup_entry(
+                            constants.TABLE, parts[0], parts[1])
+                    except RuntimeError:
+                        LOGGER.critical(
+                            'Failed to find parent for sequence %s.%s',
+                            schema, name)
+                        raise
+                    sql = [
+                        'ALTER SEQUENCE',
+                        '{}.{}'.format(item.definition.get('schema', schema),
+                                       item.definition.get('name', name)),
+                        'OWNED BY', item.definition['owned_by']
+                    ]
+                    acl = self._dump.add_entry(
+                        constants.SEQUENCE_OWNED_BY,
+                        item.definition.get('schema', schema),
+                        item.definition.get('name', name),
+                        defn='\n'.join(sql),
+                        dependencies=[parent.dump_id],
+                        dump_id=self._next_dump_id())
+                    self._processed.add(acl.dump_id)
+                    self._objects += 1
 
     def _process_servers(self) -> typing.NoReturn:
         for _schema, name, definition in self._iterate_files(constants.SERVER):
@@ -659,9 +813,11 @@ class Generate:
             if 'sql' in definition:
                 sql = [definition['sql'].strip()]
             else:
-                sql = ['CREATE USER MAPPING FOR ',
-                       utils.quote_ident(definition['user']),
-                       'SERVER', utils.quote_ident(definition['server'])]
+                sql = [
+                    'CREATE USER MAPPING FOR',
+                    utils.quote_ident(definition['user']),
+                    'SERVER',
+                    utils.quote_ident(definition['server'])]
                 sql.append('SERVER')
                 if 'options' in definition:
                     sql.append('OPTIONS')
@@ -698,6 +854,9 @@ class Generate:
             path.unlink()
         self._dump.save(path)
         LOGGER.info('Project pg_dump artifact created at %s', path)
+
+    def _system_role(self, name: str) -> bool:
+        return name in ['PUBLIC', self._project.superuser]
 
     def _verify_data(self) -> typing.NoReturn:
         errors = 0
