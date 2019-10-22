@@ -180,7 +180,8 @@ class Generate:
                             constants.SCHEMA,
                             constants.SERVER,
                             constants.TYPE,
-                            constants.USER]:
+                            constants.USER,
+                            constants.USER_MAPPING]:
                 continue
             for schema, name, definition in self._iterate_files(obj_type):
                 self._add_item(obj_type, schema, name, definition)
@@ -818,7 +819,6 @@ class Generate:
                     utils.quote_ident(definition['user']),
                     'SERVER',
                     utils.quote_ident(definition['server'])]
-                sql.append('SERVER')
                 if 'options' in definition:
                     sql.append('OPTIONS')
                     sql.append(
@@ -871,7 +871,8 @@ class Generate:
                                   constants.ROLE,
                                   constants.SCHEMA,
                                   constants.SERVER,
-                                  constants.USER]:
+                                  constants.USER,
+                                  constants.USER_MAPPING]:
                         schema = ''
                     entry = self._dump.lookup_entry(obj_type, schema, name)
                     if not entry and name not in ['postgres', 'PUBLIC']:
