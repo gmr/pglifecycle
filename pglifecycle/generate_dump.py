@@ -825,12 +825,15 @@ class Generate:
                         '({})'.format(', '.join(
                             ["{} '{}'".format(k, v)
                              for k, v in definition['options'].items()])))
-            entry = self._add_generic_item(
-                constants.USER_MAPPING, '',
-                definition.get('name', name), '{};\n'.format(' '.join(sql)),
-                definition.get('owner', self._project.superuser))
+            entry = self._dump.add_entry(
+                desc=constants.USER_MAPPING,
+                dump_id=self._next_dump_id(),
+                tag=definition.get('name', name),
+                owner=definition.get('owner', self._project.superuser),
+                defn='{};\n'.format(' '.join(sql)))
             self._maybe_add_comment(entry, definition)
             self._objects += 1
+            self._processed.add(entry.dump_id)
 
     @staticmethod
     def _read_file(path: pathlib.Path) -> dict:
