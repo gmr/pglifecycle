@@ -1,0 +1,107 @@
+---
+$schema: http://json-schema.org/schema#
+$id: https://pglifecycle.readthedocs.io/en/stable/schema/role.html
+title: Role
+description: >
+  A role is an entity that can own database objects and have database privileges.
+type: object
+properties:
+  name:
+    title: Role Name
+    type: string
+  comment:
+    title: Comment
+    description: An optional comment about the role
+    type: str
+  create:
+    title: Create Role
+    description: >
+      Used in special cases where a role should be definied, but not created,
+      such as "PUBLIC".
+    type: boolean
+    default: true
+  environments:
+    title: Environments
+    description: >
+      Used to limit the environments the role is created in. The
+      default value is all environments.
+    type: array
+    items:
+      enum: [DEVELOPMENT, STAGING, TESTING, PRODUCTION]
+    uniqueItems: true
+  grants:
+    description: ACLs to add to the role
+    $ref: "pglifecycle/schema/acls.yml"
+  revocations:
+    description: ACLs to remove from the role
+    $ref: "pglifecycle/schema/acls.yml"
+  options:
+    titles: Role Options
+    type: object
+    properties:
+      bypass_rls:
+        title: Bypass Role Level Security
+        description: >
+          These clauses determine whether a role bypasses every row-level
+          security (RLS) policy.
+        type: boolean
+        default: false
+      connection_limit:
+        title: Connection Limit
+        description: >
+          If role can log in, this specifies how many concurrent connections
+          the role can make. -1 (the default) means no limit.
+        type: integer
+        default: -1
+      create_db:
+        title: Create Database
+        description: Determines if the role is allowed to create databases.
+        type: boolean
+        default: false
+      create_role:
+        title: Create Role
+        description: >
+          These clauses determine whether a role will be permitted to create a
+          new group, role or user.
+        type: boolean
+        default: false
+      inherit:
+        title: Inherits Role Privileges
+        description: >
+          These clauses determine whether a role "inherits" the privileges of
+          roles it is a member of.
+        type: boolean
+        default: false
+      login:
+        title: Login Allowed
+        description: >
+          These clauses determine whether a role is allowed to log in; that is,
+          whether the role can be given as the initial session authorization
+          name during client connection.
+        type: boolean
+        default: false
+      replication:
+        title: Replication Enabled
+        description: >
+          These clauses determine whether a role is allowed to initiate
+          streaming replication or put the system in and out of backup mode.
+          A role having the REPLICATION attribute is a very highly privileged
+          role, and should only be used on roles actually used for replication.
+        type: boolean
+        default: false
+      superuser:
+        title: Super User
+        description: >
+          These clauses determine whether the new role is a "superuser", who
+          can override all access restrictions within the database. Superuser
+          status is dangerous and should be used only when really needed.
+        type: boolean
+        default: false
+    additionalProperties: false
+  settings:
+    type: array
+    items:
+      type: object
+      propertyNames:
+        pattern: ^[A-Za-z_][A-Za-z0-9_\.]*$
+additionalProperties: false

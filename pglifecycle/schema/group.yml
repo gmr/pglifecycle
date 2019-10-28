@@ -1,0 +1,79 @@
+---
+$schema: http://json-schema.org/schema#
+$id: https://pglifecycle.readthedocs.io/en/stable/schema/group.html
+type: object
+title: Group
+description: >
+  A group is a type of role that defines permissions for one or more users.
+properties:
+  name:
+    description: The group name
+    type: string
+  comment:
+    title: Comment
+    description: An optional comment about the group
+    type: str
+  environments:
+    title: Environments
+    description: >
+      Used to limit the environments the group is created in. The
+      default value is all environments.
+    type: array
+    items:
+      enum: [DEVELOPMENT, STAGING, TESTING, PRODUCTION]
+    uniqueItems: true
+  grants:
+    description: ACLs to add to the group
+    $ref: "pglifecycle/schema/acls.yml"
+  revocations:
+    description: ACLs to remove from the group
+    $ref: "pglifecycle/schema/acls.yml"
+  options:
+    titles: Group Options
+    type: object
+    properties:
+      bypass_rls:
+        title: Bypass Role Level Security
+        description: >
+          These clauses determine whether members of the group are able to
+          bypasses every row-level security (RLS) policy.
+        type: boolean
+        default: false
+      create_db:
+        title: Create Database
+        description: Determines if members of a group are allowed to create databases.
+        type: boolean
+        default: false
+      create_role:
+        title: Create Role
+        description: >
+          These clauses determine whether members of a group will be permitted
+          to create a new group, role or user.
+        type: boolean
+        default: false
+      inherit:
+        title: Inherits Role Privileges
+        description: >
+          These clauses determine whether the group "inherits" the privileges of
+          any roles that are granted ot it.
+        type: boolean
+        default: false
+      replication:
+        title: Replication Enabled
+        description: >
+          These clauses determine whether members of the group are allowed to
+          initiate streaming replication or put the system in and out of backup
+          mode. A role having the REPLICATION attribute is a very highly privileged
+          role, and should only be used on roles actually used for replication.
+        type: boolean
+        default: false
+      superuser:
+        title: Superuser
+        description: >
+          These clauses determine whether members of a group are superusers, who
+          can override all access restrictions within the database. Superuser
+          status is dangerous and should be used only when really needed.
+        type: boolean
+        default: false
+    additionalProperties: false
+additionalProperties: false

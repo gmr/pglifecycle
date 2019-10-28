@@ -1,0 +1,143 @@
+---
+$schema: http://json-schema.org/schema#
+$id: https://pglifecycle.readthedocs.io/en/stable/schema/acls.html
+title: ACLs
+type: object
+properties:
+  columns:
+    type: object
+    propertyNames:
+      pattern: ^([A-Za-z0-9_\-]+)\.([A-Za-z0-9_\-]+)\.([A-Za-z0-9_\-]+)$
+    patternProperties:
+      "^.*$":
+        type: array
+        items:
+          enum: [SELECT, INSERT, UPDATE, DELETE, ALL]
+  databases:
+    type: object
+    propertyNames:
+      pattern: ^([A-Za-z_\-\.])+$
+    patternProperties:
+      "^.*$":
+        type: array
+        items:
+          enum: [CREATE, CONNECT, TEMP, TEMPORARY, ALL]
+  domains:
+    type: object
+    propertyNames:
+      pattern: ^([A-Za-z0-9_\-]+)\.([A-Za-z0-9_\-]+)$
+    patternProperties:
+      "^.*$":
+        type: array
+        items:
+          enum: [USAGE, ALL]
+  foreign_data_wrappers:
+    type: object
+    propertyNames:
+      pattern: ^([A-Za-z0-9_\-\.]+)$
+    patternProperties:
+      "^.*$":
+        type: array
+        items:
+          enum: [USAGE, ALL]
+  foreign_servers:
+    type: object
+    propertyNames:
+      pattern: ^([A-Za-z0-9_\-\.]+)$
+    patternProperties:
+      "^.*$":
+        type: array
+        items:
+          enum: [USAGE, ALL]
+  functions:
+    type: object
+    propertyNames:
+      pattern: ^([A-Za-z0-9_\-]+)\.([A-Za-z0-9_\-]+)\(([A-Za-z0-9_\-, ]+)\)$
+    patternProperties:
+      "^.*$":
+        type: array
+        items:
+          enum: [EXECUTE, ALL]
+  groups:
+    type: array
+    items:
+      type: string
+    uniqueItems: true
+  languages:
+    type: object
+    propertyNames:
+      pattern: ^([A-Za-z0-9_\-\.]+)$
+    patternProperties:
+      "^.*$":
+        type: array
+        items:
+          enum: [USAGE, ALL]
+  large_objects:
+    type: object
+    propertyNames:
+      pattern: ^[0-9]+$
+    patternProperties:
+      "^.*$":
+        type: array
+        items:
+          enum: [SELECT, UPDATE, ALL]
+  roles:
+    type: array
+    items:
+      type: string
+    uniqueItems: true
+  schemata:
+    type: object
+    propertyNames:
+      pattern: ^([A-Za-z0-9_\-]+)$
+    patternProperties:
+      "^.*$":
+        type: array
+        items:
+          enum: [CREATE, USAGE, ALL]
+  sequences:
+    type: object
+    propertyNames:
+      pattern: ^([A-Za-z0-9_\-]+)\.([A-Za-z0-9_\-]+)$
+    patternProperties:
+      "^.*$":
+        type: array
+        items:
+          enum: [SELECT, UPDATE, USAGE, ALL]
+  tables:
+    type: object
+    propertyNames:
+      pattern: ^([A-Za-z0-9_\-]+)\.([A-Za-z0-9_\-]+)$
+    patternProperties:
+      "^.*$":
+        type: array
+        items:
+          enum: [SELECT, INSERT, UPDATE, DELETE, ALL]
+  tablespaces:
+    type: object
+    propertyNames:
+      pattern: ^([A-Za-z0-9_\-]+)$
+    patternProperties:
+      "^.*$":
+        type: array
+        items:
+          enum: [CREATE, USAGE, ALL]
+  types:
+    type: object
+    propertyNames:
+      pattern: ^([A-Za-z0-9_\-]+)\.([A-Za-z0-9_\-]+)$
+    patternProperties:
+      "^.*$":
+        type: array
+        items:
+          enum: [USAGE, ALL]
+  views:
+    type: object
+    propertyNames:
+      pattern: ^([A-Za-z0-9_\-]+)\.([A-Za-z0-9_\-]+)$
+    patternProperties:
+      "^.*$":
+        type: array
+        items:
+          enum: [SELECT, ALL]
+additionalProperties: false

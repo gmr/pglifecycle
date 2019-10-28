@@ -1,0 +1,101 @@
+---
+$schema: http://json-schema.org/schema#
+$id: https://pglifecycle.readthedocs.io/en/stable/schema/user.html
+title: User
+description: A user is a role that is permitted to login to the database.
+type: object
+properties:
+  name:
+    title: User name
+    type: string
+  comment:
+    title: Comment
+    description: An optional comment about the user
+    type: str
+  environments:
+    title: Environments
+    description: >
+      Used to limit the environments the role is created in. The
+      default value is all environments.
+    type: array
+    items:
+      enum: [DEVELOPMENT, STAGING, TESTING, PRODUCTION]
+    uniqueItems: true
+  password:
+    title: Password
+    description: The password that is used to authenticate the user upon login.
+    type: str
+  valid_until:
+    title: Valid Until
+    description: >
+      Sets a date and time after which the user's password is no longer valid.
+    type: str
+    format: date-time
+  grants:
+    description: ACLs to add to the role
+    $ref: "pglifecycle/schema/acls.yml"
+  revocations:
+    description: ACLs to remove from the role
+    $ref: "pglifecycle/schema/acls.yml"
+  options:
+    titles: User Options
+    type: object
+    properties:
+      bypass_rls:
+        title: Bypass Role Level Security
+        description: >
+          These clauses determine whether the user may bypasses every row-level
+          security (RLS) policy.
+        type: boolean
+        default: false
+      connection_limit:
+        title: Connection Limit
+        description: >
+          How many concurrent connections the user can make. -1 (the default)
+          means no limit.
+        type: integer
+        default: -1
+      create_db:
+        title: Create Database
+        description: Determines if the user is allowed to create databases.
+        type: boolean
+        default: false
+      create_role:
+        title: Create Role
+        description: >
+          These clauses determine whether the user will be permitted to create a
+          new group, role or user.
+        type: boolean
+        default: false
+      inherit:
+        title: Inherits Role Privileges
+        description: >
+          These clauses determine whether the user "inherits" the privileges of
+          groups it is a member of and roles it is granted.
+        type: boolean
+        default: false
+      replication:
+        title: Replication Enabled
+        description: >
+          These clauses determine whether a user is allowed to initiate
+          streaming replication or put the system in and out of backup mode.
+          A role having the REPLICATION attribute is a very highly privileged
+          role, and should only be used on roles actually used for replication.
+        type: boolean
+        default: false
+      superuser:
+        title: Super User
+        description: >
+          These clauses determine whether the user role is a "superuser", who
+          can override all access restrictions within the database. Superuser
+          status is dangerous and should be used only when really needed.
+        type: boolean
+        default: false
+    additionalProperties: false
+  settings:
+    type: array
+    items:
+      type: object
+      propertyNames:
+        pattern: ^[A-Za-z_][A-Za-z0-9_\.]*$
+additionalProperties: false

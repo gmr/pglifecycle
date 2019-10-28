@@ -1,0 +1,97 @@
+---
+$id: https://pglifecycle.readthedocs.io/en/stable/schema/project.html
+type: object
+properties:
+  name:
+    description: The name of the database that is saved in the build artifact when generating a dump.
+    type: string
+  encoding:
+    description: The database encoding to use
+    type: string
+    default: UTF8
+  stdstrings:
+    description: Turn standard confirming strings on/off in the created build artifact
+    type: boolean
+    default: false
+  superuser:
+    description: The PostgreSQL super user
+    type: string
+    default: postgres
+  extensions:
+    description: An array of PostgreSQL extensions to load into the database
+    type: array
+    items:
+      type: object
+      properties:
+        name:
+          description: >
+            The name of the extension to be installed. PostgreSQL will create the
+            extension using details from the file SHAREDIR/extension/extension_name.control.
+          type: string
+        schema:
+          description: >
+            The name of the schema in which to install the extension's objects,
+            given that the extension allows its contents to be relocated.
+          type: string
+        version:
+          description: >
+            The version of the extension to install. This can be written as either an
+            identifier or a string literal. The default version is whatever is
+            specified in the extension's control file.
+          type: string
+        cascade:
+          description: >
+            Automatically install any extensions that this extension depends on
+            that are not already installed.
+          type: boolean
+          default: false
+        comment:
+          title: Comment
+          description: An optional comment about the extension
+          type: str
+      required:
+        - name
+  languages:
+    description: An array of Procedural Languages to load into the database
+    type: array
+      items:
+        type: object
+        properties:
+          name:
+            description: The name of the language to load
+            type: string
+          comment:
+            title: Comment
+            description: An optional comment about the language
+            type: str
+          trusted:
+            description: >
+              Specifies if the language grants access to data that the user would not
+              otherwise have access to.
+            type: boolean
+            default: false
+          replace:
+            description: Use CREATE or REPLACE syntax
+            type: boolean
+            default: false
+          handler:
+            description: >
+              Specifies the name of a previously registered function that will
+              be called to execute the procedural language's functions.
+            type: string
+          inline_handler:
+            description: >
+              Specifies the name of a previously registered function that will be
+              called to execute an anonymous code block (DO command) in this language.
+            type: string
+          validator:
+            description: >
+              Specifies the name of a previously registered function that will
+              be called when a new function in the language is created, to validate
+              the new function.
+            type: string
+      required:
+        - name
+required:
+  - name
+additionalProperties: false
