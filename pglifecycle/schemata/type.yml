@@ -218,6 +218,8 @@ oneOf:
         - type
   - required:
       - type
+    properties:
+      sql: {"type": "null"}
     not:
       required:
         - sql
@@ -230,47 +232,46 @@ oneOf:
           required:
             - input
             - output
-          not:
-            required:
-              - columns
-              - enum
-              - subtype
-              - subtype_opclass
-              - collation
-              - canonical
+          properties:
+            columns: {type: "null"}
+            enum: {type: "null"}
+            subtype: {type: "null"}
+            subtype_opclass: {type: "null"}
+            collation: {type: "null"}
+            canonical: {type: "null"}
+            subtype_diff: {type: "null"}
       - if:
           properties:
             type:
               const: composite
         then:
-          type: object
           required:
             - columns
-          not:
-            required:
-              - input
-              - output
-              - receive
-              - send
-              - typmod_in
-              - typmod_out
-              - analyze
-              - internal_length
-              - passed_by_value
-              - alignment
-              - storage
-              - like
-              - category
-              - preferred
-              - default
-              - element
-              - delimiter
-              - collatable
-              - enum
-              - subtype
-              - subtype_opclass
-              - collation
-              - canonical
+          properties:
+            input: {type: "null"}
+            output: {type: "null"}
+            receive: {type: "null"}
+            send: {type: "null"}
+            typmod_in: {type: "null"}
+            typmod_out: {type: "null"}
+            analyze: {type: "null"}
+            internal_length: {type: "null"}
+            passed_by_value: {type: "null"}
+            alignment: {type: "null"}
+            storage: {type: "null"}
+            like: {type: "null"}
+            category: {type: "null"}
+            preferred: {type: "null"}
+            default: {type: "null"}
+            element: {type: "null"}
+            delimiter: {type: "null"}
+            collatable: {type: "null"}
+            enum: {type: "null"}
+            subtype: {type: "null"}
+            subtype_opclass: {type: "null"}
+            collation: {type: "null"}
+            canonical: {type: "null"}
+            subtype_diff: {type: "null"}
       - if:
           properties:
             type:
@@ -278,32 +279,31 @@ oneOf:
         then:
           required:
             - enum
-          not:
-            required:
-              - input
-              - output
-              - receive
-              - send
-              - typmod_in
-              - typmod_out
-              - analyze
-              - internal_length
-              - passed_by_value
-              - alignment
-              - storage
-              - like
-              - category
-              - preferred
-              - default
-              - element
-              - delimiter
-              - collatable
-              - columns
-              - subtype
-              - subtype_opclass
-              - collation
-              - canonical
-              - subtype_diff
+          properties:
+            input: {type: "null"}
+            output: {type: "null"}
+            receive: {type: "null"}
+            send: {type: "null"}
+            typmod_in: {type: "null"}
+            typmod_out: {type: "null"}
+            analyze: {type: "null"}
+            internal_length: {type: "null"}
+            passed_by_value: {type: "null"}
+            alignment: {type: "null"}
+            storage: {type: "null"}
+            like: {type: "null"}
+            category: {type: "null"}
+            preferred: {type: "null"}
+            default: {type: "null"}
+            element: {type: "null"}
+            delimiter: {type: "null"}
+            collatable: {type: "null"}
+            columns: {type: "null"}
+            subtype: {type: "null"}
+            subtype_opclass: {type: "null"}
+            collation: {type: "null"}
+            canonical: {type: "null"}
+            subtype_diff: {type: "null"}
       - if:
           properties:
             type:
@@ -311,25 +311,25 @@ oneOf:
         then:
           required:
             - subtype
-          not:
-            required:
-              - input
-              - output
-              - receive
-              - send
-              - typmod_in
-              - typmod_out
-              - analyze
-              - internal_length
-              - passed_by_value
-              - alignment
-              - storage
-              - like
-              - category
-              - preferred
-              - default
-              - element
-              - delimiter
-              - collatable
-              - columns
+          properties:
+            input: {type: "null"}
+            output: {type: "null"}
+            receive: {type: "null"}
+            send: {type: "null"}
+            typmod_in: {type: "null"}
+            typmod_out: {type: "null"}
+            analyze: {type: "null"}
+            internal_length: {type: "null"}
+            passed_by_value: {type: "null"}
+            alignment: {type: "null"}
+            storage: {type: "null"}
+            like: {type: "null"}
+            category: {type: "null"}
+            preferred: {type: "null"}
+            default: {type: "null"}
+            element: {type: "null"}
+            delimiter: {type: "null"}
+            collatable: {type: "null"}
+            columns: {type: "null"}
+            enum: {type: "null"}
 additionalProperties: false
