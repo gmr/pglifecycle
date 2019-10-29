@@ -107,6 +107,27 @@ PATHS = {
     VIEW: pathlib.Path('views'),
 }
 
+OBJ_KEYS = {
+    'columns': COLUMN,
+    'conversions': CONVERSION,
+    'databases': DATABASE,
+    'extensions': EXTENSION,
+    'foreign data wrappers': FOREIGN_DATA_WRAPPER,
+    'foreign servers': FOREIGN_SERVER,
+    'functions': FUNCTION,
+    'groups': GROUP,
+    'languages': PROCEDURAL_LANGUAGE,
+    'large objects': LARGE_OBJECT,
+    'operators': OPERATOR,
+    'roles': ROLE,
+    'sequences': SEQUENCE,
+    'schemata': SCHEMA,
+    'tablespaces': TABLESPACE,
+    'types': TYPE,
+    'views': VIEW
+}
+
+
 GRANT_KEYS = {
     COLUMN: 'columns',
     DATABASE: 'databases',

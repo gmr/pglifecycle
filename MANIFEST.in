@@ -1,1 +1,3 @@
 include README.rst LICENSE
+graft pglifecycle/schemata/
+global-exclude *.py[cod] __pycache__ *.so
