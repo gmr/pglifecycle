@@ -1,0 +1,335 @@
+---
+$schema: http://json-schema.org/schema#
+$id: https://pglifecycle.readthedocs.io/en/stable/schemata/type.html
+title: Type
+description: >
+  User defined data type. here are five forms of types. They respectively
+  create a composite type, an enum type, a range type, a base type, or a
+  shell type. A shell type is simply a placeholder for a type to be defined later.
+  Shell types are needed as forward references when creating range types and
+  base types, as discussed in those sections.
+type: object
+properties:
+  name:
+    title: Name
+    description: >
+      The name of the type to be created. The type name must be distinct from
+      the name of any existing type or domain in the same schema. (Because
+      tables have associated data types, the type name must also be distinct
+      from the name of any existing table in the same schema.)
+    type: string
+  schema:
+    title: Schema
+    description: The schema to create the type in
+    type: string
+  owner:
+    title: Owner
+    description: The role name of the superuser who owns the server.
+    type: string
+  sql:
+    title: SQL Statement
+    description: User-provided raw SQL snippet
+    type: string
+  type:
+    title: Form of Type
+    description: Specifies the form of the type. Defaults to `composite`.
+    enum: [base, composite, enum, range]
+  input:
+    title: Input Function
+    description: >
+      Function that converts the type's external textual representation to the
+      internal representation used by the operators and functions defined for
+      the type.
+    type: string
+  output:
+    title: Output Function
+    description: >
+      Function that converts the type's external binary representation to the
+      internal representation.
+    type: string
+  receive:
+    title: Receive Function
+    description: >
+      Optional function to convert the type's external binary representation to
+      the internal representation.
+    type: string
+  send:
+    title: Send Function
+    description: >
+      Optional converts from the internal representation to the external binary
+      representation.
+    type: string
+  typmod_in:
+    title: Type Modifier Input Function
+    type: string
+  typmod_out:
+    title: Type Modifier Output Function
+    type: string
+  analyze:
+    title: Analyze Function
+    description: >
+      Optional function that performs type-specific statistics collection for
+      columns of the data type.
+    type: string
+  internal_length:
+    title: Internal Length
+    oneOf:
+      - type: integer
+      - const: VARIABLE
+  passed_by_value:
+    title: Passed by Value
+    description: >
+      Indicates that values of this data type are passed by value, rather than
+      by reference.
+    type: boolean
+    default: false
+  alignment:
+    title: Alignment
+    description: >
+      Specifies the storage alignment required for the data type. The allowed
+      values equate to alignment on 1, 2, 4, or 8 byte boundaries.
+    type: integer
+  storage:
+    title: Storage
+    description: >
+      Allows selection of storage strategies for variable-length data types.
+      (Only plain is allowed for fixed-length types.) plain specifies that data
+      of the type will always be stored in-line and not compressed. extended
+      specifies that the system will first try to compress a long data value,
+      and will move the value out of the main table row if it's still too long.
+      external allows the value to be moved out of the main table, but the
+      system will not try to compress it. main allows compression, but discourages
+      moving the value out of the main table. (Data items with this storage
+      strategy might still be moved out of the main table if there is no other
+      way to make a row fit, but they will be kept in the main table preferentially
+      over extended and external items.)
+    enum: [plain, extended, external, main]
+  like_type:
+    title: Like Type
+    description: >
+      Provides an alternative method for specifying the basic representation
+      properties of a data type: copy them from some existing type. The values of
+      internal_length, passed_by_value, alignment, and storage are copied from
+      the named type.
+    type: string
+  category:
+    title: Category
+    description: >
+      Used to help control which implicit cast will be applied in ambiguous situations.
+    type: string
+  preferred:
+    title: Preferred
+    description: >
+      Used to help control which implicit cast will be applied in ambiguous situations.
+    type: string
+  default:
+    title: Default
+    description: Value to use instead of NULL to use as a default.
+    anyOf:
+      - type: boolean
+      - type: integer
+      - type: "null"
+      - type: number
+      - type: string
+  element:
+    title: Array Element Type
+    description: >
+      The type being created is an array; this specifies the type of the array elements.
+    type: string
+  delimiter:
+    title: Array Delimiter
+    description: >
+      The delimiter character to be used between values in arrays made of this type.
+    type: string
+  collatable:
+    title: Collatable
+    description: This type's operations can use collation information.
+    type: boolean
+    default: false
+  columns:
+    title: Type Columns
+    type: array
+    items:
+      title: Column Definitions
+      type: object
+      properties:
+        name:
+          title: Column Name
+          description: The name of an attribute (column) for the composite type.
+          type: string
+        type:
+          title: Data Type
+          description: >
+            The name of an existing data type to become a column of the composite type.
+          type: string
+        collation:
+          title: Collation
+          description: The name of an existing collation to use for the column.
+          type: string
+      required:
+        - name
+        - type
+    minLength: 1
+  enum:
+    title: Enumerated Values
+    description: >
+      A list of quoted labels, each of which must be less than NAMEDATALEN bytes
+      long (64 bytes in a standard PostgreSQL build).
+    type: array
+    items:
+      type: string
+      minLength: 1
+      maxLength: 64
+    minLength: 1
+  subtype:
+    title: Sub-Type
+    description: >
+      The name of the element type that the range type will represent ranges of.
+    type: string
+  subtype_opclass:
+    title: Sub-Type Operator Class
+    description: The name of a b-tree operator class for the subtype.
+    type: string
+  collation:
+    title: Collation
+    description: The name of an existing collation to use for the range type.
+    type: string
+  canonical:
+    title: Canonical Function
+    description: Function used to convert range values into canonical form.
+    type: string
+  subtype_diff:
+    title: Sub-Type Diff Function
+    description: Function to provide the difference between two values.
+    type: string
+  comment:
+    title: Comment
+    description: An optional comment about the type.
+    type: string
+  dependencies:
+    title: Dependencies
+    description: Database objects this object is dependent upon
+    $package_schema: dependencies
+oneOf:
+  - required:
+      - sql
+    not:
+      required:
+        - type
+  - required:
+      - type
+    not:
+      required:
+        - sql
+    allOf:
+      - if:
+          properties:
+            type:
+              const: base
+        then:
+          required:
+            - input
+            - output
+          not:
+            required:
+              - columns
+              - enum
+              - subtype
+              - subtype_opclass
+              - collation
+              - canonical
+      - if:
+          properties:
+            type:
+              const: composite
+        then:
+          type: object
+          required:
+            - columns
+          not:
+            required:
+              - input
+              - output
+              - receive
+              - send
+              - typmod_in
+              - typmod_out
+              - analyze
+              - internal_length
+              - passed_by_value
+              - alignment
+              - storage
+              - like
+              - category
+              - preferred
+              - default
+              - element
+              - delimiter
+              - collatable
+              - enum
+              - subtype
+              - subtype_opclass
+              - collation
+              - canonical
+      - if:
+          properties:
+            type:
+              const: enum
+        then:
+          required:
+            - enum
+          not:
+            required:
+              - input
+              - output
+              - receive
+              - send
+              - typmod_in
+              - typmod_out
+              - analyze
+              - internal_length
+              - passed_by_value
+              - alignment
+              - storage
+              - like
+              - category
+              - preferred
+              - default
+              - element
+              - delimiter
+              - collatable
+              - columns
+              - subtype
+              - subtype_opclass
+              - collation
+              - canonical
+              - subtype_diff
+      - if:
+          properties:
+            type:
+              const: range
+        then:
+          required:
+            - subtype
+          not:
+            required:
+              - input
+              - output
+              - receive
+              - send
+              - typmod_in
+              - typmod_out
+              - analyze
+              - internal_length
+              - passed_by_value
+              - alignment
+              - storage
+              - like
+              - category
+              - preferred
+              - default
+              - element
+              - delimiter
+              - collatable
+              - columns
+additionalProperties: false
