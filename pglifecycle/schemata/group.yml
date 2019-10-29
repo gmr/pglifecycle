@@ -1,6 +1,6 @@
 ---
 $schema: http://json-schema.org/schema#
-$id: https://pglifecycle.readthedocs.io/en/stable/schema/group.html
+$id: https://pglifecycle.readthedocs.io/en/stable/schemata/group.html
 type: object
 title: Group
 description: >
@@ -12,7 +12,7 @@ properties:
   comment:
     title: Comment
     description: An optional comment about the group
-    type: str
+    type: string
   environments:
     title: Environments
     description: >
@@ -24,10 +24,10 @@ properties:
     uniqueItems: true
   grants:
     description: ACLs to add to the group
-    $ref: "pglifecycle/schema/acls.yml"
+    $package_schema: acls
   revocations:
     description: ACLs to remove from the group
-    $ref: "pglifecycle/schema/acls.yml"
+    $package_schema: acls
   options:
     titles: Group Options
     type: object

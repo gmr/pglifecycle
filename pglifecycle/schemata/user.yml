@@ -11,7 +11,7 @@ properties:
   comment:
     title: Comment
     description: An optional comment about the user
-    type: str
+    type: string
   environments:
     title: Environments
     description: >
@@ -33,10 +33,10 @@ properties:
     format: date-time
   grants:
     description: ACLs to add to the role
-    $ref: "pglifecycle/schema/acls.yml"
+    $package_schema: acls
   revocations:
     description: ACLs to remove from the role
-    $ref: "pglifecycle/schema/acls.yml"
+    $package_schema: acls
   options:
     titles: User Options
     type: object

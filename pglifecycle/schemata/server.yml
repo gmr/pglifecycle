@@ -1,0 +1,52 @@
+---
+$schema: http://json-schema.org/schema#
+$id: https://pglifecycle.readthedocs.io/en/stable/schemata/server.html
+title: Server
+description: >
+  A foreign server typically encapsulates connection information that a
+  foreign-data wrapper uses to access an external data resource.
+type: object
+properties:
+  name:
+    title: Server Name
+    description: >
+      The name of the server to be created.
+    type: string
+  owner:
+    title: Owner
+    description: >
+      The role name of the superuser who owns the server.
+    type: string
+  foreign_data_wrapper:
+    title: Foreign Data Wrapper Name
+    description: The name of the foreign-data wrapper that manages the server.
+    type: string
+  type:
+    title: Server Type
+    description: Optional server type, potentially useful to foreign-data wrappers.
+    type: string
+  version:
+    title: ServerVersion
+    description: Optional server version, potentially useful to foreign-data wrappers.
+    type: string
+  comment:
+    title: Comment
+    description: An optional comment about the server.
+    type: string
+  options:
+    title: Options
+    description: >
+      This clause specifies the options for the server. The options typically
+      define the connection details of the server, but the actual names and
+      values are dependent on the server's foreign-data wrapper.
+    type: object
+    propertyNames:
+      pattern: ^[A-Za-z_][A-Za-z0-9_\.]*$
+  dependencies:
+    title: Dependencies
+    description: Database objects this object is dependent upon
+    $package_schema: dependencies
+required:
+  - dependencies
+  - foreign_data_wrapper
+additionalProperties: false

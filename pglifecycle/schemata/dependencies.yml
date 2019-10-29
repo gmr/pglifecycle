@@ -1,0 +1,18 @@
+---
+$schema: http://json-schema.org/schema#
+$id: https://pglifecycle.readthedocs.io/en/stable/schemata/dependencies.html
+title: Dependencies
+type: object
+properties:
+  extensions:
+    type: array
+    propertyNames:
+      pattern: ^([A-Za-z0-9_\-]+)$
+  foreign_data_wrappers:
+    type: array
+    propertyNames:
+      pattern: ^([A-Za-z0-9_\-]+)$
+  languages:
+    type: array
+    propertyNames:
+      pattern: ^([A-Za-z0-9_\-]+)$

@@ -1,0 +1,20 @@
+---
+$schema: http://json-schema.org/schema#
+$id: https://pglifecycle.readthedocs.io/en/stable/schemata/types.html
+title: Type
+description: >
+  Specifies all user-defined types in a schema
+type: object
+properties:
+  schema:
+    title: Schema
+    type: string
+  types:
+    title: User-defined types
+    type: array
+    items:
+      type: object
+required:
+  - schema
+  - types
+addtionalProperties: false

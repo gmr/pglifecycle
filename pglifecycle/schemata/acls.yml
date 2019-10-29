@@ -1,6 +1,6 @@
 ---
 $schema: http://json-schema.org/schema#
-$id: https://pglifecycle.readthedocs.io/en/stable/schema/acls.html
+$id: https://pglifecycle.readthedocs.io/en/stable/schemata/acls.html
 title: ACLs
 type: object
 properties:

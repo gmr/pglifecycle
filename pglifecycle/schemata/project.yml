@@ -1,5 +1,6 @@
 ---
-$id: https://pglifecycle.readthedocs.io/en/stable/schema/project.html
+$schema: http://json-schema.org/schema#
+$id: https://pglifecycle.readthedocs.io/en/stable/schemata/project.html
 type: object
 properties:
   name:
@@ -48,48 +49,48 @@ properties:
         comment:
           title: Comment
           description: An optional comment about the extension
-          type: str
+          type: string
       required:
         - name
   languages:
     description: An array of Procedural Languages to load into the database
     type: array
-      items:
-        type: object
-        properties:
-          name:
-            description: The name of the language to load
-            type: string
-          comment:
-            title: Comment
-            description: An optional comment about the language
-            type: str
-          trusted:
-            description: >
-              Specifies if the language grants access to data that the user would not
-              otherwise have access to.
-            type: boolean
-            default: false
-          replace:
-            description: Use CREATE or REPLACE syntax
-            type: boolean
-            default: false
-          handler:
-            description: >
-              Specifies the name of a previously registered function that will
-              be called to execute the procedural language's functions.
-            type: string
-          inline_handler:
-            description: >
-              Specifies the name of a previously registered function that will be
-              called to execute an anonymous code block (DO command) in this language.
-            type: string
-          validator:
-            description: >
-              Specifies the name of a previously registered function that will
-              be called when a new function in the language is created, to validate
-              the new function.
-            type: string
+    items:
+      type: object
+      properties:
+        name:
+          description: The name of the language to load
+          type: string
+        comment:
+          title: Comment
+          description: An optional comment about the language
+          type: string
+        trusted:
+          description: >
+            Specifies if the language grants access to data that the user would not
+            otherwise have access to.
+          type: boolean
+          default: false
+        replace:
+          description: Use CREATE or REPLACE syntax
+          type: boolean
+          default: false
+        handler:
+          description: >
+            Specifies the name of a previously registered function that will
+            be called to execute the procedural language's functions.
+          type: string
+        inline_handler:
+          description: >
+            Specifies the name of a previously registered function that will be
+            called to execute an anonymous code block (DO command) in this language.
+          type: string
+        validator:
+          description: >
+            Specifies the name of a previously registered function that will
+            be called when a new function in the language is created, to validate
+            the new function.
+          type: string
       required:
         - name
 required:

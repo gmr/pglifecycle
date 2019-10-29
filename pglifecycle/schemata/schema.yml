@@ -1,0 +1,29 @@
+---
+$schema: http://json-schema.org/schema#
+$id: https://pglifecycle.readthedocs.io/en/stable/schemata/schema.html
+title: Schema
+description: >
+  A schema is essentially a namespace: it contains named objects (tables,
+  data types, functions, and operators) whose names can duplicate those of
+  other objects existing in other schemas. Named objects are accessed either
+  by “qualifying” their names with the schema name as a prefix, or by setting
+  a search path that includes the desired schema(s).
+type: object
+properties:
+  name:
+    title: Schema Name
+    description: >
+      The name of a schema to be created. The name cannot begin with pg_, as
+      such names are reserved for system schemas.
+    type: string
+  owner:
+    title: Schema Owner
+    description: >
+      The role name of the user who will own the new schema. If ommitted,
+      defaults to the project superuser.
+    type: string
+  comment:
+    title: Comment
+    description: An optional comment about the schema.
+    type: string
+additionalProperties: false

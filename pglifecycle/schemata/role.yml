@@ -1,6 +1,6 @@
 ---
 $schema: http://json-schema.org/schema#
-$id: https://pglifecycle.readthedocs.io/en/stable/schema/role.html
+$id: https://pglifecycle.readthedocs.io/en/stable/schemata/role.html
 title: Role
 description: >
   A role is an entity that can own database objects and have database privileges.
@@ -12,7 +12,7 @@ properties:
   comment:
     title: Comment
     description: An optional comment about the role
-    type: str
+    type: string
   create:
     title: Create Role
     description: >
@@ -31,10 +31,10 @@ properties:
     uniqueItems: true
   grants:
     description: ACLs to add to the role
-    $ref: "pglifecycle/schema/acls.yml"
+    $package_schema: acls
   revocations:
     description: ACLs to remove from the role
-    $ref: "pglifecycle/schema/acls.yml"
+    $package_schema: acls
   options:
     titles: Role Options
     type: object
