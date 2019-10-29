@@ -1,0 +1,42 @@
+---
+$schema: http://json-schema.org/schema#
+$id: https://pglifecycle.readthedocs.io/en/stable/schemata/tablespace.html
+title: Tablespace
+description: > 
+  A tablespace allows superusers to define an alternative location on the file
+  system where the data files containing database objects (such as tables and
+  indexes) can reside.
+type: object
+properties:
+  name:
+    title: Name
+    description: The name of the tablespace function to create.
+    type: string
+  owner:
+    title: Owner
+    description: The role that owns the tablespace function.
+    type: string
+  location:
+    title: Location
+    description: >
+      The directory that will be used for the tablespace. The directory must
+      exist (CREATE TABLESPACE will not create it), should be empty, and must
+      be owned by the PostgreSQL system user. The directory must be specified
+      by an absolute path name.
+    type: string
+  options:
+    type: array
+    items:
+      type: object
+      propertyNames:
+        pattern: ^(seq_page_cost|random_page_cost|effective_io_concurrency)$
+      patternProperties:
+        "^.*$": number
+  comment:
+    title: Comment
+    description: An optional comment about the tablespace.
+    type: string
+requires:
+  - name
+  - location
+additionalProperties: false

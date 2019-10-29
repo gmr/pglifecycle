@@ -7,15 +7,15 @@ type: object
 properties:
   name:
     title: Name
-    description: The name of the aggregate function to create.
+    description: The name of the collation function to create.
     type: string
   schema:
     title: Schema
-    description: The schema to create the aggregate function in.
+    description: The schema to create the collation function in.
     type: string
   owner:
     title: Owner
-    description: The role that owns the aggregate function.
+    description: The role that owns the collation function.
     type: string
   default:
     title: Default
@@ -38,7 +38,7 @@ properties:
     type: string
   comment:
     title: Comment
-    description: An optional comment about the collation.
+    description: An optional comment about the conversion.
     type: string
   dependencies:
     title: Dependencies

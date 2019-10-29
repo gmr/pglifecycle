@@ -7,15 +7,15 @@ type: object
 properties:
   name:
     title: Name
-    description: The name of the aggregate function to create.
+    description: The name of the domain function to create.
     type: string
   schema:
     title: Schema
-    description: The schema to create the aggregate function in.
+    description: The schema to create the domain function in.
     type: string
   owner:
     title: Owner
-    description: The role that owns the aggregate function.
+    description: The role that owns the domain function.
     type: string
   sql:
     title: SQL Statement
@@ -65,7 +65,7 @@ properties:
     uniqueItems: true
   comment:
     title: Comment
-    description: An optional comment about the collation.
+    description: An optional comment about the domain.
     type: string
   dependencies:
     title: Dependencies
