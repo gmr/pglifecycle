@@ -1,0 +1,91 @@
+---
+$schema: http://json-schema.org/schema#
+$id: https://pglifecycle.readthedocs.io/en/stable/schemata/operator.html
+title: Operator
+description: User defined comparison operator
+type: object
+properties:
+  name:
+    title: Name
+    description: The name of the operator function to create.
+    type: string
+  schema:
+    title: Schema
+    description: The schema to create the operator function in.
+    type: string
+  owner:
+    title: Owner
+    description: The role that owns the operator function.
+    type: string
+  sql:
+    title: SQL Statement
+    description: User-provided raw SQL snippet
+    type: string
+  function:
+    title: Function or Procedure Name
+    description: The function used to implement this operator.
+    type: string
+  left_arg:
+    title: Left Operand
+    description: >
+      The data type of the operator's left operand, if any. This option would
+      be omitted for a left-unary operator.
+    type: string
+  right_arg:
+    title: Right Operand
+    description: >
+      The data type of the operator's right operand, if any. This option would
+      be omitted for a right-unary operator.
+    type: string
+  commutator:
+    title: Commutator
+    description: The commutator of this operator.
+    type: string
+  negator:
+    title: Negator
+    description: The negator of this operator.
+    type: string
+  restrict:
+    title: Restriction Selectivity Estimator Function
+    description: The restriction selectivity estimator function for this operator.
+    type: string
+  join:
+    title: Join Selectivity Estimator Function
+    description: The join selectivity estimator function for this operator.
+    type: string
+  hashes:
+    title: Hashes
+    description: Indicates this operator can support a hash join.
+    type: boolean
+  merges:
+    title: Merges
+    description: Indicates this operator can support a merge join.
+    type: boolean
+  comment:
+    title: Comment
+    description: An optional comment about the operator.
+    type: string
+  dependencies:
+    title: Dependencies
+    description: Database objects this object is dependent upon
+    $package_schema: dependencies
+oneOf:
+  - required:
+      - sql
+    not:
+      required:
+        - function
+        - left_arg
+        - right_arg
+        - commutator
+        - negator
+        - restrict
+        - join
+        - hashes
+        - merges
+        - sql
+  - required:
+      - function
+    not:
+      required:
+        - sql

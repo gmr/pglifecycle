@@ -1,0 +1,82 @@
+---
+$schema: http://json-schema.org/schema#
+$id: https://pglifecycle.readthedocs.io/en/stable/schemata/aggregate.html
+title: Aggregate
+description: >
+  An Aggregate function computes a single result from a set of input values.
+type: object
+properties:
+  name:
+    title: Name
+    description: The name of the aggregate function to create.
+    type: string
+  schema:
+    title: Schema
+    description: The schema to create the aggregate function in.
+    type: string
+  owner:
+    title: Owner
+    description: The role that owns the aggregate function.
+    type: string
+  locale:
+    title: Locale
+    description: >
+      This is a shortcut for setting lc_collate and lc_ctype at once. If you
+      specify this, you cannot specify either of those parameters.
+    type: string
+  lc_collate:
+    title: Locale Collation
+    description: >
+      Use the specified operating system locale for the LC_COLLATE locale category.
+    type: string
+  lc_ctype:
+    title: Locale CType
+    description: >
+      Use the specified operating system locale for the LC_CTYPE locale category.
+    type: string
+  provider:
+    title: Locale Provider
+    description: >
+      Specifies the provider to use for locale services associated with this
+      collation. Possible values are: icu, libc. libc is the default. The
+      available choices depend on the operating system and build options.
+    enum: [icu, libc]
+  deterministic:
+    title: Deterministic Comparisons
+    description: >
+      Specifies whether the collation should use deterministic comparisons.
+    type: boolean
+    default: true
+  copy_from:
+    title: Source Collation
+    description: Copy the collation from a pre-existing collation
+    type: string
+  comment:
+    title: Comment
+    description: An optional comment about the collation.
+    type: string
+  dependencies:
+    title: Dependencies
+    description: Database objects this object is dependent upon
+    $package_schema: dependencies
+requires:
+  - name
+allOf:
+  - if:
+      properties:
+        copy_from:
+          type: string
+          minLength: 3
+    then:
+      required:
+        - copy_from
+      properties:
+        locale: {type: "null"}
+        lc_collate: {type: "null"}
+        lc_ctype: {type: "null"}
+        provider: {type: "null"}
+        deterministic: {type: "null"}
+        version: {type: "null"}
+    else:
+      properties:
+        copy_from:  {type: "null"}

@@ -125,7 +125,7 @@ properties:
   default:
     title: Default
     description: Value to use instead of NULL to use as a default.
-    anyOf:
+    oneOf:
       - type: boolean
       - type: integer
       - type: "null"
@@ -218,8 +218,6 @@ oneOf:
         - type
   - required:
       - type
-    properties:
-      sql: {"type": "null"}
     not:
       required:
         - sql

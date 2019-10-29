@@ -1,0 +1,52 @@
+---
+$schema: http://json-schema.org/schema#
+$id: https://pglifecycle.readthedocs.io/en/stable/schemata/conversion.html
+title: Conversion
+description: Defines a conversion between character set encodings
+type: object
+properties:
+  name:
+    title: Name
+    description: The name of the aggregate function to create.
+    type: string
+  schema:
+    title: Schema
+    description: The schema to create the aggregate function in.
+    type: string
+  owner:
+    title: Owner
+    description: The role that owns the aggregate function.
+    type: string
+  default:
+    title: Default
+    description: >
+      Indicates that this conversion is the default for this particular source
+      to destination encoding. There should be only one default encoding in a
+      schema for the encoding pair.
+    type: boolean
+  encoding_from:
+    title: Source Encoding
+    description: The source encoding name.
+    type: string
+  encoding_to:
+    title: Destination Encoding
+    description: The destination encoding name.
+    type: string
+  function:
+    title: Destination Encoding
+    description: The function used to perform the conversion.
+    type: string
+  comment:
+    title: Comment
+    description: An optional comment about the collation.
+    type: string
+  dependencies:
+    title: Dependencies
+    description: Database objects this object is dependent upon
+    $package_schema: dependencies
+requires:
+  - name
+  - schema
+  - encoding_from
+  - encoding_to
+  - function

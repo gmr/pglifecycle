@@ -1,0 +1,222 @@
+---
+$schema: http://json-schema.org/schema#
+$id: https://pglifecycle.readthedocs.io/en/stable/schemata/aggregate.html
+title: Aggregate
+description: >
+  An Aggregate function computes a single result from a set of input values.
+type: object
+properties:
+  name:
+    title: Name
+    description: The name of the aggregate function to create.
+    type: string
+  schema:
+    title: Schema
+    description: The schema to create the aggregate function in.
+    type: string
+  owner:
+    title: Owner
+    description: The role that owns the aggregate function.
+    type: string
+  sql:
+    title: SQL Statement
+    description: User-provided raw SQL snippet
+    type: string
+  arguments:
+    title: Arguments
+    description: An array of arguments that are passed into the function.
+    type: array
+    items:
+      $package_schema: argument
+  order_by:
+    title: Ordered Set Arguments
+    description: >
+      An array of arguments that are passed into the function for ordered-set behavior.
+    type: array
+    items:
+      $package_schema: argument
+  sfunc:
+    title: State Transition Function
+    description: >
+      The name of the state transition function to be called for each input row.
+    type: string
+  state_data_type:
+    title: State Transition Data Type
+    description: The data type for the aggregate's state value.
+    type: string
+  state_data_size:
+    title: State Transition Data Size
+    description: >
+      The approximate average size (in bytes) of the aggregate's state value.
+    type: integer
+  ffunc:
+    title: Final Function
+    description: >
+      The name of the final function called to compute the aggregate's result
+      after all input rows have been traversed
+    type: string
+  finalfunc_extra:
+    title: Final Function Extra
+    description: >
+      If true then in addition to the final state value and any direct arguments,
+      the final function receives extra NULL values corresponding to the aggregate's
+      regular (aggregated) arguments. This is mainly useful to allow correct
+      resolution of the aggregate result type when a polymorphic aggregate is
+      being defined.
+    type: bool
+  finalfunc_modify:
+    title: Final Function Modifies
+    description: >
+      This option specifies whether the final function is a pure function that
+      does not modify its arguments. READ_ONLY indicates it does not; the other
+      two values indicate that it may change the transition state value.
+    enum: [READ_ONLY, SHAREABLE, READ_WRITE]
+  combinefunc:
+    title: Comination Function
+    description: >
+      A function may optionally be specified to allow the aggregate function
+      to support partial aggregation.
+    type: string
+  serialfunc:
+    title: Serialization Function
+    description: >
+      An aggregate function whose state_data_type is internal can participate
+      in parallel aggregation only if it has a serialfunc function, which must
+      serialize the aggregate state into a bytea value for transmission to
+      another process. This function must take a single argument of type
+      internal and return type bytea. A corresponding deserialfunc is also
+      required.
+    type: string
+  deserialfunc:
+    title: Deserialization Function
+    description: >
+      Deserialize a previously serialized aggregate state back into state_data_type.
+      This function must take two arguments of types bytea and internal, and
+      produce a result of type internal. (Note: the second, internal argument
+      is unused, but is required for type safety reasons.)
+    type: string
+  initial_condition:
+    title: Initial Condition
+    description: The initial setting for the state value.
+    type: string
+  msfunc:
+    title: Forward State Transition Function
+    description: >
+      The name of the forward state transition function to be called for each
+      input row in moving-aggregate mode. This is exactly like the regular
+      transition function, except that its first argument and result are of
+      type mstate_data_type, which might be different from state_data_type.
+    type: string
+  minvfunc:
+    title: Inverse Transition Function
+    description: >
+      The name of the inverse state transition function to be used in
+      moving-aggregate mode. This function has the same argument and result
+      types as msfunc, but it is used to remove a value from the current
+      aggregate state, rather than add a value to it. The inverse transition
+      function must have the same strictness attribute as the forward state
+      transition function.
+    type: string
+  mstate_data_type:
+    title: Moving Aggregate State Data Type
+    description: >
+      The data type for the aggregate's state value, when using moving-aggregate
+      mode.
+    type: string
+  mstate_data_size:
+    title: Moving Aggregate State Size
+    description: >
+      The approximate average size (in bytes) of the aggregate's state value,
+      when using moving-aggregate mode. This works the same as state_data_size.
+    type: integer
+  mffunc:
+    title: Moving Aggregate Final Function
+    description: >
+      The name of the final function called to compute the aggregate's result
+      after all input rows have been traversed, when using moving-aggregate mode.
+    type: string
+  mfinalfunc_extra:
+    title: Moving Aggregate Final Function Extra
+    description: Include extra dummy arguments
+    type: boolean
+  mfinalfunc_modify:
+    title:
+    description: >
+      This option specifies whether the Moving Average final function is a pure
+      function that does not modify its arguments. READ_ONLY indicates it does
+      not; the other two values indicate that it may change the transition state
+      value.
+    enum: [READ_ONLY, SHAREABLE, READ_WRITE]
+  minitial_condition:
+    title: Moving Average Initial Condition
+    description: >
+      The initial setting for the state value, when using moving-aggregate mode.
+    type: string
+  sort_operator:
+    title: Sort Operator
+    description: >
+      The associated sort operator for a MIN- or MAX-like aggregate. This is
+      just an operator name (possibly schema-qualified). The operator is
+      assumed to have the same input data types as the aggregate (which must
+      be a single-argument normal aggregate).
+    type: string
+  parallel:
+    title: Parallelization Safety
+    description: >
+      An aggregate will not be considered for parallelization if it is marked
+      PARALLEL UNSAFE (which is the default!) or PARALLEL RESTRICTED. Note that
+      the parallel-safety markings of the aggregate's support functions are
+      not consulted by the planner, only the marking of the aggregate itself.
+    enum: [SAFE, RESTRICTED, UNSAFE]
+  hypothetical:
+    title: Hypothetical-Set Aggregate Indicator
+    description: >
+      For ordered-set aggregates only, this flag specifies that the aggregate
+      arguments are to be processed according to the requirements for
+      hypothetical-set aggregates: that is, the last few direct arguments must
+      match the data types of the aggregated (WITHIN GROUP) arguments. The
+      HYPOTHETICAL flag has no effect on run-time behavior, only on parse-time
+      resolution of the data types and collations of the aggregate's arguments.
+    type: boolean
+  comment:
+    title: Comment
+    description: An optional comment about the aggregate.
+    type: string
+  dependencies:
+    title: Dependencies
+    description: Database objects this object is dependent upon
+    $package_schema: dependencies
+oneOf:
+  - required:
+      - sql
+    not:
+      required:
+        - arguments
+        - sfunc
+        - state_data_type
+        - state_data_size
+        - ffunc
+        - finalfunc_extra
+        - finalfunc_modify
+        - combinefunc
+        - serialfunc
+        - deserialfunc
+        - initial_condition
+        - msfunc
+        - minvfunc
+        - mstate_data_type
+        - mstate_data_size
+        - mffunc
+        - mfinalfunc_extra
+        - mfinalfunc_modify
+        - minitial_condition
+        - sort_operator
+        - parallel
+        - hypothetical
+  - required:
+      - arguments
+      - sfunc
+      - state_data_type
+    not:
+      required:
+        - sql

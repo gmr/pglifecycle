@@ -1,0 +1,25 @@
+---
+$schema: http://json-schema.org/schema#
+$id: https://pglifecycle.readthedocs.io/en/stable/schemata/argument.html
+title: Argument
+type: object
+properties:
+  mode:
+    title: Argument Mode
+    description: The mode of the argument
+    enum: [IN, VARIADIC]
+    default: IN
+  name:
+    title: Argument Name
+    description: The name of the function argument
+    type: string
+  data_type:
+    title: Argument Data Type
+    description: >
+      An input data type on which this aggregate function operates. To
+      create a zero-argument aggregate function, write * in place of the
+      list of argument specifications.
+    type: string
+requires:
+  - name
+  - data_type

@@ -1,0 +1,19 @@
+---
+$schema: http://json-schema.org/schema#
+$id: https://pglifecycle.readthedocs.io/en/stable/schemata/operators.html
+title: Operators
+description: Specifies all user-defined operators in a schema
+type: object
+properties:
+  schema:
+    title: Schema
+    type: string
+  operators:
+    title: User-defined operators
+    type: array
+    items:
+      type: object
+required:
+  - schema
+  - operators
+addtionalProperties: false
