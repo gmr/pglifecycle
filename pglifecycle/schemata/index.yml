@@ -1,0 +1,132 @@
+---
+$schema: http://json-schema.org/schema#
+$id: https://pglifecycle.readthedocs.io/en/stable/schemata/index.html
+title: Index
+description: Defines an index on a table
+type: object
+properties:
+  name:
+    title: Name
+    description: The index name
+    type: string
+  sql:
+    title: SQL Statement
+    description: User-provided raw SQL snippet
+    type: string
+  unique:
+    title: Unique
+    description: Specifies that the index is a unique index
+    type: boolean
+    default: false
+  recurse:
+    title: Recurse to Partitions
+    description: >
+      Used to specify that the index should be created on partitions of the table.
+    type: boolean
+  tablespace:
+    title: Tablespace
+    description: Specifies the tablespace to use when creating the index
+    type: string
+  table_name:
+    title: Table Name
+    description: The table name the index is defined for
+    type: string
+  method:
+    title: Index Method
+    description: The name of the index method to be used
+    enum:
+      - brin
+      - btree
+      - gist
+      - hash
+      - spgist
+    default: btree
+  columns:
+    title: Columns
+    description: Defines the columns that are indexed
+    type: array
+    items:
+      title: Column
+      type: object
+      properties:
+        name:
+          title: Column Name
+          description: Specify either the column name, mutally exclusive from expression.
+          type: string
+        expression:
+          title: Expression
+          type: string
+          description: Specify an expression for the column, mutally exclusive from name.
+        collation:
+          title: Column Collation
+          description: >
+            Assigns a collation to the column (which must be of a collatable data type).
+            If not specified, the column data type's default collation is used.
+          type: string
+        opclass:
+          title: Operator Class
+          description: The name of an operator class
+          type: string
+        direction:
+          title: Sort Direction
+          description: Specifies the sort direction in the index for the column
+          enum: [ASC, DESC]
+          default: ASC
+        null_placement:
+          title: NULL value placement
+          description: Specifies the placement of null values in the index.
+          enum: [FIRST, LAST]
+      additionalProperties: false
+      oneOf:
+        - required: [name]
+          not: {required: [expression]}
+        - required: [expression]
+          not: {required: [name]}
+  include:
+    title: Include Columns
+    description: Use to provide a list of non-key columns to provide in the index.
+    type: array
+    items:
+      title: Column Name
+      type: string
+  where:
+    title: Where
+    description: Use to provide an expression for creating a partial index
+    type: string
+  storage_parameters:
+    title: Storage Parameters
+    description: Storage parameter settings for the index
+    type: object
+    propertyNames:
+      pattern: ^[A-Za-z0-9_]*$
+  comment:
+    title: Comment
+    description: An optional comment about the table
+    type: string
+  dependencies:
+    title: Dependencies
+    description: Database objects this object is dependent upon
+    $package_schema: dependencies
+
+additionalProperties: false
+oneOf:
+  - required:
+      - sql
+    not:
+      required:
+        - name
+        - table_name
+        - method
+        - columns
+        - storage_parameters
+        - unique
+        - recurse
+        - include
+        - where
+  - required:
+      - name
+      - table_name
+      - columns
+    not:
+      required:
+        - sql

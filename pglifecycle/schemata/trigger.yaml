@@ -1,0 +1,78 @@
+---
+$schema: http://json-schema.org/schema#
+$id: https://pglifecycle.readthedocs.io/en/stable/schemata/trigger.html
+title: Trigger
+description: Defines an trigger on a table
+type: object
+properties:
+  name:
+    title: Name
+    description: The index name
+    type: string
+  sql:
+    title: SQL Statement
+    description: User-provided raw SQL snippet
+    type: string
+  table_name:
+    title: Table Name
+    description: The table to create the trigger on
+    type: string
+  when:
+    title: When to fire the trigger
+    enum: [BEFORE, AFTER, INSTEAD OF]
+  for_each:
+    title: For Each Row or Statement
+    enum: [ROW, STATEMENT]
+    default: STATEMENT
+  condition:
+    title: Trigger Condition
+    description: >
+      A Boolean expression that determines whether the trigger function will
+      actually be executed. If WHEN is specified, the function will only be
+      called if the condition returns true.
+    type: string
+  function:
+    title: Trigger Function
+    description: The trigger function to execute
+    type: string
+  arguments:
+    title: Funciton Arguments
+    description: >
+      An optional comma-separated list of arguments to be provided to the
+      function when the trigger is executed.
+    type: array
+    items:
+      anyOf:
+        - type: boolean
+        - type: integer
+        - type: number
+        - type: string
+  comment:
+    title: Comment
+    description: An optional comment about the table
+    type: string
+  dependencies:
+    title: Dependencies
+    description: Database objects this object is dependent upon
+    $package_schema: dependencies
+additionalProperties: false
+oneOf:
+  - required:
+      - sql
+    not:
+      required:
+        - name
+        - table_name
+        - when
+        - for_each
+        - condition
+        - function
+        - arguments
+  - required:
+      - name
+      - table_name
+      - when
+      - function
+    not:
+      required:
+        - sql

@@ -1,0 +1,407 @@
+---
+$schema: http://json-schema.org/schema#
+$id: https://pglifecycle.readthedocs.io/en/stable/schemata/table.html
+title: Table
+description: Defines a table
+type: object
+properties:
+  name:
+    title: Name
+    description: The table name
+    type: string
+  schema:
+    title: Schema
+    description: The schema to create the table in
+    type: string
+  owner:
+    title: Owner
+    description: The role name that owns the table
+    type: string
+  sql:
+    title: SQL Statement
+    description: User-provided raw SQL snippet
+    type: string
+  unlogged:
+    title: Unlogged
+    description: >
+      If specified, the table is created as an unlogged table. Data written to
+      unlogged tables is not written to the write-ahead log, which makes them
+      considerably faster than ordinary tables. However, they are not
+      crash-safe: an unlogged table is automatically truncated after a crash
+      or unclean shutdown.
+    type: boolean
+  from_type:
+    title: From Type (OF)
+    description: >
+      Creates a typed table, which takes its structure from the specified
+      composite type (name optionally schema-qualified).
+    type: string
+  parents:
+    title: Parent Tables (INHERITS)
+    description: >
+      A list of tables from which the new table automatically inherits all
+      columns. Parent tables can be plain tables or foreign tables.
+    type: array
+    items:
+      type: string
+  like_table:
+    title: Like Table
+    description: >
+      Specifies a table from which the new table automatically copies all column
+      names, their data types, and their not-null constraints.
+    type: object
+    properties:
+      name:
+        title: Table Name
+        description: The table to copy
+        type: string
+      include_comments:
+        title: Include comments when creating the new table.
+        type: boolean
+      include_constraints:
+        title: Include constraints
+        type: boolean
+      include_defaults:
+        title: Include defaults
+        type: boolean
+      include_generated:
+        title: Include generated expressions
+        type: boolean
+      include_identity:
+        title: Include identity specifications
+        type: boolean
+      include_indexes:
+        title: Include indexes
+        type: boolean
+      include_statistics:
+        title: Include extended statistics
+        type: boolean
+      include_storage:
+        title: Include storage settings
+        type: boolean
+      include_all:
+        title: Include all
+        description: >
+          Include all options (comments, constraints, defaults, generated,
+          identity, indexes, statistics, and storage).
+        type: boolean
+    required:
+      - name
+    additionalProperties: false
+    oneOf:
+      - required: [include_comments]
+        not: {required: [include_all]}
+      - required: [include_constraints]
+        not: {required: [include_all]}
+      - required: [include_defaults]
+        not: {required: [include_all]}
+      - required: [include_generated]
+        not: {required: [include_all]}
+      - required: [include_identity]
+        not: {required: [include_all]}
+      - required: [include_indexes]
+        not: {required: [include_all]}
+      - required: [include_statistics]
+        not: {required: [include_all]}
+      - required: [include_storage]
+        not: {required: [include_all]}
+      - required: [include_all]
+        not:
+          required:
+            - include_comments
+            - include_constraints
+            - include_defaults
+            - include_generated
+            - include_identity
+            - include_indexes
+            - include_statistics
+            - include_storage
+  columns:
+    title: Columns
+    description: Defines the columns in the table
+    type: array
+    items:
+      $package_schema: column
+  primary_key:
+    title: Primary Key
+    description: >
+      The PRIMARY KEY constraint specifies that a column or columns of a table
+      can contain only unique (non-duplicate), non-null values. Only one primary
+      key can be specified for a table.
+    type: object
+    properties:
+      columns:
+        title: Columns
+        description: The list of columns that provide the uniqueness
+        type: array
+        minItems: 1
+      include:
+        title: Include Columns
+        description: >
+          Use to provide a list of non-key columns to provide in the primary key index.
+        type: array
+        items:
+          title: Column Name
+          type: string
+    required:
+      - columns
+    additionalProperties: false
+  indexes:
+    title: Indexes
+    description: An array of indexes on the table
+    type: array
+    items:
+      $package_schema: index
+  check_constraints:
+    title: Table Check Constraints
+    type: array
+    items:
+      title: Check Constraint Expression
+      description: >
+        Specifies an expression producing a Boolean result which new or updated rows
+        must satisfy for an insert or update operation to succeed.
+      type: string
+  unique_constriants:
+    title: Unique Constraints
+    description: >
+      The UNIQUE constraint specifies that a group of one or more columns of a
+      table can contain only unique values. The behavior of the unique table
+      constraint is the same as that for column constraints, with the additional
+      capability to span multiple columns.
+
+      For the purpose of a unique constraint, null values are not considered equal.
+
+      Each unique table constraint must name a set of columns that is different
+      from the set of columns named by any other unique or primary key constraint
+      defined for the table. (Otherwise it would just be the same constraint listed
+      twice.)
+
+      When establishing a unique constraint for a multi-level partition hierarchy,
+      all the columns in the partition key of the target partitioned table, as
+      well as those of all its descendant partitioned tables, must be included
+      in the constraint definition.
+
+      Adding a unique constraint will automatically create a unique btree index
+      on the column or group of columns used in the constraint. The optional
+      clause INCLUDE adds to that index one or more columns on which the
+      uniqueness is not enforced. Note that although the constraint is not
+      enforced on the included columns, it still depends on them. Consequently,
+      some operations on these columns (e.g. DROP COLUMN) can cause cascaded
+      constraint and index deletion.
+    type: array
+    items:
+      title: Unique Constriant
+      type: object
+      properties:
+        columns:
+          title: Columns
+          description: The list of columns that provide the uniqueness
+          type: array
+          minItems: 1
+        include:
+          title: Include Columns
+          description: Use to provide a list of non-key columns to provide in the index.
+          type: array
+          items:
+            title: Column Name
+            type: string
+      required:
+        - columns
+      additionalProperties: false
+  foreign_keys:
+    title: Foreign Keys
+    description: An array of foreign keys on the table
+    type: array
+    items:
+      $package_schema: foreign_key
+  triggers:
+    title: Triggers
+    description: An array of triggers on the table
+    type: array
+    items:
+      $package_schema: rigger
+  partition:
+    title: Partition Table
+    description: Defines table partitioning behavior
+    type: object
+    properties:
+      type:
+        title: Partition Type
+        enum: [HASH, LIST, RANGE]
+      columns:
+        title: Columns
+        description: Defines the columns that are indexed
+        type: array
+        items:
+          title: Column
+          type: object
+          properties:
+            name:
+              title: Column Name
+              description: Specify either the column name, mutally exclusive from expression.
+              type: string
+            expression:
+              title: Expression
+              type: string
+              description: Specify an expression for the column, mutally exclusive from name.
+            collation:
+              title: Column Collation
+              description: >
+                Assigns a collation to the column (which must be of a collatable data type).
+              type: string
+            opclass:
+              title: Operator Class
+              description: The name of an operator class
+              type: string
+          additionalProperties: false
+          oneOf:
+            - required: [name]
+              not: {required: [expression]}
+            - required: [expression]
+              not: {required: [name]}
+    additionalProperties: false
+    required:
+      - type
+      - columns
+  partitions:
+    title: Partitions
+    description: Define partitions of the table
+    type: array
+    items:
+      title: Partition
+      description: Defines a partition of the table
+      type: object
+      properties:
+        schema:
+          title: Schema
+          description: The schema to create the table in
+          type: string
+        name:
+          title: Name
+          description: The table name
+          type: string
+        default:
+          title: Default Partition
+          description: Indicates that the partition is the default partition
+          type: boolean
+        for_values_in:
+          title: Partition Values IN
+          description: Used in LIST partitioning
+          type: array
+          items:
+            anyOf:
+              - type: boolean
+              - type: integer
+              - type: number
+              - type: string
+        for_values_from:
+          title: Partition Values From
+          description: Used in RANGE partitioning
+          onOf:
+            - type: integer
+            - type: number
+            - type: string
+        for_values_to:
+          title: Partition Values To
+          description: Used in RANGE partitioning
+          onOf:
+            - type: integer
+            - type: number
+            - type: string
+        for_values_with:
+          title: Partition Values With Expression
+          description: Used in HASH partitioning
+          type: string
+        comment:
+          title: Comment
+          description: An optional comment about the partition
+          type: string
+      required:
+        - schema
+        - name
+      oneOf:
+        - required: [default]
+          not:
+            required:
+              - for_values_in
+              - for_values_from
+              - for_values_to
+              - for_values_when
+        - required: [for_values_in]
+          not:
+            required:
+              - default
+              - for_values_from
+              - for_values_to
+              - for_values_when
+        - required:
+            - for_values_from
+            - for_vlaues_to
+          not:
+            required:
+              - default
+              - for_values_in
+              - for_values_when
+        - required: [for_values_when]
+          not:
+            required:
+              - default
+              - for_values_in
+              - for_values_from
+              - for_values_to
+  access_method:
+    title: Storage Access Method
+    description: >
+      Specifies the table access method to use to store the contents for the
+      new table; the method needs be an access method of type TABLE.
+    type: string
+  storage_parameters:
+    title: Storage Parameters
+    description: Storage parameter settings for the table
+    type: object
+    propertyNames:
+      pattern: ^[A-Za-z0-9_]*$
+  tablespace:
+    title: Tablespace
+    description: >
+      Specifies the name of the tablespace in which the new table is to be created.
+    type: string
+  index_tablespace:
+    title: Tablespace
+    description: >
+      This clause allows selection of the tablespace in which the index associated
+      with a UNIQUE, PRIMARY KEY, or EXCLUDE constraint will be created. If not
+      specified, default_tablespace is consulted.
+    type: string
+  comment:
+    title: Comment
+    description: An optional comment about the table
+    type: string
+  dependencies:
+    title: Dependencies
+    description: Database objects this object is dependent upon
+    $package_schema: dependencies
+
+additionalProperties: false
+required:
+  - schema
+  - name
+oneOf:
+  - required:
+      - parents
+    not:
+      required:
+        - columns
+        - sql
+  - required:
+      - sql
+    not:
+      required:
+        - columns
+        - parents
+  - required:
+      - columns
+    not:
+      required:
+        - parents
+        - sql

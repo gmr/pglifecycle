@@ -1,0 +1,88 @@
+---
+$schema: http://json-schema.org/schema#
+$id: https://pglifecycle.readthedocs.io/en/stable/schemata/column.html
+title: Column
+description: Defines a column in a table
+type: object
+properties:
+  name:
+    title: Name
+    description: The column name
+    type: string
+  data_type:
+    title: Data Type
+    description: The column data type
+    type: string
+  nullable:
+    title: Nullable
+    description: Column is NULLABLE when True. Defaults to True.
+    type: boolean
+    default: True
+  default:
+    title: Default Value
+    description: Default value for the column.
+    oneOf:
+      - type: boolean
+      - type: integer
+      - type: number
+      - type: string
+  collation:
+    title: Column Collation
+    description: >
+      Assigns a collation to the column (which must be of a collatable data type).
+      If not specified, the column data type's default collation is used.
+    type: string
+  check_constraint:
+    title: Check Constraint
+    description: >
+      Specifies an expression producing a Boolean result which new or updated rows
+      must satisfy for an insert or update operation to succeed.
+    type: string
+  generated:
+    title: Generated Column
+    description: Options for specifying a generated column
+    type: object
+    properties:
+      expression:
+        title: Expression
+        description: >
+          The expression used to generate the column. Mutually exclusive with the
+          sequence column.
+        type: string
+      sequence:
+        title: Sequence Name
+        description: >
+          Specifies that the generated column value is provided by a sequence.
+          Mutually exclusive with the expression attribute.
+      sequence_behavior:
+        title: Sequence Behavior
+        description: >
+          The clauses ALWAYS and BY DEFAULT determine how the sequence value is
+          given precedence over a user-specified value in an INSERT statement.
+          If ALWAYS is specified, a user-specified value is only accepted if
+          the INSERT statement specifies OVERRIDING SYSTEM VALUE. If BY DEFAULT
+          is specified, then the user-specified value takes precedence.
+        enum:
+          - ALWAYS
+          - BY DEFAULT
+    oneOf:
+      - required:
+          - expression
+        not:
+          required:
+            - sequence
+            - sequence_behavior
+      - required:
+          - sequence
+        not:
+          required:
+            - expression
+    additionalProperties: false
+  comment:
+    title: Comment
+    description: An optional comment about the column
+    type: string
+required:
+  - name
+  - data_type
+additionalProperties: false

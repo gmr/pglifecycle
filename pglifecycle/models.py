@@ -69,10 +69,30 @@ class Collation:
 
 
 @dataclasses.dataclass
+class Column:
+    """Represents a column in a table"""
+    name: str
+    data_type: str
+    nullable: bool = True
+    default: typing.Optional[typing.Any] = None
+    collation: typing.Optional[str] = None
+    check_constraint: typing.Optional[str] = None
+    generated: typing.Optional[typing.Dict[str, str]] = None
+    comment: typing.Optional[str] = None
+
+
+@dataclasses.dataclass
 class Constraint:
     """Represents a Constraint in a Domain"""
     check: str
     name: typing.Optional[str] = None
+
+
+@dataclasses.dataclass
+class ConstraintColumns:
+    """Defines constraint columns for various table constraints"""
+    columns: typing.List[str]
+    include: typing.List[str] = None
 
 
 @dataclasses.dataclass
@@ -100,7 +120,9 @@ class Domain:
     default: typing.Optional[str] = None
     constraints: typing.Optional[typing.List[Constraint]] = None
     comment: typing.Optional[str] = None
-    dependencies: typing.Optional[Collation, Extension, Function] = None
+    dependencies: typing.Optional[typing.List[Collation,
+                                              Extension,
+                                              Function]] = None
 
 
 @dataclasses.dataclass
@@ -125,6 +147,26 @@ class ForeignDataWrapper:
 
 
 @dataclasses.dataclass
+class ForeignKey:
+    """Represents a Foreign Key on a Table"""
+    name: str
+    columns: typing.List[str]
+    references: ForeignKeyReference
+    on_delete: str = 'NO ACTION'
+    on_update: str = 'NO ACTION'
+    deferrable: typing.Optional[bool] = None
+    initially_deferred: typing.Optional[bool] = None
+    dependencies: typing.Optional[typing.List[Table]] = None
+
+
+@dataclasses.dataclass
+class ForeignKeyReference:
+    """Represents the table a Foreign Key references"""
+    name: str
+    columns: typing.List[str]
+
+
+@dataclasses.dataclass
 class Function:
     """Represents a Function"""
     name: str
@@ -132,6 +174,35 @@ class Function:
     owner: str
     comment: typing.Optional[str] = None
     dependencies: typing.Optional[Language] = None
+
+
+@dataclasses.dataclass
+class Index:
+    """Represents an Index on a table"""
+    name: str
+    sql: typing.Optional[str] = None
+    unique: typing.Optional[bool] = None
+    recurse: typing.Optional[bool] = None
+    tablespace: typing.Optional[str] = None
+    table_name: typing.Optional[str] = None
+    method: typing.Optional[str] = None
+    columns: typing.Optional[typing.List[IndexColumn]] = None
+    include: typing.Optional[typing.List[str]] = None
+    where: typing.Optional[str] = None
+    storage_parameters: typing.Optional[typing.Dict[str, str]] = None
+    comment: typing.Optional[str] = None
+    dependencies: typing.Optional[typing.List[Function]] = None
+
+
+@dataclasses.dataclass
+class IndexColumn:
+    """Represents a column in an index on a table"""
+    name: typing.Optional[str] = None
+    expression: typing.Optional[str] = None
+    collation: typing.Optional[str] = None
+    opclass: typing.Optional[str] = None
+    direction: typing.Optional[str] = None
+    null_placement: typing.Optional[str] = None
 
 
 @dataclasses.dataclass
@@ -144,6 +215,21 @@ class Language:
     inline_handler: typing.Optional[str] = None
     validator: typing.Optional[str] = None
     comment: typing.Optional[str] = None
+
+
+@dataclasses.dataclass
+class LikeTable:
+    """Represents a the settings for creating a table using LIKE"""
+    name: str
+    include_comments: typing.Optional[bool] = None
+    include_constraints: typing.Optional[bool] = None
+    include_defaults: typing.Optional[bool] = None
+    include_generated: typing.Optional[bool] = None
+    include_identity: typing.Optional[bool] = None
+    include_indexes: typing.Optional[bool] = None
+    include_statistics: typing.Optional[bool] = None
+    include_storage: typing.Optional[bool] = None
+    include_all: typing.Optional[bool] = None
 
 
 @dataclasses.dataclass
@@ -167,6 +253,14 @@ class Operator:
 
 
 @dataclasses.dataclass
+class PartitionKeyColumn:
+    """Represents a column in a partition key"""
+    column_name: typing.Optional[str] = None
+    expression: typing.Optional[str] = None
+    opclass: typing.Optional[str] = None
+
+
+@dataclasses.dataclass
 class Role:
     """Represents a schema/namespace"""
     name: str
@@ -181,16 +275,83 @@ class Schema:
 
 
 @dataclasses.dataclass
+class Sequence:
+    """Represents a sequence"""
+    name: str
+    schema: str
+    owner: str
+
+
+@dataclasses.dataclass
 class Server:
     """Represents a server"""
     name: str
     owner: str
     foreign_data_wrapper: str
-    dependencies: typing.Union[Extension, ForeignDataWrapper]
+    dependencies: typing.List[Extension, ForeignDataWrapper]
     type: typing.Optional[str] = None
     version: typing.Optional[str] = None
     options: typing.Optional[dict] = None
     comment: typing.Optional[str] = None
+
+
+@dataclasses.dataclass
+class Table:
+    """Represents a table"""
+    name: str
+    schema: str
+    owner: str
+    sql: typing.Optional[str] = None
+    unlogged: typing.Optional[bool] = None
+    from_type: typing.Optional[str] = None
+    parents: typing.Optional[typing.List[str]] = None
+    like_table: typing.Optional[LikeTable] = None
+    columns: typing.Optional[typing.List[Column]] = None
+    indexes: typing.Optional[typing.List[Index]] = None
+    primary_key: typing.Optional[ConstraintColumns] = None
+    check_constraints: typing.Optional[typing.List[str]] = None
+    unique_constraints: typing.Optional[typing.List[ConstraintColumns]] = None
+    foreign_keys: typing.Optional[typing.List[ForeignKey]] = None
+    triggers: typing.Optional[typing.List[Triggers]] = None
+    partition: typing.Optional[TablePartitionBehavior] = None
+    partitions: typing.Optional[typing.List[TablePartition]] = None
+    access_method: typing.Optional[str] = None
+    storage_parameters: typing.Optional[typing.Dict[str, str]] = None
+    tablespace: typing.Optional[str] = None
+    index_tablespace: typing.Optional[str] = None
+    comment: typing.Optional[str] = None
+    dependencies: typing.Optional[typing.List[Extension,
+                                              Function,
+                                              Sequence]] = None
+
+
+@dataclasses.dataclass
+class TablePartition:
+    """Defines a table partition"""
+    name: str
+    schema: str
+    default: typing.Optional[bool] = None
+    for_values_in: typing.Optional[typing.List[float, int, str]] = None
+    for_values_from: typing.Optional[float, int, str] = None
+    for_values_to: typing.Optional[float, int, str] = None
+    for_values_with: typing.Optional[str] = None
+    comment: typing.Optional[str] = None
+
+
+@dataclasses.dataclass
+class TablePartitionBehavior:
+    """Defines the data structure defining how a table is partitioned"""
+    type: str
+    columns: typing.List[TablePartitionColumn]
+
+
+@dataclasses.dataclass
+class TablePartitionColumn:
+    """Defines the data structure defining table a partition column"""
+    name: typing.Optional[str] = None
+    expression: typing.Optional[str] = None
+    collation: typing.Optional[str] = None
+    opclass: typing.Optional[str] = None
 
 
 @dataclasses.dataclass
@@ -201,6 +362,23 @@ class Tablespace:
     location: str
     options: typing.Optional[typing.Dict[str, float]] = None
     comment: typing.Optional[str] = None
+
+
+@dataclasses.dataclass
+class Triggers:
+    """Table Triggers"""
+    sql: typing.Optional[str] = None
+    name: typing.Optional[str] = None
+    table_name: typing.Optional[str] = None
+    when: typing.Optional[str] = None
+    for_each: typing.Optional[str] = None
+    condition: typing.Optional[str] = None
+    function: typing.Optional[str] = None
+    arguments: typing.Optional[typing.List[float, int, str]] = None
+    comment: typing.Optional[str] = None
+    dependencies: typing.Optional[typing.List[Extension,
+                                              Function,
+                                              Table]] = None
 
 
 @dataclasses.dataclass
@@ -251,6 +429,7 @@ MAPPINGS = {
     constants.PROCEDURAL_LANGUAGE: Language,
     constants.SCHEMA: Schema,
     constants.SERVER: Server,
+    constants.TABLE: Table,
     constants.TABLESPACE: Tablespace,
     constants.TYPE: Type
 }

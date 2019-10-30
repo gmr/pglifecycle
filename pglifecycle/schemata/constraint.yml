@@ -1,0 +1,11 @@
+---
+$schema: http://json-schema.org/schema#
+$id: https://pglifecycle.readthedocs.io/en/stable/schemata/constraint.html
+title: Constraint
+description: Defines a constraint
+type: object
+properties:
+  name:
+    title: Name
+    description: The index name
+    type: string

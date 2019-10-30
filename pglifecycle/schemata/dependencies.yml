@@ -4,6 +4,10 @@ $id: https://pglifecycle.readthedocs.io/en/stable/schemata/dependencies.html
 title: Dependencies
 type: object
 properties:
+  domains:
+    type: array
+    propertyNames:
+      pattern: ^([A-Za-z0-9_\-]+)\.([A-Za-z0-9_\-]+)$
   extensions:
     type: array
     propertyNames:
@@ -16,3 +20,16 @@ properties:
     type: array
     propertyNames:
       pattern: ^([A-Za-z0-9_\-]+)$
+  sequences:
+    type: array
+    propertyNames:
+      pattern: ^([A-Za-z0-9_\-]+)\.([A-Za-z0-9_\-]+)$
+  tables:
+    type: array
+    propertyNames:
+      pattern: ^([A-Za-z0-9_\-]+)\.([A-Za-z0-9_\-]+)$
+  types:
+    type: array
+    propertyNames:
+      pattern: ^([A-Za-z0-9_\-]+)\.([A-Za-z0-9_\-]+)$
+additionalProperties: false
