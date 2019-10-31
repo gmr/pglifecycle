@@ -109,43 +109,29 @@ PATHS = {
 
 OBJ_KEYS = {
     'columns': COLUMN,
+    'constraints': CONSTRAINT,
     'conversions': CONVERSION,
     'databases': DATABASE,
+    'domains': DOMAIN,
     'extensions': EXTENSION,
     'foreign data wrappers': FOREIGN_DATA_WRAPPER,
     'foreign servers': FOREIGN_SERVER,
     'functions': FUNCTION,
     'groups': GROUP,
+    'indexes': INDEX,
     'languages': PROCEDURAL_LANGUAGE,
     'large objects': LARGE_OBJECT,
     'operators': OPERATOR,
     'roles': ROLE,
     'sequences': SEQUENCE,
     'schemata': SCHEMA,
+    'tables': TABLE,
     'tablespaces': TABLESPACE,
     'types': TYPE,
     'views': VIEW
 }
 
-
-GRANT_KEYS = {
-    COLUMN: 'columns',
-    DATABASE: 'databases',
-    DOMAIN: 'domains',
-    FOREIGN_DATA_WRAPPER: 'foreign data wrappers',
-    FOREIGN_SERVER: 'foreign servers',
-    FUNCTION: 'functions',
-    GROUP: 'groups',
-    PROCEDURAL_LANGUAGE: 'languages',
-    LARGE_OBJECT: 'large objects',
-    ROLE: 'roles',
-    SEQUENCE: 'sequences',
-    SCHEMA: 'schemata',
-    TABLE: 'tables',
-    TABLESPACE: 'tablespaces',
-    TYPE: 'types',
-    VIEW: 'views'
-}
+GRANT_KEYS = {v: k for k, v in OBJ_KEYS.items()}
 
 GRANT_SORT_WEIGHTS = {
     'ALL': -1,
