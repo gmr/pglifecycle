@@ -5,10 +5,8 @@ import pathlib
 import typing
 
 from dateutil import tz
-import ruamel.yaml as yaml
-from ruamel.yaml import scalarstring
 
-from pglifecycle import constants, version
+from pglifecycle import constants, version, yaml
 
 LOGGER = logging.getLogger(__name__)
 LINE_LENGTH = 80
@@ -81,25 +79,5 @@ def save(base_path: pathlib.Path, path: str, doc_type: str, doc_name: str,
         for key, value in (comments or {}).items():
             handle.write('# {}: {}\n'.format(key, value))
         handle.write('---\n')
-        yaml_dump(handle, data)
+        yaml.dump(handle, data)
     return path
-
-
-def yaml_dump(handle, data: typing.Union[dict, list]) -> typing.NoReturn:
-    """Write a YAML document for the supplied data to the given file handle"""
-    yml = yaml.YAML()
-    yml.default_flow_style = False
-    yml.indent(mapping=2, sequence=4, offset=2)
-    yml.dump(_yaml_reformat(data), handle)
-
-
-def _yaml_reformat(data: typing.Any) -> typing.Any:
-    if isinstance(data, dict):
-        for key, value in data.items():
-            if isinstance(value, str) and '\n' in value:
-                data[key] = scalarstring.PreservedScalarString(value)
-            if isinstance(value, list):
-                data[key] = _yaml_reformat(value)
-    elif isinstance(data, list):
-        data = [_yaml_reformat(i) for i in data]
-    return data
