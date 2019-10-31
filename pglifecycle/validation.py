@@ -21,7 +21,7 @@ def validate_object(obj_type: str, name: str, data: dict) -> bool:
 
     # import json
     # with open('{}.json'.format(obj_type), 'w') as handle:
-    #    json.dump(schema, handle, indent=2)
+    #     json.dump(schema, handle, indent=2)
 
     try:
         jsonschema.validate(data, schema)
@@ -45,7 +45,7 @@ def _load_schemata(obj_type: str) -> dict:
     if not schema_path.exists():
         raise FileNotFoundError(
             'Schema file not found for object type {!r}'.format(obj_type))
-    return yaml.load(schema_path)
+    return _preprocess(yaml.load(schema_path))
 
 
 def _preprocess(schema: dict) -> dict:
@@ -60,8 +60,8 @@ def _preprocess(schema: dict) -> dict:
         elif isinstance(value, dict):
             schema_out[key] = _preprocess(value)
         elif isinstance(value, list):
-            schema_out[key] = [
-                _preprocess(v) if isinstance(v, dict) else v for v in value]
+            schema_out[key] = [_preprocess(v) if isinstance(v, dict) else v
+                               for v in value]
         else:
             schema_out[key] = value
     return schema_out
