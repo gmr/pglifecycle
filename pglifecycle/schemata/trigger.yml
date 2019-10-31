@@ -20,6 +20,11 @@ properties:
   when:
     title: When to fire the trigger
     enum: [BEFORE, AFTER, INSTEAD OF]
+  events:
+    title: The events that cause the fire to trigger
+    type: array
+    items:
+      enum: [INSERT, UPDATE, DELETE, TRUNCATE]
   for_each:
     title: For Each Row or Statement
     enum: [ROW, STATEMENT]
@@ -57,10 +62,10 @@ properties:
     $package_schema: dependencies
 additionalProperties: false
 oneOf:
-  - required:
-      - sql
+  - required: [sql]
     not:
       required:
+        - columns
         - name
         - table_name
         - when
@@ -68,11 +73,5 @@ oneOf:
         - condition
         - function
         - arguments
-  - required:
-      - name
-      - table_name
-      - when
-      - function
-    not:
-      required:
-        - sql
+  - required: [name, when, events, function]
+    not: {required: [sql]}

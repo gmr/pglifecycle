@@ -16,6 +16,10 @@ properties:
     type: array
     propertyNames:
       pattern: ^([A-Za-z0-9_\-]+)$
+  functions:
+    type: array
+    propertyNames:
+      pattern: ^([A-Za-z0-9_\-]+).^([A-Za-z0-9_\-]+)\(^([A-Za-z0-9_\-, ]+)\)$
   languages:
     type: array
     propertyNames:

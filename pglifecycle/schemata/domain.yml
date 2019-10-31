@@ -46,8 +46,8 @@ properties:
       - type: "null"
       - type: number
       - type: string
-  constraints:
-    title: An array of one or more constraints
+  check_constraints:
+    title: An array of one or more check constraints
     type: array
     items:
       title: Constraint
@@ -56,11 +56,12 @@ properties:
         name:
           title: Constraint Name
           type: string
-        check:
-          title: Check Expression
+        expression:
+          title: Constraint Expression
           type: string
       requires:
-        - check
+        - name
+        - expression
       additionalProperties: false
     uniqueItems: true
   comment:
@@ -81,10 +82,9 @@ oneOf:
     not:
       required:
         - data_type
-        - constraints
+        - check_constraints
   - required:
       - data_type
-      - constraints
     not:
       required:
         - sql

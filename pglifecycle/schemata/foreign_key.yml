@@ -1,0 +1,88 @@
+---
+$schema: http://json-schema.org/schema#
+$id: https://pglifecycle.readthedocs.io/en/stable/schemata/foreign_key.html
+title: Foreign Key
+description: Defines a foreign key on a table
+type: object
+properties:
+  name:
+    title: Name
+    description: The foreign key name
+    type: string
+  sql:
+    title: SQL Statement
+    description: User-provided raw SQL snippet
+    type: string
+  columns:
+    title: Columns
+    description: The columns in the table that the foreign key enforces the value of
+    type: array
+    items:
+      title: Column Name
+      type: string
+    minItems: 1
+  references:
+    title: Referenced Table
+    description: Defines the information about the foreign key table and columns
+    type: object
+    properties:
+      name:
+        title: Name
+        description: The name of the foreign key table
+        type: string
+      columns:
+        title: Columns
+        description: The columns in the table in the foreign key table
+        type: array
+        items:
+          title: Column Name
+          type: string
+        minItems: 1
+    additionalProperties: false
+    required:
+      - name
+      - columns
+  on_delete:
+    title: On Delete
+    description: Action to take on delete of the column value in the referenced table
+    enum:
+      - NO ACTION
+      - RESTRICT
+      - CASCADE
+      - SET NULL
+      - SET DEFAULT
+  on_update:
+    title: On Update
+    description: Action to take on update of the column value in the referenced table
+    enum:
+      - NO ACTION
+      - RESTRICT
+      - CASCADE
+      - SET NULL
+      - SET DEFAULT
+  deferrable:
+    title: Deferrable
+    description: >
+      This controls whether the constraint can be deferred. A constraint that is
+      not deferrable will be checked immediately after every command.
+    type: boolean
+  initially_deferred:
+    title: Initial Constraint Check Behavior
+    type: boolean
+additionalProperties: false
+oneOf:
+  - required:
+      - sql
+    not:
+      required:
+        - columns
+        - references
+        - on_delete
+        - on_update
+        - deferrable
+        - initially_deferred
+  - required:
+      - columns
+    not:
+      required:
+        - sql

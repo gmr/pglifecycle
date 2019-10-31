@@ -128,24 +128,33 @@ properties:
       The PRIMARY KEY constraint specifies that a column or columns of a table
       can contain only unique (non-duplicate), non-null values. Only one primary
       key can be specified for a table.
-    type: object
-    properties:
-      columns:
-        title: Columns
-        description: The list of columns that provide the uniqueness
-        type: array
-        minItems: 1
-      include:
-        title: Include Columns
-        description: >
-          Use to provide a list of non-key columns to provide in the primary key index.
-        type: array
+
+      For primary keys without included columns, this value can be a list of
+      column names. Otherwise it's an object with a columns and an include
+      attribute.
+    anyOf:
+      - type: string
+      - type: array
         items:
-          title: Column Name
           type: string
-    required:
-      - columns
-    additionalProperties: false
+      - type: object
+        properties:
+          columns:
+            title: Columns
+            description: The list of columns that provide the uniqueness
+            type: array
+            minItems: 1
+          include:
+            title: Include Columns
+            description: >
+              Use to provide a list of non-key columns to provide in the primary key index.
+            type: array
+            items:
+              title: Column Name
+              type: string
+        required:
+          - columns
+        additionalProperties: false
   indexes:
     title: Indexes
     description: An array of indexes on the table
@@ -160,8 +169,13 @@ properties:
       description: >
         Specifies an expression producing a Boolean result which new or updated rows
         must satisfy for an insert or update operation to succeed.
-      type: string
-  unique_constriants:
+      type: object
+      properties:
+        name:
+          type: string
+        expression:
+          type: string
+  unique_constraints:
     title: Unique Constraints
     description: >
       The UNIQUE constraint specifies that a group of one or more columns of a
@@ -188,26 +202,37 @@ properties:
       enforced on the included columns, it still depends on them. Consequently,
       some operations on these columns (e.g. DROP COLUMN) can cause cascaded
       constraint and index deletion.
+
+      For unique constraints without included columns, this value can be a list of
+      column names. Otherwise it's an object with a columns and an include
+      attribute.
     type: array
     items:
-      title: Unique Constriant
-      type: object
-      properties:
-        columns:
-          title: Columns
-          description: The list of columns that provide the uniqueness
-          type: array
-          minItems: 1
-        include:
-          title: Include Columns
-          description: Use to provide a list of non-key columns to provide in the index.
-          type: array
+      anyOf:
+        - type: array
           items:
             title: Column Name
             type: string
-      required:
-        - columns
-      additionalProperties: false
+        - title: Column Name
+          type: string
+        - title: Unique Constraint
+          type: object
+          properties:
+            columns:
+              title: Columns
+              description: The list of columns that provide the uniqueness
+              type: array
+              minItems: 1
+            include:
+              title: Include Columns
+              description: Use to provide a list of non-key columns to provide in the index.
+              type: array
+              items:
+                title: Column Name
+                type: string
+          required:
+            - columns
+          additionalProperties: false
   foreign_keys:
     title: Foreign Keys
     description: An array of foreign keys on the table
@@ -219,7 +244,7 @@ properties:
     description: An array of triggers on the table
     type: array
     items:
-      $package_schema: rigger
+      $package_schema: trigger
   partition:
     title: Partition Table
     description: Defines table partitioning behavior
@@ -231,34 +256,32 @@ properties:
       columns:
         title: Columns
         description: Defines the columns that are indexed
-        type: array
-        items:
-          title: Column
-          type: object
-          properties:
-            name:
-              title: Column Name
-              description: Specify either the column name, mutally exclusive from expression.
+        anyOf:
+          - type: string
+          - type: array
+            items:
               type: string
-            expression:
-              title: Expression
-              type: string
-              description: Specify an expression for the column, mutally exclusive from name.
-            collation:
-              title: Column Collation
-              description: >
-                Assigns a collation to the column (which must be of a collatable data type).
-              type: string
-            opclass:
-              title: Operator Class
-              description: The name of an operator class
-              type: string
-          additionalProperties: false
-          oneOf:
-            - required: [name]
-              not: {required: [expression]}
-            - required: [expression]
-              not: {required: [name]}
+          - title: Column
+            type: object
+            properties:
+              name:
+                title: Column Name
+                description: Specify either the column name, mutally exclusive from expression.
+                type: string
+              expression:
+                title: Expression
+                type: string
+                description: Specify an expression for the column, mutally exclusive from name.
+              collation:
+                title: Column Collation
+                description: >
+                  Assigns a collation to the column (which must be of a collatable data type).
+                type: string
+              opclass:
+                title: Operator Class
+                description: The name of an operator class
+                type: string
+            additionalProperties: false
     additionalProperties: false
     required:
       - type

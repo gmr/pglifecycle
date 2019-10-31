@@ -37,6 +37,7 @@ properties:
     enum:
       - brin
       - btree
+      - gin
       - gist
       - hash
       - spgist
@@ -125,7 +126,6 @@ oneOf:
         - where
   - required:
       - name
-      - table_name
       - columns
     not:
       required:
