@@ -81,6 +81,7 @@ class Project:
         self._inventory: dict = {k: {} for k in constants.PATHS.keys()}
         for key in [constants.EXTENSION, constants.PROCEDURAL_LANGUAGE]:
             self._inventory[key] = {}
+        self._dependencies = {k: {} for k in self._inventory.keys()}
 
     def __repr__(self) -> str:
         return '<Project path="{!s}">'.format(self.path)
@@ -151,6 +152,11 @@ class Project:
             definition['owner'] = self.superuser
         return definition
 
+    def _cache_and_remove_dependencies(self, obj_type: str, definition: dict):
+        name = self._object_name(definition, 'schema' in definition)
+        self._dependencies[obj_type][name] = definition['dependencies']
+        del definition['dependencies']
+
     def _process_object_dependencies(self, definition: dict) \
             -> typing.NoReturn:
         dependencies = []
@@ -175,7 +181,7 @@ class Project:
                 self._load_errors += 1
                 continue
             if 'dependencies' in definition:
-                self._process_object_dependencies(definition)
+                self._cache_and_remove_dependencies(obj_type, definition)
             self._inventory[obj_type][name] = model(**definition)
 
     def _read_objects_files(self, obj_type: str, model: dataclasses.dataclass):
@@ -194,7 +200,7 @@ class Project:
                     self._load_errors += 1
                     continue
                 if 'dependencies' in entry:
-                    self._process_object_dependencies(entry)
+                    self._cache_and_remove_dependencies(obj_type, definition)
                 self._inventory[obj_type][entry['name']] = model(**entry)
 
     def _read_project_file(self) -> typing.NoReturn:

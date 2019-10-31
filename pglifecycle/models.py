@@ -82,10 +82,10 @@ class Column:
 
 
 @dataclasses.dataclass
-class Constraint:
-    """Represents a Constraint in a Domain"""
-    check: str
-    name: typing.Optional[str] = None
+class CheckConstraint:
+    """Represents a Check Constraint in a Table or Domain"""
+    name: str
+    expression: str
 
 
 @dataclasses.dataclass
@@ -118,7 +118,7 @@ class Domain:
     data_type: typing.Optional[str] = None
     collation: typing.Optional[str] = None
     default: typing.Optional[str] = None
-    constraints: typing.Optional[typing.List[Constraint]] = None
+    check_constraints: typing.Optional[typing.List[CheckConstraint]] = None
     comment: typing.Optional[str] = None
     dependencies: typing.Optional[typing.List[Collation,
                                               Extension,
@@ -309,7 +309,7 @@ class Table:
     columns: typing.Optional[typing.List[Column]] = None
     indexes: typing.Optional[typing.List[Index]] = None
     primary_key: typing.Optional[ConstraintColumns] = None
-    check_constraints: typing.Optional[typing.List[str]] = None
+    check_constraints: typing.Optional[typing.List[CheckConstraint]] = None
     unique_constraints: typing.Optional[typing.List[ConstraintColumns]] = None
     foreign_keys: typing.Optional[typing.List[ForeignKey]] = None
     triggers: typing.Optional[typing.List[Triggers]] = None
@@ -371,6 +371,7 @@ class Triggers:
     name: typing.Optional[str] = None
     table_name: typing.Optional[str] = None
     when: typing.Optional[str] = None
+    events: typing.Optional[typing.List[str]] = None
     for_each: typing.Optional[str] = None
     condition: typing.Optional[str] = None
     function: typing.Optional[str] = None
