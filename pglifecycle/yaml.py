@@ -46,6 +46,7 @@ def save(path: pathlib.Path, data: dict) -> typing.NoReturn:
 
 def dump(handle: typing.TextIO, data: dict) -> typing.NoReturn:
     """Save the data in YAML format to the IO handle."""
+    handle.write('---\n')
     yml = yaml.YAML()
     yml.default_flow_style = False
     yml.indent(mapping=2, sequence=4, offset=2)
