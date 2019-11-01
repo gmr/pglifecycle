@@ -36,4 +36,8 @@ properties:
     type: array
     propertyNames:
       pattern: ^([A-Za-z0-9_\-]+)\.([A-Za-z0-9_\-]+)$
+  views:
+    type: array
+    propertyNames:
+      pattern: ^([A-Za-z0-9_\-]+)\.([A-Za-z0-9_\-]+)$
 additionalProperties: false

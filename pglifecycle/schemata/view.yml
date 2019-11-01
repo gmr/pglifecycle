@@ -1,0 +1,106 @@
+---
+$schema: http://json-schema.org/schema#
+$id: https://pglifecycle.readthedocs.io/en/stable/schemata/view.html
+title: View
+description: Defines a view
+type: object
+properties:
+  schema:
+    title: Schema
+    description: The schema the view is created in
+    type: string
+  name:
+    title: Name
+    description: The view name
+    type: string
+  owner:
+    title: Owner
+    description: The role that owns the view
+    type: string
+  sql:
+    title: SQL Statement
+    description: User-provided raw SQL snippet
+    type: string
+  recursive:
+    title: Recursive View
+    description: Specifies the view is a recursive view
+    type: boolean
+  columns:
+    title: Column names
+    description: |
+      An optional list of names to be used for columns of the view. If not
+      given, the column names are deduced from the query.
+    type: array
+    items:
+      anyOf:
+        - type: string
+        - type: object
+          properties:
+            name:
+              title: Column Name
+              type: string
+            comment:
+              title: Comment
+              type: string
+          required:
+            - name
+  options:
+    title: View Options
+    description: >
+      This clause specifies optional parameters for a view
+    type: object
+    properties:
+      check_option:
+        title: Check Option
+        description: |
+          This option controls the behavior of automatically updatable views.
+          When this option is specified, INSERT and UPDATE commands on the
+          view will be checked to ensure that new rows satisfy the view-defining
+          condition (that is, the new rows are checked to ensure that they are
+          visible through the view). If they are not, the update will be
+          rejected. If the CHECK OPTION is not specified, INSERT and UPDATE
+          commands on the view are allowed to create rows that are not visible
+          through the view.
+
+          When it is set to LOCAL, new rows are only checked against the
+          conditions defined directly in the view itself. Any conditions defined
+          on underlying base views are not checked (unless they also specify
+          the CHECK OPTION).
+
+          When it is set to CASCADED, new rows are checked against the conditions
+          of the view and all underlying base views. If the CHECK OPTION is
+          specified, and neither LOCAL nor CASCADED is specified, then CASCADED
+          is assumed.
+        enum: [LOCAL, CASCADED]
+      security_barrier:
+        title: Security Barrier
+        description: |
+          This should be used if the view is intended to provide row-level security.
+        type: boolean
+  query:
+    title: Query
+    description: |
+      A SELECT or VALUES command which will provide the columns and rows of the view.
+    type: string
+  comment:
+    title: Comment
+    description: An optional comment about the view.
+    type: string
+  dependencies:
+    title: Dependencies
+    description: Database objects this object is dependent upon
+    $package_schema: dependencies
+additionalProperties: false
+requires:
+  - schema
+  - name
+oneOf:
+  - required: [query]
+    not: {required: [sql]}
+  - required: [sql]
+    not:
+      required:
+        - recursive
+        - columns
+        - options
+        - query

@@ -78,6 +78,20 @@ AFTER = 'AFTER'
 BEFORE = 'BEFORE'
 INSTEAD = 'INSTEAD OF'
 
+DATA_TYPE_MAPPING = {
+    'bool': 'boolean',
+    'float4': 'real',
+    'float8': 'double precision',
+    'int4': 'integer',
+    'int8': 'bigint',
+    'time': 'time without time zone',
+    'timetz': 'times with time zone',
+    'timestamp': 'timestamp without time zone',
+    'timestamptz': 'timestamp with time zone',
+    'varchar': ' character varying'
+}
+
+
 PATHS = {
     AGGREGATE: pathlib.Path('aggregates'),
     CAST: pathlib.Path('casts'),
@@ -206,7 +220,7 @@ ACL_ROLE_TYPE = {
 
 BOOL_OP = {0: 'AND', 1: 'OR', 2: 'NOT'}
 
-BOOL_TEST = {1: 'TRUE', 2: 'FALSE', "'t'": 'TRUE', "'f'": 'FALSE'}
+BOOL_TEST = {1: 'TRUE', 2: 'FALSE', 't': 'TRUE', 'f': 'FALSE'}
 
 FK_ACTION = {
     'a': None,  # NO ACTION
@@ -309,8 +323,6 @@ TRIGGER_BEFORE = (1 << 1)
 TRIGGER_AFTER = 0x00000000
 TRIGGER_INSTEAD = (1 << 6)
 
-VIEW_CHECK_OPTION = {0: None, 1: 'LOCAL', 2: 'CASCADED'}
-
 
 class AlterTableType(enum.IntEnum):
     """Enum identifying the alter_table_cmd type"""
@@ -390,6 +402,15 @@ class DefElemAction(enum.IntEnum):
     DROP = 3
 
 
+class FunctionParameterMode(enum.Enum):
+    """Modes for a function parameter"""
+    IN = 105  # i
+    OUT = 111  # o
+    INOUT = 98  # b
+    VARADIC = 118  # v
+    TABLE = 116  # t
+
+
 class ObjectType(enum.IntEnum):
     """PostgreSQL Object Types"""
     ACCESS_METHOD = 0
@@ -440,3 +461,20 @@ class ObjectType(enum.IntEnum):
     TYPE = 45
     USER_MAPPING = 46
     VIEW = 47
+
+
+class VariableSetKind(enum.IntEnum):
+    """Defines the various set statement kinds"""
+    VALUE = 0
+    DEFAULT = 1
+    CURRENT = 2
+    MULTI = 3
+    RESET = 4
+    RESET_ALL = 5
+
+
+class ViewCheckOption(enum.IntEnum):
+    """Defines ViewCheckOption values"""
+    UNDEFINED: 0
+    LOCAL: 1
+    CASCADED: 2

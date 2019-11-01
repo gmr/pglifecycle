@@ -5,6 +5,8 @@ Restructure parsed SQL generated from pgparse/libpg_query
 import logging
 import typing
 
+from pglast import node as pgl_node, printer
+from pglast.printers import dml
 import stringcase
 
 from pglifecycle import constants
@@ -49,7 +51,7 @@ class Reformatter:
     def _a__const(self, node: dict) -> typing.Union[int, str, None]:
         node = self.reformat(node['val'])
         if isinstance(node, str):
-            return repr(node)
+            return node
         return node
 
     def _a__expr(self, node: dict) -> list:
@@ -188,7 +190,7 @@ class Reformatter:
         primary_key = constraints.get('primary_key', []) != []
         column = {
             'name': node.get('colname'),
-            'type': self.reformat(node['typeName']),
+            'type': self._normalize_data_type(self.reformat(node['typeName'])),
             'default': constraints.get('default') or None,
             'nullable': nullable if node.get('colname') else None,
             'constraint': temp[0] if temp else None,
@@ -323,6 +325,46 @@ class Reformatter:
             'name': self.reformat(node['typeName'])[0],
             'values': self.reformat(node['vals'])}
 
+    def _create_function_stmt(self, node: dict) -> dict:
+        name = self.reformat(node['funcname'])
+        args, name_args = [], []
+        for arg in self.reformat(node.get('parameters', [])):
+            if arg['mode'] == 'IN':
+                name_args.append(self._normalize_data_type(arg['data_type']))
+            args.append(arg)
+        options = {o['name']: o['arg'] for o in self.reformat(node['options'])}
+        function = {
+            'schema': name[0],
+            'name': '{}({})'.format(name[1], ', '.join(name_args))}
+        if args:
+            function['parameters'] = args
+        function['returns'] = self._normalize_data_type(
+            self.reformat(node['returnType']))
+        function['language'] = options['language']
+        if options.get('security') == 1:
+            function['security'] = 'DEFINER'
+
+        # @TODO Need to implement window, transform_types, parallel
+
+        if options.get('strict') == 1:
+            function['strict'] = True
+        if options.get('volatility'):
+            function[options['volatility']] = True
+        for key in ['cost', 'rows', 'support']:
+            if options.get(key) is not None:
+                function[key] = options[key]
+        if 'set' in options:
+            if isinstance(options['set'], dict):
+                function['configuration'] = {
+                    options['set']['name']: options['set']['value']
+                }
+            else:
+                LOGGER.critical('Unsupported configuration option: %r',
+                                options.get('set'))
+                raise RuntimeError
+        function['definition'] = options['as'][0].strip()
+        return function
+
     def _create_range_stmt(self, node: dict) -> dict:
         return {
             'stmt_type': constants.TYPE,
@@ -442,6 +484,18 @@ class Reformatter:
             '.'.join(self.reformat(node['funcname'])),
             ', '.join([str(a) for a in self.reformat(node.get('args', []))]))
 
+    def _function_parameter(self, node: dict) -> dict:
+        param = {
+            'mode': constants.FunctionParameterMode(node['mode']).name
+        }
+        if node.get('name'):
+            param['name'] = node['name']
+        param['data_type'] = self._normalize_data_type(
+            self.reformat(node['argType']))
+        if 'defexpr' in node:
+            param['default'] = self.reformat(node['defexpr'])
+        return param
+
     def _grouping_set(self, node: dict) -> dict:
         return {
             'type': constants.GROUPING_SET[node['kind']],
@@ -510,6 +564,10 @@ class Reformatter:
     @staticmethod
     def _notify_stmt(node: dict) -> list:
         return ['NOTIFY', node['conditionname']]
+
+    @staticmethod
+    def _null(_node: dict) -> None:
+        return 'NULL'
 
     def _null_test(self, node: dict) -> list:
         return [
@@ -729,6 +787,9 @@ class Reformatter:
         return '{}::{}'.format(node, type_name)
 
     def _type_name(self, node: dict) -> str:
+        parts = []
+        if node.get('setof'):
+            parts.append('SETOF ')
         name = self.reformat(node['names'])
         if name[0] == 'pg_catalog':
             name.remove('pg_catalog')
@@ -738,7 +799,7 @@ class Reformatter:
             name = name[0]
         if name == 'bpchar':
             name = 'char'
-        parts = [name]
+        parts.append(name)
         if 'typmods' in node:
             precision = self.reformat(node['typmods'])[0]
             LOGGER.debug('Precision: %r', precision)
@@ -774,17 +835,61 @@ class Reformatter:
             'returning': self.reformat(node.get('returningList')),
         }
 
+    def _variable_set_stmt(self, node: dict) -> dict:
+        if node['kind'] == constants.VariableSetKind.VALUE:
+            return {
+                'name': node['name'],
+                'value': ', '.join(self.reformat(node['args']))
+            }
+        LOGGER.critical('Unsupported _variable_set_stmt option: %r', node)
+        raise RuntimeError
+
     def _view_stmt(self, node: dict) -> dict:
-        return {
-            'stmt_type': constants.VIEW,
-            'check_option':
-                constants.VIEW_CHECK_OPTION[node.get('withCheckOption', 0)],
-            'name': self.reformat(node['view']),
-            'sql': self.reformat(node['query'])
-        }
+        handle = printer.IndentedStream()
+        handle.comma_at_eoln = True
+        query = pgl_node.Node(node['query'])
+        dml.select_stmt(query, handle)
+        handle.seek(0)
+        view = {}
+        if 'schemaname' in node['view']['RangeVar']:
+            view['schema'] = node['view']['RangeVar']['schemaname']
+        view['name'] = node['view']['RangeVar']['relname']
+        view['columns'] = {}
+        view['options'] = {}
+        view['query'] = handle.read()
+        if node.get('aliases'):
+            LOGGER.critical('Unsupported _view_stmt attribute: %r',
+                            node.get('aliases'))
+            raise RuntimeError
+        if node.get('withCheckOption', 0) > 0:
+            view['options']['check_option'] = \
+                constants.ViewCheckOption(node['withCheckOption']).name
+        if node.get('options'):
+            options = {o['name']: o['arg']
+                       for o in self.reformat(node['options'])}
+            if options.get('security_barrier'):
+                view['options']['security_barrier'] = \
+                    options['security_barrier']
+        if not view['columns']:
+            del view['columns']
+        if not view['options']:
+            del view['options']
+        # @TODO Need to handle recursive parsing, but seems broken in pg_query
+        return view
 
     def _with_clause(self, node: dict) -> dict:
         return {
             'ctes': [self.reformat(c) for c in node.get('ctes', [])],
             'recursive': node.get('recursive', False)
         }
+
+    @staticmethod
+    def _normalize_data_type(value):
+        for k, v in constants.DATA_TYPE_MAPPING.items():
+            if value == k:
+                value = v
+            elif value.startswith('{}['.format(k)):
+                value = '{}{}'.format(v, value[len(k):])
+            elif value.startswith('{}('.format(k)):
+                value = '{}{}'.format(v, value[len(k):])
+        return value.strip()

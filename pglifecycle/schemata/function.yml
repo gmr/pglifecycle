@@ -1,0 +1,249 @@
+---
+$schema: http://json-schema.org/schema#
+$id: https://pglifecycle.readthedocs.io/en/stable/schemata/function.html
+title: Function
+description: Defines a function
+type: object
+properties:
+  schema:
+    title: Schema
+    description: The schema the function is created in
+    type: string
+  name:
+    title: Name
+    description: The function name
+    type: string
+  owner:
+    title: Owner
+    description: The role that owns the function
+    type: string
+  sql:
+    title: SQL Statement
+    description: User-provided raw SQL snippet
+    type: string
+  parameters:
+    title: Function Parameters
+    description: A dictionary of IN, OUT, BOTH, VARADIC, and TABLE args
+    type: object
+    properties:
+      mode:
+        title: Parameter Mode
+        type: string
+        enum: [IN, OUT, BOTH, VARADIC, TABLE]
+      name:
+        title: Parameter Name
+        type: string
+      data_type:
+        title: Parameter Data Type
+        type: string
+      default:
+        title: Default value for Paramter
+        oneOf:
+          - type: boolean
+          - type: integer
+          - type: "null"
+          - type: number
+          - type: string
+    additionalProperties: false
+    required:
+      - mode
+      - data_type
+  returns:
+    title: Return Type
+    description: The return type for the funciton
+    type: string
+  language:
+    title: Language
+    description: |
+      The name of the language that the function is implemented in. It can be
+      sql, c, internal, or the name of a user-defined procedural language,
+      e.g. plpgsql.
+    type: string
+  transform_types:
+    title: Transform Types
+    description: Lists which transforms a call to the function should apply.
+    type: array
+    items:
+      type: string
+  window:
+    title: Is Window Function
+    description: >
+      Indicates that the function is a window function rather than a plain
+      function. This is currently only useful for functions written in C.
+    type: boolean
+  immutable:
+    title: Immutable
+    description: >
+      Indicates that the function cannot modify the database and always returns
+      the same result when given the same argument values; that is, it does not
+      do database lookups or otherwise use information not directly present in
+      its argument list. If this option is given, any call of the function with
+      all-constant arguments can be immediately replaced with the function value.
+    type: boolean
+  stable:
+    title: Stable
+    description: >
+      Indicates  that the function cannot modify the database, and that within
+      a single table scan it will consistently return the same result for the
+      same argument values, but that its result could change across SQL
+      statements. This is the appropriate selection for functions whose results
+      depend on database lookups, parameter variables (such as the current time
+      zone), etc. (It is inappropriate for AFTER triggers that wish to query
+      rows modified by the current command.) Also note that the current_timestamp
+      family of functions qualify as stable, since their values do not change
+      within a transaction.
+    type: boolean
+  volatile:
+    title: Volatile
+    description: >
+      Indicates that the function value can change even within a single table
+      scan, so no optimizations can be made. Relatively few database functions
+      are volatile in this sense; some examples are random(), currval(),
+      timeofday(). But note that any function that has side-effects must be
+      classified volatile, even if its result is quite predictable, to prevent
+      calls from being optimized away; an example is setval().
+    type: boolean
+  leak_proof:
+    title: Leak Proof
+    description: >
+      indicates that the function has no side effects. It reveals no information
+      about its arguments other than by its return value. For example, a function
+      which throws an error message for some argument values but not others, or
+      which includes the argument values in any error message, is not leakproof.
+      This affects how the system executes queries against views created with
+      the security_barrier option or tables with row level security enabled.
+      The system will enforce conditions from security policies and security
+      barrier views before any user-supplied conditions from the query itself
+      that contain non-leakproof functions, in order to prevent the inadvertent
+      exposure of data. Functions and operators marked as leakproof are assumed
+      to be trustworthy, and may be executed before conditions from security
+      policies and security barrier views. In addition, functions which do not
+      take arguments or which are not passed any arguments from the security
+      barrier view or table do not have to be marked as leakproof to be executed
+      before security conditions.
+  called_on_null_input:
+    title: Called on NULL Input
+    description: >
+      Indicates that the function will be called normally when some of its
+      arguments are null. It is then the function author's responsibility to
+      check for null values if necessary and respond appropriately.
+    type: boolean
+    default: true
+  strict:
+    title: Returns NULL on NULL Input
+    description: >
+      Indicates that the function always returns null whenever any of its
+      arguments are null. If this parameter is specified, the function is not
+      executed when there are null arguments; instead a null result is assumed
+      automatically.
+    type: boolean
+    default: false
+  security:
+    title: Security
+    description: >
+      INVOKER indicates that the function is to be executed with the privileges
+      of the user that calls it. That is the default. DEFINER specifies that the
+      function is to be executed with the privileges of the user that owns it.
+    enum: [INVOKER, DEFINER]
+  parallel:
+    title: Parallel
+    description: >
+      UNSAFE indicates that the function can't be executed in parallel mode and
+      the presence of such a function in an SQL statement forces a serial
+      execution plan. This is the default. PARALLEL indicates that the function
+      can be executed in parallel mode, but the execution is restricted to
+      parallel group leader. SAFE indicates that the function is safe to run in
+      parallel mode without restriction.
+    enum: [SAFE, UNSAFE, RESTRICTED]
+  cost:
+    title: Execution Cost
+    description: >
+      A positive number giving the estimated execution cost for the function,
+      in units of cpu_operator_cost. If the function returns a set, this is the
+      cost per returned row. If the cost is not specified, 1 unit is assumed
+      for C-language and internal functions, and 100 units for functions in all
+      other languages. Larger values cause the planner to try to avoid evaluating
+      the function more often than necessary.
+    type: integer
+  rows:
+    title: Estimated Rows
+    description: >
+      A positive number giving the estimated number of rows that the planner
+      should expect the function to return. This is only allowed when the function
+      is declared to return a set. The default assumption is 1000 rows.
+    type: integer
+  support:
+    title: Support Function
+    description: >
+      The name (optionally schema-qualified) of a planner support function to use
+      for this function.
+    type: string
+  configuration:
+    title: Configuration Parameters
+    description: >
+      Configuration parameters to be set to the specified value when the function
+      is entered, and then restored to its prior value when the function exits.
+    type: object
+    propertyNames:
+      pattern: ^[A-Za-z_][A-Za-z0-9_\.]*$
+  definition:
+    title: Function Definition
+    description: >
+      A string constant defining the function; the meaning depends on the language.
+      It can be an internal function name, the path to an object file, an SQL
+      command, or text in a procedural language.
+    type: string
+  object_file:
+    title: Object File
+    description: >
+      Used for dynamically loadable C language functions when the function name
+      in the C language source code is not the same as the name of the SQL
+      function.
+    type: string
+  link_symbol:
+    title: Link Symbol
+    description: >
+      The string link_symbol is the function's link symbol when used in conjunction
+      with object_file, that is, the name of the function in the C language
+      source code. If the link symbol is omitted, it is assumed to be the same
+      as the name of the SQL function being defined. The C names of all functions
+      must be different, so you must give overloaded C functions different C
+      names (for example, use the argument types as part of the C names).
+    type: string
+  comment:
+    title: Comment
+    description: An optional comment about the function
+    type: string
+  dependencies:
+    title: Dependencies
+    description: Database objects this object is dependent upon
+    $package_schema: dependencies
+additionalProperties: false
+required:
+  - schema
+  - name
+oneOf:
+  - required: [language, returns, definition]
+    not: {required: [sql, object_file, link_symbol]}
+  - required: [sql]
+    not:
+      required:
+        - returns
+        - language
+        - transform_types
+        - window
+        - immutable
+        - stable
+        - volatile
+        - leak_proof
+        - called_on_null_input
+        - strict
+        - security
+        - parallel
+        - cost
+        - rows
+        - support
+        - configuration
+        - definition
+        - object_file
+        - link_symbol

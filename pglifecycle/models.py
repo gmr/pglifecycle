@@ -172,8 +172,38 @@ class Function:
     name: str
     schema: str
     owner: str
+    sql: typing.Optional[str] = None
+    paramters: typing.Optional[FunctionParameter] = None
+    returns: typing.Optional[str] = None
+    language: typing.Optional[str] = None
+    transform_types: typing.Optional[typing.List[str]] = None
+    window: typing.Optional[bool] = None
+    immutable: typing.Optional[bool] = None
+    stable: typing.Optional[bool] = None
+    volatile: typing.Optional[bool] = None
+    leak_proof: typing.Optional[bool] = None
+    called_on_null_input: typing.Optional[bool] = None
+    strict: typing.Optional[bool] = None
+    security: typing.Optional[str] = None
+    parallel: typing.Optional[str] = None
+    cost: typing.Optional[int] = None
+    rows: typing.Optional[int] = None
+    support: typing.Optional[str] = None
+    configuration: typing.Optional[dict] = None
+    definition: typing.Optional[str] = None
+    object_file: typing.Optional[str] = None
+    link_symbol: typing.Optional[str] = None
     comment: typing.Optional[str] = None
     dependencies: typing.Optional[Language] = None
+
+
+@dataclasses.dataclass
+class FunctionParameter:
+    """Represents a single parameter for a function"""
+    mode: str
+    data_type: str
+    name: typing.Optional[str] = None
+    default: typing.Optional[typing.Any] = None
 
 
 @dataclasses.dataclass
@@ -233,6 +263,21 @@ class LikeTable:
 
 
 @dataclasses.dataclass
+class MaterializedView:
+    """Represents a MaterializedView"""
+    name: str
+    schema: str
+    owner: str
+    sql: typing.Optional[str] = None
+    columns: typing.Optional[typing.List[str]] = None
+    storage_parameters: typing.Optional[typing.Dict[str, str]] = None
+    tablespace: typing.Optional[str] = None
+    query: typing.Optional[str] = None
+    comment: typing.Optional[str] = None
+    dependencies: typing.Optional[Function, Procedure, Table, View] = None
+
+
+@dataclasses.dataclass
 class Operator:
     """Represents an operator used to compare values"""
     name: str
@@ -258,6 +303,25 @@ class PartitionKeyColumn:
     column_name: typing.Optional[str] = None
     expression: typing.Optional[str] = None
     opclass: typing.Optional[str] = None
+
+
+@dataclasses.dataclass
+class Procedure:
+    """Represents a Procedure"""
+    name: str
+    schema: str
+    owner: str
+    sql: typing.Optional[str] = None
+    paramters: typing.Optional[FunctionParameter] = None
+    language: typing.Optional[str] = None
+    transform_types: typing.Optional[typing.List[str]] = None
+    security: typing.Optional[str] = None
+    configuration: typing.Optional[dict] = None
+    definition: typing.Optional[str] = None
+    object_file: typing.Optional[str] = None
+    link_symbol: typing.Optional[str] = None
+    comment: typing.Optional[str] = None
+    dependencies: typing.Optional[Language] = None
 
 
 @dataclasses.dataclass
@@ -430,6 +494,28 @@ class Type:
     dependencies: typing.Optional[Collation, Function, Extension] = None
 
 
+@dataclasses.dataclass
+class View:
+    """Represents a View"""
+    name: str
+    schema: str
+    owner: str
+    sql: typing.Optional[str] = None
+    recursive: typing.Optional[bool] = None
+    columns: typing.Optional[typing.List[str]] = None
+    options: typing.Optional[ViewOptions] = None
+    query: typing.Optional[str] = None
+    comment: typing.Optional[str] = None
+    dependencies: typing.Optional[Function, Procedure, Table, View] = None
+
+
+@dataclasses.dataclass
+class ViewOptions:
+    """Represents  view options"""
+    check_option: typing.Optional[str] = None
+    security_barrier: typing.Optional[bool] = None
+
+
 MAPPINGS = {
     constants.AGGREGATE: Aggregate,
     constants.COLLATION: Collation,
@@ -437,12 +523,16 @@ MAPPINGS = {
     constants.DOMAIN: Domain,
     constants.EXTENSION: Extension,
     constants.FOREIGN_DATA_WRAPPER: ForeignDataWrapper,
+    constants.FUNCTION: Function,
+    constants.MATERIALIZED_VIEW: MaterializedView,
     constants.OPERATOR: Operator,
+    constants.PROCEDURE: Procedure,
     constants.PROCEDURAL_LANGUAGE: Language,
     constants.SCHEMA: Schema,
     constants.SEQUENCE: Sequence,
     constants.SERVER: Server,
     constants.TABLE: Table,
     constants.TABLESPACE: Tablespace,
-    constants.TYPE: Type
+    constants.TYPE: Type,
+    constants.VIEW: View
 }

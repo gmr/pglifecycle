@@ -1,0 +1,82 @@
+---
+$schema: http://json-schema.org/schema#
+$id: https://pglifecycle.readthedocs.io/en/stable/schemata/materialized_view.html
+title: Materialized View
+description: Defines a materialized view
+type: object
+properties:
+  schema:
+    title: Schema
+    description: The schema the materialized view is created in
+    type: string
+  name:
+    title: Name
+    description: The materialized view name
+    type: string
+  owner:
+    title: Owner
+    description: The role that owns the materialized view
+    type: string
+  sql:
+    title: SQL Statement
+    description: User-provided raw SQL snippet
+    type: string
+  columns:
+    title: Column names
+    description: |
+      An optional list of names to be used for columns of the materialized view.
+      If not given, the column names are deduced from the query.
+    type: array
+    items:
+      anyOf:
+        - type: string
+        - type: object
+          properties:
+            name:
+              title: Column Name
+              type: string
+            comment:
+              title: Comment
+              type: string
+          required:
+            - name
+  storage_parameters:
+    title: Storage Parameters
+    description: Storage parameter settings for the materialized view.
+    type: object
+    propertyNames:
+      pattern: ^[A-Za-z0-9_]*$
+  tablespace:
+    title: Tablespace
+    description: >
+      Specifies the name of the tablespace in which the materialized view is
+      to be created.
+    type: string
+  query:
+    title: Query
+    description: |
+      A SELECT or VALUES command which will provide the columns and rows of the
+      materialized view.
+    type: string
+  comment:
+    title: Comment
+    description: An optional comment about the materialized view.
+    type: string
+  dependencies:
+    title: Dependencies
+    description: Database objects this object is dependent upon
+    $package_schema: dependencies
+additionalProperties: false
+requires:
+  - schema
+  - name
+oneOf:
+  - required: [query]
+    not: {required: [sql]}
+  - required: [sql]
+    not:
+      required:
+        - columns
+        - storage_paramters
+        - tablespace
+        - query
