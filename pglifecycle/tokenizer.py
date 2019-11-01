@@ -330,6 +330,27 @@ class Reformatter:
             'range': {e['defname']: e['arg']
                       for e in self.reformat(node['params'])}}
 
+    def _create_seq_stmt(self, node: dict) -> dict:
+        sequence = {
+            'schema': node['sequence']['RangeVar']['schemaname'],
+            'name': node['sequence']['RangeVar']['relname']
+        }
+        map_keys = {
+            'maxvalue': 'max_value',
+            'minvalue': 'min_value',
+        }
+        for row in self.reformat(node['options']):
+            if 'arg' in row:
+                if row['name'] == 'cache' and row['arg'] == 1:
+                    continue
+                sequence[map_keys.get(row['name'], row['name'])] = row['arg']
+            elif 'action' in row and row['action'] == 'UNSPECIFIED':
+                continue
+            else:
+                LOGGER.critical('Unsupported _create_seq_stmt option: %r', row)
+                raise RuntimeError
+        return sequence
+
     def _create_stmt(self, node: dict) -> dict:
         stmt = {'stmt_type': constants.TABLE}
         stmt.update({k: self.reformat(v) for k, v in node.items()})
@@ -368,27 +389,6 @@ class Reformatter:
             'condition': self.reformat(node.get('whenClause')),
             'function': '{}()'.format(funcname)
         }
-
-    def _create_seq_stmt(self, node: dict) -> dict:
-        sequence = {
-            'schema': node['sequence']['RangeVar']['schemaname'],
-            'name':  node['sequence']['RangeVar']['relname']
-        }
-        map_keys = {
-            'maxvalue': 'max_value',
-            'minvalue': 'min_value',
-        }
-        for row in self.reformat(node['options']):
-            if 'arg' in row:
-                if row['name'] == 'cache' and row['arg'] == 1:
-                    continue
-                sequence[map_keys.get(row['name'], row['name'])] = row['arg']
-            elif 'action' in row and row['action'] == 'UNSPECIFIED':
-                continue
-            else:
-                LOGGER.critical('Unsupported _create_seq_stmt option: %r', row)
-                raise RuntimeError
-        return sequence
 
     @staticmethod
     def _current_of_expr(node: dict) -> str:
