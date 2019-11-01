@@ -280,6 +280,17 @@ class Sequence:
     name: str
     schema: str
     owner: str
+    sql: typing.Optional[str] = None
+    data_type: typing.Optional[str] = None
+    increment_by: typing.Optional[int] = None
+    min_value: typing.Optional[int] = None
+    max_value: typing.Optional[int] = None
+    start_with: typing.Optional[int] = None
+    cache: typing.Optional[int] = None
+    cycle: typing.Optional[bool] = None
+    owned_by: typing.Optional[str] = None
+    comment: typing.Optional[str] = None
+    dependencies: typing.Optional[Table] = None
 
 
 @dataclasses.dataclass
@@ -429,6 +440,7 @@ MAPPINGS = {
     constants.OPERATOR: Operator,
     constants.PROCEDURAL_LANGUAGE: Language,
     constants.SCHEMA: Schema,
+    constants.SEQUENCE: Sequence,
     constants.SERVER: Server,
     constants.TABLE: Table,
     constants.TABLESPACE: Tablespace,

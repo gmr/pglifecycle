@@ -1,0 +1,93 @@
+---
+$schema: http://json-schema.org/schema#
+$id: https://pglifecycle.readthedocs.io/en/stable/schemata/sequence.html
+title: Sequence
+description: Defines a sequence object
+type: object
+properties:
+  schema:
+    title: Schema
+    description: The schema the sequence is created in
+    type: string
+  name:
+    title: Name
+    description: The sequence name
+    type: string
+  owner:
+    title: Owner
+    description: The role that owns the sequence
+    type: string
+  sql:
+    title: SQL Statement
+    description: User-provided raw SQL snippet
+    type: string
+  data_type:
+    title: Data Type
+    description: Specifies the data type of the sequence.
+    type: string
+    enum: [smallint, integer, int4, bigint, int8]
+    default: bigint
+  increment_by:
+    title: Increment By
+    description: >
+      Specifies which value is added to the current sequence value to create a
+      new value. A positive value will make an ascending sequence, a negative
+      one a descending sequence.
+    type: integer
+    default: 1
+  min_value:
+    title: Minimum Value
+    description: Specifies the minimum value a sequence can generate.
+    type: integer
+    default: 1
+  max_value:
+    title: Maximum Value
+    description: Specifies the maximum value for the sequence.
+    type: integer
+  start_with:
+    title: Start With
+    description: Specifies the value to start the sequence at.
+    type: integer
+  cache:
+    title: Cache Quantity
+    description: |
+      Sspecifies how many sequence numbers are to be preallocated and stored in
+      memory for faster access.
+    type: integer
+    default: 1
+  cycle:
+    title: Cycle
+    description: |
+      When set to true, the sequence can wrap around when it hits the maximum
+      value. When false, the sequence will return an error when it hits the
+      maximum value.
+    type: boolean
+  owned_by:
+    title: Owned By
+    description: |
+      Specifies the schema.table.column that owns the column. In pglifecycle
+      this setting will allow the sequence to automatically be set when DML
+      is provided for a table that has a sequence column.
+    type: string
+  comment:
+    title: Comment
+    description: An optional comment about the sequence
+    type: string
+  dependencies:
+    title: Dependencies
+    description: Database objects this object is dependent upon
+    $package_schema: dependencies
+additionalProperties: false
+oneOf:
+  - required: [schema, name]
+  - required:
+      - sql
+    not:
+      required:
+        - data_type
+        - increment_by
+        - min_value
+        - max_value
+        - start_with
+        - cache
+        - cycle

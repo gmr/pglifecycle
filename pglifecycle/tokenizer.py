@@ -5,8 +5,9 @@ Restructure parsed SQL generated from pgparse/libpg_query
 import logging
 import typing
 
-from pgpretty import constants
 import stringcase
+
+from pglifecycle import constants
 
 LOGGER = logging.getLogger(__name__)
 
@@ -368,12 +369,43 @@ class Reformatter:
             'function': '{}()'.format(funcname)
         }
 
+    def _create_seq_stmt(self, node: dict) -> dict:
+        sequence = {
+            'schema': node['sequence']['RangeVar']['schemaname'],
+            'name':  node['sequence']['RangeVar']['relname']
+        }
+        map_keys = {
+            'maxvalue': 'max_value',
+            'minvalue': 'min_value',
+        }
+        for row in self.reformat(node['options']):
+            if 'arg' in row:
+                if row['name'] == 'cache' and row['arg'] == 1:
+                    continue
+                sequence[map_keys.get(row['name'], row['name'])] = row['arg']
+            elif 'action' in row and row['action'] == 'UNSPECIFIED':
+                continue
+            else:
+                LOGGER.critical('Unsupported _create_seq_stmt option: %r', row)
+                raise RuntimeError
+        return sequence
+
     @staticmethod
     def _current_of_expr(node: dict) -> str:
         return 'CURRENT OF {}'.format(node['cursor_name'])
 
     def _def_elem(self, node: dict) -> dict:
-        return {'arg': self.reformat(node['arg']), 'defname': node['defname']}
+        if 'arg' in node:
+            return {
+                'arg': self.reformat(node['arg']),
+                'name': node['defname']}
+        elif 'defaction' in node:
+            return {
+                'action': constants.DefElemAction(node['defaction']).name,
+                'name': node['defname']}
+        else:
+            LOGGER.debug('Unsupported _def_elem node: %r', node)
+            raise RuntimeError
 
     def _delete_stmt(self, node: dict) -> dict:
         stmt = {

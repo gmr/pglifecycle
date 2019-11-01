@@ -384,7 +384,7 @@ class AlterTableType(enum.IntEnum):
 
 class DefElemAction(enum.IntEnum):
     """Actions for a DefElem"""
-    UNSPEC = 0
+    UNSPECIFIED = 0
     SET = 1
     ADD = 2
     DROP = 3
