@@ -9,7 +9,7 @@ import os
 from os import path
 import pwd
 
-from pglifecycle import common, generate_dump, generate_project, version
+from pglifecycle import common, project, version
 
 LOGGER = logging.getLogger(__name__)
 LOGGING_FORMAT = '[%(asctime)-15s] %(levelname)-8s %(message)s'
@@ -29,19 +29,16 @@ def add_actions_to_parser(parser):
         metavar='ACTION')
 
     parser = sp.add_parser(
-        'generate-dump',
-        help='Generate a pg_dump compatible file from the project')
-    parser.add_argument(
-        '-f', '--file', action='store',
-        help='The path to the file to create')
-    parser.add_argument(
-        '-s', '--suppress-warnings', action='store_true',
-        help='Do not show warnings about the project')
+        'build',
+        help='Generate a pg_restore -Fc compatible archive of the project')
     parser.add_argument(
         'project', metavar='PROJECT', nargs='?', action='store',
         help='The path to the pglifecycle project')
+    parser.add_argument(
+        'destination', metavar='DEST', nargs='?', action='store',
+        help='The path save the build artifact to ')
 
-    parser = sp.add_parser('generate-project', help='Generate a project')
+    parser = sp.add_parser('generate', help='Generate a project')
     add_connection_options_to_parser(parser)
     add_ddl_options_to_parser(parser)
     parser.add_argument(
@@ -203,11 +200,13 @@ def run():
     args = parse_cli_arguments()
     configure_logging(args)
     LOGGER.info('pglifecycle v%s running %s', version, args.action)
-    if args.action == 'generate-dump':
+    if args.action == 'build':
         if not args.project:
             common.exit_application('Project not specified', 2)
+        elif not args.destination:
+            common.exit_application('Destination not specified', 2)
         try:
-            generate_dump.Generate(args).run()
+            project.load(args.project).build(args.destination)
         except RuntimeError as error:
             common.exit_application(str(error), 4)
     elif args.action == 'generate-project':
@@ -216,6 +215,6 @@ def run():
         if args.gitkeep and args.remove_empty_dirs:
             common.exit_application(
                 'Can not specify --gitkeep and --remove-empty-dirs', 2)
-        generate_project.Generate(args).run()
+        #  generate_project.Generate(args).run()
     else:
         common.exit_application('Invalid action specified', 1)
