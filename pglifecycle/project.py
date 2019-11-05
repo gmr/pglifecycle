@@ -15,46 +15,7 @@ import pgdumplib
 from pglifecycle import constants as const
 from pglifecycle import models, utils, validation, yaml
 
-
 LOGGER = logging.getLogger(__name__)
-
-_READ_ORDER = [
-    const.SCHEMA,
-    const.OPERATOR,
-    const.AGGREGATE,
-    const.COLLATION,
-    const.CONVERSION,
-    const.TYPE,
-    const.DOMAIN,
-    const.TABLESPACE,
-    const.TABLE,
-    const.SEQUENCE,
-    const.FUNCTION,
-    const.PROCEDURE,
-    const.VIEW,
-    const.MATERIALIZED_VIEW,
-    # const.CAST,
-    # const.TEXT_SEARCH_CONFIGURATION,
-    # const.TEXT_SEARCH_DICTIONARY,
-    # const.FOREIGN_DATA_WRAPPER,
-    # const.SERVER,
-    # const.EVENT_TRIGGER,
-    # const.PUBLICATION,
-    # const.SUBSCRIPTION,
-    # const.USER_MAPPING
-]
-
-_PER_SCHEMA_FILES = [
-    const.CONVERSION,
-    const.OPERATOR,
-    const. TYPE
-]
-
-_SCHEMALESS_OBJECTS = [
-    const.FOREIGN_DATA_WRAPPER,
-    const.SCHEMA,
-    const.SERVER
-]
 
 
 class Project:
@@ -67,6 +28,44 @@ class Project:
     :param str superuser: The name of the superuser, defaults to `postgres`
 
     """
+    _READ_ORDER = [
+        const.SCHEMA,
+        const.OPERATOR,
+        const.AGGREGATE,
+        const.COLLATION,
+        const.CONVERSION,
+        const.TYPE,
+        const.DOMAIN,
+        const.TABLESPACE,
+        const.TABLE,
+        const.SEQUENCE,
+        const.FUNCTION,
+        const.PROCEDURE,
+        const.VIEW,
+        const.MATERIALIZED_VIEW,
+        # const.CAST,
+        # const.TEXT_SEARCH_CONFIGURATION,
+        # const.TEXT_SEARCH_DICTIONARY,
+        # const.FOREIGN_DATA_WRAPPER,
+        # const.SERVER,
+        # const.EVENT_TRIGGER,
+        # const.PUBLICATION,
+        # const.SUBSCRIPTION,
+        # const.USER_MAPPING
+    ]
+
+    _PER_SCHEMA_FILES = [
+        const.CONVERSION,
+        const.OPERATOR,
+        const.TYPE
+    ]
+
+    _SCHEMALESS_OBJECTS = [
+        const.FOREIGN_DATA_WRAPPER,
+        const.SCHEMA,
+        const.SERVER
+    ]
+
     def __init__(self,
                  path: os.PathLike,
                  name: str = 'postgres',
@@ -109,11 +108,11 @@ class Project:
 
         """
         self._read_project_file()
-        for ot in _READ_ORDER:
-            if ot in _PER_SCHEMA_FILES:
+        for ot in self._READ_ORDER:
+            if ot in self._PER_SCHEMA_FILES:
                 self._read_objects_files(ot, models.MAPPINGS[ot])
             else:
-                schemaless = ot in _SCHEMALESS_OBJECTS
+                schemaless = ot in self._SCHEMALESS_OBJECTS
                 self._read_object_files(ot, schemaless, models.MAPPINGS[ot])
         self._validate_dependencies()
         if self._load_errors:
