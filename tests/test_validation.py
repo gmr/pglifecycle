@@ -1,8 +1,6 @@
 """Test that validation works as expected"""
 import unittest
 
-from jsonschema import exceptions
-
 from pglifecycle import validation
 
 
@@ -10,7 +8,7 @@ class TestCase(unittest.TestCase):
 
     def test_invalid_object_type(self):
         with self.assertRaises(FileNotFoundError):
-            validation.validate_object('foo', {})
+            validation.validate_object('foo', 'test', {})
 
     def test_role_happy_path(self):
         data = {
@@ -26,7 +24,7 @@ class TestCase(unittest.TestCase):
                 'superuser': True
             }
         }
-        self.assertTrue(validation.validate_object('ROLE', data))
+        self.assertTrue(validation.validate_object('ROLE', 'test', data))
 
     def test_invalid_role(self):
         data = {
@@ -37,9 +35,8 @@ class TestCase(unittest.TestCase):
                 }
             },
             'options': {
-                'inherit': True,
-                'superuser': True
+                'inherit': 'no',
+                'super_user': 100
             }
         }
-        with self.assertRaises(exceptions.ValidationError):
-            validation.validate_object('ROLE', data)
+        self.assertFalse(validation.validate_object('ROLE', 'test', data))
