@@ -42,7 +42,6 @@ class Aggregate:
     hypothetical: typing.Optional[bool] = None
     sql: typing.Optional[str] = None
     comment: typing.Optional[str] = None
-    dependencies: typing.List[Extension, Function] = Dependencies
 
 
 @dataclasses.dataclass
@@ -67,7 +66,6 @@ class Collation:
     version: typing.Optional[str] = None
     copy_from: typing.Optional[str] = None
     comment: typing.Optional[str] = None
-    dependencies: typing.List[Extension, Function] = Dependencies
 
 
 @dataclasses.dataclass
@@ -107,7 +105,6 @@ class Conversion:
     encoding_to: str
     function: str
     comment: typing.Optional[str] = None
-    dependencies: typing.List[Extension, Function] = Dependencies
 
 
 @dataclasses.dataclass
@@ -122,7 +119,6 @@ class Domain:
     default: typing.Optional[str] = None
     check_constraints: typing.Optional[typing.List[CheckConstraint]] = None
     comment: typing.Optional[str] = None
-    dependencies: typing.List[Collation, Extension, Function] = Dependencies
 
 
 @dataclasses.dataclass
@@ -156,7 +152,6 @@ class ForeignKey:
     on_update: str = 'NO ACTION'
     deferrable: typing.Optional[bool] = None
     initially_deferred: typing.Optional[bool] = None
-    dependencies: typing.List[Table] = Dependencies
 
 
 @dataclasses.dataclass
@@ -194,17 +189,6 @@ class Function:
     object_file: typing.Optional[str] = None
     link_symbol: typing.Optional[str] = None
     comment: typing.Optional[str] = None
-    dependencies: typing.List[Aggregate,
-                              Collation,
-                              Conversion,
-                              Domain,
-                              Extension,
-                              Language,
-                              Function,
-                              Sequence,
-                              Server,
-                              Table,
-                              View] = Dependencies
 
 
 @dataclasses.dataclass
@@ -231,7 +215,6 @@ class Index:
     where: typing.Optional[str] = None
     storage_parameters: typing.Optional[typing.Dict[str, str]] = None
     comment: typing.Optional[str] = None
-    dependencies: typing.List[Function] = Dependencies
 
 
 @dataclasses.dataclass
@@ -284,10 +267,6 @@ class MaterializedView:
     tablespace: typing.Optional[str] = None
     query: typing.Optional[str] = None
     comment: typing.Optional[str] = None
-    dependencies: typing.List[Function,
-                              Procedure,
-                              Table,
-                              View] = Dependencies
 
 
 @dataclasses.dataclass
@@ -307,7 +286,6 @@ class Operator:
     merges: typing.Optional[bool] = None
     sql: typing.Optional[str] = None
     comment: typing.Optional[str] = None
-    dependencies: typing.List[Function] = Dependencies
 
 
 @dataclasses.dataclass
@@ -334,7 +312,6 @@ class Procedure:
     object_file: typing.Optional[str] = None
     link_symbol: typing.Optional[str] = None
     comment: typing.Optional[str] = None
-    dependencies: typing.List[Language] = Dependencies
 
 
 @dataclasses.dataclass
@@ -368,7 +345,6 @@ class Sequence:
     cycle: typing.Optional[bool] = None
     owned_by: typing.Optional[str] = None
     comment: typing.Optional[str] = None
-    dependencies: typing.List[Table] = Dependencies
 
 
 @dataclasses.dataclass
@@ -377,7 +353,6 @@ class Server:
     name: str
     owner: str
     foreign_data_wrapper: str
-    dependencies: typing.List[Extension, ForeignDataWrapper]
     type: typing.Optional[str] = None
     version: typing.Optional[str] = None
     options: typing.Optional[dict] = None
@@ -409,13 +384,6 @@ class Table:
     tablespace: typing.Optional[str] = None
     index_tablespace: typing.Optional[str] = None
     comment: typing.Optional[str] = None
-    dependencies: typing.List[Aggregate,
-                              Collation,
-                              Conversion,
-                              Domain,
-                              Function,
-                              Sequence,
-                              Table] = Dependencies
 
 
 @dataclasses.dataclass
@@ -470,7 +438,6 @@ class Triggers:
     function: typing.Optional[str] = None
     arguments: typing.Optional[typing.List[float, int, str]] = None
     comment: typing.Optional[str] = None
-    dependencies: typing.List[Extension, Function, Table] = Dependencies
 
 
 @dataclasses.dataclass
@@ -507,7 +474,6 @@ class Type:
     canonical: typing.Optional[str] = None
     subtype_diff: typing.Optional[str] = None
     comment: typing.Optional[str] = None
-    dependencies: typing.List[Collation, Function, Extension] = Dependencies
 
 
 @dataclasses.dataclass
@@ -522,10 +488,6 @@ class View:
     options: typing.Optional[ViewOptions] = None
     query: typing.Optional[str] = None
     comment: typing.Optional[str] = None
-    dependencies: typing.List[Function,
-                              Procedure,
-                              Table,
-                              View] = Dependencies
 
 
 @dataclasses.dataclass
