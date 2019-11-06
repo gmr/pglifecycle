@@ -1,0 +1,5 @@
+---
+name: test-project
+encoding: UTF-8
+stdstrings: true
+superuser: postgres
