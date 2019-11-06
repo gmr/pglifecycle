@@ -42,6 +42,22 @@ properties:
     required:
       - name
       - columns
+  match_type:
+    title: Match Type
+    description: >
+      A value inserted into the referencing column(s) is matched against the
+      values of the referenced table and referenced columns using the given
+      match type. There are three match types: FULL, PARTIAL, and SIMPLE
+      (which is the default). FULL will not allow one column of a multicolumn
+      foreign key to be null unless all foreign key columns are null; if they
+      are all null, the row is not required to have a match in the referenced
+      table. SIMPLE allows any of the foreign key columns to be null; if any of
+      them are null, the row is not required to have a match in the referenced
+      table. PARTIAL is not yet implemented.
+    enum:
+      - FULL
+      - PARTIAL
+      - SIMPLE
   on_delete:
     title: On Delete
     description: Action to take on delete of the column value in the referenced table

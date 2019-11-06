@@ -23,14 +23,6 @@ properties:
     description: >
       Used to specify that the index should be created on partitions of the table.
     type: boolean
-  tablespace:
-    title: Tablespace
-    description: Specifies the tablespace to use when creating the index
-    type: string
-  table_name:
-    title: Table Name
-    description: The table name the index is defined for
-    type: string
   method:
     title: Index Method
     description: The name of the index method to be used
@@ -90,16 +82,20 @@ properties:
     items:
       title: Column Name
       type: string
-  where:
-    title: Where
-    description: Use to provide an expression for creating a partial index
-    type: string
   storage_parameters:
     title: Storage Parameters
     description: Storage parameter settings for the index
     type: object
     propertyNames:
       pattern: ^[A-Za-z0-9_]*$
+  tablespace:
+    title: Tablespace
+    description: Specifies the tablespace to use when creating the index
+    type: string
+  where:
+    title: Where
+    description: Use to provide an expression for creating a partial index
+    type: string
   comment:
     title: Comment
     description: An optional comment about the table

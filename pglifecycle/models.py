@@ -77,8 +77,16 @@ class Column:
     default: typing.Optional[typing.Any] = None
     collation: typing.Optional[str] = None
     check_constraint: typing.Optional[str] = None
-    generated: typing.Optional[typing.Dict[str, str]] = None
+    generated: typing.Optional[ColumnGenerated] = None
     comment: typing.Optional[str] = None
+
+
+@dataclasses.dataclass
+class ColumnGenerated:
+    """Represents configuration of a generated column"""
+    expression: typing.Optional[str] = None
+    sequence: typing.Optional[str] = None
+    sequence_behavior: typing.Optional[str] = None
 
 
 @dataclasses.dataclass
@@ -148,6 +156,7 @@ class ForeignKey:
     name: str
     columns: typing.List[str]
     references: ForeignKeyReference
+    match_type: typing.Optional[str] = None
     on_delete: str = 'NO ACTION'
     on_update: str = 'NO ACTION'
     deferrable: typing.Optional[bool] = None
@@ -207,13 +216,12 @@ class Index:
     sql: typing.Optional[str] = None
     unique: typing.Optional[bool] = None
     recurse: typing.Optional[bool] = None
-    tablespace: typing.Optional[str] = None
-    table_name: typing.Optional[str] = None
     method: typing.Optional[str] = None
     columns: typing.Optional[typing.List[IndexColumn]] = None
     include: typing.Optional[typing.List[str]] = None
     where: typing.Optional[str] = None
     storage_parameters: typing.Optional[typing.Dict[str, str]] = None
+    tablespace: typing.Optional[str] = None
     comment: typing.Optional[str] = None
 
 
@@ -376,7 +384,7 @@ class Table:
     check_constraints: typing.Optional[typing.List[CheckConstraint]] = None
     unique_constraints: typing.Optional[typing.List[ConstraintColumns]] = None
     foreign_keys: typing.Optional[typing.List[ForeignKey]] = None
-    triggers: typing.Optional[typing.List[Triggers]] = None
+    triggers: typing.Optional[typing.List[Trigger]] = None
     partition: typing.Optional[TablePartitionBehavior] = None
     partitions: typing.Optional[typing.List[TablePartition]] = None
     access_method: typing.Optional[str] = None
@@ -426,11 +434,10 @@ class Tablespace:
 
 
 @dataclasses.dataclass
-class Triggers:
+class Trigger:
     """Table Triggers"""
     sql: typing.Optional[str] = None
     name: typing.Optional[str] = None
-    table_name: typing.Optional[str] = None
     when: typing.Optional[str] = None
     events: typing.Optional[typing.List[str]] = None
     for_each: typing.Optional[str] = None

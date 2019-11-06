@@ -13,10 +13,6 @@ properties:
     title: SQL Statement
     description: User-provided raw SQL snippet
     type: string
-  table_name:
-    title: Table Name
-    description: The table to create the trigger on
-    type: string
   when:
     title: When to fire the trigger
     enum: [BEFORE, AFTER, INSTEAD OF]
