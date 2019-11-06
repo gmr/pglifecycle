@@ -1,0 +1,9 @@
+---
+schema: test
+name: empty_table_id
+data_type: BIGINT
+increment_by: 10
+max_value: 1000000
+start_with: 100
+cache: 2
+owned_by: test.empty_table

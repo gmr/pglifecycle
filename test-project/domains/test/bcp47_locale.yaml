@@ -1,0 +1,12 @@
+---
+name: bcp47_locale
+schema: test
+owner: postgres
+data_type: text
+check_constraints:
+  - expression: |-
+      value ~ '^[a-z]{2}-[A-Z]{2,3}$'
+comment: Simplified locale check, doesn't fully conform to BCP-47
+dependencies:
+  extensions:
+    - public.citext

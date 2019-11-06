@@ -32,7 +32,6 @@ def add_actions_to_parser(parser):
     parser = sp.add_parser(
         'build',
         help='Generate a pg_restore -Fc compatible archive of the project')
-
     parser.add_argument(
         'project', metavar='PROJECT', nargs='?', action='store',
         help='The path to the pglifecycle project')

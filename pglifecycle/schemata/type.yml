@@ -166,9 +166,10 @@ properties:
           title: Collation
           description: The name of an existing collation to use for the column.
           type: string
+      additionalProperties: false
       required:
         - name
-        - type
+        - data_type
     minLength: 1
   enum:
     title: Enumerated Values
@@ -210,6 +211,7 @@ properties:
     title: Dependencies
     description: Database objects this object is dependent upon
     $package_schema: dependencies
+additionalProperties: false
 oneOf:
   - required:
       - sql
@@ -330,4 +332,3 @@ oneOf:
             collatable: {type: "null"}
             columns: {type: "null"}
             enum: {type: "null"}
-additionalProperties: false

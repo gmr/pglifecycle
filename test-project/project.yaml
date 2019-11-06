@@ -3,3 +3,16 @@ name: test-project
 encoding: UTF-8
 stdstrings: true
 superuser: postgres
+extensions:
+  - name: citext
+    schema: public
+  - name: postgres_fdw
+  - name: uuid-ossp
+    schema: public
+foreign_data_wrappers:
+  - name: postgresql
+    owner: postgres
+    validator: postgresql_fdw_validator
+languages:
+  - name: plpython3u
+    replace: true

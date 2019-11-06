@@ -67,6 +67,7 @@ class Project:
     _OWNERLESS = [
         const.GROUP,
         const.ROLE,
+        const.TEXT_SEARCH,
         const.USER,
         const.USER_MAPPING
     ]
@@ -78,6 +79,7 @@ class Project:
         const.SERVER,
         const.PUBLICATION,
         const.SUBSCRIPTION,
+        const.TABLESPACE,
         const.USER,
         const.USER_MAPPING
     ]
@@ -99,7 +101,9 @@ class Project:
         self._dump = None
         self._load_errors = 0
         self._inv: dict = {k: {} for k in const.PATHS.keys()}
-        for key in [const.EXTENSION, const.PROCEDURAL_LANGUAGE]:
+        for key in [const.EXTENSION,
+                    const.FOREIGN_DATA_WRAPPER,
+                    const.PROCEDURAL_LANGUAGE]:
             self._inv[key] = {}
         self._deps = {k: {} for k in self._inv.keys()}
         self._pending_deps: typing.List[_PendingDependency] = []
@@ -216,15 +220,14 @@ class Project:
                     if col.default:
                         column.append('DEFAULT')
                         column.append(utils.postgres_value(col.default))
-                    if col.generated and col.expression:
+                    if col.generated and col.generated.expression:
                         column.append('GENERATED ALWAYS AS')
-                        column.append(col.expression)
+                        column.append(col.generated.expression)
                         column.append('STORED')
-                    elif col.generated and col.sequence:
+                    elif col.generated and col.generated.sequence:
                         column.append('GENERATED')
-                        column.append(col.sequence_behavior)
+                        column.append(col.generated.sequence_behavior)
                         column.append('AS IDENTITY')
-                        column.append(col.expression)
                     inner_sql.append(' '.join(column))
                     if col.comment:
                         self._add_comment_to_dump(
@@ -357,10 +360,7 @@ class Project:
         os.makedirs(self.path, exist_ok=exist_ok)
         for value in const.PATHS.values():
             subdir_path = self.path / value
-            try:
-                subdir_path.mkdir(exist_ok=exist_ok)
-            except FileExistsError:
-                pass
+            subdir_path.mkdir(exist_ok=exist_ok)
             if gitkeep:
                 gitkeep_path = subdir_path / '.gitkeep'
                 gitkeep_path.touch(exist_ok=exist_ok)
@@ -639,15 +639,21 @@ class Project:
                 self._load_errors += 1
                 continue
             if obj_type == const.TEXT_SEARCH:
-                self._read_text_search_definition(defn)
+                self._inv[obj_type][defn['schema']] = \
+                    self._read_text_search_definition(defn)
                 continue
             for entry in defn.get(key):
+                if 'owner' not in entry:
+                    entry['owner'] = defn['owner']
+                if 'schema' not in entry:
+                    entry['schema'] = defn['schema']
                 name = self._object_name(entry)
                 if not validation.validate_object(obj_type, name, entry):
                     self._load_errors += 1
                     continue
                 if 'dependencies' in entry:
-                    self._cache_and_remove_dependencies(obj_type, name, defn)
+                    self._cache_and_remove_dependencies(
+                        obj_type, name, defn)
                 self._inv[obj_type][name] = model(**entry)
 
     def _read_project_file(self) -> typing.NoReturn:

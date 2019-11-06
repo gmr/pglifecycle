@@ -1,0 +1,27 @@
+---
+schema: test
+types:
+  - name: user_state
+    type: enum
+    enum:
+      - removed
+      - suspended
+      - unverified
+      - verified
+  - name: address_type
+    type: enum
+    enum:
+      - billing
+      - delivery
+  - name: compfoo
+    type: composite
+    columns:
+      - name: f1
+        data_type: int
+      - name: f2
+        data_type: text
+  - name: float8_range
+    type: range
+    subtype: float8
+    subtype_diff: float8mi
+

@@ -1,0 +1,9 @@
+---
+name: email_address
+schema: public
+owner: postgres
+data_type: citext
+check_constraints:
+  - expression: |-
+      value ~ '^[a-zA-Z0-9.!#$%&''*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$'
+comment: Validates an email address against a simplified regex

@@ -1,0 +1,4 @@
+---
+name: test
+owner: postgres
+comment: Common test schema

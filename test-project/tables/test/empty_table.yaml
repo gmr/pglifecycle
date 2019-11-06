@@ -1,0 +1,34 @@
+---
+name: empty_table
+schema: test
+owner: postgres
+comment: Simple table without much substance
+columns:
+  - name: id
+    data_type: BIGINT
+    comment: The auto-incrementing row ID value
+    generated:
+      sequence: empty_table_id
+      sequence_behavior: ALWAYS
+    nullable: false
+  - name: created_at
+    comment: When the record was created
+    data_type: TIMESTAMP WITH TIME ZONE
+    default: CURRENT_TIMESTAMP
+    nullable: false
+  - name: last_modified_at
+    comment: When the record was last modified
+    data_type: TIMESTAMP WITH TIME ZONE
+    nullable: true
+  - name: value
+    comment: Some random value
+    data_type: TEXT
+    nullable: true
+primary_key: id
+indexes:
+  - name: empty_table_created_at
+    comment: Index covering the created_at column
+    columns:
+      - name: created_at
+        direction: DESC
+        null_placement: LAST

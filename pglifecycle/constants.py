@@ -94,7 +94,6 @@ DATA_TYPE_MAPPING = {
     'varchar': ' character varying'
 }
 
-
 PATHS = {
     AGGREGATE: pathlib.Path('aggregates'),
     CAST: pathlib.Path('casts'),

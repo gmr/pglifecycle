@@ -1,0 +1,5 @@
+---
+name: temp
+owner: postgres
+location: /tmp
+comment: It's temporary

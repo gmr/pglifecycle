@@ -1,0 +1,28 @@
+---
+schema: test
+configurations:
+  - name: custom_english
+    parser: custom_default
+    comment: Copy of default things
+  - name: custom_german
+    source: german
+    comment: Copy of german config
+dictionaries:
+  - name: custom_simple
+    template: custom_snowball
+    options:
+      language: english
+      stopwords: english
+parsers:
+  - name: custom_default
+    start_function: prsd_start
+    gettoken_function: prsd_nexttoken
+    end_function: prsd_end
+    lextypes_function: prsd_lextype
+    headline_function: prsd_headline
+    comment: Simple copy of the default parser values
+templates:
+  - name: custom_snowball
+    init_function: dsnowball_init
+    lexize_function: dsnowball_lexize
+    comment: Copied from the snowball template
