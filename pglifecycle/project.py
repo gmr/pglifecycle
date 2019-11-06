@@ -51,8 +51,8 @@ class Project:
         const.TEXT_SEARCH,
         const.SERVER,
         const.EVENT_TRIGGER,
-        # const.PUBLICATION,
-        # const.SUBSCRIPTION,
+        const.PUBLICATION,
+        const.SUBSCRIPTION,
         # const.USER_MAPPING
     ]
 

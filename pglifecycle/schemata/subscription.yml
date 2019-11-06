@@ -1,0 +1,86 @@
+---
+$schema: http://json-schema.org/schema#
+$id: https://pglifecycle.readthedocs.io/en/stable/schemata/subscription.html
+title: Subscription
+description: >
+  The subscription represents a replication connection to the publisher.
+type: object
+properties:
+  name:
+    title: Subscription Name
+    description: The name of the subscription to create
+    type: string
+  connection:
+    title: Connection Information
+    description: The connection string to the publisher.
+    type: string
+  publications:
+    title: Publications
+    description: Publications to subscribe to on the publisher
+    type: array
+    items:
+      type: string
+    minItems: 1
+  paramters:
+    title: Subscription Parameters
+    type: object
+    properties:
+      copy_data:
+        title: Copy Data
+        description: >
+          Specifies whether the existing data in the publications that are
+          being subscribed to should be copied once the replication starts.
+        type: boolean
+        default: true
+      create_slot:
+        title: Create Replication Slot
+        description: >
+          Specifies whether the command should create the replication slot on
+          the publisher.
+        type: boolean
+        default: true
+      enabled:
+        title: Replication Enabled
+        description: >
+          Specifies whether the subscription should be actively replicating, or
+          whether it should be just setup but not started yet.
+        type: boolean
+        default: true
+      slot_name:
+        title: Slot Name
+        description: >
+          Name of the replication slot to use. The default behavior is to use
+          the name of the subscription for the slot name.
+
+          When slot_name is set to NONE, there will be no replication slot
+          associated with the subscription. This can be used if the replication
+          slot will be created later manually. Such subscriptions must also
+          have both enabled and create_slot set to false.
+        type: string
+      synchronous_commit:
+        title: Synchronous Commit
+        description: >
+          The value of this parameter overrides the synchronous_commit setting.
+        enum: [on, remote_apply, remote_write, local, off]
+        default: off
+      connect:
+        title: Connect
+        description: >
+          Specifies whether the subscription should connect to the publisher at
+          all. Setting this to false will change default values of enabled,
+          create_slot and copy_data to false.
+
+          It is not allowed to combine connect set to false and enabled,
+          create_slot, or copy_data set to true.
+        type: boolean
+        default: true
+    additionalProperties: false
+  comment:
+    title: Comment
+    description: An optional comment about the publication
+    type: string
+required:
+  - name
+  - connection
+  - publications
+additionalProperties: false

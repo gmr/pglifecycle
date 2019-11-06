@@ -66,6 +66,13 @@ class Cast:
 
 
 @dataclasses.dataclass
+class CheckConstraint:
+    """Represents a Check Constraint in a Table or Domain"""
+    name: str
+    expression: str
+
+
+@dataclasses.dataclass
 class Collation:
     """Represents a Collation"""
     name: str
@@ -100,13 +107,6 @@ class ColumnGenerated:
     expression: typing.Optional[str] = None
     sequence: typing.Optional[str] = None
     sequence_behavior: typing.Optional[str] = None
-
-
-@dataclasses.dataclass
-class CheckConstraint:
-    """Represents a Check Constraint in a Table or Domain"""
-    name: str
-    expression: str
 
 
 @dataclasses.dataclass
@@ -348,6 +348,16 @@ class Procedure:
 
 
 @dataclasses.dataclass
+class Publication:
+    """Represents a Publication"""
+    name: str
+    tables: typing.Optional[typing.List[str]] = None
+    all_tables: typing.Optional[str] = None
+    parameters: typing.Optional[typing.Dict[str, typing.List[str]]] = None
+    comment: typing.Optional[str] = None
+
+
+@dataclasses.dataclass
 class Role:
     """Represents a schema/namespace"""
     name: str
@@ -389,6 +399,16 @@ class Server:
     type: typing.Optional[str] = None
     version: typing.Optional[str] = None
     options: typing.Optional[dict] = None
+    comment: typing.Optional[str] = None
+
+
+@dataclasses.dataclass
+class Subscription:
+    """Represents a logical replication subscription"""
+    name: str
+    connection: str
+    publication: str
+    parameters: typing.Optional[typing.Dict[str, typing.List[str]]] = None
     comment: typing.Optional[str] = None
 
 
@@ -593,9 +613,11 @@ MAPPINGS = {
     constants.OPERATOR: Operator,
     constants.PROCEDURE: Procedure,
     constants.PROCEDURAL_LANGUAGE: Language,
+    constants.PUBLICATION: Publication,
     constants.SCHEMA: Schema,
     constants.SEQUENCE: Sequence,
     constants.SERVER: Server,
+    constants.SUBSCRIPTION: Subscription,
     constants.TABLE: Table,
     constants.TABLESPACE: Tablespace,
     constants.TEXT_SEARCH: TextSearch,

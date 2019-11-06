@@ -1,0 +1,61 @@
+---
+$schema: http://json-schema.org/schema#
+$id: https://pglifecycle.readthedocs.io/en/stable/schemata/publication.html
+title: Publication
+description: >
+  A publication is essentially a group of tables whose data changes are intended
+  to be replicated through logical replication.
+type: object
+properties:
+  name:
+    title: Publication Name
+    description: The name of the publication to create
+    type: string
+  tables:
+    title: Tables for Replication
+    type: array
+    items:
+      title: Table Name
+      description: >
+        Specifies a list of tables to add to the publication. If ONLY is
+        specified before the table name, only that table is added to the
+        publication. If ONLY is not specified, the table and all its descendant
+        tables (if any) are added. Optionally, * can be specified after the
+        table name to explicitly indicate that descendant tables are included.
+      type: string
+    description: The name of the publication to create
+    type: string
+    minItems: 1
+  all_tables:
+    title: Replicate All Tables
+    description: Use to replicate all tables
+    type: boolean
+  paramters:
+    title: Publication Paramters
+    type: object
+    properties:
+      publish:
+        title: Publish
+        description: >
+          This parameter determines which DML operations will be published by
+          the new publication to the subscribers.
+        type: array
+        items:
+          title: Operation
+          type: string
+          enum: [insert, update, delete, truncate]
+    required:
+      - publish
+    additionalProperties: false
+  comment:
+    title: Comment
+    description: An optional comment about the publication
+    type: string
+required:
+  - name
+additionalProperties: false
+oneOf:
+  - required: [tables]
+    not: {required: [all_tables]}
+  - required: [all_tables]
+    not: {required: [tables]}
