@@ -7,6 +7,7 @@ import argparse
 import logging
 import os
 from os import path
+import pathlib
 import pwd
 
 from pglifecycle import common, project, version
@@ -31,12 +32,33 @@ def add_actions_to_parser(parser):
     parser = sp.add_parser(
         'build',
         help='Generate a pg_restore -Fc compatible archive of the project')
+
     parser.add_argument(
         'project', metavar='PROJECT', nargs='?', action='store',
         help='The path to the pglifecycle project')
     parser.add_argument(
         'destination', metavar='DEST', nargs='?', action='store',
         help='The path save the build artifact to ')
+
+    parser = sp.add_parser(
+        'create', help='Create a skeleton project')
+    parser.add_argument(
+        '--encoding', help='Specify the database encoding', default='UTF-8')
+    parser.add_argument(
+        '--force', action='store_true',
+        help='Write to destination path even if it already exists')
+    parser.add_argument('--name', help='Override the default project name')
+    parser.add_argument(
+        '--no-gitkeep', action='store_true',
+        help='Do not create .gitkeep files')
+    parser.add_argument(
+        '--no-stdstrings', action='store_true',
+        help='Turn of standard conforming strings (< Postgres 9.1 behavior)')
+    parser.add_argument(
+        '--superuser', help='Specify the superuser name', default='postgres')
+    parser.add_argument(
+        'destination', metavar='DEST', nargs='?', action='store',
+        help='The path create the skeleton project in')
 
     parser = sp.add_parser('generate', help='Generate a project')
     add_connection_options_to_parser(parser)
@@ -207,6 +229,18 @@ def run():
             common.exit_application('Destination not specified', 2)
         try:
             project.load(args.project).build(args.destination)
+        except RuntimeError as error:
+            common.exit_application(str(error), 4)
+    elif args.action == 'create':
+        if not args.destination:
+            common.exit_application('Project destination not specified', 2)
+        try:
+            project.Project(
+                args.destination,
+                args.name or pathlib.Path(args.destination).name,
+                args.encoding,
+                args.no_stdstrings is False,
+                args.superuser).create(args.force, args.no_gitkeep is False)
         except RuntimeError as error:
             common.exit_application(str(error), 4)
     elif args.action == 'generate-project':

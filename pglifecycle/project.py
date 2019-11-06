@@ -120,6 +120,17 @@ class Project:
         LOGGER.info('Build artifact saved with %i entries',
                     len(self._dump.entries))
 
+    def create(self, force: bool = False,
+               gitkeep: bool = True) -> typing.NoReturn:
+        """Create an empty, stub project"""
+        self._create_directories(force, gitkeep)
+        yaml.save(
+            self.path / 'project.yaml', {
+                'name': self.name,
+                'encoding': self.encoding,
+                'stdstrings': self.stdstrings,
+                'superuser': self.superuser})
+
     def load(self) -> Project:
         """Load the project from the specified project directory
 
@@ -338,6 +349,21 @@ class Project:
                                        defn: dict) -> typing.NoReturn:
         self._deps[obj_type][name] = defn['dependencies']
         del defn['dependencies']
+
+    def _create_directories(self, exist_ok: bool = False,
+                            gitkeep: bool = True) -> typing.NoReturn:
+        LOGGER.debug('Creating %s', self.path)
+        self.path.mkdir(exist_ok=exist_ok)
+        os.makedirs(self.path, exist_ok=exist_ok)
+        for value in const.PATHS.values():
+            subdir_path = self.path / value
+            try:
+                subdir_path.mkdir(exist_ok=exist_ok)
+            except FileExistsError:
+                pass
+            if gitkeep:
+                gitkeep_path = subdir_path / '.gitkeep'
+                gitkeep_path.touch(exist_ok=exist_ok)
 
     def _dump_extensions(self) -> typing.NoReturn:
         for name in self._inv[const.EXTENSION]:

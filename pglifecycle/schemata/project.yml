@@ -13,7 +13,7 @@ properties:
   stdstrings:
     description: Turn standard confirming strings on/off in the created build artifact
     type: boolean
-    default: false
+    default: true
   superuser:
     description: The PostgreSQL super user
     type: string

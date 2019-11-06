@@ -103,7 +103,6 @@ PATHS = {
     DML: pathlib.Path('dml'),
     DOMAIN: pathlib.Path('domains'),
     EVENT_TRIGGER: pathlib.Path('event_triggers'),
-    FOREIGN_DATA_WRAPPER: pathlib.Path('foreign_data_wrappers'),
     FUNCTION: pathlib.Path('functions'),
     GROUP: pathlib.Path('groups'),
     MATERIALIZED_VIEW: pathlib.Path('materialized_views'),

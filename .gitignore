@@ -10,4 +10,3 @@ build/
 dist/
 env/
 docs/_build
-test-project/
