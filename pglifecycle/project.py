@@ -49,8 +49,7 @@ class Project:
         const.MATERIALIZED_VIEW,
         const.CAST,
         const.TEXT_SEARCH,
-        # const.FOREIGN_DATA_WRAPPER,
-        # const.SERVER,
+        const.SERVER,
         # const.EVENT_TRIGGER,
         # const.PUBLICATION,
         # const.SUBSCRIPTION,
@@ -80,6 +79,7 @@ class Project:
         self.name: str = name
         self.encoding: str = encoding
         self.extensions: typing.List[models.Extension] = []
+        self.fdws: typing.List[models.ForeignDataWrapper] = []
         self.languages: typing.List[models.Language] = []
         self.path = pathlib.Path(path).absolute()
         self.stdstrings: bool = stdstrings
@@ -101,6 +101,7 @@ class Project:
         self._dump = pgdumplib.new(self.name, self.encoding)
         self._dump_schemas()
         self._dump_extensions()
+        self._dump_foreign_data_wrappers()
         self._dump_languages()
         self._dump_tables()
         self._dump.save(path)
@@ -352,6 +353,31 @@ class Project:
                 owner=self.superuser,
                 defn='{};\n'.format(' '.join(sql)))
 
+    def _dump_foreign_data_wrappers(self) -> typing.NoReturn:
+        for name in self._inv[const.FOREIGN_DATA_WRAPPER]:
+            sql = ['CREATE FOREIGN DATA WAPPER', utils.quote_ident(name)]
+            if self._inv[const.FOREIGN_DATA_WRAPPER][name].handler:
+                sql.append('HANDLER')
+                sql.append(self._inv[const.FOREIGN_DATA_WRAPPER][name].handler)
+            else:
+                sql.append('NO HANDLER')
+            if self._inv[const.FOREIGN_DATA_WRAPPER][name].validator:
+                sql.append('VALIDATOR')
+                sql.append(
+                    self._inv[const.FOREIGN_DATA_WRAPPER][name].validator)
+            else:
+                sql.append('NO VALIDATOR')
+            if self._inv[const.FOREIGN_DATA_WRAPPER][name].options:
+                sql.append('OPTIONS ({})'.format(
+                    ', '.join([
+                        '{} {}'.format(k, utils.postgres_value(v))
+                        for k, v in self._inv[
+                            const.FOREIGN_DATA_WRAPPER][name].options.items()
+                    ])))
+            self._dump.add_entry(
+                const.FOREIGN_DATA_WRAPPER, None, name, self.superuser,
+                '{};\n'.format(' '.join(sql)))
+
     def _dump_index(self, index: models.Index, schema: str, owner: str,
                     parent: str) -> typing.NoReturn:
         sql = ['CREATE UNIQUE INDEX'] if index.unique else ['CREATE INDEX']
@@ -600,6 +626,9 @@ class Project:
             name = self._object_name(extension)
             self._inv[const.EXTENSION][name] = \
                 models.Extension(**extension)
+        for fdw in project.get('foreign_data_wrappers'):
+            self._inv[const.FOREIGN_DATA_WRAPPER][fdw['name']] = \
+                models.ForeignDataWrapper(**fdw)
         for language in project.get('languages'):
             name = self._object_name(language)
             self._inv[const.PROCEDURAL_LANGUAGE][name] = \

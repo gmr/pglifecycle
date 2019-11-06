@@ -52,6 +52,12 @@ properties:
           type: string
       required:
         - name
+  foreign_data_wrappers:
+    title: Foreign Data Wrappers
+    description: An array of Foreign Data Wrappers to create in the database
+    type: array
+    items:
+      $package_schema: foreign_data_wrapper
   languages:
     description: An array of Procedural Languages to load into the database
     type: array
