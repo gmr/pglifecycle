@@ -143,6 +143,18 @@ class Domain:
 
 
 @dataclasses.dataclass
+class EventTrigger:
+    """Represents an event trigger"""
+    sql: typing.Optional[str] = None
+    name: typing.Optional[str] = None
+    event: typing.Optional[str] = None
+    filter_variable: typing.Optional[str] = None
+    filter_value: typing.Optional[str] = None
+    function: typing.Optional[str] = None
+    comment: typing.Optional[str] = None
+
+
+@dataclasses.dataclass
 class Extension:
     """Represents an extension"""
     name: str
@@ -573,6 +585,7 @@ MAPPINGS = {
     constants.COLLATION: Collation,
     constants.CONVERSION: Conversion,
     constants.DOMAIN: Domain,
+    constants.EVENT_TRIGGER: EventTrigger,
     constants.EXTENSION: Extension,
     constants.FOREIGN_DATA_WRAPPER: ForeignDataWrapper,
     constants.FUNCTION: Function,

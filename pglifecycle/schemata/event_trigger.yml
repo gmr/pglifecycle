@@ -1,0 +1,57 @@
+---
+$schema: http://json-schema.org/schema#
+$id: https://pglifecycle.readthedocs.io/en/stable/schemata/event_trigger.html
+title: Event Trigger
+description: Defines an Event Trigger
+type: object
+properties:
+  sql:
+    title: SQL Statement
+    description: User-provided raw SQL snippet
+    type: string
+  name:
+    title: Name
+    description: The event trigger name
+    type: string
+  event:
+    title: The event that cause the fire to trigger
+    type: array
+    items:
+      enum: [ddl_command_start, ddl_command_end, table_rewrite, sql_drop]
+  filter_variable:
+    title: Filter Variable
+    description: >
+      The name of a variable used to filter events. This makes it possible to
+      restrict the firing of the trigger to a subset of the cases in which it
+      is supported. Currently the only supported filter_variable is TAG.
+    enum: [TAG]
+  filter_value:
+    title: Fitler Value
+    description: >
+      A list of values for the associated filter_variable for which the trigger should fire. For TAG, this means a list
+      of command tags (e.g. 'DROP FUNCTION').
+    type: string
+  function:
+    title: Trigger Function
+    description: The trigger function to execute
+    type: string
+  comment:
+    title: Comment
+    description: An optional comment about the table
+    type: string
+  dependencies:
+    title: Dependencies
+    description: Database objects this object is dependent upon
+    $package_schema: dependencies
+additionalProperties: false
+oneOf:
+  - required: [sql]
+    not:
+      required:
+        - name
+        - event
+        - filter_variable
+        - filter_value
+        - function
+  - required: [name, event, function]
+    not: {required: [sql]}

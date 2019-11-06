@@ -2,7 +2,7 @@
 $schema: http://json-schema.org/schema#
 $id: https://pglifecycle.readthedocs.io/en/stable/schemata/trigger.html
 title: Trigger
-description: Defines an trigger on a table
+description: Defines a trigger on a table
 type: object
 properties:
   name:
