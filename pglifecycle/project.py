@@ -53,7 +53,7 @@ class Project:
         const.EVENT_TRIGGER,
         const.PUBLICATION,
         const.SUBSCRIPTION,
-        # const.USER_MAPPING
+        const.USER_MAPPING
     ]
 
     _PER_SCHEMA_FILES = [
@@ -64,10 +64,22 @@ class Project:
         const.TYPE
     ]
 
-    _SCHEMALESS_OBJECTS = [
-        const.FOREIGN_DATA_WRAPPER,
+    _OWNERLESS = [
+        const.GROUP,
+        const.ROLE,
+        const.USER,
+        const.USER_MAPPING
+    ]
+
+    _SCHEMALESS = [
+        const.GROUP,
+        const.ROLE,
         const.SCHEMA,
-        const.SERVER
+        const.SERVER,
+        const.PUBLICATION,
+        const.SUBSCRIPTION,
+        const.USER,
+        const.USER_MAPPING
     ]
 
     def __init__(self,
@@ -116,11 +128,10 @@ class Project:
         """
         self._read_project_file()
         for ot in self._READ_ORDER:
-            if ot in self._PER_SCHEMA_FILES:
-                self._read_objects_files(ot, models.MAPPINGS[ot])
-            else:
-                schemaless = ot in self._SCHEMALESS_OBJECTS
-                self._read_object_files(ot, schemaless, models.MAPPINGS[ot])
+            self._read_object_files(ot, models.MAPPINGS[ot])
+        self._read_role_files(const.GROUP, models.Group)
+        self._read_role_files(const.ROLE, models.Role)
+        self._read_role_files(const.USER, models.User)
         self._validate_dependencies()
         if self._load_errors:
             LOGGER.critical('Project load failed with %i errors',
@@ -212,7 +223,6 @@ class Project:
                                 self._inv[const.TABLE][name].name, col.name),
                             self._inv[const.TABLE][name].owner, name,
                             col.comment)
-
             for item in self._inv[const.TABLE][name].unique_constraints or []:
                 inner_sql.append(self._format_sql_constraint('UNIQUE', item))
             if self._inv[const.TABLE][name].primary_key:
@@ -554,12 +564,12 @@ class Project:
                 for s_child in sorted(child.iterdir(), key=lambda p: str(p)):
                     if yaml.is_yaml(s_child):
                         yield self._preprocess_definition(
-                            s_child.parent.name, s_child.name.split('.')[0],
-                            yaml.load(s_child), schemaless)
+                            file_type, s_child.parent.name,
+                            s_child.name.split('.')[0], yaml.load(s_child))
             elif yaml.is_yaml(child):
                 yield self._preprocess_definition(
-                    child.name.split('.')[0], None, yaml.load(child),
-                    schemaless)
+                    file_type, child.name.split('.')[0],
+                    None, yaml.load(child))
 
     @staticmethod
     def _object_name(definition: dict, schemaless: bool = False):
@@ -567,22 +577,23 @@ class Project:
             return definition['name']
         return '{}.{}'.format(definition['schema'], definition['name'])
 
-    def _preprocess_definition(self, schema: str,
+    def _preprocess_definition(self, obj_type: str, schema: str,
                                name: typing.Optional[str],
-                               definition: dict,
-                               schemaless: bool) -> dict:
-        if schema and 'schema' not in definition and not schemaless:
+                               definition: dict) -> dict:
+        if obj_type not in self._SCHEMALESS and 'schema' not in definition:
             definition['schema'] = schema
         if name and 'name' not in definition:
             definition['name'] = name
-        if 'owner' not in definition:
+        if obj_type not in self._OWNERLESS and 'owner' not in definition:
             definition['owner'] = self.superuser
         return definition
 
-    def _read_object_files(self, obj_type: str, schemaless: bool,
+    def _read_object_files(self, obj_type: str,
                            model: dataclasses.dataclass) -> typing.NoReturn:
+        if obj_type in self._PER_SCHEMA_FILES:
+            return self._read_objects_files(obj_type, model)
         LOGGER.debug('Reading %s objects', obj_type)
-        for defn in self._iterate_files(obj_type, schemaless):
+        for defn in self._iterate_files(obj_type):
             name = self._object_name(defn)
             if not validation.validate_object(obj_type, name, defn):
                 self._load_errors += 1
@@ -633,6 +644,17 @@ class Project:
             name = self._object_name(language)
             self._inv[const.PROCEDURAL_LANGUAGE][name] = \
                 models.Language(**language)
+
+    def _read_role_files(self, obj_type: str,
+                         model: dataclasses.dataclass) -> typing.NoReturn:
+        LOGGER.debug('Reading %s', const.PATHS[obj_type].name.upper())
+        for defn in self._iterate_files(obj_type, True):
+            validation.validate_object(obj_type, defn['name'], defn)
+            if 'grants' in defn:
+                defn['grants'] = models.ACLs(**defn['grants'])
+            if 'revocations' in defn:
+                defn['revocations'] = models.ACLs(**defn['revocations'])
+            self._inv[obj_type][defn['name']] = model(**defn)
 
     @staticmethod
     def _read_text_search_definition(defn: dict) -> typing.NoReturn:

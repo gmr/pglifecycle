@@ -10,6 +10,28 @@ import typing
 from pglifecycle import constants
 
 Dependencies = dataclasses.field(default_factory=lambda: [])
+ACLList = typing.Optional[typing.Dict[str, typing.List[str]]]
+
+
+@dataclasses.dataclass
+class ACLs:
+    """Represents role grant/revoke ACLs"""
+    columns: ACLList = None
+    databases: ACLList = None
+    domains: ACLList = None
+    foreign_data_wrappers: ACLList = None
+    foreign_servers: ACLList = None
+    functions: ACLList = None
+    groups: typing.Optional[typing.List[str]] = None
+    languages: ACLList = None
+    large_objects: ACLList = None
+    roles: typing.Optional[typing.List[str]] = None
+    schemata: ACLList = None
+    sequences: ACLList = None
+    tables: ACLList = None
+    tablespaces: ACLList = None
+    types: ACLList = None
+    views: ACLList = None
 
 
 @dataclasses.dataclass
@@ -235,6 +257,17 @@ class FunctionParameter:
 
 
 @dataclasses.dataclass
+class Group:
+    """Represents a group"""
+    name: str
+    comment: typing.Optional[str] = None
+    environments: typing.Optional[typing.List[str]] = None
+    grants: typing.Optional[ACLs] = None
+    revocations: typing.Optional[ACLs] = None
+    options: typing.Optional[typing.Dict[str, bool]] = None
+
+
+@dataclasses.dataclass
 class Index:
     """Represents an Index on a table"""
     name: str
@@ -359,8 +392,15 @@ class Publication:
 
 @dataclasses.dataclass
 class Role:
-    """Represents a schema/namespace"""
+    """Represents a role"""
     name: str
+    comment: typing.Optional[str] = None
+    create: typing.Optional[bool] = None
+    environments: typing.Optional[typing.List[str]] = None
+    grants: typing.Optional[ACLs] = None
+    revocations: typing.Optional[ACLs] = None
+    options: typing.Optional[typing.Dict[str, bool]] = None
+    settings: typing.Optional[typing.Dict[str, typing.Any]] = None
 
 
 @dataclasses.dataclass
@@ -579,6 +619,28 @@ class Type:
 
 
 @dataclasses.dataclass
+class User:
+    """Represents a user"""
+    name: str
+    comment: typing.Optional[str] = None
+    environments: typing.Optional[typing.List[str]] = None
+    password: typing.Optional[str] = None
+    valid_unitl: typing.Optional[str] = None
+    grants: typing.Optional[ACLs] = None
+    revocations: typing.Optional[ACLs] = None
+    options: typing.Optional[typing.Dict[str, bool]] = None
+    settings: typing.Optional[typing.Dict[str, typing.Any]] = None
+
+
+@dataclasses.dataclass
+class UserMapping:
+    """Represents a user mapping"""
+    name: str
+    server: str
+    options: typing.Optional[typing.Dict[str, typing.Any]] = None
+
+
+@dataclasses.dataclass
 class View:
     """Represents a View"""
     name: str
@@ -594,7 +656,7 @@ class View:
 
 @dataclasses.dataclass
 class ViewOptions:
-    """Represents  view options"""
+    """Represents view options"""
     check_option: typing.Optional[str] = None
     security_barrier: typing.Optional[bool] = None
 
@@ -609,11 +671,13 @@ MAPPINGS = {
     constants.EXTENSION: Extension,
     constants.FOREIGN_DATA_WRAPPER: ForeignDataWrapper,
     constants.FUNCTION: Function,
+    constants.GROUP: Group,
     constants.MATERIALIZED_VIEW: MaterializedView,
     constants.OPERATOR: Operator,
     constants.PROCEDURE: Procedure,
     constants.PROCEDURAL_LANGUAGE: Language,
     constants.PUBLICATION: Publication,
+    constants.ROLE: Role,
     constants.SCHEMA: Schema,
     constants.SEQUENCE: Sequence,
     constants.SERVER: Server,
@@ -622,5 +686,7 @@ MAPPINGS = {
     constants.TABLESPACE: Tablespace,
     constants.TEXT_SEARCH: TextSearch,
     constants.TYPE: Type,
+    constants.USER: User,
+    constants.USER_MAPPING: UserMapping,
     constants.VIEW: View
 }
