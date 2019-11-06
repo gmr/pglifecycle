@@ -24,12 +24,12 @@ properties:
   password:
     title: Password
     description: The password that is used to authenticate the user upon login.
-    type: str
+    type: string
   valid_until:
     title: Valid Until
     description: >
       Sets a date and time after which the user's password is no longer valid.
-    type: str
+    type: string
     format: date-time
   grants:
     description: ACLs to add to the role

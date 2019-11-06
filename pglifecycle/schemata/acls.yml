@@ -52,7 +52,7 @@ properties:
   functions:
     type: object
     propertyNames:
-      pattern: ^([A-Za-z0-9_\-]+)\.([A-Za-z0-9_\-]+)\(([A-Za-z0-9_\-, ]+)\)$
+      pattern: ^([A-Za-z0-9_\-]+)\.([A-Za-z0-9_\-]+)\((.*)\)$
     patternProperties:
       "^.*$":
         type: array
