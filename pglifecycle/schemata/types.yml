@@ -12,7 +12,7 @@ properties:
     title: User-defined types
     type: array
     items:
-      type: object
+      $package_schema: type
 required:
   - schema
   - types

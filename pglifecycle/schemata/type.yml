@@ -157,7 +157,7 @@ properties:
           title: Column Name
           description: The name of an attribute (column) for the composite type.
           type: string
-        type:
+        data_type:
           title: Data Type
           description: >
             The name of an existing data type to become a column of the composite type.

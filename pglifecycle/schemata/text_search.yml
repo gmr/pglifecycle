@@ -29,7 +29,7 @@ properties:
           description: The name of the text search parser to use
           type: string
         source:
-          type: Source Config
+          title: Source Config
           description: The name of an existing text search configuration to copy.
           type: string
         comment:
@@ -61,7 +61,7 @@ properties:
             of this dictionary.
           type: string
         options:
-          type: Options
+          title: Options
           description: Template specific options
           type: object
           propertyNames:
@@ -122,7 +122,6 @@ properties:
     title: Text Search Templates
     type: array
     items:
-      type: object
       title: Text Search Template
       type: object
       properties:
@@ -148,19 +147,14 @@ properties:
 additionalProperties: false
 required:
   - schema
-oneOf:
-  - required: [sql]
-    not:
-      required:
-        - configurations
-        - dictionaries
-        - parsers
-        - templates
-  - required: [configurations]
-    not: {required: [sql]}
-  - required: [dictionaries]
-    not: {required: [sql]}
-  - required: [parsers]
-    not: {required: [sql]}
-  - required: [templates]
-    not: {required: [sql]}
+allOf:
+  - if: {required: [sql]}
+    then: {not: {required: [configurations, dictionaries, parsers, templates]}}
+  - if: {configurations: {minItems: 1}}
+    then: {not: {required: [sql]}}
+  - if: {dictionaries: {minItems: 1}}
+    then: {not: {required: [sql]}}
+  - if: {parsers: {minItems: 1}}
+    then: {not: {required: [sql]}}
+  - if: {templates: {minItems: 1}}
+    then: {not: {required: [sql]}}

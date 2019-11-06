@@ -25,8 +25,20 @@ properties:
     title: Data Type
     description: Specifies the data type of the sequence.
     type: string
-    enum: [smallint, integer, int4, bigint, int8]
-    default: bigint
+    enum:
+      - smallint
+      - SMALLINT
+      - int2
+      - INT2
+      - integer
+      - INTEGER
+      - int4
+      - INT4
+      - bigint
+      - BIGINT
+      - int8
+      - INT8
+    default: BIGINT
   increment_by:
     title: Increment By
     description: >
@@ -73,10 +85,6 @@ properties:
     title: Comment
     description: An optional comment about the sequence
     type: string
-  dependencies:
-    title: Dependencies
-    description: Database objects this object is dependent upon
-    $package_schema: dependencies
 additionalProperties: false
 oneOf:
   - required: [schema, name]

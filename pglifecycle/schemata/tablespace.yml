@@ -31,7 +31,8 @@ properties:
       propertyNames:
         pattern: ^(seq_page_cost|random_page_cost|effective_io_concurrency)$
       patternProperties:
-        "^.*$": number
+        "^.*$":
+          type: number
   comment:
     title: Comment
     description: An optional comment about the tablespace.
