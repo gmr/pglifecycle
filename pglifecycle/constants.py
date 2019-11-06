@@ -60,8 +60,11 @@ STDSTRINGS = 'STDSTRINGS'
 SUBSCRIPTION = 'SUBSCRIPTION'
 TABLE = 'TABLE'
 TABLESPACE = 'TABLESPACE'
+TEXT_SEARCH = 'TEXT SEARCH'
 TEXT_SEARCH_DICTIONARY = 'TEXT SEARCH DICTIONARY'
 TEXT_SEARCH_CONFIGURATION = 'TEXT SEARCH CONFIGURATION'
+TEXT_SEARCH_PARSER = 'TEXT SEARCH PARSER'
+TEXT_SEARCH_TEMPLATE = 'TEXT SEARCH TEMPLATE'
 TRIGGER = 'TRIGGER'
 TYPE = 'TYPE'
 USER = 'USER'
@@ -114,8 +117,7 @@ PATHS = {
     SUBSCRIPTION: pathlib.Path('subscriptions'),
     TABLE: pathlib.Path('tables'),
     TABLESPACE: pathlib.Path('tablespaces'),
-    TEXT_SEARCH_CONFIGURATION: pathlib.Path('text_search'),
-    TEXT_SEARCH_DICTIONARY: pathlib.Path('text_search'),
+    TEXT_SEARCH: pathlib.Path('text_search'),
     TYPE: pathlib.Path('types'),
     USER: pathlib.Path('users'),
     USER_MAPPING: pathlib.Path('user_mappings'),
@@ -123,6 +125,7 @@ PATHS = {
 }
 
 OBJ_KEYS = {
+    'casts': CAST,
     'columns': COLUMN,
     'constraints': CONSTRAINT,
     'conversions': CONVERSION,
@@ -142,6 +145,7 @@ OBJ_KEYS = {
     'schemata': SCHEMA,
     'tables': TABLE,
     'tablespaces': TABLESPACE,
+    'text_search': TEXT_SEARCH,
     'types': TYPE,
     'views': VIEW
 }

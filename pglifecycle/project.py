@@ -47,9 +47,8 @@ class Project:
         const.PROCEDURE,
         const.VIEW,
         const.MATERIALIZED_VIEW,
-        # const.CAST,
-        # const.TEXT_SEARCH_CONFIGURATION,
-        # const.TEXT_SEARCH_DICTIONARY,
+        const.CAST,
+        const.TEXT_SEARCH,
         # const.FOREIGN_DATA_WRAPPER,
         # const.SERVER,
         # const.EVENT_TRIGGER,
@@ -59,8 +58,10 @@ class Project:
     ]
 
     _PER_SCHEMA_FILES = [
+        const.CAST,
         const.CONVERSION,
         const.OPERATOR,
+        const.TEXT_SEARCH,
         const.TYPE
     ]
 
@@ -574,6 +575,9 @@ class Project:
             if not validation.validate_object(key, defn['schema'], defn):
                 self._load_errors += 1
                 continue
+            if obj_type == const.TEXT_SEARCH:
+                self._read_text_search_definition(defn)
+                continue
             for entry in defn.get(key):
                 name = self._object_name(entry)
                 if not validation.validate_object(obj_type, name, entry):
@@ -600,6 +604,30 @@ class Project:
             name = self._object_name(language)
             self._inv[const.PROCEDURAL_LANGUAGE][name] = \
                 models.Language(**language)
+
+    @staticmethod
+    def _read_text_search_definition(defn: dict) -> typing.NoReturn:
+        if defn.get('sql'):
+            return models.TextSearch(defn['schema'], defn['sql'])
+        configs, dicts, parsers, templates = None, None, None, None
+        if defn.get('configurations'):
+            configs = [models.TextSearchConfig(**c)
+                       for c in defn['configurations']]
+        if defn.get('dictionaries'):
+            dicts = [models.TextSearchDict(**d)
+                     for d in defn['dictionaries']]
+        if defn.get('parsers'):
+            parsers = [models.TextSearchParser(**p)
+                       for p in defn['parsers']]
+        if defn.get('templates'):
+            templates = [models.TextSearchTemplate(**t)
+                         for t in defn['templates']]
+        return models.TextSearch(
+            defn['schema'],
+            configurations=configs,
+            dictionaries=dicts,
+            parsers=parsers,
+            templates=templates)
 
     def _validate_dependencies(self) -> typing.NoReturn:
         LOGGER.debug('Validating dependencies')

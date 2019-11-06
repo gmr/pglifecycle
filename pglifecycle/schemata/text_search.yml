@@ -1,0 +1,166 @@
+---
+$schema: http://json-schema.org/schema#
+$id: https://pglifecycle.readthedocs.io/en/stable/schemata/text_search.html
+title: Text Search
+description: Defines all properties for text-search in a schema
+type: object
+properties:
+  schema:
+    title: Schema
+    description: The schema for the text search objects
+    type: string
+  sql:
+    title: SQL Statement
+    description: User-provided SQL for text-search
+    type: string
+  configurations:
+    title: Text Search Configurations
+    type: array
+    items:
+      title: Text Search Configuration
+      type: object
+      properties:
+        name:
+          title: Name
+          description: The name of the text search configuration to be created.
+          type: string
+        parser:
+          title: Parser
+          description: The name of the text search parser to use
+          type: string
+        source:
+          type: Source Config
+          description: The name of an existing text search configuration to copy.
+          type: string
+        comment:
+          title: Comment
+          type: string
+      required:
+        - name
+      additionalProperties: false
+      oneOf:
+        - required: [parser]
+          not: {required: [source]}
+        - required: [source]
+          not: {required: [parser]}
+  dictionaries:
+    title: Text Search Dictionary
+    type: array
+    items:
+      title: Text Search Dictionary
+      type: object
+      properties:
+        name:
+          title: Name
+          description: The name of the text search dictionary to be created.
+          type: string
+        template:
+          title: Template
+          description: >
+            The name of the text search template that will define the basic behavior
+            of this dictionary.
+          type: string
+        options:
+          type: Options
+          description: Template specific options
+          type: object
+          propertyNames:
+            pattern: ^[A-Za-z0-9_]*$
+        comment:
+          title: Comment
+          type: string
+      required:
+        - name
+        - template
+      additionalProperties: false
+  parsers:
+    title: Text Search Parsers
+    type: array
+    items:
+      title: Text Search Parser
+      type: object
+      properties:
+        name:
+          title: Name
+          description: The name of the text search parser to be created.
+          type: string
+        start_function:
+          title: Start Function
+          description: The name of the start function for the parser.
+          type: string
+        gettoken_function:
+          title: Get Token Function
+          description: The name of the get-next-token function for the parser.
+          type: string
+        end_function:
+          title: End Function
+          description: The name of the end function for the parser.
+          type: string
+        lextypes_function:
+          title: Lex-Types Function
+          description: >
+            The name of the lextypes function for the parser (a function that
+            returns information about the set of token types it produces).
+          type: string
+        headline_function:
+          title: Headline Function
+          description: >
+            The name of the headline function for the parser (a function that
+            summarizes a set of tokens).
+          type: string
+        comment:
+          title: Comment
+          type: string
+      required:
+        - name
+        - start_function
+        - gettoken_function
+        - end_function
+        - lextypes_function
+      additionalProperties: false
+  templates:
+    title: Text Search Templates
+    type: array
+    items:
+      type: object
+      title: Text Search Template
+      type: object
+      properties:
+        name:
+          title: Name
+          description: The name of the text search template to be created.
+          type: string
+        init_function:
+          title: Init Function
+          description: The name of the init function for the template.
+          type: string
+        lexize_function:
+          title: Lexize Function
+          description: The name of the lexize function for the template.
+          type: string
+        comment:
+          title: Comment
+          type: string
+      required:
+        - name
+        - lexize_function
+      additionalProperties: false
+additionalProperties: false
+required:
+  - schema
+oneOf:
+  - required: [sql]
+    not:
+      required:
+        - configurations
+        - dictionaries
+        - parsers
+        - templates
+  - required: [configurations]
+    not: {required: [sql]}
+  - required: [dictionaries]
+    not: {required: [sql]}
+  - required: [parsers]
+    not: {required: [sql]}
+  - required: [templates]
+    not: {required: [sql]}

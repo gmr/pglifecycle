@@ -1,0 +1,65 @@
+---
+$schema: http://json-schema.org/schema#
+$id: https://pglifecycle.readthedocs.io/en/stable/schemata/cast.html
+title: Cast
+description: Defines an cast
+type: object
+properties:
+  sql:
+    title: SQL Statement
+    description: User-provided raw SQL snippet
+    type: string
+  source_type:
+    title: Source Type
+    type: string
+  target_type:
+    title: Target Type
+    type: string
+  function:
+    title: Function
+    description: >
+      The function used to perform the cast. The function name can be
+      schema-qualified. If it is not, the function will be looked up in the
+      schema search path. The function's result data type must match the target
+      type of the cast. Its arguments are discussed below.
+    type: string
+  inout:
+    title: I/O Conversion
+    description: >
+      Indicates that the cast is an I/O conversion cast, performed by invoking
+      the output function of the source data type, and passing the resulting
+      string to the input function of the target data type.
+    type: boolean
+    default: false
+  assignment:
+    title: Assignment
+    description: >
+      Indicates that the cast can be invoked implicitly in assignment contexts.
+    type: boolean
+    default: false
+  implicit:
+    title: Implicit
+    description: Indicates that the cast can be invoked implicitly in any context.
+    type: boolean
+    default: false
+  comment:
+    title: Comment
+    description: An optional comment about the table
+    type: string
+  dependencies:
+    title: Dependencies
+    description: Database objects this object is dependent upon
+    $package_schema: dependencies
+additionalProperties: false
+oneOf:
+  - required: [sql]
+    not:
+      required:
+        - source_type
+        - target_type
+        - function
+        - inout
+        - assignment
+        - implicit
+  - required: [source_type, target_type]
+    not: {required: [sql]}

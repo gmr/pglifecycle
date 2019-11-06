@@ -53,6 +53,19 @@ class Argument:
 
 
 @dataclasses.dataclass
+class Cast:
+    """Represents an argument to a function"""
+    sql: typing.Optional[str] = None
+    source_type: typing.Optional[str] = None
+    target_type: typing.Optional[str] = None
+    function: typing.Optional[str] = None
+    inout: typing.Optional[bool] = None
+    assignment: typing.Optional[bool] = None
+    implicit: typing.Optional[bool] = None
+    comment: typing.Optional[str] = None
+
+
+@dataclasses.dataclass
 class Collation:
     """Represents a Collation"""
     name: str
@@ -434,6 +447,56 @@ class Tablespace:
 
 
 @dataclasses.dataclass
+class TextSearch:
+    """Represents a complex object for text search"""
+    schema: str
+    sql: typing.Optional[str] = None
+    configurations: typing.Optional[typing.List[TextSearchConfig]] = None
+    dictionaries: typing.Optional[typing.List[TextSearchDict]] = None
+    parsers: typing.Optional[typing.List[TextSearchParser]] = None
+    templates: typing.Optional[typing.List[TextSearchTemplate]] = None
+
+
+@dataclasses.dataclass
+class TextSearchConfig:
+    """Represents a configuration object for Text Search"""
+    name: str
+    parser: typing.Optional[str] = None
+    source: typing.Optional[str] = None
+    comment: typing.Optional[str] = None
+
+
+@dataclasses.dataclass
+class TextSearchDict:
+    """Represents a dictionary object for Text Search"""
+    name: str
+    template: str
+    options: typing.Optional[typing.Dict[str, str]] = None
+    comment: typing.Optional[str] = None
+
+
+@dataclasses.dataclass
+class TextSearchParser:
+    """Represents a parser object for Text Search"""
+    name: str
+    start_function: str
+    gettoken_function: str
+    end_function: str
+    lextypes_function: str
+    headline_function: typing.Optional[str] = None
+    comment: typing.Optional[str] = None
+
+
+@dataclasses.dataclass
+class TextSearchTemplate:
+    """Represents a template for Text Search"""
+    name: str
+    lexize_function: str
+    init_function: typing.Optional[str] = None
+    comment: typing.Optional[str] = None
+
+
+@dataclasses.dataclass
 class Trigger:
     """Table Triggers"""
     sql: typing.Optional[str] = None
@@ -506,6 +569,7 @@ class ViewOptions:
 
 MAPPINGS = {
     constants.AGGREGATE: Aggregate,
+    constants.CAST: Cast,
     constants.COLLATION: Collation,
     constants.CONVERSION: Conversion,
     constants.DOMAIN: Domain,
@@ -521,6 +585,7 @@ MAPPINGS = {
     constants.SERVER: Server,
     constants.TABLE: Table,
     constants.TABLESPACE: Tablespace,
+    constants.TEXT_SEARCH: TextSearch,
     constants.TYPE: Type,
     constants.VIEW: View
 }
