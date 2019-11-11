@@ -22,24 +22,13 @@ columns:
     data_type: UUID
     comment: Foreign Key to test.users
     nullable: false
-  - name: address1
-    data_type: TEXT
-    nullable: false
-  - name: address2
-    data_type: TEXT
-  - name: address3
-    data_type: TEXT
-  - name: locality
-    data_type: TEXT
-    nullable: false
-  - name: region
-    data_type: TEXT
-  - name: postal_code
-    data_type: TEXT
-    nullable: false
-  - name: country
-    data_type: TEXT
-    nullable: false
+  - {name: address1, data_type: TEXT, nullable: false}
+  - {name: address2, data_type: TEXT}
+  - {name: address3, data_type: TEXT}
+  - {name: locality, data_type: TEXT, nullable: false}
+  - {name: region, data_type: TEXT}
+  - {name: postal_code, data_type: TEXT, nullable: false}
+  - {name: country, data_type: TEXT, nullable: false}
 primary_key: id
 foreign_keys:
   - name: addresses_user_id

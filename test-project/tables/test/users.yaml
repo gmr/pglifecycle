@@ -14,41 +14,24 @@ columns:
     data_type: TIMESTAMP WITH TIME ZONE
     default: CURRENT_TIMESTAMP
     nullable: false
-  - name: last_modified_at
-    comment: When the record was last modified
-    data_type: TIMESTAMP WITH TIME ZONE
+  - name: last_modified_at,
+    comment: When the record was last modified,
+    data_type: TIMESTAMP WITH TIME ZONE,
     nullable: true
   - name: state
     comment: The current state of the user
     data_type: user_state
     nullable: false
     default: unverified
-  - name: email
-    data_type: email_address
-    nullable: false
-  - name: name
-    data_type: TEXT
-    nullable: false
-  - name: surname
-    data_type: TEXT
-    nullable: false
-  - name: display_name
-    data_type: TEXT
-  - name: locale
-    data_type: bcp47_locale
-    default: en-US
-    nullable: false
-  - name: password_salt
-    data_type: TEXT
-    nullable: false
-  - name: password
-    data_type: TEXT
-    nullable: false
-  - name: signup_ip
-    data_type: INET
-    nullable: false
-  - name: icon
-    data_type: oid
+  - {name: email, data_type: email_address, nullable: false}
+  - {name: name, data_type: TEXT, nullable: false}
+  - {name: surname, data_type: TEXT, nullable: false}
+  - {name: display_name, data_type: TEXT}
+  - {name: locale, data_type: bcp47_locale, default: en-US, nullable: false}
+  - {name: password_salt, data_type: TEXT, nullable: false}
+  - {name: password, data_type: TEXT, nullable: false}
+  - {name: signup_ip, data_type: INET, nullable: false}
+  - {name: icon, data_type: oid}
 primary_key: id
 indexes:
   - name: users_unique_email
