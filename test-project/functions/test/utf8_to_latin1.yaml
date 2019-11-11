@@ -1,0 +1,23 @@
+---
+schema: test
+name: utf8_to_latin1(integer, integer, cstring, internal, integer)
+language: plpython3u
+parameters:
+  - mode: IN
+    name: source_encoding_id
+    data_type: INTEGER
+  - mode: IN
+    name: destination_encoding_id
+    data_type: INTEGER
+  - mode: IN
+    name: source
+    data_type: CSTRING
+  - mode: IN
+    name: destination
+    data_type: INTERNAL
+  - mode: IN
+    name: source_length
+    data_type: INTEGER
+returns: TEXT
+definition: |
+  return source.encode('UTF8').decode('LATIN-1')

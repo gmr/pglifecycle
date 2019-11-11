@@ -1,0 +1,11 @@
+---
+name: postgres
+create: false
+options:
+  bypass_rls: false
+  create_db: true
+  create_role: true
+  inherit: true
+  login: true
+  replication: false
+  superuser: true

@@ -1,0 +1,33 @@
+---
+schema: test
+name: user_addresses
+columns:
+  - user_id
+  - email
+  - address1
+  - address2
+  - address3
+  - name: locality
+    comment: town, city, etc
+  - name: region
+    comment: region, state, province, etc
+  - postal_code
+  - country
+query: |
+  SELECT a.id AS user_id,
+         a.email,
+         b.address1,
+         b.address2,
+         b.address3,
+         b.locality,
+         b.region,
+         b.postal_code,
+         b.country
+    FROM test.users AS a
+    JOIN test.addresses AS b
+      ON b.user_id = a.id;
+tablespace: temp
+dependencies:
+  tables:
+    - test.addresses
+    - test.users

@@ -1,0 +1,9 @@
+---
+schema: test
+name: disable_alter_domain
+events:
+  - ddl_command_start
+filter:
+  tags:
+    - ALTER DOMAIN
+function: test.disable_alter_domain()

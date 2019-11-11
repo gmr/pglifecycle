@@ -12,7 +12,7 @@ properties:
     title: Conversions
     type: array
     items:
-      type: object
+      $package_schema: conversion
 required:
   - schema
   - conversions

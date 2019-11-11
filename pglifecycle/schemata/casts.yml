@@ -1,0 +1,19 @@
+---
+$schema: http://json-schema.org/schema#
+$id: https://pglifecycle.readthedocs.io/en/stable/schemata/casts.html
+title: Casts
+description: Specifies all user-defined casts in a schema
+type: object
+properties:
+  schema:
+    title: Schema
+    type: string
+  casts:
+    title: User-defined casts
+    type: array
+    items:
+      $package_schema: cast
+required:
+  - schema
+  - casts
+addtionalProperties: false

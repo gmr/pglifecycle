@@ -21,5 +21,4 @@ properties:
       list of argument specifications.
     type: string
 requires:
-  - name
   - data_type

@@ -1,0 +1,7 @@
+---
+schema: test
+conversions:
+  - name: myconv
+    encoding_from: UTF8
+    encoding_to: LATIN1
+    function: utf8_to_latin1

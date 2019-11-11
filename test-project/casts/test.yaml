@@ -1,0 +1,7 @@
+---
+schema: test
+casts:
+  - source_type: int4
+    target_type: timestamp
+    function: to_timestamp(int4)
+    assignment: true

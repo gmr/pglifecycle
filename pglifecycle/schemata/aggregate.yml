@@ -63,7 +63,7 @@ properties:
       regular (aggregated) arguments. This is mainly useful to allow correct
       resolution of the aggregate result type when a polymorphic aggregate is
       being defined.
-    type: bool
+    type: boolean
   finalfunc_modify:
     title: Final Function Modifies
     description: >
@@ -140,7 +140,7 @@ properties:
     description: Include extra dummy arguments
     type: boolean
   mfinalfunc_modify:
-    title:
+    title: Moving Averal Final Function Modifies
     description: >
       This option specifies whether the Moving Average final function is a pure
       function that does not modify its arguments. READ_ONLY indicates it does
@@ -186,9 +186,11 @@ properties:
     title: Dependencies
     description: Database objects this object is dependent upon
     $package_schema: dependencies
+required:
+  - schema
+  - name
 oneOf:
-  - required:
-      - sql
+  - required: [sql]
     not:
       required:
         - arguments
@@ -213,10 +215,5 @@ oneOf:
         - sort_operator
         - parallel
         - hypothetical
-  - required:
-      - arguments
-      - sfunc
-      - state_data_type
-    not:
-      required:
-        - sql
+  - required: [arguments, sfunc, state_data_type]
+    not: {required: [sql]}

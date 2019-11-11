@@ -7,5 +7,5 @@ type: object
 properties:
   name:
     title: Name
-    description: The index name
+    description: The constraint name
     type: string

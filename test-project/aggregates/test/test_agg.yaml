@@ -1,0 +1,10 @@
+---
+schema: test
+name: test_agg
+sfunc: test.test_agg
+arguments:
+  - data_type: integer
+state_data_type: integer
+dependencies:
+  functions:
+    - public.test_aggregate(integer[])

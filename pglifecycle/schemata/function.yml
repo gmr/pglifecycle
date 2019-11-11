@@ -23,31 +23,34 @@ properties:
     type: string
   parameters:
     title: Function Parameters
-    description: A dictionary of IN, OUT, BOTH, VARADIC, and TABLE args
-    type: object
-    properties:
-      mode:
-        title: Parameter Mode
-        type: string
-        enum: [IN, OUT, BOTH, VARADIC, TABLE]
-      name:
-        title: Parameter Name
-        type: string
-      data_type:
-        title: Parameter Data Type
-        type: string
-      default:
-        title: Default value for Paramter
-        oneOf:
-          - type: boolean
-          - type: integer
-          - type: "null"
-          - type: number
-          - type: string
-    additionalProperties: false
-    required:
-      - mode
-      - data_type
+    description: An array of IN, OUT, BOTH, VARADIC, and TABLE args
+    type: array
+    items:
+      title: Parameter
+      type: object
+      properties:
+        mode:
+          title: Parameter Mode
+          type: string
+          enum: [IN, OUT, BOTH, VARADIC, TABLE]
+        name:
+          title: Parameter Name
+          type: string
+        data_type:
+          title: Parameter Data Type
+          type: string
+        default:
+          title: Default value for Paramter
+          oneOf:
+            - type: boolean
+            - type: integer
+            - type: "null"
+            - type: number
+            - type: string
+      additionalProperties: false
+      required:
+        - mode
+        - data_type
   returns:
     title: Return Type
     description: The return type for the funciton

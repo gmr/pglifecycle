@@ -69,14 +69,16 @@ class Aggregate:
 @dataclasses.dataclass
 class Argument:
     """Represents an argument to a function"""
-    mode: str
-    name: str
     data_type: str
+    mode: str = 'IN'
+    name: typing.Optional[str] = None
 
 
 @dataclasses.dataclass
 class Cast:
     """Represents an argument to a function"""
+    schema: str
+    owner: str
     sql: typing.Optional[str] = None
     source_type: typing.Optional[str] = None
     target_type: typing.Optional[str] = None
@@ -167,11 +169,12 @@ class Domain:
 @dataclasses.dataclass
 class EventTrigger:
     """Represents an event trigger"""
+    name: str
+    schema: str
+    owner: str
     sql: typing.Optional[str] = None
-    name: typing.Optional[str] = None
-    event: typing.Optional[str] = None
-    filter_variable: typing.Optional[str] = None
-    filter_value: typing.Optional[str] = None
+    events: typing.Optional[typing.List[str]] = None
+    filter: typing.Optional[typing.Dict[str, typing.List[str]]] = None
     function: typing.Optional[str] = None
     comment: typing.Optional[str] = None
 
@@ -224,7 +227,7 @@ class Function:
     schema: str
     owner: str
     sql: typing.Optional[str] = None
-    paramters: typing.Optional[FunctionParameter] = None
+    parameters: typing.Optional[FunctionParameter] = None
     returns: typing.Optional[str] = None
     language: typing.Optional[str] = None
     transform_types: typing.Optional[typing.List[str]] = None

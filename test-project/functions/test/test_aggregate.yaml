@@ -1,0 +1,7 @@
+---
+schema: test
+name: test_aggregate(integer[])
+language: sql
+returns: INTEGER
+definition: |
+  SELECT array_agg($1);

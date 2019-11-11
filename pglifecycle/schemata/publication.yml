@@ -23,8 +23,6 @@ properties:
         tables (if any) are added. Optionally, * can be specified after the
         table name to explicitly indicate that descendant tables are included.
       type: string
-    description: The name of the publication to create
-    type: string
     minItems: 1
   all_tables:
     title: Replicate All Tables

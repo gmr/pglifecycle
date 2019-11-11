@@ -5,15 +5,22 @@ title: Cast
 description: Defines an cast
 type: object
 properties:
-  sql:
-    title: SQL Statement
-    description: User-provided raw SQL snippet
+  schema:
+    title: Schema
+    type: string
+  owner:
+    title: Owner
+    description: The role that owns the cast
     type: string
   source_type:
     title: Source Type
     type: string
   target_type:
     title: Target Type
+    type: string
+  sql:
+    title: SQL Statement
+    description: User-provided raw SQL snippet
     type: string
   function:
     title: Function
@@ -51,15 +58,33 @@ properties:
     description: Database objects this object is dependent upon
     $package_schema: dependencies
 additionalProperties: false
+required:
+  - source_type
+  - target_type
 oneOf:
   - required: [sql]
     not:
       required:
-        - source_type
-        - target_type
         - function
         - inout
         - assignment
         - implicit
-  - required: [source_type, target_type]
-    not: {required: [sql]}
+  - anyOf:
+    - required: [function]
+      not: {required: [sql, inout]}
+    - required: [function, assignment]
+      not: {required: [sql, inout]}
+    - required: [function, assignment, implicit]
+      not: {required: [sql, inout]}
+    - required: [inout]
+      not: {required: [sql, function]}
+    - required: [inout, assignment]
+      not: {required: [sql, function]}
+    - required: [inout, assignment, implicit]
+      not: {required: [sql, function]}
+    - required: [assignment]
+      not: {required: [sql]}
+    - required: [assignment, implicit]
+      not: {required: [sql]}
+    - required: [implicit]
+      not: {required: [sql]}

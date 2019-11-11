@@ -1,6 +1,11 @@
 ---
 schema: test
 types:
+  - name: address_type
+    type: enum
+    enum:
+      - billing
+      - delivery
   - name: user_state
     type: enum
     enum:
@@ -8,11 +13,6 @@ types:
       - suspended
       - unverified
       - verified
-  - name: address_type
-    type: enum
-    enum:
-      - billing
-      - delivery
   - name: compfoo
     type: composite
     columns:

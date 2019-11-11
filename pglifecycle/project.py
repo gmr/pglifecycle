@@ -44,7 +44,6 @@ class Project:
         const.TABLE,
         const.SEQUENCE,
         const.FUNCTION,
-        const.PROCEDURE,
         const.VIEW,
         const.MATERIALIZED_VIEW,
         const.CAST,
@@ -66,6 +65,7 @@ class Project:
 
     _OWNERLESS = [
         const.GROUP,
+        const.PUBLICATION,
         const.ROLE,
         const.TEXT_SEARCH,
         const.USER,
@@ -599,6 +599,9 @@ class Project:
 
     @staticmethod
     def _object_name(definition: dict, schemaless: bool = False):
+        if 'name' not in definition:
+            LOGGER.critical('name missing from definition: %r', definition)
+            raise RuntimeError('Missing object name')
         if schemaless or 'schema' not in definition:
             return definition['name']
         return '{}.{}'.format(definition['schema'], definition['name'])
@@ -647,7 +650,12 @@ class Project:
                     entry['owner'] = defn['owner']
                 if 'schema' not in entry:
                     entry['schema'] = defn['schema']
-                name = self._object_name(entry)
+                if obj_type == const.CAST:
+                    name = '{} AS {}'.format(
+                        defn.get('source_type', 'UNKNOWN'),
+                        defn.get('target_type', 'UNKNOWN'))
+                else:
+                    name = self._object_name(entry)
                 if not validation.validate_object(obj_type, name, entry):
                     self._load_errors += 1
                     continue

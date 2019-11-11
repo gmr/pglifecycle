@@ -18,6 +18,10 @@ properties:
     title: Owner
     description: The role that owns the collation function.
     type: string
+  sql:
+    title: SQL
+    description: Raw SQL for the object
+    type: string
   locale:
     title: Locale
     description: >
@@ -60,23 +64,35 @@ properties:
     description: Database objects this object is dependent upon
     $package_schema: dependencies
 requires:
+  - schema
   - name
-allOf:
-  - if:
-      properties:
-        copy_from:
-          type: string
-          minLength: 3
-    then:
+  - owner
+oneOf:
+  - required: [sql]
+    not:
       required:
         - copy_from
-      properties:
-        locale: {type: "null"}
-        lc_collate: {type: "null"}
-        lc_ctype: {type: "null"}
-        provider: {type: "null"}
-        deterministic: {type: "null"}
-        version: {type: "null"}
-    else:
-      properties:
-        copy_from:  {type: "null"}
+        - locale
+        - lc_collate
+        - lc_ctype
+        - provider
+        - deterministic
+        - version
+  - required: [copy_from]
+    not:
+      required:
+        - sql
+        - locale
+        - lc_collate
+        - lc_ctype
+        - provider
+        - deterministic
+        - version
+  - not: {required: [sql, copy_from]}
+    anyOf:
+      - {properties: {locale: {minLength: 1}}}
+      - {properties: {lc_collate: {minLength: 1}}}
+      - {properties: {lc_ctype: {minLength: 1}}}
+      - {properties: {provider: {minLength: 1}}}
+      - {properties: {deterministic: {enum: [true, false]}}}
+      - {properties: {version: {minLength: 1}}}

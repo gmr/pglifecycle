@@ -26,8 +26,11 @@ def validate_object(obj_type: str, name: str, data: dict) -> bool:
     try:
         jsonschema.validate(data, schema)
     except exceptions.ValidationError as error:
-        LOGGER.critical('Validation error for %s %s: %s',
-                        obj_type, name, error.message)
+        LOGGER.critical('Validation error for %s %s: %s for %r: %s',
+                        obj_type, name, error.message,
+                        error.path[0] if error.path
+                        else error.absolute_schema_path[0],
+                        error.instance)
         return False
     return True
 

@@ -12,7 +12,7 @@ properties:
     title: User-defined operators
     type: array
     items:
-      type: object
+      $package_schema: operator
 required:
   - schema
   - operators

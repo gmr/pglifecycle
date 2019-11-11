@@ -1,0 +1,54 @@
+---
+name: addresses
+schema: test
+owner: postgres
+comment: Generic contact addresses table
+columns:
+  - name: id
+    data_type: UUID
+    comment: The user ID
+    default: uuid_generate_v4()
+    nullable: false
+  - name: created_at
+    comment: When the record was created
+    data_type: TIMESTAMP WITH TIME ZONE
+    default: CURRENT_TIMESTAMP
+    nullable: false
+  - name: last_modified_at
+    comment: When the record was last modified
+    data_type: TIMESTAMP WITH TIME ZONE
+    nullable: true
+  - name: user_id
+    data_type: UUID
+    comment: Foreign Key to test.users
+    nullable: false
+  - name: address1
+    data_type: TEXT
+    nullable: false
+  - name: address2
+    data_type: TEXT
+  - name: address3
+    data_type: TEXT
+  - name: locality
+    data_type: TEXT
+    nullable: false
+  - name: region
+    data_type: TEXT
+  - name: postal_code
+    data_type: TEXT
+    nullable: false
+  - name: country
+    data_type: TEXT
+    nullable: false
+primary_key: id
+foreign_keys:
+  - name: addresses_user_id
+    columns: [user_id]
+    references:
+      name: test.users
+      columns: [id]
+    on_delete: CASCADE
+    on_update: CASCADE
+dependencies:
+  types:
+    - test.address_type

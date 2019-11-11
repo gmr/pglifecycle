@@ -5,6 +5,13 @@ title: Event Trigger
 description: Defines an Event Trigger
 type: object
 properties:
+  schema:
+    title: Schema
+    type: string
+  owner:
+    title: Owner
+    description: The role that owns the cast
+    type: string
   sql:
     title: SQL Statement
     description: User-provided raw SQL snippet
@@ -13,24 +20,28 @@ properties:
     title: Name
     description: The event trigger name
     type: string
-  event:
-    title: The event that cause the fire to trigger
+  events:
+    title: The events that cause the fire to trigger
     type: array
     items:
       enum: [ddl_command_start, ddl_command_end, table_rewrite, sql_drop]
-  filter_variable:
-    title: Filter Variable
+  filter:
+    title: Filter
     description: >
       The name of a variable used to filter events. This makes it possible to
       restrict the firing of the trigger to a subset of the cases in which it
-      is supported. Currently the only supported filter_variable is TAG.
-    enum: [TAG]
-  filter_value:
-    title: Fitler Value
-    description: >
-      A list of values for the associated filter_variable for which the trigger should fire. For TAG, this means a list
-      of command tags (e.g. 'DROP FUNCTION').
-    type: string
+      is supported.
+    type: object
+    properties:
+      tags:
+        title: Tag Values
+        description: A list of tag values to filter on (e.g. 'DROP FUNCTION').
+        type: array
+        items:
+          title: Tag
+          type: string
+    required: [tags]
+    additionalProperties: false
   function:
     title: Trigger Function
     description: The trigger function to execute
@@ -50,8 +61,7 @@ oneOf:
       required:
         - name
         - event
-        - filter_variable
-        - filter_value
+        - filter
         - function
-  - required: [name, event, function]
+  - required: [name, events, function]
     not: {required: [sql]}

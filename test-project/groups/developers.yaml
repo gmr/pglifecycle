@@ -1,0 +1,11 @@
+---
+name: developers
+grants:
+  tables:
+    public.empty_table:
+      - SELECT
+      - INSERT
+      - DELETE
+      - UPDATE
+options:
+  inherit: true

@@ -7,15 +7,19 @@ type: object
 properties:
   name:
     title: Name
-    description: The name of the collation function to create.
+    description: The name of the conversion
     type: string
   schema:
     title: Schema
-    description: The schema to create the collation function in.
+    description: The schema for the conversion
     type: string
   owner:
     title: Owner
-    description: The role that owns the collation function.
+    description: The role that owns the conversion
+    type: string
+  sql:
+    title: SQL Statement
+    description: User-provided raw SQL snippet
     type: string
   default:
     title: Default
@@ -47,6 +51,16 @@ properties:
 requires:
   - name
   - schema
-  - encoding_from
-  - encoding_to
-  - function
+oneOf:
+  - required: [sql]
+    not:
+      required:
+        - default
+        - encoding_from
+        - encoding_to
+        - function
+  - anyOf:
+    - required: [encoding_from, encoding_to, function]
+      not: {required: [sql]}
+    - required: [default, encoding_from, encoding_to, function]
+      not: {required: [sql]}

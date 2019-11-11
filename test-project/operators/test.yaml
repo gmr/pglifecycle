@@ -1,0 +1,14 @@
+---
+operators:
+  - schema: test
+    name: "==="
+    function: area_equal_procedure
+    left_arg: box
+    right_arg: box
+    commutator: "==="
+    negator: "!=="
+    restrict: area_restriction_procedure
+    join: area_join_procedure
+    hashes: true
+    merges: true
+    comment: Ripped directly from Postgres docs - should not work
