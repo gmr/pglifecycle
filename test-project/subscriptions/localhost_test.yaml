@@ -1,0 +1,15 @@
+---
+name: localhost_test
+connection: host=localhost port=5432 dbname=logical_replication user=postgres
+publications:
+  - all_tables
+parameters:
+  copy_data: true
+  create_slot: true
+  enabled: true
+  synchronous_commit: on
+  connect: true
+comment: |
+  Test logical replication subscription that requires a local database
+  setup with the name `logical_replication` and a publication named
+  `all_tables`.

@@ -67,6 +67,8 @@ class Project:
         const.GROUP,
         const.PUBLICATION,
         const.ROLE,
+        const.SERVER,
+        const.SUBSCRIPTION,
         const.TEXT_SEARCH,
         const.USER,
         const.USER_MAPPING
@@ -74,10 +76,10 @@ class Project:
 
     _SCHEMALESS = [
         const.GROUP,
+        const.PUBLICATION,
         const.ROLE,
         const.SCHEMA,
         const.SERVER,
-        const.PUBLICATION,
         const.SUBSCRIPTION,
         const.TABLESPACE,
         const.USER,
@@ -678,6 +680,8 @@ class Project:
             self._inv[const.EXTENSION][name] = \
                 models.Extension(**extension)
         for fdw in project.get('foreign_data_wrappers'):
+            if 'owner' not in fdw:
+                fdw['owner'] = self.superuser
             self._inv[const.FOREIGN_DATA_WRAPPER][fdw['name']] = \
                 models.ForeignDataWrapper(**fdw)
         for language in project.get('languages'):

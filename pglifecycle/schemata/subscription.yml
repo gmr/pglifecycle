@@ -21,7 +21,7 @@ properties:
     items:
       type: string
     minItems: 1
-  paramters:
+  parameters:
     title: Subscription Parameters
     type: object
     properties:

@@ -1,0 +1,4 @@
+id,created_at,last_modified_at,value
+1,2019-11-11 11:11:11Z,\N,foo
+2,2019-11-11 11:11:12Z,\N,bar
+3,2019-11-11 11:11:13Z,\N,baz

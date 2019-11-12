@@ -10,9 +10,8 @@ extensions:
   - name: uuid-ossp
     schema: public
 foreign_data_wrappers:
-  - name: postgresql
-    owner: postgres
-    validator: postgresql_fdw_validator
+  - name: file
+    handler: file_fdw_handler
 languages:
   - name: plpython3u
     replace: true

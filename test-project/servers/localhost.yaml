@@ -1,0 +1,11 @@
+---
+name: localhost
+foreign_data_wrapper: postgres_fdw
+options:
+  host: localhost
+  port: 5432
+  user: fdw_user
+  dbname: postgres
+dependencies:
+  extensions:
+    - postgres_fdw

@@ -1,0 +1,6 @@
+---
+name: postgres
+servers:
+  - name: localhost
+    options:
+      user: fdw_user

@@ -1,0 +1,23 @@
+---
+schema: test
+name: user_addresses
+query: |
+  SELECT id,
+         created_at,
+         last_modified_at,
+         state,
+         email,
+         name,
+         surname,
+         display_name,
+         locale,
+         password_salt,
+         password,
+         signup_ip,
+         icon
+    FROM test.users
+   WHERE id IN (SELECT DISTINCT id FROM test.addresses WHERE country = 'US';
+dependencies:
+  tables:
+    - test.addresses
+    - test.users

@@ -437,7 +437,6 @@ class Sequence:
 class Server:
     """Represents a server"""
     name: str
-    owner: str
     foreign_data_wrapper: str
     type: typing.Optional[str] = None
     version: typing.Optional[str] = None
@@ -450,7 +449,7 @@ class Subscription:
     """Represents a logical replication subscription"""
     name: str
     connection: str
-    publication: str
+    publications: typing.List[str]
     parameters: typing.Optional[typing.Dict[str, typing.List[str]]] = None
     comment: typing.Optional[str] = None
 
@@ -639,7 +638,13 @@ class User:
 class UserMapping:
     """Represents a user mapping"""
     name: str
-    server: str
+    servers: typing.List[UserMappingServer]
+
+
+@dataclasses.dataclass
+class UserMappingServer:
+    """Represents a server for a user mapping"""
+    name: str
     options: typing.Optional[typing.Dict[str, typing.Any]] = None
 
 

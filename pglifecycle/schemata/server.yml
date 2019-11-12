@@ -12,11 +12,6 @@ properties:
     description: >
       The name of the server to be created.
     type: string
-  owner:
-    title: Owner
-    description: >
-      The role name of the superuser who owns the server.
-    type: string
   foreign_data_wrapper:
     title: Foreign Data Wrapper Name
     description: The name of the foreign-data wrapper that manages the server.
@@ -47,6 +42,7 @@ properties:
     description: Database objects this object is dependent upon
     $package_schema: dependencies
 required:
+  - name
   - dependencies
   - foreign_data_wrapper
 additionalProperties: false

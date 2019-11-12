@@ -9,24 +9,35 @@ description: >
 type: object
 properties:
   name:
-    title: User Name
-    description: The name of an existing user that is mapped to foreign server.
+    title: Role Name
+    description: The name of a local role that is mapped to foreign server.
     type: string
-  server:
-    title: Server
-    description: The name of an existing server for which the user mapping is to be created.
-    type: string
-  options:
-    title: Options
-    description: >
-      This clause specifies the options of the user mapping. The options
-      typically define the actual user name and password of the mapping. Option
-      names must be unique. The allowed option names and values are specific to
-      the server's foreign-data wrapper.
-    type: object
-    propertyNames:
-      pattern: ^[A-Za-z_][A-Za-z0-9_\.]*$
+  servers:
+    title: Servers
+    description: Array of server and options for the user
+    type: array
+    items:
+      type: object
+      properties:
+        name:
+          title: Server Name
+          description: The name of an existing server for which the user mapping is to be created.
+          type: string
+        options:
+          title: Options
+          description: >
+            This clause specifies the options of the user mapping. The options
+            typically define the actual user name and password of the mapping. Option
+            names must be unique. The allowed option names and values are specific to
+            the server's foreign-data wrapper.
+          type: object
+          propertyNames:
+            pattern: ^[A-Za-z_][A-Za-z0-9_\.]*$
+      required:
+        - name
+      additionalProperties: false
+    minItems: 1
 required:
   - name
-  - server
+  - servers
 additionalProperties: false

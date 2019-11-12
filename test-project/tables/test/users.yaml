@@ -40,7 +40,7 @@ indexes:
     unique: true
 dependencies:
   domains:
+    - test.bcp47_locale
     - test.email_address
   types:
-    - test.bcp47_locale
     - test.user_state

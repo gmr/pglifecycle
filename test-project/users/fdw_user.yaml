@@ -1,0 +1,9 @@
+---
+name: fwd_user
+options:
+  bypass_rls: false
+  create_db: false
+  create_role: false
+  inherit: true
+  replication: false
+  superuser: false

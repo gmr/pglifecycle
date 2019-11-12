@@ -1,6 +1,6 @@
 ---
 name: email_address
-schema: public
+schema: test
 owner: postgres
 data_type: citext
 check_constraints:

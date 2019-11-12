@@ -396,6 +396,25 @@ properties:
       with a UNIQUE, PRIMARY KEY, or EXCLUDE constraint will be created. If not
       specified, default_tablespace is consulted.
     type: string
+  server:
+    title: Foreign Server
+    description: Used to specify the server if this is a foreign table
+    type: string
+  options:
+    title: Foreign Table Options
+    description: Used to specify the details of the foreign table
+    type: object
+    properties:
+      schema:
+        title: Foreign Schema Name
+        type: string
+      name:
+        title: Foreign Table Name
+        type: string
+    required:
+      - schema
+      - name
+    additionalProperties: false
   comment:
     title: Comment
     description: An optional comment about the table
@@ -410,21 +429,11 @@ required:
   - schema
   - name
 oneOf:
-  - required:
-      - parents
-    not:
-      required:
-        - columns
-        - sql
-  - required:
-      - sql
-    not:
-      required:
-        - columns
-        - parents
-  - required:
-      - columns
-    not:
-      required:
-        - parents
-        - sql
+  - required: [parents]
+    not: {required: [columns, sql, server, options]}
+  - required: [sql]
+    not: {required: [columns, parents, server, options]}
+  - required: [columns]
+    not: {required: [ parents, sql]}
+  - required: [columns, server, options]
+    not: {required: [ parents, sql]}
