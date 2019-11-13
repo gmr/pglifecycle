@@ -40,6 +40,10 @@ properties:
               type: string
           required:
             - name
+  table_access_method:
+    title: Table Access Method
+    description: Define the table access method
+    type: string
   storage_parameters:
     title: Storage Parameters
     description: Storage parameter settings for the materialized view.

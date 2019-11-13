@@ -21,3 +21,4 @@ dependencies:
   tables:
     - test.addresses
     - test.users
+comment: This is a test view

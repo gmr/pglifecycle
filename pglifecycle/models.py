@@ -343,6 +343,7 @@ class MaterializedView:
     owner: str
     sql: typing.Optional[str] = None
     columns: typing.Optional[typing.List[str]] = None
+    table_access_method: typing.Optional[str] = None
     storage_parameters: typing.Optional[typing.Dict[str, str]] = None
     tablespace: typing.Optional[str] = None
     query: typing.Optional[str] = None
@@ -675,17 +676,18 @@ class View:
     owner: str
     sql: typing.Optional[str] = None
     recursive: typing.Optional[bool] = None
-    columns: typing.Optional[typing.List[str]] = None
-    options: typing.Optional[ViewOptions] = None
+    columns: typing.Optional[typing.List[typing.Union[ViewColumn, str]]] = None
+    check_option: typing.Optional[str] = None
+    security_barrier: typing.Optional[bool] = None
     query: typing.Optional[str] = None
     comment: typing.Optional[str] = None
 
 
 @dataclasses.dataclass
-class ViewOptions:
-    """Represents view options"""
-    check_option: typing.Optional[str] = None
-    security_barrier: typing.Optional[bool] = None
+class ViewColumn:
+    """Represents a column in a view or materialized view"""
+    name: str
+    comment: typing.Optional[str] = None
 
 
 MAPPINGS = {

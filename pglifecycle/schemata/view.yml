@@ -44,39 +44,33 @@ properties:
               type: string
           required:
             - name
-  options:
-    title: View Options
-    description: >
-      This clause specifies optional parameters for a view
-    type: object
-    properties:
-      check_option:
-        title: Check Option
-        description: |
-          This option controls the behavior of automatically updatable views.
-          When this option is specified, INSERT and UPDATE commands on the
-          view will be checked to ensure that new rows satisfy the view-defining
-          condition (that is, the new rows are checked to ensure that they are
-          visible through the view). If they are not, the update will be
-          rejected. If the CHECK OPTION is not specified, INSERT and UPDATE
-          commands on the view are allowed to create rows that are not visible
-          through the view.
+  check_option:
+    title: Check Option
+    description: |
+      This option controls the behavior of automatically updatable views.
+      When this option is specified, INSERT and UPDATE commands on the
+      view will be checked to ensure that new rows satisfy the view-defining
+      condition (that is, the new rows are checked to ensure that they are
+      visible through the view). If they are not, the update will be
+      rejected. If the CHECK OPTION is not specified, INSERT and UPDATE
+      commands on the view are allowed to create rows that are not visible
+      through the view.
 
-          When it is set to LOCAL, new rows are only checked against the
-          conditions defined directly in the view itself. Any conditions defined
-          on underlying base views are not checked (unless they also specify
-          the CHECK OPTION).
+      When it is set to LOCAL, new rows are only checked against the
+      conditions defined directly in the view itself. Any conditions defined
+      on underlying base views are not checked (unless they also specify
+      the CHECK OPTION).
 
-          When it is set to CASCADED, new rows are checked against the conditions
-          of the view and all underlying base views. If the CHECK OPTION is
-          specified, and neither LOCAL nor CASCADED is specified, then CASCADED
-          is assumed.
-        enum: [LOCAL, CASCADED]
-      security_barrier:
-        title: Security Barrier
-        description: |
-          This should be used if the view is intended to provide row-level security.
-        type: boolean
+      When it is set to CASCADED, new rows are checked against the conditions
+      of the view and all underlying base views. If the CHECK OPTION is
+      specified, and neither LOCAL nor CASCADED is specified, then CASCADED
+      is assumed.
+    enum: [LOCAL, CASCADED]
+  security_barrier:
+    title: Security Barrier
+    description: |
+      This should be used if the view is intended to provide row-level security.
+    type: boolean
   query:
     title: Query
     description: |

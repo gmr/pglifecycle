@@ -131,6 +131,8 @@ class Project:
         self._dump_tables()
         self._dump_sequences()
         self._dump_functions()
+        self._dump_views()
+        self._dump_materialized_views()
 
         self._dump.save(path)
         LOGGER.info('Build artifact saved with %i entries',
@@ -693,6 +695,47 @@ class Project:
                 owner=self.superuser,
                 defn='{};\n'.format(' '.join(sql)))
 
+    def _dump_materialized_views(self) -> typing.NoReturn:
+        for name in self._inv[const.MATERIALIZED_VIEW]:
+            view = self._inv[const.MATERIALIZED_VIEW][name]
+            if view.sql:
+                sql = [view.sql]
+            else:
+                sql = ['CREATE MATERIALIZED VIEW',
+                       utils.quote_ident(view.name)]
+                if view.columns:
+                    columns = []
+                    for column in view.columns:
+                        columns.append(column.name)
+                        if column.comment:
+                            self._add_comment_to_dump(
+                                const.COLUMN, view.schema,
+                                '{}.{}'.format(view.name, column.name),
+                                view.owner, None, column.comment)
+                    sql.append('({})'.format(', '.join(columns)))
+                if view.table_access_method:
+                    sql.append('USING')
+                    sql.append(view.table_access_method)
+                if view.storage_parameters:
+                    sql.append('WITH')
+                    params = []
+                    for key, value in view.storage_parameters.items():
+                        params.append('{} = {}'.format(key, value))
+                    sql.append(', '.join(params))
+                if view.tablespace:
+                    sql.append('TABLESPACE')
+                    sql.append(view.tablespace)
+                sql.append('AS')
+                sql.append(view.query)
+            self._dump.add_entry(
+                desc=const.MATERIALIZED_VIEW, namespace=view.schema,
+                tag=view.name, owner=view.owner,
+                defn='{};\n'.format(' '.join(sql)))
+            if view.comment:
+                self._add_comment_to_dump(
+                    const.MATERIALIZED_VIEW, view.schema, view.name,
+                    view.owner, None, view.comment)
+
     def _dump_operators(self) -> typing.NoReturn:
         for name in self._inv[const.OPERATOR]:
             if self._inv[const.OPERATOR][name].sql:
@@ -797,35 +840,6 @@ class Project:
                     self._inv[const.SEQUENCE][name].owner, None,
                     self._inv[const.SEQUENCE][name].comment)
 
-    def _dump_tables(self) -> typing.NoReturn:
-        for name in self._inv[const.TABLE]:
-            self._dump_table(name)
-
-    def _dump_tablespaces(self) -> typing.NoReturn:
-        for name in self._inv[const.TABLESPACE]:
-            sql = ['CREATE TABLESPACE',
-                   utils.quote_ident(self._inv[const.TABLESPACE][name].name),
-                   'OWNER',
-                   self._inv[const.TABLESPACE][name].owner,
-                   'LOCATION',
-                   self._inv[const.TABLESPACE][name].location]
-            if self._inv[const.TABLESPACE][name].options:
-                options = []
-                for k, v in self._inv[const.TABLESPACE][name].options.items():
-                    options.append('{}={}'.format(k, utils.postgres_value(v)))
-                sql.append('WITH ({})'.format(','.join(options)))
-            self._dump.add_entry(
-                desc=const.TABLESPACE,
-                tag=self._inv[const.TABLESPACE][name].name,
-                owner=self._inv[const.TABLESPACE][name].owner,
-                defn='{};\n'.format(' '.join(sql)))
-            if self._inv[const.TABLESPACE][name].comment:
-                self._add_comment_to_dump(
-                    const.TABLESPACE, None,
-                    self._inv[const.TABLESPACE][name].name,
-                    self._inv[const.TABLESPACE][name].owner, None,
-                    self._inv[const.TABLESPACE][name].comment)
-
     def _dump_table(self, name):
         table = self._inv[const.TABLE][name]
         if table.sql:
@@ -876,7 +890,7 @@ class Project:
                             self._add_comment_to_dump(
                                 const.COLUMN, table.schema,
                                 '{}.{}'.format(table.name, col.name),
-                                table.owner, name, col.comment)
+                                table.owner, None, col.comment)
                 for item in table.unique_constraints or []:
                     inner_sql.append(
                         self._format_sql_constraint('UNIQUE', item))
@@ -971,6 +985,35 @@ class Project:
             self._add_comment_to_dump(
                 const.TRIGGER, schema, trigger.name, owner,
                 parent, trigger.comment)
+
+    def _dump_tables(self) -> typing.NoReturn:
+        for name in self._inv[const.TABLE]:
+            self._dump_table(name)
+
+    def _dump_tablespaces(self) -> typing.NoReturn:
+        for name in self._inv[const.TABLESPACE]:
+            sql = ['CREATE TABLESPACE',
+                   utils.quote_ident(self._inv[const.TABLESPACE][name].name),
+                   'OWNER',
+                   self._inv[const.TABLESPACE][name].owner,
+                   'LOCATION',
+                   self._inv[const.TABLESPACE][name].location]
+            if self._inv[const.TABLESPACE][name].options:
+                options = []
+                for k, v in self._inv[const.TABLESPACE][name].options.items():
+                    options.append('{}={}'.format(k, utils.postgres_value(v)))
+                sql.append('WITH ({})'.format(','.join(options)))
+            self._dump.add_entry(
+                desc=const.TABLESPACE,
+                tag=self._inv[const.TABLESPACE][name].name,
+                owner=self._inv[const.TABLESPACE][name].owner,
+                defn='{};\n'.format(' '.join(sql)))
+            if self._inv[const.TABLESPACE][name].comment:
+                self._add_comment_to_dump(
+                    const.TABLESPACE, None,
+                    self._inv[const.TABLESPACE][name].name,
+                    self._inv[const.TABLESPACE][name].owner, None,
+                    self._inv[const.TABLESPACE][name].comment)
 
     def _dump_types(self) -> typing.NoReturn:
         for name in self._inv[const.TYPE]:
@@ -1081,6 +1124,44 @@ class Project:
                     self._inv[const.TYPE][name].owner, None,
                     self._inv[const.TYPE][name].comment)
 
+    def _dump_views(self) -> typing.NoReturn:
+        for name in self._inv[const.VIEW]:
+            view = self._inv[const.VIEW][name]
+            if view.sql:
+                sql = [view.sql]
+            else:
+                sql = ['CREATE RECURSIVE VIEW' if view.recursive else
+                       'CREATE VIEW', utils.quote_ident(view.name)]
+                if view.columns:
+                    columns = []
+                    for column in view.columns:
+                        columns.append(column.name)
+                        if column.comment:
+                            self._add_comment_to_dump(
+                                const.COLUMN, view.schema,
+                                '{}.{}'.format(view.name, column.name),
+                                view.owner, None, column.comment)
+                    sql.append('({})'.format(', '.join(columns)))
+                if view.check_option:
+                    sql.append('WITH check_option = ')
+                    sql.append(view.check_option)
+                if view.security_barrier:
+                    sql.append('WITH security_barrier = ')
+                    sql.append(view.security_barrier)
+                sql.append('AS')
+                sql.append(view.query)
+                if view.check_option:
+                    sql.append('WITH')
+                    sql.append(view.check_option)
+                    sql.append('CHECK OPTION')
+            self._dump.add_entry(
+                desc=const.VIEW, namespace=view.schema, tag=view.name,
+                owner=view.owner, defn='{};\n'.format(' '.join(sql)))
+            if view.comment:
+                self._add_comment_to_dump(
+                    const.VIEW, view.schema, view.name, view.owner, None,
+                    view.comment)
+
     @staticmethod
     def _format_sql_constraint(constraint_type: str,
                                constraint: models.ConstraintColumns) -> str:
@@ -1153,8 +1234,14 @@ class Project:
                 self._inv[obj_type][name] = model(**defn)
             elif obj_type == const.FUNCTION and defn.get('parameters'):
                 defn['parameters'] = [
-                    models.FunctionParameter(**p)
-                    for p in defn['parameters']]
+                    models.FunctionParameter(**p) for p in defn['parameters']]
+                self._inv[obj_type][name] = model(**defn)
+            elif obj_type in {const.MATERIALIZED_VIEW,
+                              const.VIEW} and defn.get('columns'):
+                defn['columns'] = [
+                    models.ViewColumn(c) if isinstance(c, str) else
+                    models.ViewColumn(**c)
+                    for c in defn['columns']]
                 self._inv[obj_type][name] = model(**defn)
             elif obj_type == const.TABLE:
                 self._inv[obj_type][name] = self._build_table_definition(defn)
