@@ -9,10 +9,6 @@ properties:
     title: Schema
     description: The schema for the text search objects
     type: string
-  sql:
-    title: SQL Statement
-    description: User-provided SQL for text-search
-    type: string
   configurations:
     title: Text Search Configurations
     type: array
@@ -23,6 +19,10 @@ properties:
         name:
           title: Name
           description: The name of the text search configuration to be created.
+          type: string
+        sql:
+          title: SQL Statement
+          description: User-provided SQL
           type: string
         parser:
           title: Parser
@@ -39,10 +39,12 @@ properties:
         - name
       additionalProperties: false
       oneOf:
+        - required: [sql]
+          not: {required: [parser, source]}
         - required: [parser]
-          not: {required: [source]}
+          not: {required: [source, sql]}
         - required: [source]
-          not: {required: [parser]}
+          not: {required: [parser, sql]}
   dictionaries:
     title: Text Search Dictionary
     type: array
@@ -53,6 +55,10 @@ properties:
         name:
           title: Name
           description: The name of the text search dictionary to be created.
+          type: string
+        sql:
+          title: SQL Statement
+          description: User-provided SQL
           type: string
         template:
           title: Template
@@ -71,7 +77,11 @@ properties:
           type: string
       required:
         - name
-        - template
+      oneOf:
+        - required: [sql]
+          not: {required: [template, options]}
+        - required: [template]
+          not: {required: [sql]}
       additionalProperties: false
   parsers:
     title: Text Search Parsers
@@ -83,6 +93,10 @@ properties:
         name:
           title: Name
           description: The name of the text search parser to be created.
+          type: string
+        sql:
+          title: SQL Statement
+          description: User-provided SQL
           type: string
         start_function:
           title: Start Function
@@ -113,10 +127,11 @@ properties:
           type: string
       required:
         - name
-        - start_function
-        - gettoken_function
-        - end_function
-        - lextypes_function
+      oneOf:
+        - required: [sql]
+          not: {required: [start_function, gettoken_function, end_function, lextypes_function]}
+        - required: [start_function, gettoken_function, end_function, lextypes_function]
+          not: {required: [sql]}
       additionalProperties: false
   templates:
     title: Text Search Templates
@@ -128,6 +143,10 @@ properties:
         name:
           title: Name
           description: The name of the text search template to be created.
+          type: string
+        sql:
+          title: SQL Statement
+          description: User-provided SQL
           type: string
         init_function:
           title: Init Function
@@ -142,19 +161,12 @@ properties:
           type: string
       required:
         - name
-        - lexize_function
+      oneOf:
+        - required: [sql]
+          not: {required: [lexize_function, init_function]}
+        - required: [lexize_function]
+          not: {required: [sql]}
       additionalProperties: false
 additionalProperties: false
 required:
   - schema
-allOf:
-  - if: {required: [sql]}
-    then: {not: {required: [configurations, dictionaries, parsers, templates]}}
-  - if: {configurations: {minItems: 1}}
-    then: {not: {required: [sql]}}
-  - if: {dictionaries: {minItems: 1}}
-    then: {not: {required: [sql]}}
-  - if: {parsers: {minItems: 1}}
-    then: {not: {required: [sql]}}
-  - if: {templates: {minItems: 1}}
-    then: {not: {required: [sql]}}

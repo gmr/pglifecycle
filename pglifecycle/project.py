@@ -134,6 +134,8 @@ class Project:
         self._dump_views()
         self._dump_materialized_views()
         self._dump_casts()
+        self._dump_text_search()
+        self._dump_servers()
 
         self._dump.save(path)
         LOGGER.info('Build artifact saved with %i entries',
@@ -867,6 +869,31 @@ class Project:
                     self._inv[const.SEQUENCE][name].owner, None,
                     self._inv[const.SEQUENCE][name].comment)
 
+    def _dump_servers(self) -> typing.NoReturn:
+        for name in self._inv[const.SERVER]:
+            server = self._inv[const.SERVER][name]
+            sql = ['CREATE SERVER', server.name]
+            if server.type:
+                sql.append('TYPE')
+                sql.append(utils.postgres_value(server.type))
+            if server.version:
+                sql.append('VERSION')
+                sql.append(utils.postgres_value(server.version))
+            sql.append('FOREIGN DATA WRAPPER')
+            sql.append(server.foreign_data_wrapper)
+            if server.options:
+                options = []
+                for k, v in server.options.items():
+                    options.append('{} {}'.format(k, utils.postgres_value(v)))
+                sql.append('OPTIONS {}'.format(', '.join(options)))
+            self._dump.add_entry(
+                desc=const.SERVER, tag=server.name,
+                owner=self.superuser, defn='{};\n'.format(' '.join(sql)))
+            if server.comment:
+                self._add_comment_to_dump(
+                    const.SERVER, None, server.name, self.superuser, None,
+                    server.comment)
+
     def _dump_table(self, name):
         table = self._inv[const.TABLE][name]
         if table.sql:
@@ -1041,6 +1068,100 @@ class Project:
                     self._inv[const.TABLESPACE][name].name,
                     self._inv[const.TABLESPACE][name].owner, None,
                     self._inv[const.TABLESPACE][name].comment)
+
+    def _dump_text_search(self) -> typing.NoReturn:
+        for schema in self._inv[const.TEXT_SEARCH]:
+            ts = self._inv[const.TEXT_SEARCH][schema]
+            for config in ts.configurations or []:
+                if config.sql:
+                    sql = [config.sql]
+                else:
+                    if config.parser:
+                        value = ['PARSER', '=', config.parser]
+                    elif config.source:
+                        value = ['SOURCE', '=', config.source]
+                    else:
+                        raise RuntimeError
+                    sql = ['CREATE', const.TEXT_SEARCH_CONFIGURATION,
+                           config.name, '({})'.format(value)]
+                self._dump.add_entry(
+                    desc=const.TEXT_SEARCH_CONFIGURATION,
+                    namespace=schema, tag=config.name,
+                    owner=self.superuser,
+                    defn='{};\n'.format(' '.join(sql)))
+                if config.comment:
+                    self._add_comment_to_dump(
+                        const.TEXT_SEARCH_CONFIGURATION, schema,
+                        config.name, self.superuser, None, config.comment)
+            for dictionary in ts.dictionaries or []:
+                if dictionary.sql:
+                    sql = [dictionary.sql]
+                else:
+                    value = [' '.join(
+                        ['TEMPLATE', '=', dictionary.template])]
+                    if dictionary.options:
+                        for k, v in dictionary.options.items():
+                            value.append('{} = {}'.format(
+                                k, utils.postgres_value(v)))
+                    sql = ['CREATE', const.TEXT_SEARCH_DICTIONARY,
+                           dictionary.name, '({})'.format(', '.join(value))]
+                self._dump.add_entry(
+                    desc=const.TEXT_SEARCH_DICTIONARY,
+                    namespace=schema, tag=dictionary.name,
+                    owner=self.superuser,
+                    defn='{};\n'.format(' '.join(sql)))
+                if dictionary.comment:
+                    self._add_comment_to_dump(
+                        const.TEXT_SEARCH_DICTIONARY, schema,
+                        dictionary.name, self.superuser, None,
+                        dictionary.comment)
+            for parser in ts.parsers or []:
+                if parser.sql:
+                    sql = [parser.sql]
+                else:
+                    value = [' '.join(['START', '=', parser.start_function]),
+                             ' '.join(
+                                 ['GETTOKEN', '=', parser.gettoken_function]),
+                             ' '.join(['END', '=', parser.end_function]),
+                             ' '.join(
+                                 ['LEXTYPES', '=', parser.lextypes_function])]
+                    if parser.headline_function:
+                        value.append(' '.join(
+                            ['HEADLINE', '=', parser.headline_function]))
+                    sql = ['CREATE', const.TEXT_SEARCH_PARSER,
+                           parser.name, '({})'.format(', '.join(value))]
+                self._dump.add_entry(
+                    desc=const.TEXT_SEARCH_PARSER,
+                    namespace=schema, tag=parser.name,
+                    owner=self.superuser,
+                    defn='{};\n'.format(' '.join(sql)))
+                if parser.comment:
+                    self._add_comment_to_dump(
+                        const.TEXT_SEARCH_PARSER, schema,
+                        parser.name, self.superuser, None,
+                        parser.comment)
+            for template in ts.templates or []:
+                if template.sql:
+                    sql = [template.sql]
+                else:
+                    value = []
+                    if template.init_function:
+                        value.append(' '.join(
+                            ['INIT', '=', template.init_function]))
+                    value.append(' '.join(
+                        ['LEXIZE', '=', template.lexize_function]))
+                    sql = ['CREATE', const.TEXT_SEARCH_TEMPLATE,
+                           template.name, '({})'.format(', '.join(value))]
+                self._dump.add_entry(
+                    desc=const.TEXT_SEARCH_TEMPLATE,
+                    namespace=schema, tag=template.name,
+                    owner=self.superuser,
+                    defn='{};\n'.format(' '.join(sql)))
+                if template.comment:
+                    self._add_comment_to_dump(
+                        const.TEXT_SEARCH_TEMPLATE, schema,
+                        template.name, self.superuser, None,
+                        template.comment)
 
     def _dump_types(self) -> typing.NoReturn:
         for name in self._inv[const.TYPE]:

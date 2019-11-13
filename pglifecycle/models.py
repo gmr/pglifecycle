@@ -536,7 +536,6 @@ class Tablespace:
 class TextSearch:
     """Represents a complex object for text search"""
     schema: str
-    sql: typing.Optional[str] = None
     configurations: typing.Optional[typing.List[TextSearchConfig]] = None
     dictionaries: typing.Optional[typing.List[TextSearchDict]] = None
     parsers: typing.Optional[typing.List[TextSearchParser]] = None
@@ -547,6 +546,7 @@ class TextSearch:
 class TextSearchConfig:
     """Represents a configuration object for Text Search"""
     name: str
+    sql: typing.Optional[str] = None
     parser: typing.Optional[str] = None
     source: typing.Optional[str] = None
     comment: typing.Optional[str] = None
@@ -556,7 +556,8 @@ class TextSearchConfig:
 class TextSearchDict:
     """Represents a dictionary object for Text Search"""
     name: str
-    template: str
+    sql: typing.Optional[str] = None
+    template: typing.Optional[str] = None
     options: typing.Optional[typing.Dict[str, str]] = None
     comment: typing.Optional[str] = None
 
@@ -565,10 +566,11 @@ class TextSearchDict:
 class TextSearchParser:
     """Represents a parser object for Text Search"""
     name: str
-    start_function: str
-    gettoken_function: str
-    end_function: str
-    lextypes_function: str
+    sql: typing.Optional[str] = None
+    start_function: typing.Optional[str] = None
+    gettoken_function: typing.Optional[str] = None
+    end_function: typing.Optional[str] = None
+    lextypes_function: typing.Optional[str] = None
     headline_function: typing.Optional[str] = None
     comment: typing.Optional[str] = None
 
@@ -577,7 +579,8 @@ class TextSearchParser:
 class TextSearchTemplate:
     """Represents a template for Text Search"""
     name: str
-    lexize_function: str
+    sql: typing.Optional[str] = None
+    lexize_function: typing.Optional[str] = None
     init_function: typing.Optional[str] = None
     comment: typing.Optional[str] = None
 

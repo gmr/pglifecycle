@@ -9,3 +9,4 @@ options:
 dependencies:
   extensions:
     - postgres_fdw
+comment: Example FDW that conencts back to the same server on a different DB
