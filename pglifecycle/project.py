@@ -136,6 +136,7 @@ class Project:
         self._dump_casts()
         self._dump_text_search()
         self._dump_servers()
+        self._dump_event_triggers()
 
         self._dump.save(path)
         LOGGER.info('Build artifact saved with %i entries',
@@ -400,95 +401,85 @@ class Project:
 
     def _dump_collations(self) -> typing.NoReturn:
         for name in self._inv[const.COLLATION]:
-            if self._inv[const.COLLATION][name].sql:
-                sql = [self._inv[const.COLLATION][name].sql]
+            collation = self._inv[const.COLLATION][name]
+            if collation.sql:
+                sql = [collation.sql]
             else:
-                sql = ['CREATE COLLATION',
-                       utils.quote_ident(
-                           self._inv[const.COLLATION][name].name)]
-                if self._inv[const.COLLATION][name].copy_from:
+                sql = [const.CREATE, const.COLLATION,
+                       utils.quote_ident(collation.name)]
+                if collation.copy_from:
                     sql.append('FROM')
-                    sql.append(self._inv[const.COLLATION][name].copy_from)
+                    sql.append(collation.copy_from)
                 else:
                     options = []
-                    if self._inv[const.COLLATION][name].locale:
-                        options.append('LOCALE = {}'.format(
-                            self._inv[const.COLLATION][name].locale))
-                    if self._inv[const.COLLATION][name].lc_collate:
+                    if collation.locale:
+                        options.append('LOCALE = {}'.format(collation.locale))
+                    if collation.lc_collate:
                         options.append('LC_COLLATE = {}'.format(
-                            self._inv[const.COLLATION][name].lc_collate))
-                    if self._inv[const.COLLATION][name].lc_ctype:
+                            collation.lc_collate))
+                    if collation.lc_ctype:
                         options.append('LC_CTYPE = {}'.format(
-                            self._inv[const.COLLATION][name].lc_ctype))
-                    if self._inv[const.COLLATION][name].provider:
+                            collation.lc_ctype))
+                    if collation.provider:
                         options.append('PROVIDER = {}'.format(
-                            self._inv[const.COLLATION][name].provider))
-                    if self._inv[const.COLLATION][name].deterministic:
+                            collation.provider))
+                    if collation.deterministic:
                         options.append('DETERMINISTIC = {}'.format(
-                            self._inv[const.COLLATION][name].deterministic))
-                    if self._inv[const.COLLATION][name].version:
+                            collation.deterministic))
+                    if collation.version:
                         options.append('VERSION = {}'.format(
-                            self._inv[const.COLLATION][name].version))
+                            collation.version))
                     sql.append('({})'.format(', '.join(options)))
             self._dump.add_entry(
-                desc=const.COLLATION,
-                namespace=self._inv[const.COLLATION][name].schema,
-                tag=self._inv[const.COLLATION][name].name,
-                owner=self._inv[const.COLLATION][name].owner,
+                desc=const.COLLATION, namespace=collation.schema,
+                tag=collation.name, owner=collation.owner,
                 defn='{};\n'.format(' '.join(sql)))
-            if self._inv[const.COLLATION][name].comment:
+            if collation.comment:
                 self._add_comment_to_dump(
-                    const.COLLATION,
-                    self._inv[const.COLLATION][name].schema,
-                    self._inv[const.COLLATION][name].name,
-                    self._inv[const.COLLATION][name].owner, None,
-                    self._inv[const.COLLATION][name].comment)
+                    const.COLLATION, collation.schema, collation.name,
+                    collation.owner, None, collation.comment)
 
     def _dump_conversions(self) -> typing.NoReturn:
         for name in self._inv[const.CONVERSION]:
-            if self._inv[const.CONVERSION][name].sql:
-                sql = [self._inv[const.CONVERSION][name].sql]
+            conversion = self._inv[const.CONVERSION][name]
+            if conversion.sql:
+                sql = [conversion.sql]
             else:
                 sql = ['CREATE DEFAULT'
-                       if self._inv[const.CONVERSION][name].default
-                       else 'CREATE', 'CONVERSION',
-                       utils.quote_ident(
-                           self._inv[const.CONVERSION][name].name),
-                       'FOR', self._inv[const.CONVERSION][name].encoding_from,
-                       'TO', self._inv[const.CONVERSION][name].encoding_to,
-                       'FROM', self._inv[const.CONVERSION][name].function]
+                       if conversion.default else const.CREATE,
+                       const.CONVERSION,
+                       utils.quote_ident(conversion.name),
+                       'FOR', conversion.encoding_from,
+                       'TO', conversion.encoding_to,
+                       'FROM', conversion.function]
             self._dump.add_entry(
-                desc=const.CONVERSION,
-                namespace=self._inv[const.CONVERSION][name].schema,
-                tag=self._inv[const.CONVERSION][name].name,
-                owner=self._inv[const.CONVERSION][name].owner,
+                desc=const.CONVERSION, namespace=conversion.schema,
+                tag=conversion.name, owner=conversion.owner,
                 defn='{};\n'.format(' '.join(sql)))
-            if self._inv[const.CONVERSION][name].comment:
+            if conversion.comment:
                 self._add_comment_to_dump(
-                    const.CONVERSION,
-                    self._inv[const.CONVERSION][name].schema,
-                    self._inv[const.CONVERSION][name].name,
-                    self._inv[const.CONVERSION][name].owner, None,
-                    self._inv[const.CONVERSION][name].comment)
+                    const.CONVERSION, conversion.schema, conversion.name,
+                    conversion.owner, None, conversion.comment)
 
     def _dump_domains(self) -> typing.NoReturn:
         for name in self._inv[const.DOMAIN]:
-            if self._inv[const.DOMAIN][name].sql:
-                sql = [self._inv[const.DOMAIN][name].sql]
+            domain = self._inv[const.DOMAIN][name]
+            if domain.sql:
+                sql = [domain.sql]
             else:
-                sql = ['CREATE DOMAIN',
-                       utils.quote_ident(self._inv[const.DOMAIN][name].name),
-                       'AS', self._inv[const.DOMAIN][name].data_type]
-                if self._inv[const.DOMAIN][name].collation:
+                sql = [const.CREATE, const.DOMAIN,
+                       utils.quote_ident(domain.name),
+                       'AS', domain.data_type]
+                if domain.collation:
                     sql.append('COLLATE')
-                    sql.append(self._inv[const.DOMAIN][name].collation)
-                if self._inv[const.DOMAIN][name].default:
+                    sql.append(domain.collation)
+                if domain.default:
                     sql.append('DEFAULT')
                     sql.append(utils.postgres_value(
-                        self._inv[const.DOMAIN][name].default))
-                if self._inv[const.DOMAIN][name].check_constraints:
+                        domain.default))
+                if domain.check_constraints:
                     constraints = []
-                    for c in self._inv[const.DOMAIN][name].check_constraints:
+                    for c in domain.check_constraints:
                         value = ['CONSTRAINT']
                         if c.name:
                             value.append(c.name)
@@ -500,18 +491,34 @@ class Project:
                         constraints.append(' '.join(value))
                     sql.append(' '.join(constraints))
             self._dump.add_entry(
-                desc=const.DOMAIN,
-                namespace=self._inv[const.DOMAIN][name].schema,
-                tag=self._inv[const.DOMAIN][name].name,
-                owner=self._inv[const.DOMAIN][name].owner,
+                desc=const.DOMAIN, namespace=domain.schema,
+                tag=domain.name, owner=domain.owner,
                 defn='{};\n'.format(' '.join(sql)))
-            if self._inv[const.DOMAIN][name].comment:
+            if domain.comment:
                 self._add_comment_to_dump(
-                    const.DOMAIN,
-                    self._inv[const.DOMAIN][name].schema,
-                    self._inv[const.DOMAIN][name].name,
-                    self._inv[const.DOMAIN][name].owner, None,
-                    self._inv[const.DOMAIN][name].comment)
+                    const.DOMAIN, domain.schema, domain.name, domain.owner,
+                    None, domain.comment)
+
+    def _dump_event_triggers(self) -> typing.NoReturn:
+        for name in self._inv[const.EVENT_TRIGGER]:
+            trigger = self._inv[const.EVENT_TRIGGER][name]
+            if trigger.sql:
+                sql = [trigger.sql]
+            else:
+                sql = ['CREATE', const.EVENT_TRIGGER, 'ON', trigger.event]
+                if trigger.filter:
+                    sql.append('WHEN TAG IN ({})'.format(
+                        trigger.filter.tags))
+                sql.append('EXECUTE FUNCTION')
+                sql.append(trigger.function)
+            self._dump.add_entry(
+                desc=const.EVENT_TRIGGER, namespace=trigger.schema,
+                tag=trigger.name, owner=trigger.owner,
+                defn='{};\n'.format(' '.join(sql)))
+            if trigger.comment:
+                self._add_comment_to_dump(
+                    const.EVENT_TRIGGER, trigger.schema, trigger.name,
+                    trigger.owner, None, trigger.comment)
 
     def _dump_extensions(self) -> typing.NoReturn:
         for name in self._inv[const.EXTENSION]:
@@ -1379,6 +1386,10 @@ class Project:
                 defn['check_constraints'] = [
                     models.DomainConstraint(**c)
                     for c in defn['check_constraints']]
+                self._inv[obj_type][name] = model(**defn)
+            elif obj_type == const.EVENT_TRIGGER and defn.get('filter'):
+                defn['filter'] = models.EventTriggerFilter(
+                    defn['filter'].get('tags', []))
                 self._inv[obj_type][name] = model(**defn)
             elif obj_type == const.FUNCTION and defn.get('parameters'):
                 defn['parameters'] = [

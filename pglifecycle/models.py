@@ -184,10 +184,16 @@ class EventTrigger:
     schema: str
     owner: str
     sql: typing.Optional[str] = None
-    events: typing.Optional[typing.List[str]] = None
-    filter: typing.Optional[typing.Dict[str, typing.List[str]]] = None
+    event: typing.Optional[str] = None
+    filter: typing.Optional[EventTriggerFilter] = None
     function: typing.Optional[str] = None
     comment: typing.Optional[str] = None
+
+
+@dataclasses.dataclass
+class EventTriggerFilter:
+    """An event trigger filter"""
+    tags: typing.List[str]
 
 
 @dataclasses.dataclass

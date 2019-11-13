@@ -20,11 +20,9 @@ properties:
     title: Name
     description: The event trigger name
     type: string
-  events:
-    title: The events that cause the fire to trigger
-    type: array
-    items:
-      enum: [ddl_command_start, ddl_command_end, table_rewrite, sql_drop]
+  event:
+    title: The event that cause the fire to trigger
+    enum: [ddl_command_start, ddl_command_end, table_rewrite, sql_drop]
   filter:
     title: Filter
     description: >
@@ -63,5 +61,5 @@ oneOf:
         - event
         - filter
         - function
-  - required: [name, events, function]
+  - required: [name, event, function]
     not: {required: [sql]}
