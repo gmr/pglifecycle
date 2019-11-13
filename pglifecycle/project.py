@@ -176,7 +176,7 @@ class Project:
                              parent: typing.Optional[str],
                              comment: str) -> typing.NoReturn:
         sql = ['COMMENT ON', obj_type]
-        if obj_type in {const.OPERATOR, const.SCHEMA}:
+        if obj_type in {const.DOMAIN, const.OPERATOR, const.SCHEMA}:
             sql.append('{}.{}'.format(schema, name))
         elif obj_type == const.TABLESPACE:
             sql.append(name)
@@ -1041,6 +1041,7 @@ class Project:
                 defn['check_constraints'] = [
                     models.DomainConstraint(**c)
                     for c in defn['check_constraints']]
+                self._inv[obj_type][name] = model(**defn)
             elif obj_type == const.TABLE:
                 self._inv[obj_type][name] = self._build_table_definition(defn)
             else:
