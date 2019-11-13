@@ -392,8 +392,8 @@ class Project:
             if self._inv[const.AGGREGATE][name].sql:
                 sql = [self._inv[const.AGGREGATE][name].sql]
             else:
-                sql = ['CREATE AGGREGATE',
-                       utils.quote_ident(self._inv[const.AGGREGATE][name].name)]
+                sql = ['CREATE AGGREGATE', utils.quote_ident(
+                    self._inv[const.AGGREGATE][name].name)]
                 args = []
                 for argument in self._inv[const.AGGREGATE][name].arguments:
                     arg = [argument.mode]
@@ -476,7 +476,7 @@ class Project:
                     self._inv[const.AGGREGATE][name].name,
                     self._inv[const.AGGREGATE][name].owner, None,
                     self._inv[const.AGGREGATE][name].comment)
-    
+
     def _dump_collations(self) -> typing.NoReturn:
         for name in self._inv[const.COLLATION]:
             if self._inv[const.COLLATION][name].sql:
@@ -591,7 +591,7 @@ class Project:
                     self._inv[const.DOMAIN][name].name,
                     self._inv[const.DOMAIN][name].owner, None,
                     self._inv[const.DOMAIN][name].comment)
-                
+
     def _dump_extensions(self) -> typing.NoReturn:
         for name in self._inv[const.EXTENSION]:
             sql = ['CREATE EXTENSION IF NOT EXISTS',
@@ -872,10 +872,10 @@ class Project:
                        utils.quote_ident(self._inv[const.TYPE][name].name),
                        'AS']
                 if self._inv[const.TYPE][name].type == 'base':
-                    options = ['INPUT = {}'.format(
-                                   self._inv[const.TYPE][name].input),
-                               'OUTPUT = {}'.format(
-                                   self._inv[const.TYPE][name].output)]
+                    options = [
+                        'INPUT = {}'.format(self._inv[const.TYPE][name].input),
+                        'OUTPUT = {}'.format(
+                            self._inv[const.TYPE][name].output)]
                     if self._inv[const.TYPE][name].receive:
                         options.append('RECEIVE = {}'.format(
                             self._inv[const.TYPE][name].receive))
