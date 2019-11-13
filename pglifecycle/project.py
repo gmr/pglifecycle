@@ -127,9 +127,10 @@ class Project:
         self._dump_conversions()
         self._dump_types()
         self._dump_domains()
-
         self._dump_tablespaces()
         self._dump_tables()
+        self._dump_sequences()
+
         self._dump.save(path)
         LOGGER.info('Build artifact saved with %i entries',
                     len(self._dump.entries))
@@ -780,13 +781,57 @@ class Project:
                 owner=self._inv[const.SCHEMA][name].owner,
                 defn='{};\n'.format(' '.join(sql)))
 
+    def _dump_sequences(self) -> typing.NoReturn:
+        for name in self._inv[const.SEQUENCE]:
+            if self._inv[const.SEQUENCE][name].sql:
+                sql = [self._inv[const.SEQUENCE][name].sql]
+            else:
+                sql = ['CREATE SEQUENCE',
+                       utils.quote_ident(self._inv[const.SEQUENCE][name].name)]
+                if self._inv[const.SEQUENCE][name].data_type:
+                    sql.append('AS')
+                    sql.append(self._inv[const.SEQUENCE][name].data_type)
+                if self._inv[const.SEQUENCE][name].increment_by:
+                    sql.append('INCREMENT BY')
+                    sql.append(str(
+                        self._inv[const.SEQUENCE][name].increment_by))
+                if self._inv[const.SEQUENCE][name].min_value:
+                    sql.append('MINVALUE')
+                    sql.append(str(self._inv[const.SEQUENCE][name].min_value))
+                if self._inv[const.SEQUENCE][name].max_value:
+                    sql.append('MAXVALUE')
+                    sql.append(str(self._inv[const.SEQUENCE][name].max_value))
+                if self._inv[const.SEQUENCE][name].start_with:
+                    sql.append('START WITH')
+                    sql.append(str(self._inv[const.SEQUENCE][name].start_with))
+                if self._inv[const.SEQUENCE][name].cache:
+                    sql.append('CACHE')
+                    sql.append(str(self._inv[const.SEQUENCE][name].cache))
+                if self._inv[const.SEQUENCE][name].cycle is not None:
+                    if not self._inv[const.SEQUENCE][name].cycle:
+                        sql.append('NO')
+                    sql.append('CYCLE')
+                if self._inv[const.SEQUENCE][name].owned_by:
+                    sql.append('OWNED BY')
+                    sql.append(self._inv[const.SEQUENCE][name].owned_by)
+            self._dump.add_entry(
+                desc=const.SEQUENCE,
+                tag=self._inv[const.SEQUENCE][name].name,
+                owner=self._inv[const.SEQUENCE][name].owner,
+                defn='{};\n'.format(' '.join(sql)))
+            if self._inv[const.SEQUENCE][name].comment:
+                self._add_comment_to_dump(
+                    const.SEQUENCE, None,
+                    self._inv[const.SEQUENCE][name].name,
+                    self._inv[const.SEQUENCE][name].owner, None,
+                    self._inv[const.SEQUENCE][name].comment)
+
     def _dump_tables(self) -> typing.NoReturn:
         for name in self._inv[const.TABLE]:
             self._dump_table(name)
 
     def _dump_tablespaces(self) -> typing.NoReturn:
         for name in self._inv[const.TABLESPACE]:
-
             sql = ['CREATE TABLESPACE',
                    utils.quote_ident(self._inv[const.TABLESPACE][name].name),
                    'OWNER',
