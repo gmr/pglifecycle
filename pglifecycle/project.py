@@ -121,6 +121,14 @@ class Project:
         self._dump_extensions()
         self._dump_foreign_data_wrappers()
         self._dump_languages()
+        self._dump_operators()
+        self._dump_aggregates()
+        self._dump_collations()
+        self._dump_conversions()
+        self._dump_types()
+        self._dump_domains()
+
+        self._dump_tablespaces()
         self._dump_tables()
         self._dump.save(path)
         LOGGER.info('Build artifact saved with %i entries',
@@ -161,12 +169,17 @@ class Project:
         """Save the project to the specified project directory"""
         pass
 
-    def _add_comment_to_dump(self, obj_type: str, schema: str, name: str,
-                             owner: str, parent: str,
+    def _add_comment_to_dump(self, obj_type: str,
+                             schema: typing.Optional[str],
+                             name: str,
+                             owner: str,
+                             parent: typing.Optional[str],
                              comment: str) -> typing.NoReturn:
         sql = ['COMMENT ON', obj_type]
-        if obj_type == const.SCHEMA:
+        if obj_type in {const.OPERATOR, const.SCHEMA}:
             sql.append('{}.{}'.format(schema, name))
+        elif obj_type == const.TABLESPACE:
+            sql.append(name)
         elif obj_type in {const.CONSTRAINT, const.POLICY,
                           const.RULE, const.TRIGGER}:
             sql.append('{}.{}'.format(schema, name))
@@ -186,6 +199,13 @@ class Project:
         if 'generated' in defn:
             defn['generated'] = models.ColumnGenerated(**defn['generated'])
         return models.Column(**defn)
+
+    def _build_agg_definition(self, defn: dict) -> models.Aggregate:
+        defn['arguments'] = [models.Argument(**a) for a in defn['arguments']]
+        if 'dependencies' in defn:
+            self._cache_and_remove_dependencies(
+                const.AGGREGATE, self._object_name(defn), defn)
+        return models.Aggregate(**defn)
 
     def _build_create_table_stmt(self, name: str) -> str:
         sql = ['CREATE']
@@ -367,6 +387,211 @@ class Project:
                 gitkeep_path = subdir_path / '.gitkeep'
                 gitkeep_path.touch(exist_ok=exist_ok)
 
+    def _dump_aggregates(self) -> typing.NoReturn:
+        for name in self._inv[const.AGGREGATE]:
+            if self._inv[const.AGGREGATE][name].sql:
+                sql = [self._inv[const.AGGREGATE][name].sql]
+            else:
+                sql = ['CREATE AGGREGATE',
+                       utils.quote_ident(self._inv[const.AGGREGATE][name].name)]
+                args = []
+                for argument in self._inv[const.AGGREGATE][name].arguments:
+                    arg = [argument.mode]
+                    if argument.name:
+                        arg.append(argument.name)
+                    arg.append(argument.data_type)
+                    args.append(' '.join(arg))
+                sql.append('({})'.format(', '.join(args)))
+                options = [
+                    'SFUNC = {}'.format(
+                        self._inv[const.AGGREGATE][name].sfunc),
+                    'STYPE = {}'.format(
+                        self._inv[const.AGGREGATE][name].state_data_type)]
+                if self._inv[const.AGGREGATE][name].state_data_size:
+                    options.append('SSPACE = {}'.format(
+                        self._inv[const.AGGREGATE][name].state_data_size))
+                if self._inv[const.AGGREGATE][name].ffunc:
+                    options.append('FINALFUNC = {}'.format(
+                        self._inv[const.AGGREGATE][name].ffunc))
+                if self._inv[const.AGGREGATE][name].finalfunc_extra:
+                    options.append('FINALFUNC_EXTRA = {}'.format(
+                        self._inv[const.AGGREGATE][name].finalfunc_extra))
+                if self._inv[const.AGGREGATE][name].finalfunc_modify:
+                    options.append('FINALFUNC_MODIFY = {}'.format(
+                        self._inv[const.AGGREGATE][name].finalfunc_modify))
+                if self._inv[const.AGGREGATE][name].combinefunc:
+                    options.append('COMBINEFUNC = {}'.format(
+                        self._inv[const.AGGREGATE][name].combinefunc))
+                if self._inv[const.AGGREGATE][name].serialfunc:
+                    options.append('SERIALFUNC = {}'.format(
+                        self._inv[const.AGGREGATE][name].serialfunc))
+                if self._inv[const.AGGREGATE][name].deserialfunc:
+                    options.append('DESERIALFUNC = {}'.format(
+                        self._inv[const.AGGREGATE][name].deserialfunc))
+                if self._inv[const.AGGREGATE][name].initial_condition:
+                    options.append('INITCOND = {}'.format(
+                        self._inv[const.AGGREGATE][name].initial_condition))
+                if self._inv[const.AGGREGATE][name].msfunc:
+                    options.append('MSFUNC = {}'.format(
+                        self._inv[const.AGGREGATE][name].msfunc))
+                if self._inv[const.AGGREGATE][name].minvfunc:
+                    options.append('MINVFUNC = {}'.format(
+                        self._inv[const.AGGREGATE][name].minvfunc))
+                if self._inv[const.AGGREGATE][name].mstate_data_type:
+                    options.append('MSTYPE = {}'.format(
+                        self._inv[const.AGGREGATE][name].mstate_data_type))
+                if self._inv[const.AGGREGATE][name].mstate_data_size:
+                    options.append('MSSPACE = {}'.format(
+                        self._inv[const.AGGREGATE][name].mstate_data_size))
+                if self._inv[const.AGGREGATE][name].mffunc:
+                    options.append('MFINALFUNC = {}'.format(
+                        self._inv[const.AGGREGATE][name].mffunc))
+                if self._inv[const.AGGREGATE][name].mfinalfunc_extra:
+                    options.append('MFINALFUNC_EXTRA')
+                if self._inv[const.AGGREGATE][name].mfinalfunc_modify:
+                    options.append('MFINALFUNC_MODIFY = {}'.format(
+                        self._inv[const.AGGREGATE][name].mfinalfunc_modify))
+                if self._inv[const.AGGREGATE][name].minitial_condition:
+                    options.append('MINITCOND = {}'.format(
+                        self._inv[const.AGGREGATE][name].minitial_condition))
+                if self._inv[const.AGGREGATE][name].sort_operator:
+                    options.append('SORTOP = {}'.format(
+                        self._inv[const.AGGREGATE][name].sort_operator))
+                if self._inv[const.AGGREGATE][name].parallel:
+                    options.append('PARALLEL = {}'.format(
+                        self._inv[const.AGGREGATE][name].parallel))
+                if self._inv[const.AGGREGATE][name].hypothetical:
+                    options.append('HYPOTHETICAL')
+                sql.append('({})'.format(', '.join(options)))
+            self._dump.add_entry(
+                desc=const.AGGREGATE,
+                namespace=self._inv[const.AGGREGATE][name].schema,
+                tag=self._inv[const.AGGREGATE][name].name,
+                owner=self._inv[const.AGGREGATE][name].owner,
+                defn='{};\n'.format(' '.join(sql)))
+            if self._inv[const.AGGREGATE][name].comment:
+                self._add_comment_to_dump(
+                    const.AGGREGATE,
+                    self._inv[const.AGGREGATE][name].schema,
+                    self._inv[const.AGGREGATE][name].name,
+                    self._inv[const.AGGREGATE][name].owner, None,
+                    self._inv[const.AGGREGATE][name].comment)
+    
+    def _dump_collations(self) -> typing.NoReturn:
+        for name in self._inv[const.COLLATION]:
+            if self._inv[const.COLLATION][name].sql:
+                sql = [self._inv[const.COLLATION][name].sql]
+            else:
+                sql = ['CREATE COLLATION',
+                       utils.quote_ident(
+                           self._inv[const.COLLATION][name].name)]
+                if self._inv[const.COLLATION][name].copy_from:
+                    sql.append('FROM')
+                    sql.append(self._inv[const.COLLATION][name].copy_from)
+                else:
+                    options = []
+                    if self._inv[const.COLLATION][name].locale:
+                        options.append('LOCALE = {}'.format(
+                            self._inv[const.COLLATION][name].locale))
+                    if self._inv[const.COLLATION][name].lc_collate:
+                        options.append('LC_COLLATE = {}'.format(
+                            self._inv[const.COLLATION][name].lc_collate))
+                    if self._inv[const.COLLATION][name].lc_ctype:
+                        options.append('LC_CTYPE = {}'.format(
+                            self._inv[const.COLLATION][name].lc_ctype))
+                    if self._inv[const.COLLATION][name].provider:
+                        options.append('PROVIDER = {}'.format(
+                            self._inv[const.COLLATION][name].provider))
+                    if self._inv[const.COLLATION][name].deterministic:
+                        options.append('DETERMINISTIC = {}'.format(
+                            self._inv[const.COLLATION][name].deterministic))
+                    if self._inv[const.COLLATION][name].version:
+                        options.append('VERSION = {}'.format(
+                            self._inv[const.COLLATION][name].version))
+                    sql.append('({})'.format(', '.join(options)))
+            self._dump.add_entry(
+                desc=const.COLLATION,
+                namespace=self._inv[const.COLLATION][name].schema,
+                tag=self._inv[const.COLLATION][name].name,
+                owner=self._inv[const.COLLATION][name].owner,
+                defn='{};\n'.format(' '.join(sql)))
+            if self._inv[const.COLLATION][name].comment:
+                self._add_comment_to_dump(
+                    const.COLLATION,
+                    self._inv[const.COLLATION][name].schema,
+                    self._inv[const.COLLATION][name].name,
+                    self._inv[const.COLLATION][name].owner, None,
+                    self._inv[const.COLLATION][name].comment)
+
+    def _dump_conversions(self) -> typing.NoReturn:
+        for name in self._inv[const.CONVERSION]:
+            if self._inv[const.CONVERSION][name].sql:
+                sql = [self._inv[const.CONVERSION][name].sql]
+            else:
+                sql = ['CREATE DEFAULT'
+                       if self._inv[const.CONVERSION][name].default
+                       else 'CREATE', 'CONVERSION',
+                       utils.quote_ident(
+                           self._inv[const.CONVERSION][name].name),
+                       'FOR', self._inv[const.CONVERSION][name].encoding_from,
+                       'TO', self._inv[const.CONVERSION][name].encoding_to,
+                       'FROM', self._inv[const.CONVERSION][name].function]
+            self._dump.add_entry(
+                desc=const.CONVERSION,
+                namespace=self._inv[const.CONVERSION][name].schema,
+                tag=self._inv[const.CONVERSION][name].name,
+                owner=self._inv[const.CONVERSION][name].owner,
+                defn='{};\n'.format(' '.join(sql)))
+            if self._inv[const.CONVERSION][name].comment:
+                self._add_comment_to_dump(
+                    const.CONVERSION,
+                    self._inv[const.CONVERSION][name].schema,
+                    self._inv[const.CONVERSION][name].name,
+                    self._inv[const.CONVERSION][name].owner, None,
+                    self._inv[const.CONVERSION][name].comment)
+
+    def _dump_domains(self) -> typing.NoReturn:
+        for name in self._inv[const.DOMAIN]:
+            if self._inv[const.DOMAIN][name].sql:
+                sql = [self._inv[const.DOMAIN][name].sql]
+            else:
+                sql = ['CREATE DOMAIN',
+                       utils.quote_ident(self._inv[const.DOMAIN][name].name),
+                       'AS', self._inv[const.DOMAIN][name].data_type]
+                if self._inv[const.DOMAIN][name].collation:
+                    sql.append('COLLATE')
+                    sql.append(self._inv[const.DOMAIN][name].collation)
+                if self._inv[const.DOMAIN][name].default:
+                    sql.append('DEFAULT')
+                    sql.append(utils.postgres_value(
+                        self._inv[const.DOMAIN][name].default))
+                if self._inv[const.DOMAIN][name].check_constraints:
+                    constraints = []
+                    for c in self._inv[const.DOMAIN][name].check_constraints:
+                        value = ['CONSTRAINT']
+                        if c.name:
+                            value.append(c.name)
+                        if c.nullable is not None:
+                            value.append(
+                                'NULL' if c.nullable else 'NOT NULL')
+                        if c.expression:
+                            value.append('CHECK ({})'.format(c.expression))
+                        constraints.append(' '.join(value))
+                    sql.append(' '.join(constraints))
+            self._dump.add_entry(
+                desc=const.DOMAIN,
+                namespace=self._inv[const.DOMAIN][name].schema,
+                tag=self._inv[const.DOMAIN][name].name,
+                owner=self._inv[const.DOMAIN][name].owner,
+                defn='{};\n'.format(' '.join(sql)))
+            if self._inv[const.DOMAIN][name].comment:
+                self._add_comment_to_dump(
+                    const.DOMAIN,
+                    self._inv[const.DOMAIN][name].schema,
+                    self._inv[const.DOMAIN][name].name,
+                    self._inv[const.DOMAIN][name].owner, None,
+                    self._inv[const.DOMAIN][name].comment)
+                
     def _dump_extensions(self) -> typing.NoReturn:
         for name in self._inv[const.EXTENSION]:
             sql = ['CREATE EXTENSION IF NOT EXISTS',
@@ -496,6 +721,52 @@ class Project:
                 owner=self.superuser,
                 defn='{};\n'.format(' '.join(sql)))
 
+    def _dump_operators(self) -> typing.NoReturn:
+        for name in self._inv[const.OPERATOR]:
+            if self._inv[const.OPERATOR][name].sql:
+                sql = [self._inv[const.OPERATOR][name].sql]
+            else:
+                sql = ['CREATE OPERATOR',
+                       utils.quote_ident(self._inv[const.OPERATOR][name].name)]
+                options = ['FUNCTION = {}'.format(
+                    self._inv[const.OPERATOR][name].function)]
+                if self._inv[const.OPERATOR][name].left_arg:
+                    options.append('LEFTARG = {}'.format(
+                        self._inv[const.OPERATOR][name].left_arg))
+                if self._inv[const.OPERATOR][name].right_arg:
+                    options.append('RIGHTARG = {}'.format(
+                        self._inv[const.OPERATOR][name].right_arg))
+                if self._inv[const.OPERATOR][name].commutator:
+                    options.append('COMMUTATOR = {}'.format(
+                        self._inv[const.OPERATOR][name].commutator))
+                if self._inv[const.OPERATOR][name].negator:
+                    options.append('NEGATOR = {}'.format(
+                        self._inv[const.OPERATOR][name].negator))
+                if self._inv[const.OPERATOR][name].restrict:
+                    options.append('RESTRICT = {}'.format(
+                        self._inv[const.OPERATOR][name].restrict))
+                if self._inv[const.OPERATOR][name].join:
+                    options.append('JOIN = {}'.format(
+                        self._inv[const.OPERATOR][name].join))
+                if self._inv[const.OPERATOR][name].hashes:
+                    options.append('HASHES')
+                if self._inv[const.OPERATOR][name].merges:
+                    options.append('MERGES')
+                sql.append('({})'.format(', '.join(options)))
+            self._dump.add_entry(
+                desc=const.OPERATOR,
+                namespace=self._inv[const.OPERATOR][name].schema,
+                tag=self._inv[const.OPERATOR][name].name,
+                owner=self._inv[const.OPERATOR][name].owner,
+                defn='{};\n'.format(' '.join(sql)))
+            if self._inv[const.OPERATOR][name].comment:
+                self._add_comment_to_dump(
+                    const.OPERATOR,
+                    self._inv[const.OPERATOR][name].schema,
+                    self._inv[const.OPERATOR][name].name,
+                    self._inv[const.OPERATOR][name].owner, None,
+                    self._inv[const.OPERATOR][name].comment)
+
     def _dump_schemas(self) -> typing.NoReturn:
         for name in self._inv[const.SCHEMA]:
             sql = ['CREATE SCHEMA IF NOT EXISTS', utils.quote_ident(name)]
@@ -512,6 +783,32 @@ class Project:
     def _dump_tables(self) -> typing.NoReturn:
         for name in self._inv[const.TABLE]:
             self._dump_table(name)
+
+    def _dump_tablespaces(self) -> typing.NoReturn:
+        for name in self._inv[const.TABLESPACE]:
+
+            sql = ['CREATE TABLESPACE',
+                   utils.quote_ident(self._inv[const.TABLESPACE][name].name),
+                   'OWNER',
+                   self._inv[const.TABLESPACE][name].owner,
+                   'LOCATION',
+                   self._inv[const.TABLESPACE][name].location]
+            if self._inv[const.TABLESPACE][name].options:
+                options = []
+                for k, v in self._inv[const.TABLESPACE][name].options.items():
+                    options.append('{}={}'.format(k, utils.postgres_value(v)))
+                sql.append('WITH ({})'.format(','.join(options)))
+            self._dump.add_entry(
+                desc=const.TABLESPACE,
+                tag=self._inv[const.TABLESPACE][name].name,
+                owner=self._inv[const.TABLESPACE][name].owner,
+                defn='{};\n'.format(' '.join(sql)))
+            if self._inv[const.TABLESPACE][name].comment:
+                self._add_comment_to_dump(
+                    const.TABLESPACE, None,
+                    self._inv[const.TABLESPACE][name].name,
+                    self._inv[const.TABLESPACE][name].owner, None,
+                    self._inv[const.TABLESPACE][name].comment)
 
     def _dump_table(self, name):
         self._dump.add_entry(
@@ -566,6 +863,115 @@ class Project:
                 const.TRIGGER, schema, trigger.name, owner,
                 parent, trigger.comment)
 
+    def _dump_types(self) -> typing.NoReturn:
+        for name in self._inv[const.TYPE]:
+            if self._inv[const.TYPE][name].sql:
+                sql = [self._inv[const.TYPE][name].sql]
+            else:
+                sql = ['CREATE TYPE',
+                       utils.quote_ident(self._inv[const.TYPE][name].name),
+                       'AS']
+                if self._inv[const.TYPE][name].type == 'base':
+                    options = ['INPUT = {}'.format(
+                                   self._inv[const.TYPE][name].input),
+                               'OUTPUT = {}'.format(
+                                   self._inv[const.TYPE][name].output)]
+                    if self._inv[const.TYPE][name].receive:
+                        options.append('RECEIVE = {}'.format(
+                            self._inv[const.TYPE][name].receive))
+                    if self._inv[const.TYPE][name].send:
+                        options.append('SEND = {}'.format(
+                            self._inv[const.TYPE][name].receive))
+                    if self._inv[const.TYPE][name].typmod_in:
+                        options.append('TYPMOD_IN = {}'.format(
+                            self._inv[const.TYPE][name].typmod_in))
+                    if self._inv[const.TYPE][name].typmod_out:
+                        options.append('TYPMOD_OUT = {}'.format(
+                            self._inv[const.TYPE][name].typmod_out))
+                    if self._inv[const.TYPE][name].analyze:
+                        options.append('ANALYZE = {}'.format(
+                            self._inv[const.TYPE][name].analyze))
+                    if self._inv[const.TYPE][name].internal_length:
+                        options.append('INTERNALLENGTH = {}'.format(
+                            self._inv[const.TYPE][name].internal_length))
+                    if self._inv[const.TYPE][name].passed_by_value:
+                        options.append('PASSEDBYVALUE')
+                    if self._inv[const.TYPE][name].alignment:
+                        options.append('ALIGNMENT = {}'.format(
+                            self._inv[const.TYPE][name].alignment))
+                    if self._inv[const.TYPE][name].storage:
+                        options.append('STORAGE = {}'.format(
+                            self._inv[const.TYPE][name].storage))
+                    if self._inv[const.TYPE][name].like_type:
+                        options.append('LIKE = {}'.format(
+                            self._inv[const.TYPE][name].like_type))
+                    if self._inv[const.TYPE][name].category:
+                        options.append('CATEGORY = {}'.format(
+                            utils.postgres_value(
+                                self._inv[const.TYPE][name].category)))
+                    if self._inv[const.TYPE][name].preferred:
+                        options.append('PREFERRED = {}'.format(
+                            self._inv[const.TYPE][name].preferred))
+                    if self._inv[const.TYPE][name].default:
+                        options.append('DEFAULT = {}'.format(
+                            utils.postgres_value(
+                                self._inv[const.TYPE][name].default)))
+                    if self._inv[const.TYPE][name].element:
+                        options.append('ELEMENT = {}'.format(
+                            self._inv[const.TYPE][name].element))
+                    if self._inv[const.TYPE][name].delimiter:
+                        options.append('DELIMITER = {}'.format(
+                            utils.postgres_value(
+                                self._inv[const.TYPE][name].demiter)))
+                    if self._inv[const.TYPE][name].collatable:
+                        options.append('COLLATABLE = {}'.format(
+                            self._inv[const.TYPE][name].collatable))
+                    sql.append('({})'.format(', '.join(options)))
+                elif self._inv[const.TYPE][name].type == 'composite':
+                    columns = []
+                    for column in self._inv[const.TYPE][name].columns:
+                        col = [column.name, column.data_type]
+                        if column.collation:
+                            col.append('COLLATE')
+                            col.append(column.collation)
+                        columns.append(' '.join(col))
+                    sql.append('({})'.format(', '.join(columns)))
+                elif self._inv[const.TYPE][name].type == 'enum':
+                    sql.append('ENUM')
+                    sql.append('({})'.format(', '.join(
+                        utils.postgres_value(e) for e in
+                        self._inv[const.TYPE][name].enum)))
+                elif self._inv[const.TYPE][name].type == 'range':
+                    sql.append('RANGE')
+                    options = ['SUBTYPE = {}'.format(
+                        self._inv[const.TYPE][name].subtype)]
+                    if self._inv[const.TYPE][name].subtype_opclass:
+                        options.append('SUBTYPE_OPCLASS = {}'.format(
+                            self._inv[const.TYPE][name].subtype))
+                    if self._inv[const.TYPE][name].collation:
+                        options.append('COLLATION = {}'.format(
+                            self._inv[const.TYPE][name].collation))
+                    if self._inv[const.TYPE][name].collation:
+                        options.append('CANONICAL = {}'.format(
+                            self._inv[const.TYPE][name].canonical))
+                    if self._inv[const.TYPE][name].subtype_diff:
+                        options.append('SUBTYPE_DIFF = {}'.format(
+                            self._inv[const.TYPE][name].subtype_diff))
+                    sql.append('({})'.format(', '.join(options)))
+            self._dump.add_entry(
+                desc=const.TYPE,
+                namespace=self._inv[const.TYPE][name].schema,
+                tag=self._inv[const.TYPE][name].name,
+                owner=self._inv[const.TYPE][name].owner,
+                defn='{};\n'.format(' '.join(sql)))
+            if self._inv[const.TYPE][name].comment:
+                self._add_comment_to_dump(
+                    const.TYPE,
+                    self._inv[const.TYPE][name].schema,
+                    self._inv[const.TYPE][name].name,
+                    self._inv[const.TYPE][name].owner, None,
+                    self._inv[const.TYPE][name].comment)
+
     @staticmethod
     def _format_sql_constraint(constraint_type: str,
                                constraint: models.ConstraintColumns) -> str:
@@ -575,29 +981,27 @@ class Project:
             sql.append(', '.join(constraint.include))
         return ' '.join(sql)
 
-    def _iterate_files(self, file_type: str, schemaless: bool = False) \
-            -> typing.Generator[dict, None, None]:
+    def _iterate_files(self, ot: str) -> typing.Generator[dict, None, None]:
         """Generator that will iterate over all of the subdirectories and
-        files for the specified `file_type`, parsing the YAML and returning
+        files for the specified object type, parsing the YAML and returning
         a tuple of the schema name, object name, and a dict of values from the
         file.
 
         """
-        path = self.path.joinpath(const.PATHS[file_type])
+        path = self.path.joinpath(const.PATHS[ot])
         if not path.exists():
-            LOGGER.warning('No %s file found in project', file_type)
+            LOGGER.warning('No %s file found in project', ot)
             return
         for child in sorted(path.iterdir(), key=lambda p: str(p)):
             if child.is_dir():
                 for s_child in sorted(child.iterdir(), key=lambda p: str(p)):
                     if yaml.is_yaml(s_child):
                         yield self._preprocess_definition(
-                            file_type, s_child.parent.name,
+                            ot, s_child.parent.name,
                             s_child.name.split('.')[0], yaml.load(s_child))
             elif yaml.is_yaml(child):
                 yield self._preprocess_definition(
-                    file_type, child.name.split('.')[0],
-                    None, yaml.load(child))
+                    ot, child.name.split('.')[0], None, yaml.load(child))
 
     @staticmethod
     def _object_name(definition: dict, schemaless: bool = False):
@@ -631,7 +1035,13 @@ class Project:
                 continue
             if 'dependencies' in defn:
                 self._cache_and_remove_dependencies(obj_type, name, defn)
-            if obj_type == const.TABLE:
+            if obj_type == const.AGGREGATE:
+                self._inv[obj_type][name] = self._build_agg_definition(defn)
+            elif obj_type == const.DOMAIN and defn.get('check_constraints'):
+                defn['check_constraints'] = [
+                    models.DomainConstraint(**c)
+                    for c in defn['check_constraints']]
+            elif obj_type == const.TABLE:
                 self._inv[obj_type][name] = self._build_table_definition(defn)
             else:
                 self._inv[obj_type][name] = model(**defn)
@@ -661,6 +1071,9 @@ class Project:
                 if not validation.validate_object(obj_type, name, entry):
                     self._load_errors += 1
                     continue
+                if obj_type == const.TYPE and entry.get('columns'):
+                    entry['columns'] = [models.TypeColumn(**c)
+                                        for c in entry['columns']]
                 if 'dependencies' in entry:
                     self._cache_and_remove_dependencies(
                         obj_type, name, defn)
@@ -692,7 +1105,7 @@ class Project:
     def _read_role_files(self, obj_type: str,
                          model: dataclasses.dataclass) -> typing.NoReturn:
         LOGGER.debug('Reading %s', const.PATHS[obj_type].name.upper())
-        for defn in self._iterate_files(obj_type, True):
+        for defn in self._iterate_files(obj_type):
             validation.validate_object(obj_type, defn['name'], defn)
             if 'grants' in defn:
                 defn['grants'] = models.ACLs(**defn['grants'])

@@ -56,12 +56,17 @@ properties:
         name:
           title: Constraint Name
           type: string
+        nullable:
+          title: Domain is Nullable
+          type: boolean
         expression:
           title: Constraint Expression
           type: string
-      requires:
-        - name
-        - expression
+      oneOf:
+        - required: [expression]
+          not: {required: [nullable]}
+        - required: [nullable]
+          not: {required: [expression]}
       additionalProperties: false
     uniqueItems: true
   comment:

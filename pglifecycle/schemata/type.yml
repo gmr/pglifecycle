@@ -88,7 +88,11 @@ properties:
     description: >
       Specifies the storage alignment required for the data type. The allowed
       values equate to alignment on 1, 2, 4, or 8 byte boundaries.
-    type: integer
+    enum:
+      - char
+      - double
+      - int2
+      - int4
   storage:
     title: Storage
     description: >
@@ -117,6 +121,7 @@ properties:
     description: >
       Used to help control which implicit cast will be applied in ambiguous situations.
     type: string
+    enum: [A, B, C, D, E, G, I, N, P, R, S, T, U, V, X]
   preferred:
     title: Preferred
     description: >

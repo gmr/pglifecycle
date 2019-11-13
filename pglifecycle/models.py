@@ -91,7 +91,7 @@ class Cast:
 
 @dataclasses.dataclass
 class CheckConstraint:
-    """Represents a Check Constraint in a Table or Domain"""
+    """Represents a Check Constraint in a Table"""
     name: str
     expression: str
 
@@ -102,6 +102,7 @@ class Collation:
     name: str
     schema: str
     owner: str
+    sql: typing.Optional[str] = None
     locale: typing.Optional[str] = None
     lc_collate: typing.Optional[str] = None
     lc_ctype: typing.Optional[str] = None
@@ -146,9 +147,11 @@ class Conversion:
     name: str
     schema: str
     owner: str
-    encoding_from: str
-    encoding_to: str
-    function: str
+    sql: typing.Optional[str] = None
+    default: typing.Optional[bool] = None
+    encoding_from: typing.Optional[str] = None
+    encoding_to: typing.Optional[str] = None
+    function: typing.Optional[str] = None
     comment: typing.Optional[str] = None
 
 
@@ -162,8 +165,16 @@ class Domain:
     data_type: typing.Optional[str] = None
     collation: typing.Optional[str] = None
     default: typing.Optional[str] = None
-    check_constraints: typing.Optional[typing.List[CheckConstraint]] = None
+    check_constraints: typing.Optional[typing.List[DomainConstraint]] = None
     comment: typing.Optional[str] = None
+
+
+@dataclasses.dataclass
+class DomainConstraint:
+    """Represents a Check Constraint in a Domain"""
+    name: typing.Optional[str] = None
+    nullable: typing.Optional[bool] = None
+    expression: typing.Optional[str] = None
 
 
 @dataclasses.dataclass
@@ -601,7 +612,7 @@ class Type:
     analyze: typing.Optional[str] = None
     internal_length: typing.Union[None, int, str] = None
     passed_by_value: typing.Optional[bool] = None
-    alignment: typing.Optional[int] = None
+    alignment: typing.Optional[str] = None
     storage: typing.Optional[str] = None
     like_type: typing.Optional[str] = None
     category: typing.Optional[str] = None
@@ -609,8 +620,8 @@ class Type:
     default: typing.Any = None
     element: typing.Optional[str] = None
     delimiter: typing.Optional[str] = None
-    collatable: typing.Optional[str] = None
-    columns: typing.Optional[typing.List[typing.Dict[str, str]]] = None
+    collatable: typing.Optional[bool] = None
+    columns: typing.Optional[typing.List[TypeColumn]] = None
     enum: typing.Optional[typing.List[str]] = None
     subtype: typing.Optional[str] = None
     subtype_opclass: typing.Optional[str] = None
@@ -618,6 +629,14 @@ class Type:
     canonical: typing.Optional[str] = None
     subtype_diff: typing.Optional[str] = None
     comment: typing.Optional[str] = None
+
+
+@dataclasses.dataclass
+class TypeColumn:
+    """Represents a column in a type"""
+    name: str
+    data_type: str
+    collation: typing.Optional[str] = None
 
 
 @dataclasses.dataclass
