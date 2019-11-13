@@ -28,8 +28,8 @@ properties:
     title: Replicate All Tables
     description: Use to replicate all tables
     type: boolean
-  paramters:
-    title: Publication Paramters
+  parameters:
+    title: Publication Parameters
     type: object
     properties:
       publish:

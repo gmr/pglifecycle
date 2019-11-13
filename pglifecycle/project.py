@@ -51,8 +51,7 @@ class Project:
         const.SERVER,
         const.EVENT_TRIGGER,
         const.PUBLICATION,
-        const.SUBSCRIPTION,
-        const.USER_MAPPING
+        const.SUBSCRIPTION
     ]
 
     _PER_SCHEMA_FILES = [
@@ -137,7 +136,9 @@ class Project:
         self._dump_text_search()
         self._dump_servers()
         self._dump_event_triggers()
-
+        self._dump_publications()
+        self._dump_subscriptions()
+        self._dump_user_mappings()
         self._dump.save(path)
         LOGGER.info('Build artifact saved with %i entries',
                     len(self._dump.entries))
@@ -165,6 +166,7 @@ class Project:
         self._read_role_files(const.GROUP, models.Group)
         self._read_role_files(const.ROLE, models.Role)
         self._read_role_files(const.USER, models.User)
+        self._read_user_mapping_files()
         self._validate_dependencies()
         if self._load_errors:
             LOGGER.critical('Project load failed with %i errors',
@@ -179,20 +181,19 @@ class Project:
 
     def _add_comment_to_dump(self, obj_type: str,
                              schema: typing.Optional[str],
-                             name: str,
-                             owner: str,
+                             name: str, owner: str,
                              parent: typing.Optional[str],
                              comment: str) -> typing.NoReturn:
-        sql = ['COMMENT ON', obj_type]
+        sql = [const.COMMENT, const.ON, obj_type]
         if obj_type == const.TABLESPACE:
             sql.append(name)
         elif parent:
             sql.append('{}.{}'.format(schema, name))
-            sql.append('ON')
+            sql.append(const.ON)
             sql.append(parent)
         else:
             sql.append('{}.{}'.format(schema, name))
-        sql.append('IS')
+        sql.append(const.IS)
         sql.append('$${}$$;\n'.format(comment))
         entry = self._dump.add_entry(
             const.COMMENT, schema, name, owner, ' '.join(sql))
@@ -285,93 +286,75 @@ class Project:
 
     def _dump_aggregates(self) -> typing.NoReturn:
         for name in self._inv[const.AGGREGATE]:
-            if self._inv[const.AGGREGATE][name].sql:
-                sql = [self._inv[const.AGGREGATE][name].sql]
+            agg = self._inv[const.AGGREGATE][name]
+            if agg.sql:
+                sql = [agg.sql]
             else:
-                sql = ['CREATE AGGREGATE', utils.quote_ident(
-                    self._inv[const.AGGREGATE][name].name)]
+                sql = [const.CREATE, const.AGGREGATE,
+                       utils.quote_ident(agg.name)]
                 args = []
-                for argument in self._inv[const.AGGREGATE][name].arguments:
+                for argument in agg.arguments:
                     arg = [argument.mode]
                     if argument.name:
                         arg.append(argument.name)
                     arg.append(argument.data_type)
                     args.append(' '.join(arg))
                 sql.append('({})'.format(', '.join(args)))
-                options = [
-                    'SFUNC = {}'.format(
-                        self._inv[const.AGGREGATE][name].sfunc),
-                    'STYPE = {}'.format(
-                        self._inv[const.AGGREGATE][name].state_data_type)]
-                if self._inv[const.AGGREGATE][name].state_data_size:
-                    options.append('SSPACE = {}'.format(
-                        self._inv[const.AGGREGATE][name].state_data_size))
-                if self._inv[const.AGGREGATE][name].ffunc:
-                    options.append('FINALFUNC = {}'.format(
-                        self._inv[const.AGGREGATE][name].ffunc))
-                if self._inv[const.AGGREGATE][name].finalfunc_extra:
+                options = ['SFUNC = {}'.format(agg.sfunc),
+                           'STYPE = {}'.format(agg.state_data_type)]
+                if agg.state_data_size:
+                    options.append('SSPACE = {}'.format(agg.state_data_size))
+                if agg.ffunc:
+                    options.append('FINALFUNC = {}'.format(agg.ffunc))
+                if agg.finalfunc_extra:
                     options.append('FINALFUNC_EXTRA = {}'.format(
-                        self._inv[const.AGGREGATE][name].finalfunc_extra))
-                if self._inv[const.AGGREGATE][name].finalfunc_modify:
+                        agg.finalfunc_extra))
+                if agg.finalfunc_modify:
                     options.append('FINALFUNC_MODIFY = {}'.format(
-                        self._inv[const.AGGREGATE][name].finalfunc_modify))
-                if self._inv[const.AGGREGATE][name].combinefunc:
-                    options.append('COMBINEFUNC = {}'.format(
-                        self._inv[const.AGGREGATE][name].combinefunc))
-                if self._inv[const.AGGREGATE][name].serialfunc:
-                    options.append('SERIALFUNC = {}'.format(
-                        self._inv[const.AGGREGATE][name].serialfunc))
-                if self._inv[const.AGGREGATE][name].deserialfunc:
+                        agg.finalfunc_modify))
+                if agg.combinefunc:
+                    options.append('COMBINEFUNC = {}'.format(agg.combinefunc))
+                if agg.serialfunc:
+                    options.append('SERIALFUNC = {}'.format(agg.serialfunc))
+                if agg.deserialfunc:
                     options.append('DESERIALFUNC = {}'.format(
-                        self._inv[const.AGGREGATE][name].deserialfunc))
-                if self._inv[const.AGGREGATE][name].initial_condition:
+                        agg.deserialfunc))
+                if agg.initial_condition:
                     options.append('INITCOND = {}'.format(
-                        self._inv[const.AGGREGATE][name].initial_condition))
-                if self._inv[const.AGGREGATE][name].msfunc:
-                    options.append('MSFUNC = {}'.format(
-                        self._inv[const.AGGREGATE][name].msfunc))
-                if self._inv[const.AGGREGATE][name].minvfunc:
-                    options.append('MINVFUNC = {}'.format(
-                        self._inv[const.AGGREGATE][name].minvfunc))
-                if self._inv[const.AGGREGATE][name].mstate_data_type:
-                    options.append('MSTYPE = {}'.format(
-                        self._inv[const.AGGREGATE][name].mstate_data_type))
-                if self._inv[const.AGGREGATE][name].mstate_data_size:
-                    options.append('MSSPACE = {}'.format(
-                        self._inv[const.AGGREGATE][name].mstate_data_size))
-                if self._inv[const.AGGREGATE][name].mffunc:
-                    options.append('MFINALFUNC = {}'.format(
-                        self._inv[const.AGGREGATE][name].mffunc))
-                if self._inv[const.AGGREGATE][name].mfinalfunc_extra:
+                        agg.initial_condition))
+                if agg.msfunc:
+                    options.append('MSFUNC = {}'.format(agg.msfunc))
+                if agg.minvfunc:
+                    options.append('MINVFUNC = {}'.format(agg.minvfunc))
+                if agg.mstate_data_type:
+                    options.append('MSTYPE = {}'.format(agg.mstate_data_type))
+                if agg.mstate_data_size:
+                    options.append('MSSPACE = {}'.format(agg.mstate_data_size))
+                if agg.mffunc:
+                    options.append('MFINALFUNC = {}'.format(agg.mffunc))
+                if agg.mfinalfunc_extra:
                     options.append('MFINALFUNC_EXTRA')
-                if self._inv[const.AGGREGATE][name].mfinalfunc_modify:
+                if agg.mfinalfunc_modify:
                     options.append('MFINALFUNC_MODIFY = {}'.format(
-                        self._inv[const.AGGREGATE][name].mfinalfunc_modify))
-                if self._inv[const.AGGREGATE][name].minitial_condition:
+                        agg.mfinalfunc_modify))
+                if agg.minitial_condition:
                     options.append('MINITCOND = {}'.format(
-                        self._inv[const.AGGREGATE][name].minitial_condition))
-                if self._inv[const.AGGREGATE][name].sort_operator:
-                    options.append('SORTOP = {}'.format(
-                        self._inv[const.AGGREGATE][name].sort_operator))
-                if self._inv[const.AGGREGATE][name].parallel:
-                    options.append('PARALLEL = {}'.format(
-                        self._inv[const.AGGREGATE][name].parallel))
-                if self._inv[const.AGGREGATE][name].hypothetical:
+                        agg.minitial_condition))
+                if agg.sort_operator:
+                    options.append('SORTOP = {}'.format(agg.sort_operator))
+                if agg.parallel:
+                    options.append(' '.join(
+                        [const.PARALLEL, '=', agg.parallel]))
+                if agg.hypothetical:
                     options.append('HYPOTHETICAL')
                 sql.append('({})'.format(', '.join(options)))
             self._dump.add_entry(
-                desc=const.AGGREGATE,
-                namespace=self._inv[const.AGGREGATE][name].schema,
-                tag=self._inv[const.AGGREGATE][name].name,
-                owner=self._inv[const.AGGREGATE][name].owner,
-                defn='{};\n'.format(' '.join(sql)))
-            if self._inv[const.AGGREGATE][name].comment:
+                desc=const.AGGREGATE, namespace=agg.schema, tag=agg.name,
+                owner=agg.owner, defn='{};\n'.format(' '.join(sql)))
+            if agg.comment:
                 self._add_comment_to_dump(
-                    const.AGGREGATE,
-                    self._inv[const.AGGREGATE][name].schema,
-                    self._inv[const.AGGREGATE][name].name,
-                    self._inv[const.AGGREGATE][name].owner, None,
-                    self._inv[const.AGGREGATE][name].comment)
+                    const.AGGREGATE, agg.schema, agg.name, agg.owner, None,
+                    agg.comment)
 
     def _dump_casts(self) -> typing.NoReturn:
         for name in self._inv[const.CAST]:
@@ -379,18 +362,17 @@ class Project:
             if cast.sql:
                 sql = [cast.sql]
             else:
-                sql = ['CREATE CAST {}'.format(name)]
+                sql = [const.CREATE, const.CAST, name]
                 if cast.function:
-                    sql.append('WITH FUNCTION')
-                    sql.append(cast.function)
+                    sql += [const.WITH, const.FUNCTION, cast.function]
                 elif cast.inout:
-                    sql.append('WITH INOUT')
+                    sql += [const.WITH, const.INOUT]
                 else:
-                    sql.append('WITHOUT FUNCTION')
+                    sql += [const.WITHOUT, const.FUNCTION]
                 if cast.assignment:
-                    sql.append('AS ASSIGNMENT')
+                    sql += [const.AS, const.ASSIGNMENT]
                 if cast.implicit:
-                    sql.append('AS IMPLICIT')
+                    sql += [const.AS, const.IMPLICIT]
             self._dump.add_entry(
                 desc=const.CAST, namespace=cast.schema, tag=name,
                 owner=cast.owner, defn='{};\n'.format(' '.join(sql)))
@@ -408,12 +390,13 @@ class Project:
                 sql = [const.CREATE, const.COLLATION,
                        utils.quote_ident(collation.name)]
                 if collation.copy_from:
-                    sql.append('FROM')
+                    sql.append(const.FROM)
                     sql.append(collation.copy_from)
                 else:
                     options = []
                     if collation.locale:
-                        options.append('LOCALE = {}'.format(collation.locale))
+                        options.append(' '.join(
+                            [const.LOCALE, '=', collation.locale]))
                     if collation.lc_collate:
                         options.append('LC_COLLATE = {}'.format(
                             collation.lc_collate))
@@ -427,8 +410,8 @@ class Project:
                         options.append('DETERMINISTIC = {}'.format(
                             collation.deterministic))
                     if collation.version:
-                        options.append('VERSION = {}'.format(
-                            collation.version))
+                        options.append(' '.join(
+                            [const.OPTIONS, '=', collation.version]))
                     sql.append('({})'.format(', '.join(options)))
             self._dump.add_entry(
                 desc=const.COLLATION, namespace=collation.schema,
@@ -445,13 +428,14 @@ class Project:
             if conversion.sql:
                 sql = [conversion.sql]
             else:
-                sql = ['CREATE DEFAULT'
-                       if conversion.default else const.CREATE,
-                       const.CONVERSION,
-                       utils.quote_ident(conversion.name),
-                       'FOR', conversion.encoding_from,
-                       'TO', conversion.encoding_to,
-                       'FROM', conversion.function]
+                sql = [const.CREATE]
+                if conversion.default:
+                    sql.append(const.DEFAULT)
+                sql += [const.CONVERSION,
+                        utils.quote_ident(conversion.name),
+                        const.FOR, conversion.encoding_from,
+                        const.TO, conversion.encoding_to,
+                        const.FROM, conversion.function]
             self._dump.add_entry(
                 desc=const.CONVERSION, namespace=conversion.schema,
                 tag=conversion.name, owner=conversion.owner,
@@ -474,18 +458,18 @@ class Project:
                     sql.append('COLLATE')
                     sql.append(domain.collation)
                 if domain.default:
-                    sql.append('DEFAULT')
+                    sql.append(const.DEFAULT)
                     sql.append(utils.postgres_value(
                         domain.default))
                 if domain.check_constraints:
                     constraints = []
                     for c in domain.check_constraints:
-                        value = ['CONSTRAINT']
+                        value = [const.CONSTRAINT]
                         if c.name:
                             value.append(c.name)
                         if c.nullable is not None:
                             value.append(
-                                'NULL' if c.nullable else 'NOT NULL')
+                                const.NULL if c.nullable else const.NOT_NULL)
                         if c.expression:
                             value.append('CHECK ({})'.format(c.expression))
                         constraints.append(' '.join(value))
@@ -505,11 +489,13 @@ class Project:
             if trigger.sql:
                 sql = [trigger.sql]
             else:
-                sql = ['CREATE', const.EVENT_TRIGGER, 'ON', trigger.event]
+                sql = [const.CREATE, const.EVENT_TRIGGER,
+                       const.ON, trigger.event]
                 if trigger.filter:
                     sql.append('WHEN TAG IN ({})'.format(
                         trigger.filter.tags))
-                sql.append('EXECUTE FUNCTION')
+                sql.append(const.EXECUTE)
+                sql.append(const.FUNCTION)
                 sql.append(trigger.function)
             self._dump.add_entry(
                 desc=const.EVENT_TRIGGER, namespace=trigger.schema,
@@ -522,49 +508,41 @@ class Project:
 
     def _dump_extensions(self) -> typing.NoReturn:
         for name in self._inv[const.EXTENSION]:
-            sql = ['CREATE EXTENSION IF NOT EXISTS',
+            extn = self._inv[const.EXTENSION][name]
+            sql = [const.CREATE, const.EXTENSION, const.IF_NOT_EXISTS,
                    utils.quote_ident(name)]
-            if any([self._inv[const.EXTENSION][name].schema,
-                    self._inv[const.EXTENSION][name].version]):
-                sql.append('WITH')
-            if self._inv[const.EXTENSION][name].schema:
-                sql.append('SCHEMA')
-                sql.append(utils.quote_ident(
-                    self._inv[const.EXTENSION][name].schema))
-            if self._inv[const.EXTENSION][name].version:
-                sql.append('VERSION')
-                sql.append(utils.quote_ident(
-                    self._inv[const.EXTENSION][name].version))
-            if self._inv[const.EXTENSION][name].cascade:
-                sql.append('CASCADE')
+            if any([extn.schema,
+                    extn.version]):
+                sql.append(const.WITH)
+            if extn.schema:
+                sql += [const.SCHEMA, utils.quote_ident(extn.schema)]
+            if extn.version:
+                sql += [const.VERSION, utils.quote_ident(extn.version)]
+            if extn.cascade:
+                sql.append(const.CASCADE)
             self._dump.add_entry(
-                desc=const.EXTENSION,
-                namespace=self._inv[const.EXTENSION][name].schema,
-                tag=self._inv[const.EXTENSION][name].name,
-                owner=self.superuser,
-                defn='{};\n'.format(' '.join(sql)))
+                desc=const.EXTENSION, namespace=extn.schema, tag=extn.name,
+                owner=self.superuser, defn='{};\n'.format(' '.join(sql)))
 
     def _dump_foreign_data_wrappers(self) -> typing.NoReturn:
         for name in self._inv[const.FOREIGN_DATA_WRAPPER]:
-            sql = ['CREATE FOREIGN DATA WAPPER', utils.quote_ident(name)]
-            if self._inv[const.FOREIGN_DATA_WRAPPER][name].handler:
-                sql.append('HANDLER')
-                sql.append(self._inv[const.FOREIGN_DATA_WRAPPER][name].handler)
+            fdw = self._inv[const.FOREIGN_DATA_WRAPPER][name]
+            sql = [const.CREATE, const.FOREIGN_DATA_WRAPPER,
+                   utils.quote_ident(name)]
+            if fdw.handler:
+                sql.append(const.HANDLER)
+                sql.append(fdw.handler)
             else:
-                sql.append('NO HANDLER')
-            if self._inv[const.FOREIGN_DATA_WRAPPER][name].validator:
-                sql.append('VALIDATOR')
-                sql.append(
-                    self._inv[const.FOREIGN_DATA_WRAPPER][name].validator)
+                sql += [const.NO, const.HANDLER]
+            if fdw.validator:
+                sql += [const.VALIDATOR, fdw.validator]
             else:
-                sql.append('NO VALIDATOR')
-            if self._inv[const.FOREIGN_DATA_WRAPPER][name].options:
-                sql.append('OPTIONS ({})'.format(
-                    ', '.join([
-                        '{} {}'.format(k, utils.postgres_value(v))
-                        for k, v in self._inv[
-                            const.FOREIGN_DATA_WRAPPER][name].options.items()
-                    ])))
+                sql += [const.NO, const.VALIDATOR]
+            if fdw.options:
+                sql.append('{} ({})'.format(
+                    const.OPTIONS,
+                    ', '.join(['{} {}'.format(k, utils.postgres_value(v))
+                               for k, v in fdw.options.items()])))
             self._dump.add_entry(
                 const.FOREIGN_DATA_WRAPPER, None, name, self.superuser,
                 '{};\n'.format(' '.join(sql)))
@@ -589,52 +567,47 @@ class Project:
                         params.append(' '.join(value))
                     func_name = '{}()'.format(
                         function.name.split('(')[0], ', '.join(params))
-                sql = ['CREATE FUNCTION', func_name,
-                       'RETURNS', function.returns,
-                       'LANGUAGE', function.language]
+                sql = [const.CREATE, const.FUNCTION, func_name,
+                       const.RETURNS, function.returns,
+                       const.LANGUAGE, function.language]
                 if function.transform_types:
                     tts = []
                     for tt in function.transform_types:
-                        tts.append('FOR TYPE {}'.format(tt))
-                    sql.append('TRANSFORM {}'.format(', '.join(tts)))
+                        tts.append(' '.join([const.FOR, const.TYPE, tt]))
+                    sql.append('{} {}'.format(const.TRANSFORM, ', '.join(tts)))
                 if function.window:
-                    sql.append('WINDOW')
+                    sql.append(const.WINDOW)
                 if function.immutable:
-                    sql.append('IMMUTABLE')
+                    sql.append(const.IMMUTABLE)
                 if function.stable:
-                    sql.append('STABLE')
+                    sql.append(const.STABLE)
                 if function.volatile:
-                    sql.append('VOLATILE')
+                    sql.append(const.VOLATILE)
                 if function.leak_proof is not None:
                     if not function.leak_proof:
-                        sql.append('NOT')
-                    sql.append('LEAKPROOF')
+                        sql.append(const.NOT)
+                    sql.append(const.LEAKPROOF)
                 if function.called_on_null_input:
                     sql.append('CALLED ON NULL INPUT')
                 elif function.called_on_null_input is False:
                     sql.append('RETURNS NULL ON NULL INPUT')
                 if function.strict:
-                    sql.append('STRICT')
+                    sql.append(const.STRICT)
                 if function.security:
-                    sql.append('SECURITY')
-                    sql.append(function.security)
+                    sql += [const.SECURITY, function.security]
                 if function.parallel:
-                    sql.append('PARALLEL')
-                    sql.append(function.parallel)
+                    sql += [const.PARALLEL, function.parallel]
                 if function.cost:
-                    sql.append('COST')
-                    sql.append(str(function.cost))
+                    sql += [const.COST, str(function.cost)]
                 if function.rows:
-                    sql.append('ROWS')
-                    sql.append(str(function.rows))
+                    sql += [const.ROWS, str(function.rows)]
                 if function.support:
-                    sql.append('SUPPORT')
-                    sql.append(function.support)
+                    sql += [const.SUPPORT, function.support]
                 if function.configuration:
                     for k, v in function.configuration.items():
-                        sql.append('SET {} = {}'.format(
-                            k, utils.postgres_value(v)))
-                sql.append('AS')
+                        sql.append('{} {} = {}'.format(
+                            const.SET, k, utils.postgres_value(v)))
+                sql.append(const.AS)
                 if function.definition:
                     sql = ['{} $$\n{}\n$$'.format(
                         ' '.join(sql), function.definition)]
@@ -653,52 +626,45 @@ class Project:
 
     def _dump_index(self, index: models.Index, schema: str, owner: str,
                     parent: str) -> typing.NoReturn:
-        sql = ['CREATE UNIQUE INDEX'] if index.unique else ['CREATE INDEX']
-        sql.append(index.name)
-        sql.append('ON')
+        sql = [const.CREATE]
+        if index.unique:
+            sql.append(const.UNIQUE)
+        sql += [const.INDEX, index.name, const.ON]
         if index.recurse is False:
-            sql.append('ONLY')
+            sql.append(const.ONLY)
         sql.append(parent)
         if index.method:
-            sql.append('USING')
+            sql.append(const.USING)
             sql.append(index.method)
         sql.append('(')
         columns = []
         for col in index.columns:
             column = [col.name or col.expression]
             if col.collation:
-                column.append('COLLATION')
-                column.append(col.collation)
+                column += [const.COLLATION, col.collation]
             if col.opclass:
                 column.append(col.opclass)
             if col.direction:
                 column.append(col.direction)
             if col.null_placement:
-                column.append('NULLS')
-                column.append(col.null_placement)
+                column += ['NULLS', col.null_placement]
         sql.append(', '.join(columns))
         sql.append(')')
         if index.include:
             sql.append('INCLUDE ({})'.format(', '.join(index.include)))
         if index.storage_parameters:
-            sql.append('WITH')
+            sql.append(const.WITH)
             sp_sql = []
             for key, value in index.storage_parameters.items():
                 sp_sql.append('{}={}'.format(key, value))
             sql.append(', '.join(sp_sql))
         if index.tablespace:
-            sql.append('TABLESPACE')
-            sql.append(index.tablespace)
+            sql += [const.TABLESPACE, index.tablespace]
         if index.where:
-            sql.append('WHERE')
-            sql.append(index.where)
+            sql += [const.WHERE, index.where]
         entry = self._dump.add_entry(
-            desc=const.INDEX,
-            namespace=schema,
-            tablespace=index.tablespace,
-            tag=index.name,
-            owner=owner,
-            defn='{};\n'.format(' '.join(sql)))
+            desc=const.INDEX, namespace=schema, tablespace=index.tablespace,
+            tag=index.name, owner=owner, defn='{};\n'.format(' '.join(sql)))
         self._pending_deps.append(
             _PendingDependency(entry.dump_id, const.TABLE, parent))
         if index.comment:
@@ -707,28 +673,23 @@ class Project:
 
     def _dump_languages(self) -> typing.NoReturn:
         for name in self._inv[const.PROCEDURAL_LANGUAGE]:
-            sql = ['CREATE']
-            if self._inv[const.PROCEDURAL_LANGUAGE][name].replace:
-                sql.append('OR REPLACE')
-            if self._inv[const.PROCEDURAL_LANGUAGE][name].trusted:
-                sql.append('TRUSTED')
-            sql.append('LANGUAGE')
+            lang = self._inv[const.PROCEDURAL_LANGUAGE][name]
+            sql = [const.CREATE]
+            if lang.replace:
+                sql += [const.OR, const.REPLACE]
+            if lang.trusted:
+                sql.append(const.TRUSTED)
+            sql.append(const.LANGUAGE)
             sql.append(name)
-            if self._inv[const.PROCEDURAL_LANGUAGE][name].handler:
-                sql.append('HANDLER')
-                sql.append(self._inv[const.PROCEDURAL_LANGUAGE][name].handler)
-            if self._inv[const.PROCEDURAL_LANGUAGE][name].inline_handler:
-                sql.append('INLINE')
-                sql.append(
-                    self._inv[const.PROCEDURAL_LANGUAGE][name].inline_handler)
-            if self._inv[const.PROCEDURAL_LANGUAGE][name].validator:
-                sql.append('VALIDATOR')
-                sql.append(
-                    self._inv[const.PROCEDURAL_LANGUAGE][name].validator)
+            if lang.handler:
+                sql += [const.HANDLER, lang.handler]
+            if lang.inline_handler:
+                sql += [const.INLINE, lang.inline_handler]
+            if lang.validator:
+                sql += [const.VALIDATOR, lang.validator]
             self._dump.add_entry(
                 desc=const.PROCEDURAL_LANGUAGE,
-                tag=self._inv[const.PROCEDURAL_LANGUAGE][name].name,
-                owner=self.superuser,
+                tag=lang.name, owner=self.superuser,
                 defn='{};\n'.format(' '.join(sql)))
 
     def _dump_materialized_views(self) -> typing.NoReturn:
@@ -737,32 +698,27 @@ class Project:
             if view.sql:
                 sql = [view.sql]
             else:
-                sql = ['CREATE MATERIALIZED VIEW',
+                sql = [const.CREATE, const.MATERIALIZED_VIEW,
                        utils.quote_ident(view.name)]
                 if view.columns:
-                    columns = []
-                    for column in view.columns:
-                        columns.append(column.name)
-                        if column.comment:
-                            self._add_comment_to_dump(
-                                const.COLUMN, view.schema,
-                                '{}.{}'.format(view.name, column.name),
-                                view.owner, None, column.comment)
+                    columns = [c.name for c in view.columns]
+                    for column in [c for c in view.columns if c.comment]:
+                        self._add_comment_to_dump(
+                            const.COLUMN, view.schema,
+                            '{}.{}'.format(view.name, column.name),
+                            view.owner, None, column.comment)
                     sql.append('({})'.format(', '.join(columns)))
                 if view.table_access_method:
-                    sql.append('USING')
-                    sql.append(view.table_access_method)
+                    sql += [const.USING, view.table_access_method]
                 if view.storage_parameters:
-                    sql.append('WITH')
+                    sql.append(const.WITH)
                     params = []
                     for key, value in view.storage_parameters.items():
                         params.append('{} = {}'.format(key, value))
                     sql.append(', '.join(params))
                 if view.tablespace:
-                    sql.append('TABLESPACE')
-                    sql.append(view.tablespace)
-                sql.append('AS')
-                sql.append(view.query)
+                    sql += [const.TABLESPACE, view.tablespace]
+                sql += [const.AS, view.query]
             self._dump.add_entry(
                 desc=const.MATERIALIZED_VIEW, namespace=view.schema,
                 tag=view.name, owner=view.owner,
@@ -774,55 +730,70 @@ class Project:
 
     def _dump_operators(self) -> typing.NoReturn:
         for name in self._inv[const.OPERATOR]:
-            if self._inv[const.OPERATOR][name].sql:
-                sql = [self._inv[const.OPERATOR][name].sql]
+            oper = self._inv[const.OPERATOR][name]
+            if oper.sql:
+                sql = [oper.sql]
             else:
-                sql = ['CREATE OPERATOR',
-                       utils.quote_ident(self._inv[const.OPERATOR][name].name)]
-                options = ['FUNCTION = {}'.format(
-                    self._inv[const.OPERATOR][name].function)]
-                if self._inv[const.OPERATOR][name].left_arg:
+                sql = [const.CREATE, const.OPERATOR,
+                       utils.quote_ident(oper.name)]
+                options = [' '.join([const.FUNCTION, '=', oper.function])]
+                if oper.left_arg:
                     options.append('LEFTARG = {}'.format(
-                        self._inv[const.OPERATOR][name].left_arg))
-                if self._inv[const.OPERATOR][name].right_arg:
+                        oper.left_arg))
+                if oper.right_arg:
                     options.append('RIGHTARG = {}'.format(
-                        self._inv[const.OPERATOR][name].right_arg))
-                if self._inv[const.OPERATOR][name].commutator:
+                        oper.right_arg))
+                if oper.commutator:
                     options.append('COMMUTATOR = {}'.format(
-                        self._inv[const.OPERATOR][name].commutator))
-                if self._inv[const.OPERATOR][name].negator:
+                        oper.commutator))
+                if oper.negator:
                     options.append('NEGATOR = {}'.format(
-                        self._inv[const.OPERATOR][name].negator))
-                if self._inv[const.OPERATOR][name].restrict:
+                        oper.negator))
+                if oper.restrict:
                     options.append('RESTRICT = {}'.format(
-                        self._inv[const.OPERATOR][name].restrict))
-                if self._inv[const.OPERATOR][name].join:
-                    options.append('JOIN = {}'.format(
-                        self._inv[const.OPERATOR][name].join))
-                if self._inv[const.OPERATOR][name].hashes:
-                    options.append('HASHES')
-                if self._inv[const.OPERATOR][name].merges:
-                    options.append('MERGES')
+                        oper.restrict))
+                if oper.join:
+                    options.append(' '.join([const.JOIN, '=', oper.join]))
+                if oper.hashes:
+                    options.append(const.HASHES)
+                if oper.merges:
+                    options.append(const.MERGES)
                 sql.append('({})'.format(', '.join(options)))
             self._dump.add_entry(
-                desc=const.OPERATOR,
-                namespace=self._inv[const.OPERATOR][name].schema,
-                tag=self._inv[const.OPERATOR][name].name,
-                owner=self._inv[const.OPERATOR][name].owner,
-                defn='{};\n'.format(' '.join(sql)))
-            if self._inv[const.OPERATOR][name].comment:
+                desc=const.OPERATOR, namespace=oper.schema, tag=oper.name,
+                owner=oper.owner, defn='{};\n'.format(' '.join(sql)))
+            if oper.comment:
                 self._add_comment_to_dump(
-                    const.OPERATOR,
-                    self._inv[const.OPERATOR][name].schema,
-                    self._inv[const.OPERATOR][name].name,
-                    self._inv[const.OPERATOR][name].owner, None,
-                    self._inv[const.OPERATOR][name].comment)
+                    const.OPERATOR, oper.schema, oper.name, oper.owner, None,
+                    oper.comment)
+
+    def _dump_publications(self) -> typing.NoReturn:
+        for name in self._inv[const.PUBLICATION]:
+            pub = self._inv[const.PUBLICATION][name]
+            sql = [const.CREATE, const.PUBLICATION, pub.name]
+            if pub.all_tables:
+                sql.append('FOR ALL TABLES')
+            else:
+                sql += [const.FOR, const.TABLE, ', '.join(pub.tables)]
+            if pub.parameters:
+                params = []
+                for k, v in pub.parameters.items():
+                    params.append('{} = {}'.format(k, utils.postgres_value(v)))
+                sql += [const.WITH, ', '.join(params)]
+            self._dump.add_entry(
+                desc=const.PUBLICATION, tag=pub.name,
+                owner=self.superuser, defn='{};\n'.format(' '.join(sql)))
+            if pub.comment:
+                self._add_comment_to_dump(
+                    const.PUBLICATION, None, pub.name, self.superuser, None,
+                    pub.comment)
 
     def _dump_schemas(self) -> typing.NoReturn:
         for name in self._inv[const.SCHEMA]:
-            sql = ['CREATE SCHEMA IF NOT EXISTS', utils.quote_ident(name)]
+            sql = [const.CREATE, const.SCHEMA, const.IF_NOT_EXISTS,
+                   utils.quote_ident(name)]
             if self._inv[const.SCHEMA][name].authorization:
-                sql.append('AUTHORIZATION')
+                sql.append(const.AUTHORIZATION)
                 sql.append(utils.quote_ident(
                     self._inv[const.SCHEMA][name].authorization))
             self._dump.add_entry(
@@ -836,10 +807,10 @@ class Project:
             if self._inv[const.SEQUENCE][name].sql:
                 sql = [self._inv[const.SEQUENCE][name].sql]
             else:
-                sql = ['CREATE SEQUENCE',
+                sql = [const.CREATE, const.SEQUENCE,
                        utils.quote_ident(self._inv[const.SEQUENCE][name].name)]
                 if self._inv[const.SEQUENCE][name].data_type:
-                    sql.append('AS')
+                    sql.append(const.AS)
                     sql.append(self._inv[const.SEQUENCE][name].data_type)
                 if self._inv[const.SEQUENCE][name].increment_by:
                     sql.append('INCREMENT BY')
@@ -859,7 +830,7 @@ class Project:
                     sql.append(str(self._inv[const.SEQUENCE][name].cache))
                 if self._inv[const.SEQUENCE][name].cycle is not None:
                     if not self._inv[const.SEQUENCE][name].cycle:
-                        sql.append('NO')
+                        sql.append(const.NO)
                     sql.append('CYCLE')
                 if self._inv[const.SEQUENCE][name].owned_by:
                     sql.append('OWNED BY')
@@ -879,20 +850,17 @@ class Project:
     def _dump_servers(self) -> typing.NoReturn:
         for name in self._inv[const.SERVER]:
             server = self._inv[const.SERVER][name]
-            sql = ['CREATE SERVER', server.name]
+            sql = [const.CREATE, const.SERVER, server.name]
             if server.type:
-                sql.append('TYPE')
-                sql.append(utils.postgres_value(server.type))
+                sql += [const.TYPE, utils.postgres_value(server.type)]
             if server.version:
-                sql.append('VERSION')
-                sql.append(utils.postgres_value(server.version))
-            sql.append('FOREIGN DATA WRAPPER')
-            sql.append(server.foreign_data_wrapper)
+                sql += [const.VERSION, utils.postgres_value(server.version)]
+            sql += [const.FOREIGN_DATA_WRAPPER, server.foreign_data_wrapper]
             if server.options:
                 options = []
                 for k, v in server.options.items():
                     options.append('{} {}'.format(k, utils.postgres_value(v)))
-                sql.append('OPTIONS {}'.format(', '.join(options)))
+                sql.append('{} {}'.format(const.OPTIONS, ', '.join(options)))
             self._dump.add_entry(
                 desc=const.SERVER, tag=server.name,
                 owner=self.superuser, defn='{};\n'.format(' '.join(sql)))
@@ -901,15 +869,34 @@ class Project:
                     const.SERVER, None, server.name, self.superuser, None,
                     server.comment)
 
+    def _dump_subscriptions(self) -> typing.NoReturn:
+        for name in self._inv[const.SUBSCRIPTION]:
+            sub = self._inv[const.SUBSCRIPTION][name]
+            sql = [const.CREATE, const.SUBSCRIPTION, sub.name,
+                   'CONNECTION', sub.connection,
+                   const.PUBLICATION, ', '.join(sub.publications)]
+            if sub.parameters:
+                params = []
+                for k, v in sub.parameters.items():
+                    params.append('{} = {}'.format(k, utils.postgres_value(v)))
+                sql += [const.WITH, ', '.join(params)]
+            self._dump.add_entry(
+                desc=const.SUBSCRIPTION, tag=sub.name,
+                owner=self.superuser, defn='{};\n'.format(' '.join(sql)))
+            if sub.comment:
+                self._add_comment_to_dump(
+                    const.SUBSCRIPTION, None, sub.name, self.superuser, None,
+                    sub.comment)
+
     def _dump_table(self, name):
         table = self._inv[const.TABLE][name]
         if table.sql:
             sql = [table.sql]
         else:
-            sql = ['CREATE']
+            sql = [const.CREATE]
             if table.unlogged:
                 sql.append('UNLOGGED')
-            sql.append('TABLE')
+            sql.append(const.TABLE)
             sql.append(name)
             sql.append('(')
             if table.like_table:
@@ -928,16 +915,14 @@ class Project:
                     for col in table.columns:
                         column = [col.name or col.expression, col.data_type]
                         if col.collation:
-                            column.append('COLLATION')
-                            column.append(col.collation)
+                            column += [const.COLLATION, col.collation]
                         if not col.nullable:
-                            column.append('NOT NULL')
+                            column.append(const.NOT_NULL)
                         if col.check_constraint:
-                            column.append('CHECK')
-                            column.append(col.check_constraint)
+                            column += [const.CHECK, col.check_constraint]
                         if col.default:
-                            column.append('DEFAULT')
-                            column.append(utils.postgres_value(col.default))
+                            column += [const.DEFAULT,
+                                       utils.postgres_value(col.default)]
                         if col.generated and col.generated.expression:
                             column.append('GENERATED ALWAYS AS')
                             column.append(col.generated.expression)
@@ -954,10 +939,10 @@ class Project:
                                 table.owner, None, col.comment)
                 for item in table.unique_constraints or []:
                     inner_sql.append(
-                        self._format_sql_constraint('UNIQUE', item))
+                        self._format_sql_constraint(const.UNIQUE, item))
                 if table.primary_key:
                     inner_sql.append(self._format_sql_constraint(
-                        'PRIMARY_KEY', table.primary_key))
+                        'PRIMARY KEY', table.primary_key))
                 for fk in table.foreign_keys or []:
                     fk_sql = ['FOREIGN KEY ({})'.format(', '.join(fk.columns)),
                               'REFERENCES', fk.references.name,
@@ -988,23 +973,21 @@ class Project:
                 for col in table.partition.columns:
                     column = [col.name or col.expression]
                     if col.collation:
-                        column.append('COLLATION')
-                        column.append(col.collation)
+                        column += [const.COLLATION, col.collation]
                     if col.opclass:
                         column.append(col.opclass)
                 sql.append(', '.join(columns))
                 sql.append(')')
             if table.access_method:
-                sql.append('USING')
-                sql.append(table.access_method)
+                sql += [const.USING, table.access_method]
             if table.storage_parameters:
-                sql.append('WITH')
+                sql.append(const.WITH)
                 params = []
                 for key, value in table.storage_parameters.items():
                     params.append('{}={}'.format(key, value))
                 sql.append(', '.join(params))
             if table.tablespace:
-                sql.append('TABLESPACE')
+                sql.append(const.TABLESPACE)
                 sql.append(table.tablespace)
         self._dump.add_entry(
             const.TABLE, table.schema, table.name, table.owner,
@@ -1020,26 +1003,23 @@ class Project:
 
     def _dump_trigger(self, trigger: models.Trigger, schema: str, owner: str,
                       parent: str) -> typing.NoReturn:
-        defn = trigger.sql
-        if not trigger.sql:
-            sql = ['CREATE TRIGGER', trigger.name, trigger.when]
-            sql.append(' OR '.join(trigger.events))
-            sql.append('ON')
-            sql.append(parent)
+        if trigger.sql:
+            sql = [trigger.sql]
+        else:
+            sql = [const.CREATE, const.TRIGGER, trigger.name, trigger.when,
+                   ' {} '.format(const.OR).join(trigger.events),
+                   const.ON, parent]
             if trigger.for_each:
-                sql.append('FOR EACH')
-                sql.append(trigger.for_each)
+                sql += [const.FOR_EACH, trigger.for_each]
             if trigger.condition:
-                sql.append('WHEN')
-                sql.append(trigger.condition)
-            sql.append('EXECUTE FUNCTION')
-            sql.append(trigger.function)
+                sql += [const.WHEN, trigger.condition]
+            sql += [const.EXECUTE, const.FUNCTION, trigger.function]
             if trigger.arguments:
                 sql.append('({})'.format(
                     ', '.join([str(a) for a in trigger.arguments])))
-            defn = '{}\n'.format(' '.join(sql))
         entry = self._dump.add_entry(
-            const.TRIGGER, schema, trigger.name, owner, defn)
+            const.TRIGGER, schema, trigger.name, owner,
+            '{};\n'.format(' '.join(sql)))
         self._pending_deps.append(
             _PendingDependency(entry.dump_id, const.TABLE, parent))
         if trigger.comment:
@@ -1053,28 +1033,21 @@ class Project:
 
     def _dump_tablespaces(self) -> typing.NoReturn:
         for name in self._inv[const.TABLESPACE]:
-            sql = ['CREATE TABLESPACE',
-                   utils.quote_ident(self._inv[const.TABLESPACE][name].name),
-                   'OWNER',
-                   self._inv[const.TABLESPACE][name].owner,
-                   'LOCATION',
-                   self._inv[const.TABLESPACE][name].location]
-            if self._inv[const.TABLESPACE][name].options:
+            ts = self._inv[const.TABLESPACE][name]
+            sql = [const.CREATE, const.TABLESPACE, utils.quote_ident(ts.name),
+                   const.OWNER, ts.owner, const.LOCATION, ts.location]
+            if ts.options:
                 options = []
-                for k, v in self._inv[const.TABLESPACE][name].options.items():
+                for k, v in ts.options.items():
                     options.append('{}={}'.format(k, utils.postgres_value(v)))
-                sql.append('WITH ({})'.format(','.join(options)))
+                sql.append('{} ({})'.format(const.WITH, ','.join(options)))
             self._dump.add_entry(
-                desc=const.TABLESPACE,
-                tag=self._inv[const.TABLESPACE][name].name,
-                owner=self._inv[const.TABLESPACE][name].owner,
+                desc=const.TABLESPACE, tag=ts.name, owner=ts.owner,
                 defn='{};\n'.format(' '.join(sql)))
-            if self._inv[const.TABLESPACE][name].comment:
+            if ts.comment:
                 self._add_comment_to_dump(
-                    const.TABLESPACE, None,
-                    self._inv[const.TABLESPACE][name].name,
-                    self._inv[const.TABLESPACE][name].owner, None,
-                    self._inv[const.TABLESPACE][name].comment)
+                    const.TABLESPACE, None, ts.name, ts.owner, None,
+                    ts.comment)
 
     def _dump_text_search(self) -> typing.NoReturn:
         for schema in self._inv[const.TEXT_SEARCH]:
@@ -1089,7 +1062,7 @@ class Project:
                         value = ['SOURCE', '=', config.source]
                     else:
                         raise RuntimeError
-                    sql = ['CREATE', const.TEXT_SEARCH_CONFIGURATION,
+                    sql = [const.CREATE, const.TEXT_SEARCH_CONFIGURATION,
                            config.name, '({})'.format(value)]
                 self._dump.add_entry(
                     desc=const.TEXT_SEARCH_CONFIGURATION,
@@ -1110,7 +1083,7 @@ class Project:
                         for k, v in dictionary.options.items():
                             value.append('{} = {}'.format(
                                 k, utils.postgres_value(v)))
-                    sql = ['CREATE', const.TEXT_SEARCH_DICTIONARY,
+                    sql = [const.CREATE, const.TEXT_SEARCH_DICTIONARY,
                            dictionary.name, '({})'.format(', '.join(value))]
                 self._dump.add_entry(
                     desc=const.TEXT_SEARCH_DICTIONARY,
@@ -1135,7 +1108,7 @@ class Project:
                     if parser.headline_function:
                         value.append(' '.join(
                             ['HEADLINE', '=', parser.headline_function]))
-                    sql = ['CREATE', const.TEXT_SEARCH_PARSER,
+                    sql = [const.CREATE, const.TEXT_SEARCH_PARSER,
                            parser.name, '({})'.format(', '.join(value))]
                 self._dump.add_entry(
                     desc=const.TEXT_SEARCH_PARSER,
@@ -1157,7 +1130,7 @@ class Project:
                             ['INIT', '=', template.init_function]))
                     value.append(' '.join(
                         ['LEXIZE', '=', template.lexize_function]))
-                    sql = ['CREATE', const.TEXT_SEARCH_TEMPLATE,
+                    sql = [const.CREATE, const.TEXT_SEARCH_TEMPLATE,
                            template.name, '({})'.format(', '.join(value))]
                 self._dump.add_entry(
                     desc=const.TEXT_SEARCH_TEMPLATE,
@@ -1175,9 +1148,9 @@ class Project:
             if self._inv[const.TYPE][name].sql:
                 sql = [self._inv[const.TYPE][name].sql]
             else:
-                sql = ['CREATE TYPE',
+                sql = [const.CREATE, const.TYPE,
                        utils.quote_ident(self._inv[const.TYPE][name].name),
-                       'AS']
+                       const.AS]
                 if self._inv[const.TYPE][name].type == 'base':
                     options = [
                         'INPUT = {}'.format(self._inv[const.TYPE][name].input),
@@ -1279,14 +1252,34 @@ class Project:
                     self._inv[const.TYPE][name].owner, None,
                     self._inv[const.TYPE][name].comment)
 
+    def _dump_user_mappings(self) -> typing.NoReturn:
+        for name in self._inv[const.USER_MAPPING]:
+            um = self._inv[const.USER_MAPPING][name]
+            for server in um.servers:
+                sql = [const.CREATE, const.USER_MAPPING, const.FOR,
+                       utils.quote_ident(um.name), const.SERVER,
+                       utils.postgres_value(server.name)]
+                if server.options:
+                    opts = []
+                    for k, v in server.options.items():
+                        opts.append('{} {}'.format(k, utils.postgres_value(v)))
+                    sql.append('{} ({})'.format(const.OPTIONS, ','.join(opts)))
+                self._dump.add_entry(
+                    desc=const.USER_MAPPING,
+                    tag='{}-{}'.format(name, server.name),
+                    owner=self.superuser, defn='{};\n'.format(' '.join(sql)))
+
     def _dump_views(self) -> typing.NoReturn:
         for name in self._inv[const.VIEW]:
             view = self._inv[const.VIEW][name]
             if view.sql:
                 sql = [view.sql]
             else:
-                sql = ['CREATE RECURSIVE VIEW' if view.recursive else
-                       'CREATE VIEW', utils.quote_ident(view.name)]
+                sql = [const.CREATE]
+                if view.recursive:
+                    sql.append(const.RECURSIVE)
+                sql.append(const.VIEW)
+                sql.append(utils.quote_ident(view.name))
                 if view.columns:
                     columns = []
                     for column in view.columns:
@@ -1303,12 +1296,8 @@ class Project:
                 if view.security_barrier:
                     sql.append('WITH security_barrier = ')
                     sql.append(view.security_barrier)
-                sql.append('AS')
+                sql.append(const.AS)
                 sql.append(view.query)
-                if view.check_option:
-                    sql.append('WITH')
-                    sql.append(view.check_option)
-                    sql.append('CHECK OPTION')
             self._dump.add_entry(
                 desc=const.VIEW, namespace=view.schema, tag=view.name,
                 owner=view.owner, defn='{};\n'.format(' '.join(sql)))
@@ -1472,6 +1461,16 @@ class Project:
             if 'revocations' in defn:
                 defn['revocations'] = models.ACLs(**defn['revocations'])
             self._inv[obj_type][defn['name']] = model(**defn)
+
+    def _read_user_mapping_files(self) -> typing.NoReturn:
+        LOGGER.debug('Reading %s',
+                     const.PATHS[const.USER_MAPPING].name.upper())
+        for defn in self._iterate_files(const.USER_MAPPING):
+            validation.validate_object(const.USER_MAPPING, defn['name'], defn)
+            defn['servers'] = [models.UserMappingServer(**s)
+                               for s in defn['servers']]
+            self._inv[const.USER_MAPPING][defn['name']] = \
+                models.UserMapping(**defn)
 
     @staticmethod
     def _read_text_search_definition(defn: dict) -> typing.NoReturn:

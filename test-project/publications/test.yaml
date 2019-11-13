@@ -1,3 +1,4 @@
 ---
 name: test
 all_tables: true
+comment: Test publication exposing all tables
