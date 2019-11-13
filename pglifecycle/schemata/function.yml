@@ -124,6 +124,7 @@ properties:
       take arguments or which are not passed any arguments from the security
       barrier view or table do not have to be marked as leakproof to be executed
       before security conditions.
+    type: boolean
   called_on_null_input:
     title: Called on NULL Input
     description: >

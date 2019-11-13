@@ -130,6 +130,7 @@ class Project:
         self._dump_tablespaces()
         self._dump_tables()
         self._dump_sequences()
+        self._dump_functions()
 
         self._dump.save(path)
         LOGGER.info('Build artifact saved with %i entries',
@@ -177,17 +178,14 @@ class Project:
                              parent: typing.Optional[str],
                              comment: str) -> typing.NoReturn:
         sql = ['COMMENT ON', obj_type]
-        if obj_type in {const.DOMAIN, const.OPERATOR, const.SCHEMA}:
-            sql.append('{}.{}'.format(schema, name))
-        elif obj_type == const.TABLESPACE:
+        if obj_type == const.TABLESPACE:
             sql.append(name)
-        elif obj_type in {const.CONSTRAINT, const.POLICY,
-                          const.RULE, const.TRIGGER}:
+        elif parent:
             sql.append('{}.{}'.format(schema, name))
             sql.append('ON')
             sql.append(parent)
         else:
-            sql.append(parent)
+            sql.append('{}.{}'.format(schema, name))
         sql.append('IS')
         sql.append('$${}$$;\n'.format(comment))
         entry = self._dump.add_entry(
@@ -207,115 +205,6 @@ class Project:
             self._cache_and_remove_dependencies(
                 const.AGGREGATE, self._object_name(defn), defn)
         return models.Aggregate(**defn)
-
-    def _build_create_table_stmt(self, name: str) -> str:
-        sql = ['CREATE']
-        if self._inv[const.TABLE][name].unlogged:
-            sql.append('UNLOGGED')
-        sql.append('TABLE')
-        sql.append(name)
-        sql.append('(')
-        if self._inv[const.TABLE][name].like_table:
-            sql.append('LIKE')
-            sql.append(self._inv[const.TABLE][name].name)
-            for field in [field for field in
-                          self._inv[const.TABLE][name].like_table.fields()
-                          if field.startswith('include_')
-                          and getattr(
-                              self._inv[const.TABLE][name].like_table, field)
-                          is not None]:
-                sql.append('INCLUDING' if getattr(
-                    self._inv[const.TABLE][name], field) else 'EXCLUDING')
-                sql.append(field)
-        else:
-            inner_sql = []
-            if self._inv[const.TABLE][name].columns:
-                for col in self._inv[const.TABLE][name].columns:
-                    column = [col.name or col.expression, col.data_type]
-                    if col.collation:
-                        column.append('COLLATION')
-                        column.append(col.collation)
-                    if not col.nullable:
-                        column.append('NOT NULL')
-                    if col.check_constraint:
-                        column.append('CHECK')
-                        column.append(col.check_constraint)
-                    if col.default:
-                        column.append('DEFAULT')
-                        column.append(utils.postgres_value(col.default))
-                    if col.generated and col.generated.expression:
-                        column.append('GENERATED ALWAYS AS')
-                        column.append(col.generated.expression)
-                        column.append('STORED')
-                    elif col.generated and col.generated.sequence:
-                        column.append('GENERATED')
-                        column.append(col.generated.sequence_behavior)
-                        column.append('AS IDENTITY')
-                    inner_sql.append(' '.join(column))
-                    if col.comment:
-                        self._add_comment_to_dump(
-                            const.TABLE,
-                            self._inv[const.TABLE][name].schema,
-                            '{}.{}'.format(
-                                self._inv[const.TABLE][name].name, col.name),
-                            self._inv[const.TABLE][name].owner, name,
-                            col.comment)
-            for item in self._inv[const.TABLE][name].unique_constraints or []:
-                inner_sql.append(self._format_sql_constraint('UNIQUE', item))
-            if self._inv[const.TABLE][name].primary_key:
-                inner_sql.append(self._format_sql_constraint(
-                    'PRIMARY_KEY', self._inv[const.TABLE][name].primary_key))
-            for fk in self._inv[const.TABLE][name].foreign_keys or []:
-                fk_sql = ['FOREIGN KEY ({})'.format(', '.join(fk.columns)),
-                          'REFERENCES',
-                          fk.references.name,
-                          '({})'.format(', '.join(fk.references.columns))]
-                if fk.match_type:
-                    fk_sql.append('MATCH')
-                    fk_sql.append(fk.match_type)
-                if fk.on_delete != 'NO ACTION':
-                    fk_sql.append('ON_DELETE')
-                    fk_sql.append(fk.on_delete)
-                if fk.on_update != 'NO ACTION':
-                    fk_sql.append('ON_UPDATE')
-                    fk_sql.append(fk.on_update)
-                if fk.deferrable:
-                    fk_sql.append('DEFERRABLE')
-                if fk.initially_deferred:
-                    fk_sql.append('INITIALLY DEFERRED')
-                inner_sql.append(' '.join(fk_sql))
-            sql.append(', '.join(inner_sql))
-        sql.append(')')
-        if self._inv[const.TABLE][name].parents:
-            sql.append(', '.join(self._inv[const.TABLE][name].parents))
-        if self._inv[const.TABLE][name].partition:
-            sql.append('PARTITION BY')
-            sql.append(self._inv[const.TABLE][name].partition.type)
-            sql.append('(')
-            columns = []
-            for col in self._inv[const.TABLE][name].partition.columns:
-                column = [col.name or col.expression]
-                if col.collation:
-                    column.append('COLLATION')
-                    column.append(col.collation)
-                if col.opclass:
-                    column.append(col.opclass)
-            sql.append(', '.join(columns))
-            sql.append(')')
-        if self._inv[const.TABLE][name].access_method:
-            sql.append('USING')
-            sql.append(self._inv[const.TABLE][name].access_method)
-        if self._inv[const.TABLE][name].storage_parameters:
-            sql.append('WITH')
-            params = []
-            for key, value in self._inv[
-                    const.TABLE][name].storage_parameters.items():
-                params.append('{}={}'.format(key, value))
-            sql.append(', '.join(params))
-        if self._inv[const.TABLE][name].tablespace:
-            sql.append('TABLESPACE')
-            sql.append(self._inv[const.TABLE][name].tablespace)
-        return ' '.join(sql)
 
     @staticmethod
     def _build_fk_definition(defn: dict) -> models.ForeignKey:
@@ -642,6 +531,88 @@ class Project:
                 const.FOREIGN_DATA_WRAPPER, None, name, self.superuser,
                 '{};\n'.format(' '.join(sql)))
 
+    def _dump_functions(self) -> typing.NoReturn:
+        for name in self._inv[const.FUNCTION]:
+            function = self._inv[const.FUNCTION][name]
+            if function.sql:
+                sql = [function.sql]
+            else:
+                func_name = function.name
+                if function.parameters:
+                    params = []
+                    for param in function.parameters:
+                        value = [param.mode]
+                        if param.name:
+                            value.append(param.name)
+                        value.append(param.data_type)
+                        if param.default:
+                            value.append('=')
+                            value.append(param.default)
+                        params.append(' '.join(value))
+                    func_name = '{}()'.format(
+                        function.name.split('(')[0], ', '.join(params))
+                sql = ['CREATE FUNCTION', func_name,
+                       'RETURNS', function.returns,
+                       'LANGUAGE', function.language]
+                if function.transform_types:
+                    tts = []
+                    for tt in function.transform_types:
+                        tts.append('FOR TYPE {}'.format(tt))
+                    sql.append('TRANSFORM {}'.format(', '.join(tts)))
+                if function.window:
+                    sql.append('WINDOW')
+                if function.immutable:
+                    sql.append('IMMUTABLE')
+                if function.stable:
+                    sql.append('STABLE')
+                if function.volatile:
+                    sql.append('VOLATILE')
+                if function.leak_proof is not None:
+                    if not function.leak_proof:
+                        sql.append('NOT')
+                    sql.append('LEAKPROOF')
+                if function.called_on_null_input:
+                    sql.append('CALLED ON NULL INPUT')
+                elif function.called_on_null_input is False:
+                    sql.append('RETURNS NULL ON NULL INPUT')
+                if function.strict:
+                    sql.append('STRICT')
+                if function.security:
+                    sql.append('SECURITY')
+                    sql.append(function.security)
+                if function.parallel:
+                    sql.append('PARALLEL')
+                    sql.append(function.parallel)
+                if function.cost:
+                    sql.append('COST')
+                    sql.append(str(function.cost))
+                if function.rows:
+                    sql.append('ROWS')
+                    sql.append(str(function.rows))
+                if function.support:
+                    sql.append('SUPPORT')
+                    sql.append(function.support)
+                if function.configuration:
+                    for k, v in function.configuration.items():
+                        sql.append('SET {} = {}'.format(
+                            k, utils.postgres_value(v)))
+                sql.append('AS')
+                if function.definition:
+                    sql = ['{} $$\n{}\n$$'.format(
+                        ' '.join(sql), function.definition)]
+                elif function.object_file and function.link_symbol:
+                    sql.append('{}, {}'.format(
+                        utils.postgres_value(function.object_file),
+                        utils.postgres_value(function.link_symbol)))
+            self._dump.add_entry(
+                desc=const.FUNCTION, namespace=function.schema,
+                tag=function.name, owner=function.owner,
+                defn='{};\n'.format(' '.join(sql)))
+            if function.comment:
+                self._add_comment_to_dump(
+                    const.FUNCTION, function.schema, function.name,
+                    function.owner, None, function.comment)
+
     def _dump_index(self, index: models.Index, schema: str, owner: str,
                     parent: str) -> typing.NoReturn:
         sql = ['CREATE UNIQUE INDEX'] if index.unique else ['CREATE INDEX']
@@ -856,28 +827,121 @@ class Project:
                     self._inv[const.TABLESPACE][name].comment)
 
     def _dump_table(self, name):
+        table = self._inv[const.TABLE][name]
+        if table.sql:
+            sql = [table.sql]
+        else:
+            sql = ['CREATE']
+            if table.unlogged:
+                sql.append('UNLOGGED')
+            sql.append('TABLE')
+            sql.append(name)
+            sql.append('(')
+            if table.like_table:
+                sql.append('LIKE')
+                sql.append(table.name)
+                for field in [field for field in table.like_table.fields()
+                              if field.startswith('include_')
+                              and getattr(table.like_table, field)
+                              is not None]:
+                    sql.append('INCLUDING' if getattr(table, field) else
+                               'EXCLUDING')
+                    sql.append(field)
+            else:
+                inner_sql = []
+                if table.columns:
+                    for col in table.columns:
+                        column = [col.name or col.expression, col.data_type]
+                        if col.collation:
+                            column.append('COLLATION')
+                            column.append(col.collation)
+                        if not col.nullable:
+                            column.append('NOT NULL')
+                        if col.check_constraint:
+                            column.append('CHECK')
+                            column.append(col.check_constraint)
+                        if col.default:
+                            column.append('DEFAULT')
+                            column.append(utils.postgres_value(col.default))
+                        if col.generated and col.generated.expression:
+                            column.append('GENERATED ALWAYS AS')
+                            column.append(col.generated.expression)
+                            column.append('STORED')
+                        elif col.generated and col.generated.sequence:
+                            column.append('GENERATED')
+                            column.append(col.generated.sequence_behavior)
+                            column.append('AS IDENTITY')
+                        inner_sql.append(' '.join(column))
+                        if col.comment:
+                            self._add_comment_to_dump(
+                                const.COLUMN, table.schema,
+                                '{}.{}'.format(table.name, col.name),
+                                table.owner, name, col.comment)
+                for item in table.unique_constraints or []:
+                    inner_sql.append(
+                        self._format_sql_constraint('UNIQUE', item))
+                if table.primary_key:
+                    inner_sql.append(self._format_sql_constraint(
+                        'PRIMARY_KEY', table.primary_key))
+                for fk in table.foreign_keys or []:
+                    fk_sql = ['FOREIGN KEY ({})'.format(', '.join(fk.columns)),
+                              'REFERENCES', fk.references.name,
+                              '({})'.format(', '.join(fk.references.columns))]
+                    if fk.match_type:
+                        fk_sql.append('MATCH')
+                        fk_sql.append(fk.match_type)
+                    if fk.on_delete != 'NO ACTION':
+                        fk_sql.append('ON_DELETE')
+                        fk_sql.append(fk.on_delete)
+                    if fk.on_update != 'NO ACTION':
+                        fk_sql.append('ON_UPDATE')
+                        fk_sql.append(fk.on_update)
+                    if fk.deferrable:
+                        fk_sql.append('DEFERRABLE')
+                    if fk.initially_deferred:
+                        fk_sql.append('INITIALLY DEFERRED')
+                    inner_sql.append(' '.join(fk_sql))
+                sql.append(', '.join(inner_sql))
+            sql.append(')')
+            if table.parents:
+                sql.append(', '.join(table.parents))
+            if table.partition:
+                sql.append('PARTITION BY')
+                sql.append(table.partition.type)
+                sql.append('(')
+                columns = []
+                for col in table.partition.columns:
+                    column = [col.name or col.expression]
+                    if col.collation:
+                        column.append('COLLATION')
+                        column.append(col.collation)
+                    if col.opclass:
+                        column.append(col.opclass)
+                sql.append(', '.join(columns))
+                sql.append(')')
+            if table.access_method:
+                sql.append('USING')
+                sql.append(table.access_method)
+            if table.storage_parameters:
+                sql.append('WITH')
+                params = []
+                for key, value in table.storage_parameters.items():
+                    params.append('{}={}'.format(key, value))
+                sql.append(', '.join(params))
+            if table.tablespace:
+                sql.append('TABLESPACE')
+                sql.append(table.tablespace)
         self._dump.add_entry(
-            const.TABLE,
-            self._inv[const.TABLE][name].schema,
-            self._inv[const.TABLE][name].name,
-            self._inv[const.TABLE][name].owner,
-            (self._inv[const.TABLE][name].sql
-             if self._inv[const.TABLE][name].sql
-             else self._build_create_table_stmt(name)),
-            None, None,
-            [], self._inv[const.TABLE][name].tablespace)
-        if self._inv[const.TABLE][name].comment:
+            const.TABLE, table.schema, table.name, table.owner,
+            '{};\n'.format(' '.join(sql)), None, None, [], table.tablespace)
+        if table.comment:
             self._add_comment_to_dump(
-                const.TABLE, self._inv[const.TABLE][name].schema,
-                self._inv[const.TABLE][name].name,
-                self._inv[const.TABLE][name].owner,
-                name, self._inv[const.TABLE][name].comment)
-        for index in self._inv[const.TABLE][name].indexes or []:
-            self._dump_index(index, self._inv[const.TABLE][name].schema,
-                             self._inv[const.TABLE][name].owner, name)
-        for trigger in self._inv[const.TABLE][name].triggers or []:
-            self._dump_trigger(trigger, self._inv[const.TABLE][name].schema,
-                               self._inv[const.TABLE][name].owner, name)
+                const.TABLE, table.schema, table.name, table.owner,
+                name, table.comment)
+        for index in table.indexes or []:
+            self._dump_index(index, table.schema, table.owner, name)
+        for trigger in table.triggers or []:
+            self._dump_trigger(trigger, table.schema, table.owner, name)
 
     def _dump_trigger(self, trigger: models.Trigger, schema: str, owner: str,
                       parent: str) -> typing.NoReturn:
@@ -1086,6 +1150,11 @@ class Project:
                 defn['check_constraints'] = [
                     models.DomainConstraint(**c)
                     for c in defn['check_constraints']]
+                self._inv[obj_type][name] = model(**defn)
+            elif obj_type == const.FUNCTION and defn.get('parameters'):
+                defn['parameters'] = [
+                    models.FunctionParameter(**p)
+                    for p in defn['parameters']]
                 self._inv[obj_type][name] = model(**defn)
             elif obj_type == const.TABLE:
                 self._inv[obj_type][name] = self._build_table_definition(defn)

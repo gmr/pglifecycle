@@ -21,3 +21,4 @@ parameters:
 returns: TEXT
 definition: |
   return source.encode('UTF8').decode('LATIN-1')
+comment: Used for a conversion to convert from UTF-8 to Latin-1
