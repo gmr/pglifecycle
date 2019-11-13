@@ -133,6 +133,7 @@ class Project:
         self._dump_functions()
         self._dump_views()
         self._dump_materialized_views()
+        self._dump_casts()
 
         self._dump.save(path)
         LOGGER.info('Build artifact saved with %i entries',
@@ -368,6 +369,32 @@ class Project:
                     self._inv[const.AGGREGATE][name].name,
                     self._inv[const.AGGREGATE][name].owner, None,
                     self._inv[const.AGGREGATE][name].comment)
+
+    def _dump_casts(self) -> typing.NoReturn:
+        for name in self._inv[const.CAST]:
+            cast = self._inv[const.CAST][name]
+            if cast.sql:
+                sql = [cast.sql]
+            else:
+                sql = ['CREATE CAST {}'.format(name)]
+                if cast.function:
+                    sql.append('WITH FUNCTION')
+                    sql.append(cast.function)
+                elif cast.inout:
+                    sql.append('WITH INOUT')
+                else:
+                    sql.append('WITHOUT FUNCTION')
+                if cast.assignment:
+                    sql.append('AS ASSIGNMENT')
+                if cast.implicit:
+                    sql.append('AS IMPLICIT')
+            self._dump.add_entry(
+                desc=const.CAST, namespace=cast.schema, tag=name,
+                owner=cast.owner, defn='{};\n'.format(' '.join(sql)))
+            if cast.comment:
+                self._add_comment_to_dump(
+                    const.CAST, cast.schema, name, cast.owner, None,
+                    cast.comment)
 
     def _dump_collations(self) -> typing.NoReturn:
         for name in self._inv[const.COLLATION]:
@@ -1265,9 +1292,8 @@ class Project:
                 if 'schema' not in entry:
                     entry['schema'] = defn['schema']
                 if obj_type == const.CAST:
-                    name = '{} AS {}'.format(
-                        defn.get('source_type', 'UNKNOWN'),
-                        defn.get('target_type', 'UNKNOWN'))
+                    name = '({} AS {})'.format(
+                        entry.get('source_type'), entry.get('target_type'))
                 else:
                     name = self._object_name(entry)
                 if not validation.validate_object(obj_type, name, entry):

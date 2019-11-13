@@ -5,3 +5,4 @@ casts:
     target_type: timestamp
     function: to_timestamp(int4)
     assignment: true
+    comment: Test cast for sure
