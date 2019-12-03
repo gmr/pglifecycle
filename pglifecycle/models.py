@@ -294,6 +294,7 @@ class Index:
     sql: typing.Optional[str] = None
     unique: typing.Optional[bool] = None
     recurse: typing.Optional[bool] = None
+    parent: typing.Optional[str] = None
     method: typing.Optional[str] = None
     columns: typing.Optional[typing.List[IndexColumn]] = None
     include: typing.Optional[typing.List[str]] = None
@@ -728,3 +729,43 @@ MAPPINGS = {
     constants.USER_MAPPING: UserMapping,
     constants.VIEW: View
 }
+
+
+Definition = typing.Union[
+    Aggregate,
+    Cast,
+    Collation,
+    Conversion,
+    Domain,
+    EventTrigger,
+    Extension,
+    ForeignDataWrapper,
+    Function,
+    Group,
+    Index,
+    Language,
+    MaterializedView,
+    Operator,
+    Publication,
+    Role,
+    Schema,
+    Sequence,
+    Server,
+    Subscription,
+    Table,
+    Tablespace,
+    TextSearch,
+    Type,
+    User,
+    UserMapping,
+    View
+]
+
+
+@dataclasses.dataclass
+class Item:
+    """Represents an item in the project inventory"""
+    id: int
+    desc: str
+    definition: Definition
+    dependencies: typing.Set[int] = dataclasses.field(default_factory=set)

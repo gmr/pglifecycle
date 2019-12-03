@@ -8,6 +8,7 @@ import pathlib
 ALTER = 'ALTER'
 COMMENT = 'COMMENT'
 CREATE = 'CREATE'
+DROP = 'DROP'
 EXECUTE = 'EXECUTE'
 GRANT = 'GRANT'
 REVOKE = 'REVOKE'
@@ -150,6 +151,8 @@ DATA_TYPE_MAPPING = {
     'varchar': ' character varying'
 }
 
+DEPENDENCIES = 'dependencies'
+
 PATHS = {
     AGGREGATE: pathlib.Path('aggregates'),
     CAST: pathlib.Path('casts'),
@@ -204,7 +207,7 @@ OBJ_KEYS = {
     'views': VIEW
 }
 
-GRANT_KEYS = {v: k for k, v in OBJ_KEYS.items()}
+ITEM_KEYS = {v: k for k, v in OBJ_KEYS.items()}
 
 GRANT_SORT_WEIGHTS = {
     'ALL': -1,
@@ -366,9 +369,9 @@ SUBLINK_TYPE = {
     0: 'EXISTS',
     1: 'ALL',
     2: 'IN',   # is 'ANY' if operName is set
-    3: 'ROW-COMPARE',     # ROWCOMPARE
+    3: 'ROW-COMPARE',     # ROW COMPARE
     4: 'EXPRESSION',   # EXPR
-    5: 'MULTI-EXPRESSION',   # MULTIEXPR
+    5: 'MULTI-EXPRESSION',   # MULTI-EXPR
     6: 'ARRAY',
     7: 'WITH'  # CTE
 }

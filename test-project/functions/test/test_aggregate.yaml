@@ -1,6 +1,6 @@
 ---
 schema: test
-name: test_aggregate(integer[])
+name: test_aggregate(integer, integer)
 language: sql
 returns: INTEGER
 definition: |

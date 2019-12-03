@@ -1,10 +1,10 @@
 ---
 schema: test
 name: test_agg
-sfunc: test.test_agg
+sfunc: test.test_aggregate
 arguments:
   - data_type: integer
 state_data_type: integer
 dependencies:
   functions:
-    - test.test_aggregate(integer[])
+    - test.test_aggregate(integer, integer)

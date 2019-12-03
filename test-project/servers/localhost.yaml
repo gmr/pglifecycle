@@ -8,5 +8,5 @@ options:
   dbname: postgres
 dependencies:
   extensions:
-    - postgres_fdw
+    - public.postgres_fdw
 comment: Example FDW that conencts back to the same server on a different DB
