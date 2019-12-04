@@ -27,9 +27,9 @@ def postgres_value(value: typing.Any, nested: bool = False) -> str:
     return str(value)
 
 
-def split_name(value: str) -> typing.Tuple[str, str]:
+def split_name(value: str) -> typing.Tuple[typing.Optional[str], str]:
     """Take a postgres ident and return the proper namespace & tag value"""
     parts = value.partition('.')
     if (parts[1], parts[2]) == ('', ''):
-        return '', value
+        return None, value
     return parts[0], parts[2]

@@ -69,6 +69,7 @@ class Project:
     ]
 
     _OWNERLESS = [
+        constants.EVENT_TRIGGER,
         constants.GROUP,
         constants.PUBLICATION,
         constants.ROLE,
@@ -80,6 +81,7 @@ class Project:
     ]
 
     _SCHEMALESS = [
+        constants.EVENT_TRIGGER,
         constants.GROUP,
         constants.PUBLICATION,
         constants.ROLE,
@@ -136,9 +138,10 @@ class Project:
         self._read_project_file()
         for ot in self._READ_ORDER:
             self._read_object_files(ot, models.MAPPINGS[ot])
-        self._read_role_files(constants.GROUP, models.Group)
-        self._read_role_files(constants.ROLE, models.Role)
-        self._read_role_files(constants.USER, models.User)
+        self._read_role_files(
+            constants.GROUP, models.Group, models.GroupOptions)
+        self._read_role_files(constants.ROLE, models.Role, models.RoleOptions)
+        self._read_role_files(constants.USER, models.User, models.UserOptions)
         self._read_user_mapping_files()
         self._apply_cached_dependencies()
         if self._load_errors:
@@ -172,14 +175,18 @@ class Project:
     def _apply_cached_dependencies(self):
         for dep in self._cached_dependencies:
             item = self._lookup_item(dep.desc, dep.namespace, dep.tag)
-            if not item:
-                raise RuntimeError('Failed to find {} {}.{}'.format(
-                    dep.desc, dep.namespace, dep.tag))
             parent = self._lookup_item(
                 dep.parent_desc, dep.parent_namespace, dep.parent_tag)
+            if not item:
+                raise RuntimeError(
+                    'Failed to find {} {}.{} for {} {}.{}'.format(
+                        dep.desc, dep.namespace, dep.tag,
+                        dep.parent_desc, dep.parent_namespace, dep.parent_tag))
             if not parent:
-                raise RuntimeError('Failed to find {} {}.{}'.format(
-                    dep.parent_desc, dep.parent_namespace, dep.parent_tag))
+                raise RuntimeError(
+                    'Failed to find parent {} {}.{} for {} {}.{}'.format(
+                        dep.parent_desc, dep.parent_namespace, dep.parent_tag,
+                        dep.desc, dep.namespace, dep.tag))
             item.dependencies.add(parent.id)
 
     def _cache_and_remove_dependencies(self, desc: str,
@@ -190,7 +197,7 @@ class Project:
                 self._cached_dependencies.append(
                     _ItemDependency(
                         desc,
-                        definition.get('schema', ''),
+                        definition.get('schema', None),
                         definition['name'],
                         constants.OBJ_KEYS[key], parent_namespace, parent_tag))
         if constants.DEPENDENCIES in definition:
@@ -316,11 +323,16 @@ class Project:
             parsers=parsers,
             templates=templates)
 
-    def _lookup_item(self, desc: str, namespace: str,
+    def _lookup_item(self, desc: str,
+                     namespace: typing.Optional[str],
                      tag: str) -> typing.Optional[models.Item]:
         for item in self.inventory:
-            if item.desc == desc \
-                    and getattr(item.definition, 'schema', '') == namespace \
+            if desc in self._SCHEMALESS \
+                    and item.desc == desc \
+                    and item.definition.name == tag:
+                return item
+            elif item.desc == desc \
+                    and getattr(item.definition, 'schema', None) == namespace \
                     and item.definition.name == tag:
                 return item
 
@@ -429,8 +441,6 @@ class Project:
         self.name = project.get('name', self.name)
         self.encoding = project.get('encoding', self.encoding)
         for extension in project.get('extensions'):
-            if 'schema' not in extension:
-                extension['schema'] = self.default_schema
             self._add_item(constants.EXTENSION, models.Extension(**extension))
         for fdw in project.get('foreign_data_wrappers'):
             if 'owner' not in fdw:
@@ -443,7 +453,8 @@ class Project:
                 constants.PROCEDURAL_LANGUAGE, models.Language(**language))
 
     def _read_role_files(self, desc: str,
-                         model: dataclasses.dataclass) -> typing.NoReturn:
+                         model: dataclasses.dataclass,
+                         options: dataclasses.dataclass) -> typing.NoReturn:
         LOGGER.debug('Reading %s', constants.PATHS[desc].name.upper())
         for defn in self._iterate_files(desc):
             validation.validate_object(desc, defn['name'], defn)
@@ -451,6 +462,8 @@ class Project:
                 defn['grants'] = models.ACLs(**defn['grants'])
             if 'revocations' in defn:
                 defn['revocations'] = models.ACLs(**defn['revocations'])
+            if 'options' in defn:
+                defn['options'] = options(**defn['options'])
             self._add_item(desc, model(**defn))
 
     def _read_user_mapping_files(self) -> typing.NoReturn:

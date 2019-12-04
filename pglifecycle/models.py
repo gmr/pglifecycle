@@ -181,8 +181,6 @@ class DomainConstraint:
 class EventTrigger:
     """Represents an event trigger"""
     name: str
-    schema: str
-    owner: str
     sql: typing.Optional[str] = None
     event: typing.Optional[str] = None
     filter: typing.Optional[EventTriggerFilter] = None
@@ -284,7 +282,16 @@ class Group:
     environments: typing.Optional[typing.List[str]] = None
     grants: typing.Optional[ACLs] = None
     revocations: typing.Optional[ACLs] = None
-    options: typing.Optional[typing.Dict[str, bool]] = None
+    options: typing.Optional[GroupOptions] = None
+
+
+@dataclasses.dataclass
+class GroupOptions:
+    """Options for a group"""
+    create_db: typing.Optional[bool] = None
+    create_role: typing.Optional[bool] = None
+    inherit: typing.Optional[bool] = None
+    superuser: typing.Optional[bool] = None
 
 
 @dataclasses.dataclass
@@ -423,6 +430,19 @@ class Role:
     revocations: typing.Optional[ACLs] = None
     options: typing.Optional[typing.Dict[str, bool]] = None
     settings: typing.Optional[typing.Dict[str, typing.Any]] = None
+
+
+@dataclasses.dataclass
+class RoleOptions:
+    """Options for a role"""
+    bypass_rls: typing.Optional[bool] = None
+    connection_limit: typing.Optional[int] = None
+    create_db: typing.Optional[bool] = None
+    create_role: typing.Optional[bool] = None
+    inherit: typing.Optional[bool] = None
+    login: typing.Optional[bool] = None
+    replication: typing.Optional[bool] = None
+    superuser: typing.Optional[bool] = None
 
 
 @dataclasses.dataclass
@@ -657,11 +677,23 @@ class User:
     comment: typing.Optional[str] = None
     environments: typing.Optional[typing.List[str]] = None
     password: typing.Optional[str] = None
-    valid_unitl: typing.Optional[str] = None
+    valid_until: typing.Optional[str] = None
     grants: typing.Optional[ACLs] = None
     revocations: typing.Optional[ACLs] = None
     options: typing.Optional[typing.Dict[str, bool]] = None
     settings: typing.Optional[typing.Dict[str, typing.Any]] = None
+
+
+@dataclasses.dataclass
+class UserOptions:
+    """Options for a user"""
+    bypass_rls: typing.Optional[bool] = None
+    connection_limit: typing.Optional[int] = None
+    create_db: typing.Optional[bool] = None
+    create_role: typing.Optional[bool] = None
+    inherit: typing.Optional[bool] = None
+    replication: typing.Optional[bool] = None
+    superuser: typing.Optional[bool] = None
 
 
 @dataclasses.dataclass
@@ -755,6 +787,7 @@ Definition = typing.Union[
     Table,
     Tablespace,
     TextSearch,
+    Trigger,
     Type,
     User,
     UserMapping,
@@ -768,4 +801,12 @@ class Item:
     id: int
     desc: str
     definition: Definition
+    dependencies: typing.Set[int] = dataclasses.field(default_factory=set)
+
+
+class TableItem(Item):
+    """Represents a table item in the project inventory"""
+    id: int
+    desc: str
+    definition: Table
     dependencies: typing.Set[int] = dataclasses.field(default_factory=set)
