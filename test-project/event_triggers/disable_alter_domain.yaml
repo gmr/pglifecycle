@@ -1,5 +1,4 @@
 ---
-schema: test
 name: disable_alter_domain
 event: ddl_command_start
 filter:

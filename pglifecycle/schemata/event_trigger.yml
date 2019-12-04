@@ -5,13 +5,6 @@ title: Event Trigger
 description: Defines an Event Trigger
 type: object
 properties:
-  schema:
-    title: Schema
-    type: string
-  owner:
-    title: Owner
-    description: The role that owns the cast
-    type: string
   sql:
     title: SQL Statement
     description: User-provided raw SQL snippet
