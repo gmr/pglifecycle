@@ -32,13 +32,6 @@ properties:
     titles: Group Options
     type: object
     properties:
-      bypass_rls:
-        title: Bypass Role Level Security
-        description: >
-          These clauses determine whether members of the group are able to
-          bypasses every row-level security (RLS) policy.
-        type: boolean
-        default: false
       create_db:
         title: Create Database
         description: Determines if members of a group are allowed to create databases.
