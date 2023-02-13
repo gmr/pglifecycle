@@ -320,7 +320,8 @@ class Generate:
                 owner=entry.owner,
                 dependencies=[entry.dump_id])
             self._objects += 1
-        elif 'comments' in data:
+
+        if 'comments' in data:
             for comment in data['comments']:
                 parsed = parse.sql(comment)
                 self._dump.add_entry(

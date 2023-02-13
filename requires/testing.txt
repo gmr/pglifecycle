@@ -10,3 +10,5 @@ flake8-rst-docstrings
 flake8-tuple
 nose
 psycopg2
+ruamel.yaml
+jsonschema
