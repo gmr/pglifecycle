@@ -732,6 +732,7 @@ wheels = [
 
 [[package]]
 name = "pglifecycle"
+version = "1.0.0b1"
 source = { editable = "." }
 dependencies = [
     { name = "arrow" },
