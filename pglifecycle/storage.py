@@ -69,7 +69,7 @@ def save(
     file_path = base_path / path
     LOGGER.debug('Writing to %s', file_path)
     if not file_path.parent.exists():
-        file_path.parent.mkdir()
+        file_path.parent.mkdir(parents=True)
     with open(str(file_path), 'w') as handle:
         if doc_type and doc_name:
             handle.write(f'# {doc_type}: {doc_name}\n')
@@ -91,3 +91,6 @@ def save(
         handle.write('---\n')
         yaml.dump(handle, data)
     return path
+
+
+yaml_dump = yaml.dump
