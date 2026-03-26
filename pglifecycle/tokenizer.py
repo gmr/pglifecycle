@@ -7,9 +7,6 @@ import logging
 import typing
 
 import stringcase
-from pglast import node as pgl_node
-from pglast import printer
-from pglast.printers import dml
 
 from pglifecycle import constants
 
@@ -869,18 +866,13 @@ class Reformatter:
         raise RuntimeError
 
     def _view_stmt(self, node: dict) -> dict:
-        handle = printer.IndentedStream()
-        handle.comma_at_eoln = True
-        query = pgl_node.Node(node['query'])
-        dml.select_stmt(query, handle)
-        handle.seek(0)
         view = {}
         if 'schemaname' in node['view']['RangeVar']:
             view['schema'] = node['view']['RangeVar']['schemaname']
         view['name'] = node['view']['RangeVar']['relname']
         view['columns'] = {}
         view['options'] = {}
-        view['query'] = handle.read()
+        view['query'] = node.get('query', {})
         if node.get('aliases'):
             LOGGER.critical(
                 'Unsupported _view_stmt attribute: %r', node.get('aliases')
