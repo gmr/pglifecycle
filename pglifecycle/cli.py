@@ -323,7 +323,7 @@ def run():
             ).create(args.force, args.no_gitkeep is False)
         except RuntimeError as error:
             common.exit_application(str(error), 4)
-    elif args.action == 'generate-project':
+    elif args.action == 'generate':
         if not args.dest:
             common.exit_application('Destination not specified', 2)
         if args.gitkeep and args.remove_empty_dirs:
