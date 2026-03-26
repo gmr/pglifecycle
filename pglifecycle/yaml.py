@@ -7,8 +7,7 @@ import logging
 import pathlib
 import typing
 
-import ruamel.yaml as yaml
-from ruamel.yaml import scalarstring, scanner
+from ruamel.yaml import YAML, scalarstring, scanner
 
 LOGGER = logging.getLogger(__name__)
 
@@ -28,7 +27,8 @@ def load(path: pathlib.Path) -> dict:
     """
     with path.open() as handle:
         try:
-            return yaml.safe_load(handle)
+            yml = YAML(typ='safe', pure=True)
+            return yml.load(handle)
         except scanner.ScannerError as error:
             LOGGER.critical('Failed to parse YAML from %s: %s', path, error)
             raise RuntimeError('YAML parse failure') from error
@@ -48,7 +48,7 @@ def save(path: pathlib.Path, data: dict) -> typing.NoReturn:
 def dump(handle: typing.TextIO, data: dict) -> typing.NoReturn:
     """Save the data in YAML format to the IO handle."""
     handle.write('---\n')
-    yml = yaml.YAML()
+    yml = YAML()
     yml.default_flow_style = False
     yml.indent(mapping=2, sequence=4, offset=2)
     yml.dump(_yaml_reformat(data), handle)

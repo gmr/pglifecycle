@@ -11,8 +11,8 @@ import typing
 
 import pgdumplib
 import pgdumplib.dump as dump
-import ruamel.yaml as yaml
 import toposort
+from ruamel.yaml import YAML
 
 from pglifecycle import constants, parse, utils
 
@@ -1015,14 +1015,16 @@ class Generate:
     @staticmethod
     def _read_file(path: pathlib.Path) -> dict:
         with path.open() as handle:
-            return yaml.safe_load(handle)
+            yml = YAML(typ='safe', pure=True)
+            return yml.load(handle)
 
     def _read_project_file(self) -> _Project:
         project_file = self._project_path / 'project.yaml'
         if not project_file.exists():
             raise RuntimeError('Missing project file')
         with open(project_file) as handle:
-            return _Project(**yaml.safe_load(handle))
+            yml = YAML(typ='safe', pure=True)
+            return _Project(**yml.load(handle))
 
     def _save_dump(self) -> typing.NoReturn:
         LOGGER.debug('Saving dump')
