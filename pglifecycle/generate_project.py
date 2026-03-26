@@ -691,9 +691,11 @@ class Structure:
         value = self.generic(entry)
         children = self._find_children(entry, constants.SEQUENCE_OWNED_BY)
         for child in children:
-            parsed = parse.sql(child['sql'])
-            if parsed.get('options', {}).get('name') == 'owned_by':
-                value['owned_by'] = '.'.join(parsed['options']['arg'])
+            sql = child['sql'].strip().rstrip(';').strip()
+            marker = 'OWNED BY '
+            pos = sql.upper().find(marker)
+            if pos != -1:
+                value['owned_by'] = sql[pos + len(marker) :]
             else:
                 LOGGER.error('Unsupported seq child: %r', child)
                 raise RuntimeError
