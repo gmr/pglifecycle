@@ -623,6 +623,9 @@ class Reformatter:
     def _raw_stmt(self, node: dict) -> str:
         return self.reformat(node['stmt'])
 
+    def _stmt(self, node: dict) -> str:
+        return self.reformat(node)
+
     def _relation(self, node: dict | list | str) -> list | str:
         LOGGER.debug('_relation: %r', node)
         if isinstance(node, (list, str)):
