@@ -10,7 +10,7 @@ import pathlib
 import pwd
 from os import path
 
-from pglifecycle import common, project, version
+from pglifecycle import common, generate_project, project, version
 
 LOGGER = logging.getLogger(__name__)
 LOGGING_FORMAT = '[%(asctime)-15s] %(levelname)-8s %(message)s'
@@ -330,6 +330,6 @@ def run():
             common.exit_application(
                 'Can not specify --gitkeep and --remove-empty-dirs', 2
             )
-        #  generate_project.Generate(args).run()
+        generate_project.Generate(args).run()
     else:
         common.exit_application('Invalid action specified', 1)
