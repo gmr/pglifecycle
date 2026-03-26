@@ -55,7 +55,7 @@ get_exposed_port() {
 mkdir -p build build/data
 
 printf 'Installing package...'
-uv sync
+uv sync --all-groups
 echo ' done.'
 
 if test "$CI" != 'true'
@@ -84,29 +84,16 @@ else
 fi
 
 printf 'Generating .env...'
-if test "${CI}" = 'true'
-then
-	cat > .env <<EOF
-export FILE_CACHE_ENABLED=no
-export TEST_HOST=localhost
-export PGHOST=localhost
-export PGPORT=5432
-export PGDATABASE=postgres
-export PGUSER=postgres
-export PGPASSWORD=postgres
-export POSTGRES_URI=postgresql://postgres:postgres@localhost:5432/postgres
-EOF
-else
-	cat > .env <<EOF
+cat > .env <<EOF
 export FILE_CACHE_ENABLED=no
 export TEST_HOST=${TEST_HOST}
 export PGHOST=${TEST_HOST}
 export PGPORT=${PGPORT}
 export PGDATABASE=postgres
 export PGUSER=postgres
-export POSTGRES_URI=postgresql://postgres@${TEST_HOST}:${PGPORT}/postgres
+export PGPASSWORD=${PGPASSWORD:-postgres}
+export POSTGRES_URI=postgresql://postgres:postgres@${TEST_HOST}:${PGPORT}/postgres
 EOF
-fi
 echo ' done.'
 
 echo "Running pgbench ... "
