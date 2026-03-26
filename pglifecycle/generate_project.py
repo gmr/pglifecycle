@@ -47,6 +47,22 @@ def _filter(
             yield e
 
 
+def _extract_comment(defn: str) -> str | None:
+    """Extract the comment text from a COMMENT ON ... IS '...' statement."""
+    marker = ' IS '
+    pos = defn.find(marker)
+    if pos == -1:
+        return None
+    comment = defn[pos + len(marker) :].rstrip().rstrip(';').strip()
+    if comment.startswith("'") and comment.endswith("'"):
+        comment = comment[1:-1].replace("''", "'")
+    elif comment.startswith('$$') and comment.endswith('$$'):
+        comment = comment[2:-2]
+    elif comment.startswith("E'") and comment.endswith("'"):
+        comment = comment[2:-1].replace("''", "'")
+    return comment
+
+
 def _function_filename(tag, filenames):
     """Create a filename for a function file, using an auto-incrementing
     value for duplicate functions with different parameters.
@@ -833,8 +849,7 @@ class Structure:
                     entry.dump_id,
                 )
                 self._mark_processed(entry.dump_id)
-                parsed = parse.sql(entry.defn)
-                return parsed['comment']
+                return _extract_comment(entry.defn)
         return None
 
     def _mark_processed(self, dump_id: int) -> typing.NoReturn:
