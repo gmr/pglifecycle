@@ -88,7 +88,6 @@ def save(
         handle.writelines(
             f'# {key}: {value}\n' for key, value in (comments or {}).items()
         )
-        handle.write('---\n')
         yaml.dump(handle, data)
     return path
 
