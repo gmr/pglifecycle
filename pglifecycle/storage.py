@@ -4,8 +4,6 @@ import os
 import pathlib
 import typing
 
-from dateutil import tz
-
 from pglifecycle import constants, version, yaml
 
 LOGGER = logging.getLogger(__name__)
@@ -49,8 +47,14 @@ def remove_unneeded_gitkeeps(path: pathlib.Path) -> typing.NoReturn:
                 gitkeep.unlink()
 
 
-def save(base_path: pathlib.Path, path: str, doc_type: str, doc_name: str,
-         data: dict, comments: dict = None) -> str:
+def save(
+    base_path: pathlib.Path,
+    path: str,
+    doc_type: str,
+    doc_name: str,
+    data: dict,
+    comments: dict | None = None,
+) -> str:
     """Write the data out to the specified path as YAML
 
     :param str base_path: The base path to write files to
@@ -68,16 +72,22 @@ def save(base_path: pathlib.Path, path: str, doc_type: str, doc_name: str,
         file_path.parent.mkdir()
     with open(str(file_path), 'w') as handle:
         if doc_type and doc_name:
-            handle.write('# {}: {}\n'.format(doc_type, doc_name))
+            handle.write(f'# {doc_type}: {doc_name}\n')
         elif doc_type:
-            handle.write('# {}\n'.format(doc_type))
+            handle.write(f'# {doc_type}\n')
         elif doc_name:
-            handle.write('# {}\n'.format(doc_name))
-        handle.write('# Created with pglifecycle v{} ({})\n'.format(
-            version, datetime.datetime.now(tz=tz.UTC).isoformat(
-                sep=' ', timespec='seconds')))
-        for key, value in (comments or {}).items():
-            handle.write('# {}: {}\n'.format(key, value))
+            handle.write(f'# {doc_name}\n')
+        handle.write(
+            '# Created with pglifecycle v{} ({})\n'.format(
+                version,
+                datetime.datetime.now(tz=datetime.UTC).isoformat(
+                    sep=' ', timespec='seconds'
+                ),
+            )
+        )
+        handle.writelines(
+            f'# {key}: {value}\n' for key, value in (comments or {}).items()
+        )
         handle.write('---\n')
         yaml.dump(handle, data)
     return path

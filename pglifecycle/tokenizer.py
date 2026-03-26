@@ -2,12 +2,14 @@
 Restructure parsed SQL generated from pgparse/libpg_query
 
 """
+
 import logging
 import typing
 
-from pglast import node as pgl_node, printer
-from pglast.printers import dml
 import stringcase
+from pglast import node as pgl_node
+from pglast import printer
+from pglast.printers import dml
 
 from pglifecycle import constants
 
@@ -22,17 +24,17 @@ def from_libpg_query(node: list) -> list:
 class Reformatter:
     """Class used to reformat libpg_query generated data structures"""
 
-    def reformat(self, node: typing.Union[dict, int, list, str, None]) -> \
-            typing.Union[dict, int, list, str, None]:
+    def reformat(
+        self, node: dict | int | list | str | None
+    ) -> dict | int | list | str | None:
         """Reformat the node to generate a pgpretty data structure"""
         if isinstance(node, dict):
             for key in node.keys():
-                name = '_{}'.format(stringcase.snakecase(key))
+                name = f'_{stringcase.snakecase(key)}'
                 LOGGER.debug('%s(%r)', name, node)
                 meth = getattr(self, name, None)
                 if meth is None:
-                    msg = '{} ({}) is an unsupported node type'.format(
-                        key, name)
+                    msg = f'{key} ({name}) is an unsupported node type'
                     raise RuntimeError(msg)
                 return meth(node[key])
         elif isinstance(node, list):
@@ -42,13 +44,14 @@ class Reformatter:
         elif node is None:
             return None
         else:
-            raise ValueError('Unsupported type: {}'.format(type(node)))
+            raise ValueError(f'Unsupported type: {type(node)}')
 
     def _a__array_expr(self, node: dict) -> str:
         return 'ARRAY[{}]'.format(
-            ', '.join(str(self.reformat(e)) for e in node['elements']))
+            ', '.join(str(self.reformat(e)) for e in node['elements'])
+        )
 
-    def _a__const(self, node: dict) -> typing.Union[int, str, None]:
+    def _a__const(self, node: dict) -> int | str | None:
         node = self.reformat(node['val'])
         if isinstance(node, str):
             return node
@@ -64,7 +67,8 @@ class Reformatter:
                 lexpr,
                 self.reformat(node['name']),
                 constants.A_EXPR_KIND[node['kind']],
-                '({})'.format(rexpr)]
+                f'({rexpr})',
+            ]
         elif node['kind'] in {3, 4, 6, 7, 8, 9, 10, 11, 12, 13, 14}:
             return [lexpr, constants.A_EXPR_KIND[node['kind']], rexpr]
         elif node['kind'] == 5:
@@ -77,13 +81,14 @@ class Reformatter:
             lexpr = 'A_Expr' in node['A_Expr']['lexpr']
             rexpr = 'A_Expr' in node['A_Expr']['rexpr']
             if lexpr and rexpr:
-                return '({})'.format(self.reformat(node))
+                return f'({self.reformat(node)})'
         return self.reformat(node)
 
     def _a__indices(self, node: dict) -> str:
         if node.get('is_slice'):
             return '[{}:{}]'.format(
-                self.reformat(node['lidx']), self.reformat(node['uidx']))
+                self.reformat(node['lidx']), self.reformat(node['uidx'])
+            )
         if 'lidx' not in node and 'uidx' in node:
             return '[{}]'.format(self.reformat(node['uidx']))
         raise RuntimeError
@@ -97,68 +102,63 @@ class Reformatter:
         return node['aliasname']
 
     def _alter_table_cmd(self, node: dict) -> dict:
-        operation = constants.AlterTableType(
-            node['subtype']).name.replace('_', ' ')
+        operation = constants.AlterTableType(node['subtype']).name.replace(
+            '_', ' '
+        )
 
         if node['subtype'] == constants.AlterTableType.ADD_COLUMN:
             command = {
                 'operation': operation,
-                'column': self.reformat(node['def'])
+                'column': self.reformat(node['def']),
             }
         elif node['subtype'] == constants.AlterTableType.COLUMN_DEFAULT:
             if 'def' not in node:
-                command = {
-                    'operation': 'DROP DEFAULT',
-                    'column': node['name']
-                }
+                command = {'operation': 'DROP DEFAULT', 'column': node['name']}
             else:
                 command = {
                     'operation': 'SET DEFAULT',
                     'column': node['name'],
-                    'value': self.reformat(node['def'])
+                    'value': self.reformat(node['def']),
                 }
         elif node['subtype'] == constants.AlterTableType.DROP_COLUMN:
             command = {
                 'operation': operation,
                 'column': node['name'],
-                'cascade': node['behavior'] == 1
+                'cascade': node['behavior'] == 1,
             }
         elif node['subtype'] == constants.AlterTableType.ALTER_COLUMN_TYPE:
             column = {'name': node['name']}
             column.update(self.reformat(node['def']))
-            command = {
-                'operation': operation,
-                'column': column
-            }
-        elif node['subtype'] in [constants.AlterTableType.DROP_NOT_NULL,
-                                 constants.AlterTableType.SET_NOT_NULL,
-                                 constants.AlterTableType.DROP_CONSTRAINT,
-                                 constants.AlterTableType.CLUSTER_ON]:
-            command = {
-                'operation': operation,
-                'column': node['name']
-            }
+            command = {'operation': operation, 'column': column}
+        elif node['subtype'] in [
+            constants.AlterTableType.DROP_NOT_NULL,
+            constants.AlterTableType.SET_NOT_NULL,
+            constants.AlterTableType.DROP_CONSTRAINT,
+            constants.AlterTableType.CLUSTER_ON,
+        ]:
+            command = {'operation': operation, 'column': node['name']}
         else:
             command = {
                 'operation': operation,
-                'definition': self.reformat(node['def'])
+                'definition': self.reformat(node['def']),
             }
         return command
 
     def _alter_table_stmt(self, node: dict) -> dict:
         return {
-            'stmt_type': '{} {}'.format(constants.ALTER, constants.TABLE),
+            'stmt_type': f'{constants.ALTER} {constants.TABLE}',
             'relation': self.reformat(node['relation']),
-            'commands': self.reformat(node['cmds'])
+            'commands': self.reformat(node['cmds']),
         }
 
     def _bool_expr(self, node: dict) -> list:
-        LOGGER.debug('BoolExpr: %r, %r',
-                     node, constants.BOOL_OP[node['boolop']])
+        LOGGER.debug(
+            'BoolExpr: %r, %r', node, constants.BOOL_OP[node['boolop']]
+        )
         if len(node['args']) == 1:
             return [
                 constants.BOOL_OP[node['boolop']],
-                self.reformat(node['args'])
+                self.reformat(node['args']),
             ]
         output = []
         for value in self._ensure_list(self.reformat(node['args'])):
@@ -167,13 +167,16 @@ class Reformatter:
         return output[:-1]
 
     def _boolean_test(self, node: dict) -> str:
-        return '{} IS {}'.format(self.reformat(node['arg']),
-                                 constants.BOOL_TEST[node['booltesttype']])
+        return '{} IS {}'.format(
+            self.reformat(node['arg']),
+            constants.BOOL_TEST[node['booltesttype']],
+        )
 
     @staticmethod
     def _capitalize_keywords(node: list) -> list:
-        return [v.upper() if v in ['excluded', 'old', 'new'] else v
-                for v in node]
+        return [
+            v.upper() if v in ['excluded', 'old', 'new'] else v for v in node
+        ]
 
     def _column_def(self, node: dict):
         temp = self._ensure_list(self.reformat(node.get('constraints', [])))
@@ -195,9 +198,9 @@ class Reformatter:
             'nullable': nullable if node.get('colname') else None,
             'constraint': temp[0] if temp else None,
             'is_local': node.get('is_local'),
-            'primary_key': primary_key if node.get('colname') else None
+            'primary_key': primary_key if node.get('colname') else None,
         }
-        if 'raw_default' in node and node['raw_default']:
+        if node.get('raw_default'):
             column['using'] = self.reformat(node['raw_default'])
 
         for key, value in list(column.items()):
@@ -216,51 +219,49 @@ class Reformatter:
         return {
             'type': constants.ObjectType(node['objtype']).name,
             'name': '.'.join(self.reformat(node['object'])),
-            'comment': node['comment']
+            'comment': node['comment'],
         }
 
     def _common_table_expr(self, node: dict) -> dict:
         if 'aliascolnames' in node:
             name = '{}({})'.format(
                 node['ctename'],
-                ', '.join(self.reformat(node['aliascolnames'])))
+                ', '.join(self.reformat(node['aliascolnames'])),
+            )
         else:
             name = node['ctename']
-        return {
-            'name': name,
-            'query': self.reformat(node['ctequery'])
-        }
+        return {'name': name, 'query': self.reformat(node['ctequery'])}
 
     def _composite_type_stmt(self, node: dict) -> dict:
         self.typevar_ = {
             'stmt_type': constants.TYPE,
-            'name': self.reformat(node['typevar'])
+            'name': self.reformat(node['typevar']),
         }
         output = self.typevar_
         if 'coldeflist' in node:
             output['attributes'] = [
                 {'name': e['name'], 'type': e['type']}
-                for e in self._ensure_list(
-                    self.reformat(node['coldeflist']))]
+                for e in self._ensure_list(self.reformat(node['coldeflist']))
+            ]
         return output
 
     def _constraint(self, node: dict) -> dict:
-        if node['contype'] == 0:       # CONSTR_NULL
+        if node['contype'] == 0:  # CONSTR_NULL
             return {'constraint': 'NULL', 'nullable': True}
-        elif node['contype'] == 1:     # CONSTR_NOTNULL
+        elif node['contype'] == 1:  # CONSTR_NOTNULL
             return {'constraint': 'NOT NULL', 'nullable': False}
-        elif node['contype'] == 2:     # CONSTR_DEFAULT
+        elif node['contype'] == 2:  # CONSTR_DEFAULT
             return {
                 'constraint': 'DEFAULT',
-                'default': self.reformat(node['raw_expr'])
+                'default': self.reformat(node['raw_expr']),
             }
-        elif node['contype'] == 3:    # CONSTR_IDENTITY
+        elif node['contype'] == 3:  # CONSTR_IDENTITY
             return {
                 'constraint': 'IDENTITY',
                 'generated': constants.GENERATED[node['generated_when']],
-                'options': self.reformat(node.get('options', {}))
+                'options': self.reformat(node.get('options', {})),
             }
-        elif node['contype'] == 4:    # CONSTR_CHECK
+        elif node['contype'] == 4:  # CONSTR_CHECK
             value = {
                 'constraint': 'CHECK',
             }
@@ -269,19 +270,17 @@ class Reformatter:
             value['expression'] = self.reformat(node['raw_expr'])
             value['initially_valid'] = node.get('initially_valid', False)
             return value
-        elif node['contype'] == 5:    # CONSTR_PRIMARY
+        elif node['contype'] == 5:  # CONSTR_PRIMARY
             if 'keys' in node:
                 return {
                     'constraint': 'PRIMARY KEY',
-                    'columns': self.reformat(node['keys'])
+                    'columns': self.reformat(node['keys']),
                 }
             else:
                 LOGGER.error('Unsupported constraint: %r', node)
                 raise RuntimeError
-        elif node['contype'] == 6:    # CONSTR_UNIQUE
-            constraint = {
-                'constraint': 'UNIQUE'
-            }
+        elif node['contype'] == 6:  # CONSTR_UNIQUE
+            constraint = {'constraint': 'UNIQUE'}
             if 'conname' in node:
                 constraint['name'] = node['conname']
             if 'keys' in node:
@@ -290,13 +289,13 @@ class Reformatter:
                 LOGGER.error('Unsupported constraint: %r', node)
                 raise RuntimeError
             return constraint
-        elif node['contype'] == 7:    # CONSTR_EXCLUSION
+        elif node['contype'] == 7:  # CONSTR_EXCLUSION
             return {
                 'constraint': 'EXCLUSION',
                 'access_method': node['access_method'],
-                'exclusions': self.reformat(node['exclusions'])
+                'exclusions': self.reformat(node['exclusions']),
             }
-        elif node['contype'] == 8:    # CONSTR_FOREIGN
+        elif node['contype'] == 8:  # CONSTR_FOREIGN
             fk_col = self._ensure_list(self.reformat(node['fk_attrs']))
             ref_col = self._ensure_list(self.reformat(node['pk_attrs']))
             return {
@@ -309,7 +308,7 @@ class Reformatter:
                 'on_delete': constants.FK_ACTION[node['fk_del_action']],
                 'on_update': constants.FK_ACTION[node['fk_upd_action']],
                 'deferrable': node.get('deferrable', None),
-                'initially_deferred': node.get('initdeferred', None)
+                'initially_deferred': node.get('initdeferred', None),
             }
         elif node['contype'] in [9, 10, 11, 12]:
             # CONSTR_ATTR_DEFERRABLE
@@ -323,7 +322,8 @@ class Reformatter:
         return {
             'stmt_type': constants.TYPE,
             'name': self.reformat(node['typeName'])[0],
-            'values': self.reformat(node['vals'])}
+            'values': self.reformat(node['vals']),
+        }
 
     def _create_function_stmt(self, node: dict) -> dict:
         name = self.reformat(node['funcname'])
@@ -335,11 +335,13 @@ class Reformatter:
         options = {o['name']: o['arg'] for o in self.reformat(node['options'])}
         function = {
             'schema': name[0],
-            'name': '{}({})'.format(name[1], ', '.join(name_args))}
+            'name': '{}({})'.format(name[1], ', '.join(name_args)),
+        }
         if args:
             function['parameters'] = args
         function['returns'] = self._normalize_data_type(
-            self.reformat(node['returnType']))
+            self.reformat(node['returnType'])
+        )
         function['language'] = options['language']
         if options.get('security') == 1:
             function['security'] = 'DEFINER'
@@ -359,8 +361,9 @@ class Reformatter:
                     options['set']['name']: options['set']['value']
                 }
             else:
-                LOGGER.critical('Unsupported configuration option: %r',
-                                options.get('set'))
+                LOGGER.critical(
+                    'Unsupported configuration option: %r', options.get('set')
+                )
                 raise RuntimeError
         function['definition'] = options['as'][0].strip()
         return function
@@ -369,13 +372,15 @@ class Reformatter:
         return {
             'stmt_type': constants.TYPE,
             'name': self.reformat(node['typeName'])[0],
-            'range': {e['defname']: e['arg']
-                      for e in self.reformat(node['params'])}}
+            'range': {
+                e['defname']: e['arg'] for e in self.reformat(node['params'])
+            },
+        }
 
     def _create_seq_stmt(self, node: dict) -> dict:
         sequence = {
             'schema': node['sequence']['RangeVar']['schemaname'],
-            'name': node['sequence']['RangeVar']['relname']
+            'name': node['sequence']['RangeVar']['relname'],
         }
         map_keys = {
             'maxvalue': 'max_value',
@@ -429,7 +434,7 @@ class Reformatter:
             'row': node.get('row', False),
             'transitions': transitions,
             'condition': self.reformat(node.get('whenClause')),
-            'function': '{}()'.format(funcname)
+            'function': f'{funcname}()',
         }
 
     @staticmethod
@@ -438,13 +443,12 @@ class Reformatter:
 
     def _def_elem(self, node: dict) -> dict:
         if 'arg' in node:
-            return {
-                'arg': self.reformat(node['arg']),
-                'name': node['defname']}
+            return {'arg': self.reformat(node['arg']), 'name': node['defname']}
         elif 'defaction' in node:
             return {
                 'action': constants.DefElemAction(node['defaction']).name,
-                'name': node['defname']}
+                'name': node['defname'],
+            }
         else:
             LOGGER.debug('Unsupported _def_elem node: %r', node)
             raise RuntimeError
@@ -455,25 +459,31 @@ class Reformatter:
             'from': self._relation(node['relation']),
             'using': None,
             'where': None,
-            'returning': None
+            'returning': None,
         }
         if 'usingClause' in node:
             stmt['using'] = self._ensure_list(
-                self.reformat(node['usingClause']))
+                self.reformat(node['usingClause'])
+            )
         if 'whereClause' in node:
             stmt['where'] = self._ensure_list(
-                self.reformat(node['whereClause']))
+                self.reformat(node['whereClause'])
+            )
         if 'returningList' in node:
             stmt['returning'] = self._ensure_list(
-                self.reformat(node['returningList']))
+                self.reformat(node['returningList'])
+            )
         return stmt
 
     def _define_stmt(self, node: dict) -> dict:
         return {
             'stmt_type': constants.TYPE,
             'name': self.reformat(node['defnames'])[0],
-            'definition': {e['defname']: e['arg']
-                           for e in self.reformat(node['definition'])}}
+            'definition': {
+                e['defname']: e['arg']
+                for e in self.reformat(node['definition'])
+            },
+        }
 
     @staticmethod
     def _ensure_list(node: typing.Any) -> list:
@@ -482,16 +492,16 @@ class Reformatter:
     def _func_call(self, node: dict) -> str:
         return '{}({})'.format(
             '.'.join(self.reformat(node['funcname'])),
-            ', '.join([str(a) for a in self.reformat(node.get('args', []))]))
+            ', '.join([str(a) for a in self.reformat(node.get('args', []))]),
+        )
 
     def _function_parameter(self, node: dict) -> dict:
-        param = {
-            'mode': constants.FunctionParameterMode(node['mode']).name
-        }
+        param = {'mode': constants.FunctionParameterMode(node['mode']).name}
         if node.get('name'):
             param['name'] = node['name']
         param['data_type'] = self._normalize_data_type(
-            self.reformat(node['argType']))
+            self.reformat(node['argType'])
+        )
         if 'defexpr' in node:
             param['default'] = self.reformat(node['defexpr'])
         return param
@@ -499,14 +509,14 @@ class Reformatter:
     def _grouping_set(self, node: dict) -> dict:
         return {
             'type': constants.GROUPING_SET[node['kind']],
-            'values': self.reformat(node.get('content', []))
+            'values': self.reformat(node.get('content', [])),
         }
 
     def _index_elem(self, node: dict) -> dict:
         return {
             'name': node.get('name', self.reformat(node.get('expr'))),
             'null_order': constants.NULL_ORDERING[node['nulls_ordering']],
-            'order': constants.ORDERING[node['ordering']]
+            'order': constants.ORDERING[node['ordering']],
         }
 
     def _index_stmt(self, node: dict) -> dict:
@@ -522,14 +532,14 @@ class Reformatter:
             'where': self.reformat(node.get('whereClause')),
             'options': {r['defname']: r['arg'] for r in options},
             'tablespace': node.get('tableSpace'),
-            'unique': node.get('unique', False)
+            'unique': node.get('unique', False),
         }
 
     def _infer_clause(self, node: dict) -> dict:
         return {
             'elements': self.reformat(node.get('indexElems')),
             'constraint': node.get('conname'),
-            'where': self.reformat(node.get('whereClause'))
+            'where': self.reformat(node.get('whereClause')),
         }
 
     def _insert_stmt(self, node: dict) -> dict:
@@ -541,7 +551,7 @@ class Reformatter:
             'default': 'selectStmt' not in node,
             'select': self.reformat(node.get('selectStmt')),
             'returning': self.reformat(node.get('returningList')),
-            'on_conflict': self.reformat(node.get('onConflictClause'))
+            'on_conflict': self.reformat(node.get('onConflictClause')),
         }
 
     @staticmethod
@@ -555,7 +565,7 @@ class Reformatter:
             'type': constants.JOIN_TYPE[node['jointype']],
             'natural': node.get('isNatural', False),
             'using': self.reformat(node.get('usingClause')),
-            'on': self.reformat(node.get('quals'))
+            'on': self.reformat(node.get('quals')),
         }
 
     def _multi_assign_ref(self, node: dict) -> list:
@@ -573,7 +583,7 @@ class Reformatter:
         return [
             self.reformat(node['arg']),
             constants.NULL_TEST[node['nulltesttype']],
-            'NULL'
+            'NULL',
         ]
 
     def _on_conflict_clause(self, node: dict) -> dict:
@@ -583,7 +593,7 @@ class Reformatter:
             'action': constants.ON_CONFLICT[node['action']],
             'infer': self.reformat(node.get('infer')),
             'target': self.reformat(node.get('targetList')),
-            'where': self.reformat(node.get('whereClause'))
+            'where': self.reformat(node.get('whereClause')),
         }
 
     @staticmethod
@@ -593,19 +603,21 @@ class Reformatter:
     def _partition_spec(self, node: dict) -> dict:
         return {
             'partition_by': node['strategy'],
-            'columns': self.reformat(node['partParams'])
+            'columns': self.reformat(node['partParams']),
         }
 
     def _range_function(self, node: dict) -> dict:
         return {
             'alias': self.reformat(node.get('alias')),
-            'functions': [f for f in self.reformat(node['functions'])[0]
-                          if f is not None],
-            'column_defs': ['{} {}'.format(f['name'], f['type'])
-                            for f in self.reformat(
-                                node.get('coldeflist', []))],
+            'functions': [
+                f for f in self.reformat(node['functions'])[0] if f is not None
+            ],
+            'column_defs': [
+                '{} {}'.format(f['name'], f['type'])
+                for f in self.reformat(node.get('coldeflist', []))
+            ],
             'lateral': node.get('lateral', False),
-            'ordinality': node.get('ordinality', False)
+            'ordinality': node.get('ordinality', False),
         }
 
     def _range_var(self, node: dict) -> str:
@@ -614,8 +626,7 @@ class Reformatter:
     def _raw_stmt(self, node: dict) -> str:
         return self.reformat(node['stmt'])
 
-    def _relation(self, node: typing.Union[dict, list, str]) \
-            -> typing.Union[list, str]:
+    def _relation(self, node: dict | list | str) -> list | str:
         LOGGER.debug('_relation: %r', node)
         if isinstance(node, (list, str)):
             return node
@@ -635,36 +646,39 @@ class Reformatter:
     def _rename_stmt(self, node: dict) -> dict:
         if node['renameType'] == constants.ObjectType.COLUMN:
             return {
-                'stmt_type': 'ALTER {}'.format(constants.ObjectType(
-                    node['relationType']).name),
+                'stmt_type': 'ALTER {}'.format(
+                    constants.ObjectType(node['relationType']).name
+                ),
                 'relation': self.reformat(node['relation']),
                 'commands': [
                     {
                         'operation': 'RENAME COLUMN',
                         'old_name': node['subname'],
-                        'new_name': node['newname']
+                        'new_name': node['newname'],
                     }
-                ]
+                ],
             }
         elif node['renameType'] == constants.ObjectType.TABLE:
             return {
-                'stmt_type': 'RENAME {}'.format(constants.ObjectType(
-                    node['renameType']).name),
+                'stmt_type': 'RENAME {}'.format(
+                    constants.ObjectType(node['renameType']).name
+                ),
                 'old_name': self.reformat(node['relation']),
                 'new_name': node['newname'],
                 'cascade': node['behavior'] == 1,
-                'missing_ok': node.get('missing_ok', False)
+                'missing_ok': node.get('missing_ok', False),
             }
         return {
-            'stmt_type': 'RENAME {}'.format(constants.ObjectType(
-                node['renameType']).name),
+            'stmt_type': 'RENAME {}'.format(
+                constants.ObjectType(node['renameType']).name
+            ),
             'old_name': node['subname'],
             'new_name': node['newname'],
             'cascade': node['behavior'] == 1,
-            'missing_ok': node.get('missing_ok', False)
+            'missing_ok': node.get('missing_ok', False),
         }
 
-    def _res_target(self, node: dict) -> typing.Union[list, str]:
+    def _res_target(self, node: dict) -> list | str:
         name = node.get('name')
         if 'indirection' in node:
             name = [name, self.reformat(node['indirection'])]
@@ -674,7 +688,7 @@ class Reformatter:
             return [name, '=', self.reformat(node['val'])]
         if name and 'val' in node:
             return [self.reformat(node['val']), 'AS', name]
-        return name if name else self.reformat(node['val'])
+        return name or self.reformat(node['val'])
 
     @staticmethod
     def _role_spec(node: dict) -> str:
@@ -692,7 +706,8 @@ class Reformatter:
             'instead': node.get('instead', False),
             'replace': node.get('replace', False),
             'where': self.reformat(node.get('whereClause')),
-            'action': self.reformat(node['actions'])}
+            'action': self.reformat(node['actions']),
+        }
 
     @staticmethod
     def _s_q_l_value_function(node) -> str:
@@ -706,7 +721,7 @@ class Reformatter:
                 'operation': constants.SELECT_OP[node['op']],
                 'left': self.reformat(node.get('larg')),
                 'all': node.get('all', False),
-                'right': self.reformat(node.get('rarg'))
+                'right': self.reformat(node.get('rarg')),
             }
         return {
             'stmt_type': constants.SELECT,
@@ -725,7 +740,7 @@ class Reformatter:
             'offset': self.reformat(node.get('limitOffset')),
             'locking': self.reformat(node.get('lockingClause')),
             'with': self.reformat(node.get('withClause')),
-            'set': set_stmt
+            'set': set_stmt,
         }
 
     @staticmethod
@@ -746,37 +761,42 @@ class Reformatter:
 
     def _sub_link(self, node: dict) -> list:
         if node['subLinkType'] in {0, 6}:
-            return ['{}({})'.format(
-                constants.SUBLINK_TYPE[node['subLinkType']],
-                self.reformat(node['subselect']))]
+            return [
+                '{}({})'.format(
+                    constants.SUBLINK_TYPE[node['subLinkType']],
+                    self.reformat(node['subselect']),
+                )
+            ]
         if node['subLinkType'] in {1, 2}:
             sublink_type = 'IN'
             if 'operName' in node:
                 sublink_type = constants.SUBLINK_TYPE[node['subLinkType']]
                 sublink_type = '{} {}'.format(
-                    self.reformat(node['operName']), sublink_type)
+                    self.reformat(node['operName']), sublink_type
+                )
             return [
                 self.reformat(node['testexpr']),
                 sublink_type,
-                self.reformat(node['subselect'])
+                self.reformat(node['subselect']),
             ]
         elif node['subLinkType'] == 3:
             return [
                 self.reformat(node['testexpr']),
                 constants.ROW_COMPARE[node['op']],
-                self.reformat(node['subselect'])
+                self.reformat(node['subselect']),
             ]
         elif node['subLinkType'] in {4, 5}:
             return self.reformat(node['subselect'])
         raise RuntimeError(
-            'Unsupported sublink: {}'.format(node['subLinkType']))
+            'Unsupported sublink: {}'.format(node['subLinkType'])
+        )
 
     @staticmethod
     def _trigger_transition(node: dict) -> dict:
         return {
             'name': node['name'],
             'is_new': node.get('isNew', False),
-            'is_table': node.get('isTable', False)
+            'is_table': node.get('isTable', False),
         }
 
     def _type_cast(self, node: dict) -> str:
@@ -784,7 +804,7 @@ class Reformatter:
         node = self.reformat(node['arg'])
         if type_name == 'bool':
             return constants.BOOL_TEST[node]
-        return '{}::{}'.format(node, type_name)
+        return f'{node}::{type_name}'
 
     def _type_name(self, node: dict) -> str:
         parts = []
@@ -807,7 +827,7 @@ class Reformatter:
                 parts.append(' ')
                 parts.append(constants.INTERVAL_FIELDS[precision])
             else:
-                parts.append('({})'.format(precision))
+                parts.append(f'({precision})')
         if 'arrayBounds' in node:
             for _iter in range(0, len(node['arrayBounds'])):
                 parts.append('[]')
@@ -817,10 +837,14 @@ class Reformatter:
         first_target = node['targetList'][0]
         if 'MultiAssignRef' in first_target['ResTarget'].get('val', {}).keys():
             targets = [
-                '({})'.format(', '.join(e['ResTarget']['name']
-                                        for e in node['targetList'])),
+                '({})'.format(
+                    ', '.join(
+                        e['ResTarget']['name'] for e in node['targetList']
+                    )
+                ),
                 '=',
-                self.reformat(first_target['ResTarget']['val'])]
+                self.reformat(first_target['ResTarget']['val']),
+            ]
         else:
             self._set_res_target_mode(node['targetList'], 'update')
             targets = self.reformat(node['targetList'])
@@ -839,7 +863,7 @@ class Reformatter:
         if node['kind'] == constants.VariableSetKind.VALUE:
             return {
                 'name': node['name'],
-                'value': ', '.join(self.reformat(node['args']))
+                'value': ', '.join(self.reformat(node['args'])),
             }
         LOGGER.critical('Unsupported _variable_set_stmt option: %r', node)
         raise RuntimeError
@@ -858,18 +882,22 @@ class Reformatter:
         view['options'] = {}
         view['query'] = handle.read()
         if node.get('aliases'):
-            LOGGER.critical('Unsupported _view_stmt attribute: %r',
-                            node.get('aliases'))
+            LOGGER.critical(
+                'Unsupported _view_stmt attribute: %r', node.get('aliases')
+            )
             raise RuntimeError
         if node.get('withCheckOption', 0) > 0:
-            view['options']['check_option'] = \
-                constants.ViewCheckOption(node['withCheckOption']).name
+            view['options']['check_option'] = constants.ViewCheckOption(
+                node['withCheckOption']
+            ).name
         if node.get('options'):
-            options = {o['name']: o['arg']
-                       for o in self.reformat(node['options'])}
+            options = {
+                o['name']: o['arg'] for o in self.reformat(node['options'])
+            }
             if options.get('security_barrier'):
-                view['options']['security_barrier'] = \
-                    options['security_barrier']
+                view['options']['security_barrier'] = options[
+                    'security_barrier'
+                ]
         if not view['columns']:
             del view['columns']
         if not view['options']:
@@ -880,7 +908,7 @@ class Reformatter:
     def _with_clause(self, node: dict) -> dict:
         return {
             'ctes': [self.reformat(c) for c in node.get('ctes', [])],
-            'recursive': node.get('recursive', False)
+            'recursive': node.get('recursive', False),
         }
 
     @staticmethod
@@ -888,8 +916,8 @@ class Reformatter:
         for k, v in constants.DATA_TYPE_MAPPING.items():
             if value == k:
                 value = v
-            elif value.startswith('{}['.format(k)):
-                value = '{}{}'.format(v, value[len(k):])
-            elif value.startswith('{}('.format(k)):
-                value = '{}{}'.format(v, value[len(k):])
+            elif value.startswith(f'{k}['):
+                value = f'{v}{value[len(k) :]}'
+            elif value.startswith(f'{k}('):
+                value = f'{v}{value[len(k) :]}'
         return value.strip()

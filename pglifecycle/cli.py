@@ -1,14 +1,14 @@
-# coding=utf-8
 """
 CLI Entry-point
 
 """
+
 import argparse
 import logging
 import os
-from os import path
 import pathlib
 import pwd
+from os import path
 
 from pglifecycle import common, project, version
 
@@ -27,68 +27,109 @@ def add_actions_to_parser(parser):
         description='The action or operation to perform',
         dest='action',
         required=True,
-        metavar='ACTION')
+        metavar='ACTION',
+    )
 
     parser = sp.add_parser(
         'build',
-        help='Generate a pg_restore -Fc compatible archive of the project')
+        help='Generate a pg_restore -Fc compatible archive of the project',
+    )
     parser.add_argument(
-        'project', metavar='PROJECT', nargs='?', action='store',
-        help='The path to the pglifecycle project')
+        'project',
+        metavar='PROJECT',
+        nargs='?',
+        action='store',
+        help='The path to the pglifecycle project',
+    )
     parser.add_argument(
-        'destination', metavar='DEST', nargs='?', action='store',
-        help='The path save the build artifact to ')
+        'destination',
+        metavar='DEST',
+        nargs='?',
+        action='store',
+        help='The path save the build artifact to ',
+    )
 
-    parser = sp.add_parser(
-        'create', help='Create a skeleton project')
+    parser = sp.add_parser('create', help='Create a skeleton project')
     parser.add_argument(
-        '--encoding', help='Specify the database encoding', default='UTF-8')
+        '--encoding', help='Specify the database encoding', default='UTF-8'
+    )
     parser.add_argument(
-        '--force', action='store_true',
-        help='Write to destination path even if it already exists')
+        '--force',
+        action='store_true',
+        help='Write to destination path even if it already exists',
+    )
     parser.add_argument('--name', help='Override the default project name')
     parser.add_argument(
-        '--no-gitkeep', action='store_true',
-        help='Do not create .gitkeep files')
+        '--no-gitkeep',
+        action='store_true',
+        help='Do not create .gitkeep files',
+    )
     parser.add_argument(
-        '--no-stdstrings', action='store_true',
-        help='Turn of standard conforming strings (< Postgres 9.1 behavior)')
+        '--no-stdstrings',
+        action='store_true',
+        help='Turn of standard conforming strings (< Postgres 9.1 behavior)',
+    )
     parser.add_argument(
-        '--superuser', help='Specify the superuser name', default='postgres')
+        '--superuser', help='Specify the superuser name', default='postgres'
+    )
     parser.add_argument(
-        'destination', metavar='DEST', nargs='?', action='store',
-        help='The path create the skeleton project in')
+        'destination',
+        metavar='DEST',
+        nargs='?',
+        action='store',
+        help='The path create the skeleton project in',
+    )
 
     parser = sp.add_parser('generate', help='Generate a project')
     add_connection_options_to_parser(parser)
     add_ddl_options_to_parser(parser)
     parser.add_argument(
-        '-D', '--dump', action='store',
-        help='Use a pre-existing pg_dump file')
+        '-D', '--dump', action='store', help='Use a pre-existing pg_dump file'
+    )
     parser.add_argument(
-        '-e', '--extract', action='store_true',
-        help='Extract schema from an existing database')
+        '-e',
+        '--extract',
+        action='store_true',
+        help='Extract schema from an existing database',
+    )
     parser.add_argument(
-        '-r', '--extract-roles', action='store_true',
-        help='Extract roles (and users) from an existing cluster')
+        '-r',
+        '--extract-roles',
+        action='store_true',
+        help='Extract roles (and users) from an existing cluster',
+    )
     parser.add_argument(
-        '-i', '--ignore', action='store',
-        help='Specify a file with files skip writing')
+        '-i',
+        '--ignore',
+        action='store',
+        help='Specify a file with files skip writing',
+    )
     parser.add_argument(
-        '--force', action='store_true',
-        help='Write to destination path even if it already exists')
+        '--force',
+        action='store_true',
+        help='Write to destination path even if it already exists',
+    )
     parser.add_argument(
-        '--gitkeep', action='store_true',
-        help='Create a .gitkeep file in empty directories')
+        '--gitkeep',
+        action='store_true',
+        help='Create a .gitkeep file in empty directories',
+    )
     parser.add_argument(
-        '--remove-empty-dirs', action='store_true',
-        help='Remove empty directories after generation')
+        '--remove-empty-dirs',
+        action='store_true',
+        help='Remove empty directories after generation',
+    )
     parser.add_argument(
-        '--save-remaining', action='store_true',
-        help='Save any unparsed/unprocessed dump items to remaining.yaml')
+        '--save-remaining',
+        action='store_true',
+        help='Save any unparsed/unprocessed dump items to remaining.yaml',
+    )
     parser.add_argument(
-        'dest', nargs='?', metavar='DEST',
-        help='Destination directory for the new project')
+        'dest',
+        nargs='?',
+        metavar='DEST',
+        help='Destination directory for the new project',
+    )
 
 
 def add_connection_options_to_parser(parser):
@@ -98,33 +139,54 @@ def add_connection_options_to_parser(parser):
 
     """
     conn = parser.add_argument_group(
-        'Connection Options', conflict_handler='resolve')
+        'Connection Options', conflict_handler='resolve'
+    )
     conn.add_argument(
-        '-d', '--dbname', action='store',
+        '-d',
+        '--dbname',
+        action='store',
         default=os.environ.get('PGDATABASE', get_username()),
-        help='database name to connect to')
+        help='database name to connect to',
+    )
     conn.add_argument(
-        '-h', '--host', action='store',
+        '-h',
+        '--host',
+        action='store',
         default=os.environ.get('PGHOST', 'localhost'),
-        help='database server host or socket directory')
+        help='database server host or socket directory',
+    )
     conn.add_argument(
-        '-p', '--port', action='store', type=int,
+        '-p',
+        '--port',
+        action='store',
+        type=int,
         default=int(os.environ.get('PGPORT', '5432')),
-        help='database server port number')
+        help='database server port number',
+    )
     conn.add_argument(
-        '-U', '--username', action='store',
+        '-U',
+        '--username',
+        action='store',
         default=os.environ.get('PGUSER', get_username()),
-        help='The PostgreSQL username to operate as')
+        help='The PostgreSQL username to operate as',
+    )
     conn.add_argument(
-        '-w', '--no-password', action='store_true',
-        help='never prompt for password')
+        '-w',
+        '--no-password',
+        action='store_true',
+        help='never prompt for password',
+    )
     conn.add_argument(
-        '-W', '--password', action='store_true',
-        help='force password prompt '
-        '(should happen  automatically)')
+        '-W',
+        '--password',
+        action='store_true',
+        help='force password prompt (should happen  automatically)',
+    )
     conn.add_argument(
-        '--role', action='store',
-        help='Role to assume when connecting to a database')
+        '--role',
+        action='store',
+        help='Role to assume when connecting to a database',
+    )
 
 
 def add_ddl_options_to_parser(parser):
@@ -135,17 +197,27 @@ def add_ddl_options_to_parser(parser):
     """
     control = parser.add_argument_group('DDL Options')
     control.add_argument(
-        '-O', '--no-owner', action='store_true',
-        help='skip restoration of object ownership')
+        '-O',
+        '--no-owner',
+        action='store_true',
+        help='skip restoration of object ownership',
+    )
     control.add_argument(
-        '-x', '--no-privileges', action='store_true',
-        help='do not include privileges (grant/revoke)')
+        '-x',
+        '--no-privileges',
+        action='store_true',
+        help='do not include privileges (grant/revoke)',
+    )
     control.add_argument(
-        '--no-security-labels', action='store_true',
-        help='do not include security label assignments')
+        '--no-security-labels',
+        action='store_true',
+        help='do not include security label assignments',
+    )
     control.add_argument(
-        '--no-tablespaces', action='store_true',
-        help='do not include tablespace assignments')
+        '--no-tablespaces',
+        action='store_true',
+        help='do not include tablespace assignments',
+    )
 
 
 def add_logging_options_to_parser(parser):
@@ -156,14 +228,21 @@ def add_logging_options_to_parser(parser):
     """
     group = parser.add_argument_group(title='Logging Options')
     group.add_argument(
-        '-L', '--log-file', action='store',
+        '-L',
+        '--log-file',
+        action='store',
         help='Log to the specified filename. If not specified, '
-        'log output is sent to STDOUT')
+        'log output is sent to STDOUT',
+    )
     group.add_argument(
-        '-v', '--verbose', action='store_true',
-        help='Increase output verbosity')
+        '-v',
+        '--verbose',
+        action='store_true',
+        help='Increase output verbosity',
+    )
     group.add_argument(
-        '--debug', action='store_true', help='Extra verbose debug logging')
+        '--debug', action='store_true', help='Extra verbose debug logging'
+    )
 
 
 def configure_logging(args):
@@ -177,13 +256,12 @@ def configure_logging(args):
         level = logging.INFO
     elif args.debug:
         level = logging.DEBUG
-    filename = args.log_file if args.log_file else None
+    filename = args.log_file or None
     if filename:
         filename = path.abspath(filename)
         if not path.exists(path.dirname(filename)):
             filename = None
-    logging.basicConfig(
-        level=level, filename=filename, format=LOGGING_FORMAT)
+    logging.basicConfig(level=level, filename=filename, format=LOGGING_FORMAT)
     logging.getLogger('pgdumplib.dump').setLevel(logging.INFO)
 
 
@@ -205,14 +283,16 @@ def parse_cli_arguments():
     parser = argparse.ArgumentParser(
         description='PostgreSQL Schema Management',
         conflict_handler='resolve',
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
     add_logging_options_to_parser(parser)
     add_actions_to_parser(parser)
     parser.add_argument(
         '-V',
         '--version',
         action='store_true',
-        help='output version information, then exit')
+        help='output version information, then exit',
+    )
     return parser.parse_args()
 
 
@@ -239,7 +319,8 @@ def run():
                 args.name or pathlib.Path(args.destination).name,
                 args.encoding,
                 args.no_stdstrings is False,
-                args.superuser).create(args.force, args.no_gitkeep is False)
+                args.superuser,
+            ).create(args.force, args.no_gitkeep is False)
         except RuntimeError as error:
             common.exit_application(str(error), 4)
     elif args.action == 'generate-project':
@@ -247,7 +328,8 @@ def run():
             common.exit_application('Destination not specified', 2)
         if args.gitkeep and args.remove_empty_dirs:
             common.exit_application(
-                'Can not specify --gitkeep and --remove-empty-dirs', 2)
+                'Can not specify --gitkeep and --remove-empty-dirs', 2
+            )
         #  generate_project.Generate(args).run()
     else:
         common.exit_application('Invalid action specified', 1)

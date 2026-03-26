@@ -1,5 +1,5 @@
-# coding=utf-8
 """Common constants and shared methods"""
+
 import logging
 import sys
 

@@ -1,57 +1,83 @@
 name: Testing
 on:
+  pull_request:
   push:
     branches: ["*"]
     paths-ignore:
       - 'docs/**'
-      - 'setup.*'
       - '*.md'
       - '*.rst'
     tags-ignore: ["*"]
+
+env:
+  TEST_HOST: postgres
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13", "3.14"]
+        postgres: [15, 16, 17, 18]
     services:
       postgres:
-        image: postgres:11
+        image: postgres:${{ matrix.postgres }}
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
         options: >-
           --health-cmd pg_isready
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
-        ports:
-          - 5432
-    strategy:
-      matrix:
-        python: [3.7, 3.8]
-    container:
-      image: python:${{ matrix.python }}-alpine
-      env:
-        POSTGRES_URI: postgresql://postgres@postgres:5432/postgres
+          --name postgres
+          --hostname postgres
+
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v1
+        uses: actions/checkout@v5
 
-      - name: Setup environment
-        run: apk --update add gcc libpq make musl-dev postgresql postgresql-dev linux-headers tzdata
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '${{ matrix.python }}'
 
-      - name: Install testing dependencies
-        run: pip3 install -r requires/testing.txt
+      - name: Install PostgreSQL client tools
+        run: |
+          sudo apt-get install -y postgresql-common
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client-${{ matrix.postgres }}
 
-      - name: Install library dependencies
-        run: python setup.py develop
+      - name: Prepare container directories and copy fixtures
+        run: |
+          docker exec postgres mkdir -p /data /fixtures
+          docker exec postgres chmod 777 /data
+          mkdir -p build/data
+          docker cp fixtures/. postgres:/fixtures/
 
-      - name: Create build directory
-        run: mkdir build
+      - name: Bootstrap environment
+        run: ./bootstrap
+        env:
+          CI: true
 
-      - name: Run flake8 tests
-        run: flake8 --output build/flake8.txt --tee
+      - name: Copy dumps from container to workspace
+        run: |
+          docker cp postgres:/data/. build/data/
+
+      - name: Lint Check
+        run: pre-commit run --all-files
 
       - name: Run tests
-        run: nosetests -x
+        run: |
+          coverage run
+          coverage report
+          coverage xml
 
       - name: Upload Coverage
-        uses: codecov/codecov-action@v1.0.2
+        uses: codecov/codecov-action@v5
         with:
-          token: ${{secrets.CODECOV_TOKEN}}
-          file: build/coverage.xml
+          files: ./build/coverage.xml
+          flags: unittests

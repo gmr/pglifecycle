@@ -2,6 +2,7 @@
 Common Constants
 
 """
+
 import enum
 import pathlib
 
@@ -149,7 +150,7 @@ DATA_TYPE_MAPPING = {
     'timetz': 'times with time zone',
     'timestamp': 'timestamp without time zone',
     'timestamptz': 'timestamp with time zone',
-    'varchar': ' character varying'
+    'varchar': ' character varying',
 }
 
 DEPENDENCIES = 'dependencies'
@@ -205,7 +206,7 @@ OBJ_KEYS = {
     'tablespaces': TABLESPACE,
     'text_search': TEXT_SEARCH,
     'types': TYPE,
-    'views': VIEW
+    'views': VIEW,
 }
 
 ITEM_KEYS = {v: k for k, v in OBJ_KEYS.items()}
@@ -222,7 +223,7 @@ GRANT_SORT_WEIGHTS = {
     'TRIGGER': 7,
     'CREATE': 0,
     'CONNECT': 1,
-    'TEMPORARY': 2
+    'TEMPORARY': 2,
 }
 
 
@@ -240,7 +241,7 @@ OPTIONS_WEIGHTS = {
     'REPLICATION': 5,
     'NOREPLICATION': 5,
     'BYPASSRLS': 6,
-    'NOBYPASSRLS': 6
+    'NOBYPASSRLS': 6,
 }
 
 TABLE_KEYS = {
@@ -269,16 +270,12 @@ A_EXPR_KIND = {
     11: 'BETWEEN',
     12: 'NOT BETWEEN',
     13: 'BETWEEN SYMMETRIC',
-    14: 'NOT BETWEEN SYMMETRIC'
+    14: 'NOT BETWEEN SYMMETRIC',
 }
 
-ACL_OBJECT_TYPE = {
-    1: 'TABLE',
-    10: 'SCHEMA'}
+ACL_OBJECT_TYPE = {1: 'TABLE', 10: 'SCHEMA'}
 
-ACL_ROLE_TYPE = {
-    0: 'USER',
-    3: 'PUBLIC'}
+ACL_ROLE_TYPE = {0: 'USER', 3: 'PUBLIC'}
 
 BOOL_OP = {0: 'AND', 1: 'OR', 2: 'NOT'}
 
@@ -288,7 +285,8 @@ FK_ACTION = {
     'a': None,  # NO ACTION
     'c': 'CASCADE',
     'n': 'SET NULL',
-    'r': 'RESTRICT'}
+    'r': 'RESTRICT',
+}
 
 FK_MATCH = {'f': 'FULL', 'p': 'PARTIAL', 's': None}
 
@@ -299,7 +297,7 @@ GROUPING_SET = {
     1: 'SIMPLE',
     2: 'ROLLUP',
     3: 'CUBE',
-    4: 'GROUPING SETS'
+    4: 'GROUPING SETS',
 }
 
 INTERVAL_FIELDS = {
@@ -315,7 +313,7 @@ INTERVAL_FIELDS = {
     3080: 'DAY TO MINUTE',
     6144: 'MINUTE_TO_SECOND',
     7168: 'HOUR TO SECOND',
-    7176: 'DAY TO SECOND'
+    7176: 'DAY TO SECOND',
 }
 
 JOIN_TYPE = {
@@ -326,16 +324,13 @@ JOIN_TYPE = {
     4: 'EXISTS',
     5: 'NOT EXISTS',
     6: 'UNIQUE OUTER',
-    7: 'UNIQUE INNER'
+    7: 'UNIQUE INNER',
 }
 
 NULL_ORDERING = {0: None, 1: 'FIRST', 2: 'LAST'}
 NULL_TEST = {0: 'IS', 1: 'IS NOT'}
 
-ON_CONFLICT = {
-    1: 'DO NOTHING',
-    2: 'DO UPDATE SET'
-}
+ON_CONFLICT = {1: 'DO NOTHING', 2: 'DO UPDATE SET'}
 
 ORDERING = {0: None, 1: 'ASC', 2: 'DESC'}
 
@@ -348,46 +343,35 @@ ROW_COMPARE = {
     6: '!=',
 }
 
-RULE_EVENTS = {
-    1: SELECT,
-    2: UPDATE,
-    3: INSERT,
-    4: DELETE
-}
+RULE_EVENTS = {1: SELECT, 2: UPDATE, 3: INSERT, 4: DELETE}
 
-SELECT_OP = {
-    0: None,
-    1: 'UNION',
-    2: 'INTERSECT',
-    3: 'EXCEPT'
-}
+SELECT_OP = {0: None, 1: 'UNION', 2: 'INTERSECT', 3: 'EXCEPT'}
 
-SQL_VALUE_FUNCTION = {
-    3: 'CURRENT_TIMESTAMP'
-}
+SQL_VALUE_FUNCTION = {3: 'CURRENT_TIMESTAMP'}
 
 SUBLINK_TYPE = {
     0: 'EXISTS',
     1: 'ALL',
-    2: 'IN',   # is 'ANY' if operName is set
-    3: 'ROW-COMPARE',     # ROW COMPARE
-    4: 'EXPRESSION',   # EXPR
-    5: 'MULTI-EXPRESSION',   # MULTI-EXPR
+    2: 'IN',  # is 'ANY' if operName is set
+    3: 'ROW-COMPARE',  # ROW COMPARE
+    4: 'EXPRESSION',  # EXPR
+    5: 'MULTI-EXPRESSION',  # MULTI-EXPR
     6: 'ARRAY',
-    7: 'WITH'  # CTE
+    7: 'WITH',  # CTE
 }
 
-TRIGGER_INSERT = (1 << 2)
-TRIGGER_DELETE = (1 << 3)
-TRIGGER_UPDATE = (1 << 4)
-TRIGGER_TRUNCATE = (1 << 5)
-TRIGGER_BEFORE = (1 << 1)
+TRIGGER_INSERT = 1 << 2
+TRIGGER_DELETE = 1 << 3
+TRIGGER_UPDATE = 1 << 4
+TRIGGER_TRUNCATE = 1 << 5
+TRIGGER_BEFORE = 1 << 1
 TRIGGER_AFTER = 0x00000000
-TRIGGER_INSTEAD = (1 << 6)
+TRIGGER_INSTEAD = 1 << 6
 
 
 class AlterTableType(enum.IntEnum):
     """Enum identifying the alter_table_cmd type"""
+
     ADD_COLUMN = 0
     ADD_COLUMN_RECURSE = 1
     ADD_COLUMN_TO_VIEW = 2
@@ -458,6 +442,7 @@ class AlterTableType(enum.IntEnum):
 
 class DefElemAction(enum.IntEnum):
     """Actions for a DefElem"""
+
     UNSPECIFIED = 0
     SET = 1
     ADD = 2
@@ -466,6 +451,7 @@ class DefElemAction(enum.IntEnum):
 
 class FunctionParameterMode(enum.Enum):
     """Modes for a function parameter"""
+
     IN = 105  # i
     OUT = 111  # o
     INOUT = 98  # b
@@ -475,6 +461,7 @@ class FunctionParameterMode(enum.Enum):
 
 class ObjectType(enum.IntEnum):
     """PostgreSQL Object Types"""
+
     ACCESS_METHOD = 0
     AGGREGATE = 1
     AMOP = 2
@@ -527,6 +514,7 @@ class ObjectType(enum.IntEnum):
 
 class VariableSetKind(enum.IntEnum):
     """Defines the various set statement kinds"""
+
     VALUE = 0
     DEFAULT = 1
     CURRENT = 2
@@ -537,6 +525,7 @@ class VariableSetKind(enum.IntEnum):
 
 class ViewCheckOption(enum.IntEnum):
     """Defines ViewCheckOption values"""
+
     UNDEFINED: 0
     LOCAL: 1
     CASCADED: 2

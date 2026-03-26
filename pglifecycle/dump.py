@@ -2,6 +2,7 @@
 Used by pgdumplib.project.Project to build a Dump artifact
 
 """
+
 import dataclasses
 import logging
 import os
@@ -16,8 +17,8 @@ LOGGER = logging.getLogger(__name__)
 
 
 class Dump:
-
     """Used to construct a dump from a project"""
+
     def __init__(self, project):
         self.project = project
         self._dump = pgdumplib.new(project.name, project.encoding)
@@ -25,98 +26,145 @@ class Dump:
 
     def save(self, path: os.PathLike) -> typing.NoReturn:
         for item in self.project.sorted_inventory:
-            getattr(self, '_dump_{}'.format(
-                item.desc.replace(' ', '_').lower()))(item)
+            getattr(
+                self, '_dump_{}'.format(item.desc.replace(' ', '_').lower())
+            )(item)
         self._dump.save(path)
-        LOGGER.debug('Saved pg_dump -Fc compatible dump to %s with %i entries',
-                     path, len(self._dump.entries))
+        LOGGER.debug(
+            'Saved pg_dump -Fc compatible dump to %s with %i entries',
+            path,
+            len(self._dump.entries),
+        )
 
-    def _add_comment(self,
-                     desc: str,
-                     namespace: str,
-                     tag: str,
-                     owner: str,
-                     parent_dump_id: int,
-                     parent_tag: typing.Optional[str],
-                     comment: str):
+    def _add_comment(
+        self,
+        desc: str,
+        namespace: str,
+        tag: str,
+        owner: str,
+        parent_dump_id: int,
+        parent_tag: str | None,
+        comment: str,
+    ):
         create_sql = [constants.COMMENT, constants.ON, desc]
         if parent_tag:
-            sql = ['{}.{}'.format(namespace, tag), constants.ON, parent_tag]
+            sql = [f'{namespace}.{tag}', constants.ON, parent_tag]
             create_sql += sql
         elif namespace:
-            create_sql.append('{}.{}'.format(namespace, tag))
+            create_sql.append(f'{namespace}.{tag}')
         else:
             create_sql.append(tag)
         create_sql.append(constants.IS)
-        create_sql.append('$${}$$;\n'.format(comment))
+        create_sql.append(f'$${comment}$$;\n')
         self._add_entry(
-            constants.COMMENT, namespace, tag, owner, create_sql, [],
-            [parent_dump_id])
+            constants.COMMENT,
+            namespace,
+            tag,
+            owner,
+            create_sql,
+            [],
+            [parent_dump_id],
+        )
 
-    def _add_entry(self, desc: str, namespace: str, name: str, owner: str,
-                   defn: typing.List[str],
-                   drop_stmt: typing.List[str],
-                   dependencies: typing.Optional[typing.List[int]] = None,
-                   tablespace: typing.Optional[str] = None) \
-            -> pgdumplib.dump.Entry:
+    def _add_entry(
+        self,
+        desc: str,
+        namespace: str,
+        name: str,
+        owner: str,
+        defn: list[str],
+        drop_stmt: list[str],
+        dependencies: list[int] | None = None,
+        tablespace: str | None = None,
+    ) -> pgdumplib.dump.Entry:
         LOGGER.debug('Adding %s %s.%s', desc, namespace, name)
         return self._dump.add_entry(
-            desc, namespace, name, owner,
+            desc,
+            namespace,
+            name,
+            owner,
             '{};\n'.format(' '.join(defn)),
             '{};\n'.format(' '.join(drop_stmt)),
             dependencies=dependencies or [],
-            tablespace=tablespace)
+            tablespace=tablespace,
+        )
 
-    def _add_item(self, item: models.Item,
-                  defn: typing.List[str],
-                  drop_stmt: typing.List[str],
-                  name: typing.Optional[str] = None,
-                  no_owner: bool = False) -> typing.NoReturn:
+    def _add_item(
+        self,
+        item: models.Item,
+        defn: list[str],
+        drop_stmt: list[str],
+        name: str | None = None,
+        no_owner: bool = False,
+    ) -> typing.NoReturn:
         entry = self._add_entry(
             item.desc,
             getattr(item.definition, 'schema', ''),
             getattr(item.definition, 'name', name),
-            getattr(item.definition, 'owner', ''
-                    if no_owner else self.project.superuser),
-            defn, drop_stmt,
-            None, getattr(item.definition, 'tablespace', None))
+            getattr(
+                item.definition,
+                'owner',
+                '' if no_owner else self.project.superuser,
+            ),
+            defn,
+            drop_stmt,
+            None,
+            getattr(item.definition, 'tablespace', None),
+        )
         self._dump_id_map[item.id] = entry.dump_id
         if getattr(item.definition, 'comment', None):
             self._add_comment(
                 item.desc,
                 getattr(item.definition, 'schema', ''),
                 getattr(item.definition, 'name', name),
-                getattr(item.definition, 'owner',
-                        '' if no_owner else self.project.superuser),
-                entry.dump_id, None,
-                item.definition.comment)
+                getattr(
+                    item.definition,
+                    'owner',
+                    '' if no_owner else self.project.superuser,
+                ),
+                entry.dump_id,
+                None,
+                item.definition.comment,
+            )
 
-    def _add_text_search_item(self, item: models.Item, desc: str,
-                              defn: typing.List[str],
-                              drop_stmt: typing.List[str],
-                              name: typing.Optional[str] = None,
-                              comment: typing.Optional[str] = None) \
-            -> typing.NoReturn:
+    def _add_text_search_item(
+        self,
+        item: models.Item,
+        desc: str,
+        defn: list[str],
+        drop_stmt: list[str],
+        name: str | None = None,
+        comment: str | None = None,
+    ) -> typing.NoReturn:
         entry = self._add_entry(
             desc,
             getattr(item.definition, 'schema', ''),
             getattr(item.definition, 'name', name),
             getattr(item.definition, 'owner', self.project.superuser),
-            defn, drop_stmt,
-            getattr(item.definition, 'tablespace', None))
+            defn,
+            drop_stmt,
+            getattr(item.definition, 'tablespace', None),
+        )
         if comment:
             self._add_comment(
                 desc,
                 getattr(item.definition, 'schema', ''),
                 getattr(item.definition, 'name', name),
-                self.project.superuser, entry.dump_id, None, comment)
+                self.project.superuser,
+                entry.dump_id,
+                None,
+                comment,
+            )
 
     def _dump_aggregate(self, item: models.Item) -> typing.NoReturn:
         if item.definition.sql:
             create_sql, drop_sql = [item.definition.sql], []
         else:
             create_sql = [
-                constants.CREATE, constants.AGGREGATE, self._item_name(item)]
+                constants.CREATE,
+                constants.AGGREGATE,
+                self._item_name(item),
+            ]
             args = []
             for argument in item.definition.arguments:
                 arg = [argument.mode]
@@ -125,78 +173,86 @@ class Dump:
                 arg.append(argument.data_type)
                 args.append(' '.join(arg))
             create_sql.append('({})'.format(', '.join(args)))
-            options = ['SFUNC = {}'.format(item.definition.sfunc),
-                       'STYPE = {}'.format(item.definition.state_data_type)]
+            options = [
+                f'SFUNC = {item.definition.sfunc}',
+                f'STYPE = {item.definition.state_data_type}',
+            ]
             if item.definition.state_data_size:
-                options.append('SSPACE = {}'.format(
-                    item.definition.state_data_size))
+                options.append(f'SSPACE = {item.definition.state_data_size}')
             if item.definition.ffunc:
-                options.append('FINALFUNC = {}'.format(item.definition.ffunc))
+                options.append(f'FINALFUNC = {item.definition.ffunc}')
             if item.definition.finalfunc_extra:
-                options.append('FINALFUNC_EXTRA = {}'.format(
-                    item.definition.finalfunc_extra))
+                options.append(
+                    f'FINALFUNC_EXTRA = {item.definition.finalfunc_extra}'
+                )
             if item.definition.finalfunc_modify:
-                options.append('FINALFUNC_MODIFY = {}'.format(
-                    item.definition.finalfunc_modify))
+                options.append(
+                    f'FINALFUNC_MODIFY = {item.definition.finalfunc_modify}'
+                )
             if item.definition.combinefunc:
-                options.append('COMBINEFUNC = {}'.format(
-                    item.definition.combinefunc))
+                options.append(f'COMBINEFUNC = {item.definition.combinefunc}')
             if item.definition.serialfunc:
-                options.append('SERIALFUNC = {}'.format(
-                    item.definition.serialfunc))
+                options.append(f'SERIALFUNC = {item.definition.serialfunc}')
             if item.definition.deserialfunc:
-                options.append('DESERIALFUNC = {}'.format(
-                    item.definition.deserialfunc))
+                options.append(
+                    f'DESERIALFUNC = {item.definition.deserialfunc}'
+                )
             if item.definition.initial_condition:
-                options.append('INITCOND = {}'.format(
-                    item.definition.initial_condition))
+                options.append(
+                    f'INITCOND = {item.definition.initial_condition}'
+                )
             if item.definition.msfunc:
-                options.append('MSFUNC = {}'.format(item.definition.msfunc))
+                options.append(f'MSFUNC = {item.definition.msfunc}')
             if item.definition.minvfunc:
-                options.append('MINVFUNC = {}'.format(
-                    item.definition.minvfunc))
+                options.append(f'MINVFUNC = {item.definition.minvfunc}')
             if item.definition.mstate_data_type:
-                options.append('MSTYPE = {}'.format(
-                    item.definition.mstate_data_type))
+                options.append(f'MSTYPE = {item.definition.mstate_data_type}')
             if item.definition.mstate_data_size:
-                options.append('MSSPACE = {}'.format(
-                    item.definition.mstate_data_size))
+                options.append(f'MSSPACE = {item.definition.mstate_data_size}')
             if item.definition.mffunc:
-                options.append('MFINALFUNC = {}'.format(
-                    item.definition.mffunc))
+                options.append(f'MFINALFUNC = {item.definition.mffunc}')
             if item.definition.mfinalfunc_extra:
                 options.append('MFINALFUNC_EXTRA')
             if item.definition.mfinalfunc_modify:
-                options.append('MFINALFUNC_MODIFY = {}'.format(
-                    item.definition.mfinalfunc_modify))
+                options.append(
+                    f'MFINALFUNC_MODIFY = {item.definition.mfinalfunc_modify}'
+                )
             if item.definition.minitial_condition:
-                options.append('MINITCOND = {}'.format(
-                    item.definition.minitial_condition))
+                options.append(
+                    f'MINITCOND = {item.definition.minitial_condition}'
+                )
             if item.definition.sort_operator:
-                options.append('SORTOP = {}'.format(
-                    item.definition.sort_operator))
+                options.append(f'SORTOP = {item.definition.sort_operator}')
             if item.definition.parallel:
-                options.append(' '.join(
-                    [constants.PARALLEL, '=', item.definition.parallel]))
+                options.append(
+                    ' '.join(
+                        [constants.PARALLEL, '=', item.definition.parallel]
+                    )
+                )
             if item.definition.hypothetical:
                 options.append('HYPOTHETICAL')
             create_sql.append('({})'.format(', '.join(options)))
-            drop_sql = [constants.DROP, constants.AGGREGATE,
-                        constants.IF_EXISTS, self._item_name(item),
-                        '({})'.format(', '.join(args))]
+            drop_sql = [
+                constants.DROP,
+                constants.AGGREGATE,
+                constants.IF_EXISTS,
+                self._item_name(item),
+                '({})'.format(', '.join(args)),
+            ]
         self._add_item(item, create_sql, drop_sql)
 
     def _dump_cast(self, item: models.Item) -> typing.NoReturn:
         if item.definition.sql:
             create_sql, drop_sql, name = [item.definition.sql], [], None
         else:
-            name = '({} AS {})'.format(
-                utils.quote_ident(item.definition.source_type),
-                utils.quote_ident(item.definition.target_type))
+            name = f'({utils.quote_ident(item.definition.source_type)} AS {utils.quote_ident(item.definition.target_type)})'
             create_sql = [constants.CREATE, constants.CAST, name]
             if item.definition.function:
-                create_sql += [constants.WITH, constants.FUNCTION,
-                               item.definition.function]
+                create_sql += [
+                    constants.WITH,
+                    constants.FUNCTION,
+                    item.definition.function,
+                ]
             elif item.definition.inout:
                 create_sql += [constants.WITH, constants.INOUT]
             else:
@@ -205,42 +261,59 @@ class Dump:
                 create_sql += [constants.AS, constants.ASSIGNMENT]
             if item.definition.implicit:
                 create_sql += [constants.AS, constants.IMPLICIT]
-            drop_sql = [constants.DROP, constants.CAST,
-                        constants.IF_EXISTS, name]
+            drop_sql = [
+                constants.DROP,
+                constants.CAST,
+                constants.IF_EXISTS,
+                name,
+            ]
         self._add_item(item, create_sql, drop_sql, name)
 
     def _dump_collation(self, item: models.Item) -> typing.NoReturn:
         if item.definition.sql:
             create_sql, drop_sql = [item.definition.sql], []
         else:
-            create_sql = [constants.CREATE, constants.COLLATION,
-                          self._item_name(item)]
+            create_sql = [
+                constants.CREATE,
+                constants.COLLATION,
+                self._item_name(item),
+            ]
             if item.definition.copy_from:
                 create_sql.append(constants.FROM)
                 create_sql.append(item.definition.copy_from)
             else:
                 options = []
                 if item.definition.locale:
-                    options.append(' '.join(
-                        [constants.LOCALE, '=', item.definition.locale]))
+                    options.append(
+                        ' '.join(
+                            [constants.LOCALE, '=', item.definition.locale]
+                        )
+                    )
                 if item.definition.lc_collate:
-                    options.append('LC_COLLATE = {}'.format(
-                        item.definition.lc_collate))
+                    options.append(
+                        f'LC_COLLATE = {item.definition.lc_collate}'
+                    )
                 if item.definition.lc_ctype:
-                    options.append('LC_CTYPE = {}'.format(
-                        item.definition.lc_ctype))
+                    options.append(f'LC_CTYPE = {item.definition.lc_ctype}')
                 if item.definition.provider:
-                    options.append('PROVIDER = {}'.format(
-                        item.definition.provider))
+                    options.append(f'PROVIDER = {item.definition.provider}')
                 if item.definition.deterministic:
-                    options.append('DETERMINISTIC = {}'.format(
-                        item.definition.deterministic))
+                    options.append(
+                        f'DETERMINISTIC = {item.definition.deterministic}'
+                    )
                 if item.definition.version:
-                    options.append(' '.join(
-                        [constants.OPTIONS, '=', item.definition.version]))
+                    options.append(
+                        ' '.join(
+                            [constants.OPTIONS, '=', item.definition.version]
+                        )
+                    )
                 create_sql.append('({})'.format(', '.join(options)))
-            drop_sql = [constants.DROP, constants.COLLATION,
-                        constants.IF_EXISTS, self._item_name(item)]
+            drop_sql = [
+                constants.DROP,
+                constants.COLLATION,
+                constants.IF_EXISTS,
+                self._item_name(item),
+            ]
         self._add_item(item, create_sql, drop_sql)
 
     def _dump_conversion(self, item: models.Item) -> typing.NoReturn:
@@ -253,11 +326,19 @@ class Dump:
             create_sql += [
                 constants.CONVERSION,
                 self._item_name(item),
-                constants.FOR, item.definition.encoding_from,
-                constants.TO, item.definition.encoding_to,
-                constants.FROM, item.definition.function]
-        drop_sql = [constants.DROP, constants.CONVERSION,
-                    constants.IF_EXISTS, self._item_name(item)]
+                constants.FOR,
+                item.definition.encoding_from,
+                constants.TO,
+                item.definition.encoding_to,
+                constants.FROM,
+                item.definition.function,
+            ]
+        drop_sql = [
+            constants.DROP,
+            constants.CONVERSION,
+            constants.IF_EXISTS,
+            self._item_name(item),
+        ]
         self._add_item(item, create_sql, drop_sql)
 
     def _dump_domain(self, item: models.Item) -> typing.NoReturn:
@@ -265,15 +346,20 @@ class Dump:
             create_sql, drop_sql = [item.definition.sql], []
         else:
             create_sql = [
-                constants.CREATE, constants.DOMAIN, self._item_name(item),
-                'AS', item.definition.data_type]
+                constants.CREATE,
+                constants.DOMAIN,
+                self._item_name(item),
+                'AS',
+                item.definition.data_type,
+            ]
             if item.definition.collation:
                 create_sql.append('COLLATE')
                 create_sql.append(item.definition.collation)
             if item.definition.default:
                 create_sql.append(constants.DEFAULT)
-                create_sql.append(utils.postgres_value(
-                    item.definition.default))
+                create_sql.append(
+                    utils.postgres_value(item.definition.default)
+                )
             if item.definition.check_constraints:
                 constraints = []
                 for c in item.definition.check_constraints:
@@ -282,55 +368,83 @@ class Dump:
                         value.append(c.name)
                     if c.nullable is not None:
                         value.append(
-                            constants.NULL if c.nullable
-                            else constants.NOT_NULL)
+                            constants.NULL
+                            if c.nullable
+                            else constants.NOT_NULL
+                        )
                     if c.expression:
-                        value.append('CHECK ({})'.format(c.expression))
+                        value.append(f'CHECK ({c.expression})')
                     constraints.append(' '.join(value))
                 create_sql.append(' '.join(constraints))
-            drop_sql = [constants.DROP, constants.DOMAIN,
-                        constants.IF_EXISTS, self._item_name(item)]
+            drop_sql = [
+                constants.DROP,
+                constants.DOMAIN,
+                constants.IF_EXISTS,
+                self._item_name(item),
+            ]
         self._add_item(item, create_sql, drop_sql)
 
     def _dump_event_trigger(self, item: models.Item) -> typing.NoReturn:
         if item.definition.sql:
             create_sql, drop_sql = [item.definition.sql], []
         else:
-            create_sql = [constants.CREATE, constants.EVENT_TRIGGER,
-                          self._item_name(item),
-                          constants.ON, item.definition.event]
+            create_sql = [
+                constants.CREATE,
+                constants.EVENT_TRIGGER,
+                self._item_name(item),
+                constants.ON,
+                item.definition.event,
+            ]
             if item.definition.filter:
-                create_sql.append('WHEN TAG IN ({})'.format(
-                    item.definition.filter.tags))
+                create_sql.append(
+                    f'WHEN TAG IN ({item.definition.filter.tags})'
+                )
             create_sql.append(constants.EXECUTE)
             create_sql.append(constants.FUNCTION)
             create_sql.append(item.definition.function)
-            drop_sql = [constants.DROP, constants.EVENT_TRIGGER,
-                        constants.IF_EXISTS, self._item_name(item)]
+            drop_sql = [
+                constants.DROP,
+                constants.EVENT_TRIGGER,
+                constants.IF_EXISTS,
+                self._item_name(item),
+            ]
         self._add_item(item, create_sql, drop_sql)
 
     def _dump_extension(self, item: models.Item) -> typing.NoReturn:
-        create_sql = [constants.CREATE, constants.EXTENSION,
-                      constants.IF_NOT_EXISTS,
-                      utils.quote_ident(item.definition.name)]
+        create_sql = [
+            constants.CREATE,
+            constants.EXTENSION,
+            constants.IF_NOT_EXISTS,
+            utils.quote_ident(item.definition.name),
+        ]
         if any([item.definition.schema, item.definition.version]):
             create_sql.append(constants.WITH)
         if item.definition.schema:
-            create_sql += [constants.SCHEMA,
-                           utils.quote_ident(item.definition.schema)]
+            create_sql += [
+                constants.SCHEMA,
+                utils.quote_ident(item.definition.schema),
+            ]
         if item.definition.version:
-            create_sql += [constants.VERSION,
-                           utils.quote_ident(item.definition.version)]
+            create_sql += [
+                constants.VERSION,
+                utils.quote_ident(item.definition.version),
+            ]
         if item.definition.cascade:
             create_sql.append(constants.CASCADE)
-        drop_sql = [constants.DROP, constants.EXTENSION,
-                    constants.IF_EXISTS,
-                    utils.quote_ident(item.definition.name)]
+        drop_sql = [
+            constants.DROP,
+            constants.EXTENSION,
+            constants.IF_EXISTS,
+            utils.quote_ident(item.definition.name),
+        ]
         self._add_item(item, create_sql, drop_sql, no_owner=True)
 
     def _dump_foreign_data_wrapper(self, item: models.Item) -> typing.NoReturn:
-        create_sql = [constants.CREATE, constants.FOREIGN_DATA_WRAPPER,
-                      self._item_name(item)]
+        create_sql = [
+            constants.CREATE,
+            constants.FOREIGN_DATA_WRAPPER,
+            self._item_name(item),
+        ]
         if item.definition.handler:
             create_sql.append(constants.HANDLER)
             create_sql.append(item.definition.handler)
@@ -341,12 +455,23 @@ class Dump:
         else:
             create_sql += [constants.NO, constants.VALIDATOR]
         if item.definition.options:
-            create_sql.append('{} ({})'.format(
-                constants.OPTIONS,
-                ', '.join(['{} {}'.format(k, utils.postgres_value(v))
-                           for k, v in item.definition.options.items()])))
-        drop_sql = [constants.DROP, constants.FOREIGN_DATA_WRAPPER,
-                    constants.IF_EXISTS, self._item_name(item)]
+            create_sql.append(
+                '{} ({})'.format(
+                    constants.OPTIONS,
+                    ', '.join(
+                        [
+                            f'{k} {utils.postgres_value(v)}'
+                            for k, v in item.definition.options.items()
+                        ]
+                    ),
+                )
+            )
+        drop_sql = [
+            constants.DROP,
+            constants.FOREIGN_DATA_WRAPPER,
+            constants.IF_EXISTS,
+            self._item_name(item),
+        ]
         self._add_item(item, create_sql, drop_sql)
 
     def _dump_function(self, item: models.Item) -> typing.NoReturn:
@@ -365,19 +490,31 @@ class Dump:
                         value.append('=')
                         value.append(param.default)
                     params.append(' '.join(value))
-                func_name = '{}()'.format(
-                    item.definition.name.split('(')[0], ', '.join(params))
-            create_sql = [constants.CREATE, constants.FUNCTION, func_name,
-                          constants.RETURNS, item.definition.returns,
-                          constants.LANGUAGE, item.definition.language]
-            drop_sql = [constants.DROP, constants.FUNCTION,
-                        constants.IF_EXISTS, func_name]
+                func_name = '{}({})'.format(
+                    item.definition.name.split('(')[0], ', '.join(params)
+                )
+            create_sql = [
+                constants.CREATE,
+                constants.FUNCTION,
+                func_name,
+                constants.RETURNS,
+                item.definition.returns,
+                constants.LANGUAGE,
+                item.definition.language,
+            ]
+            drop_sql = [
+                constants.DROP,
+                constants.FUNCTION,
+                constants.IF_EXISTS,
+                func_name,
+            ]
             if item.definition.transform_types:
                 tts = []
                 for tt in item.definition.transform_types:
                     tts.append(' '.join([constants.FOR, constants.TYPE, tt]))
-                create_sql.append('{} {}'.format(
-                    constants.TRANSFORM, ', '.join(tts)))
+                create_sql.append(
+                    '{} {}'.format(constants.TRANSFORM, ', '.join(tts))
+                )
             if item.definition.window:
                 create_sql.append(constants.WINDOW)
             if item.definition.immutable:
@@ -408,42 +545,64 @@ class Dump:
                 create_sql += [constants.SUPPORT, item.definition.support]
             if item.definition.configuration:
                 for k, v in item.definition.configuration.items():
-                    create_sql.append('{} {} = {}'.format(
-                        constants.SET, k, utils.postgres_value(v)))
+                    create_sql.append(
+                        f'{constants.SET} {k} = {utils.postgres_value(v)}'
+                    )
             create_sql.append(constants.AS)
             if item.definition.definition:
-                create_sql = ['{} $$\n{}\n$$'.format(
-                    ' '.join(create_sql), item.definition.definition)]
+                create_sql = [
+                    '{} $$\n{}\n$$'.format(
+                        ' '.join(create_sql), item.definition.definition
+                    )
+                ]
             elif item.definition.object_file and item.definition.link_symbol:
-                create_sql.append('{}, {}'.format(
-                    utils.postgres_value(item.definition.object_file),
-                    utils.postgres_value(item.definition.link_symbol)))
+                create_sql.append(
+                    f'{utils.postgres_value(item.definition.object_file)}, {utils.postgres_value(item.definition.link_symbol)}'
+                )
         self._add_item(item, create_sql, drop_sql)
 
     def _dump_group(self, item: models.Item) -> typing.NoReturn:
-        create_sql = [constants.CREATE, constants.GROUP,
-                      utils.quote_ident(item.definition.name)]
+        create_sql = [
+            constants.CREATE,
+            constants.GROUP,
+            utils.quote_ident(item.definition.name),
+        ]
         if item.definition.options.create_db is not None:
-            create_sql.append(self._format_bool_option(
-                'CREATEDB', item.definition.options.create_db))
+            create_sql.append(
+                self._format_bool_option(
+                    'CREATEDB', item.definition.options.create_db
+                )
+            )
         if item.definition.options.create_role is not None:
-            create_sql.append(self._format_bool_option(
-                'CREATEROLE', item.definition.options.create_role))
+            create_sql.append(
+                self._format_bool_option(
+                    'CREATEROLE', item.definition.options.create_role
+                )
+            )
         if item.definition.options.inherit is not None:
-            create_sql.append(self._format_bool_option(
-                'INHERIT', item.definition.options.inherit))
+            create_sql.append(
+                self._format_bool_option(
+                    'INHERIT', item.definition.options.inherit
+                )
+            )
         if item.definition.options.superuser is not None:
-            create_sql.append(self._format_bool_option(
-                'SUPERUSER', item.definition.options.superuser))
-        drop_sql = [constants.DROP, constants.GROUP, constants.IF_EXISTS,
-                    utils.quote_ident(item.definition.name)]
+            create_sql.append(
+                self._format_bool_option(
+                    'SUPERUSER', item.definition.options.superuser
+                )
+            )
+        drop_sql = [
+            constants.DROP,
+            constants.GROUP,
+            constants.IF_EXISTS,
+            utils.quote_ident(item.definition.name),
+        ]
         self._add_item(item, create_sql, drop_sql)
 
-    def _dump_index(self, index: models.Index,
-                    parent: models.Item) -> typing.NoReturn:
-        name = '{}.{}'.format(
-            utils.quote_ident(parent.definition.schema),
-            utils.quote_ident(index.name))
+    def _dump_index(
+        self, index: models.Index, parent: models.Item
+    ) -> typing.NoReturn:
+        name = f'{utils.quote_ident(parent.definition.schema)}.{utils.quote_ident(index.name)}'
         create_sql = [constants.CREATE]
         if index.unique:
             create_sql.append(constants.UNIQUE)
@@ -459,13 +618,12 @@ class Dump:
         create_sql.append(', '.join(columns))
         create_sql.append(')')
         if index.include:
-            create_sql.append('INCLUDE ({})'.format(
-                ', '.join(index.include)))
+            create_sql.append('INCLUDE ({})'.format(', '.join(index.include)))
         if index.storage_parameters:
             create_sql.append(constants.WITH)
             sp_sql = []
             for key, value in index.storage_parameters.items():
-                sp_sql.append('{}={}'.format(key, value))
+                sp_sql.append(f'{key}={value}')
             create_sql.append(', '.join(sp_sql))
         if index.tablespace:
             create_sql += [constants.TABLESPACE, index.tablespace]
@@ -473,13 +631,25 @@ class Dump:
             create_sql += [constants.WHERE, index.where]
         drop_sql = [constants.DROP, constants.INDEX, constants.IF_EXISTS, name]
         entry = self._add_entry(
-            constants.INDEX, parent.definition.schema, index.name,
-            parent.definition.owner, create_sql, drop_sql,
-            [self._dump_id_map[parent.id]], index.tablespace)
-        if getattr(index, 'comment'):
+            constants.INDEX,
+            parent.definition.schema,
+            index.name,
+            parent.definition.owner,
+            create_sql,
+            drop_sql,
+            [self._dump_id_map[parent.id]],
+            index.tablespace,
+        )
+        if index.comment:
             self._add_comment(
-                constants.INDEX, parent.definition.schema, index.name,
-                parent.definition.owner, entry.dump_id, None, index.comment)
+                constants.INDEX,
+                parent.definition.schema,
+                index.name,
+                parent.definition.owner,
+                entry.dump_id,
+                None,
+                index.comment,
+            )
 
     @staticmethod
     def _dump_index_column(column: models.IndexColumn) -> str:
@@ -498,63 +668,80 @@ class Dump:
         if item.definition.sql:
             create_sql, drop_sql = [item.definition.sql], []
         else:
-            create_sql = [constants.CREATE, constants.MATERIALIZED_VIEW,
-                          self._item_name(item)]
+            create_sql = [
+                constants.CREATE,
+                constants.MATERIALIZED_VIEW,
+                self._item_name(item),
+            ]
             if item.definition.columns:
-                create_sql.append('({})'.format(
-                    ', '.join([c.name for c in item.definition.columns])))
+                create_sql.append(
+                    '({})'.format(
+                        ', '.join([c.name for c in item.definition.columns])
+                    )
+                )
             if item.definition.table_access_method:
-                create_sql += [constants.USING,
-                               item.definition.table_access_method]
+                create_sql += [
+                    constants.USING,
+                    item.definition.table_access_method,
+                ]
             if item.definition.storage_parameters:
                 create_sql.append(constants.WITH)
                 params = []
                 for key, value in item.definition.storage_parameters.items():
-                    params.append('{} = {}'.format(key, value))
+                    params.append(f'{key} = {value}')
                 create_sql.append(', '.join(params))
             if item.definition.tablespace:
-                create_sql += [constants.TABLESPACE,
-                               item.definition.tablespace]
+                create_sql += [
+                    constants.TABLESPACE,
+                    item.definition.tablespace,
+                ]
             create_sql += [constants.AS, item.definition.query]
-            drop_sql = [constants.DROP, constants.MATERIALIZED_VIEW,
-                        constants.IF_EXISTS, self._item_name(item)]
+            drop_sql = [
+                constants.DROP,
+                constants.MATERIALIZED_VIEW,
+                constants.IF_EXISTS,
+                self._item_name(item),
+            ]
         self._add_item(item, create_sql, drop_sql)
 
     def _dump_operator(self, item: models.Item) -> typing.NoReturn:
         if item.definition.sql:
             create_sql, drop_sql = [item.definition.sql], []
         else:
-            name = '{}.{}'.format(item.definition.schema, item.definition.name)
+            name = f'{item.definition.schema}.{item.definition.name}'
             create_sql = [constants.CREATE, constants.OPERATOR, name]
-            options = [' '.join(
-                [constants.PROCEDURE, '=', item.definition.function])]
+            options = [
+                ' '.join([constants.PROCEDURE, '=', item.definition.function])
+            ]
             if item.definition.left_arg:
-                options.append('LEFTARG = {}'.format(
-                    item.definition.left_arg))
+                options.append(f'LEFTARG = {item.definition.left_arg}')
             if item.definition.right_arg:
-                options.append('RIGHTARG = {}'.format(
-                    item.definition.right_arg))
+                options.append(f'RIGHTARG = {item.definition.right_arg}')
             if item.definition.commutator:
-                options.append('COMMUTATOR = {}'.format(
-                    item.definition.commutator))
+                options.append(f'COMMUTATOR = {item.definition.commutator}')
             if item.definition.negator:
-                options.append('NEGATOR = {}'.format(
-                    item.definition.negator))
+                options.append(f'NEGATOR = {item.definition.negator}')
             if item.definition.restrict:
-                options.append('RESTRICT = {}'.format(
-                    item.definition.restrict))
+                options.append(f'RESTRICT = {item.definition.restrict}')
             if item.definition.join:
-                options.append(' '.join(
-                    [constants.JOIN, '=', item.definition.join]))
+                options.append(
+                    ' '.join([constants.JOIN, '=', item.definition.join])
+                )
             if item.definition.hashes:
                 options.append(constants.HASHES)
             if item.definition.merges:
                 options.append(constants.MERGES)
             create_sql.append('({})'.format(', '.join(options)))
-            drop_sql = [constants.DROP, constants.OPERATOR,
-                        constants.IF_EXISTS, name,
-                        '({}, {})'.format(item.definition.left_arg or 'NONE',
-                                          item.definition.right_arg or 'NONE')]
+            drop_sql = [
+                constants.DROP,
+                constants.OPERATOR,
+                constants.IF_EXISTS,
+                name,
+                '({}, {})'.format(
+                    item.definition.left_arg or 'NONE',
+                    item.definition.right_arg or 'NONE',
+                ),
+            ]
         self._add_item(item, create_sql, drop_sql)
 
     def _dump_procedural_language(self, item: models.Item) -> typing.NoReturn:
@@ -571,70 +758,124 @@ class Dump:
             create_sql += [constants.INLINE, item.definition.inline_handler]
         if item.definition.validator:
             create_sql += [constants.VALIDATOR, item.definition.validator]
-        drop_sql = [constants.DROP, constants.LANGUAGE,
-                    constants.IF_EXISTS, self._item_name(item)]
+        drop_sql = [
+            constants.DROP,
+            constants.LANGUAGE,
+            constants.IF_EXISTS,
+            self._item_name(item),
+        ]
         self._add_item(item, create_sql, drop_sql)
 
     def _dump_publication(self, item: models.Item) -> typing.NoReturn:
-        create_sql = [constants.CREATE, constants.PUBLICATION,
-                      self._item_name(item)]
+        create_sql = [
+            constants.CREATE,
+            constants.PUBLICATION,
+            self._item_name(item),
+        ]
         if item.definition.all_tables:
             create_sql.append('FOR ALL TABLES')
         else:
-            create_sql += [constants.FOR, constants.TABLE,
-                           ', '.join(item.definition.tables)]
+            create_sql += [
+                constants.FOR,
+                constants.TABLE,
+                ', '.join(item.definition.tables),
+            ]
         if item.definition.parameters:
             create_sql += [constants.WITH, self._format_parameters(item)]
-        drop_sql = [constants.DROP, constants.PUBLICATION,
-                    constants.IF_EXISTS, self._item_name(item)]
+        drop_sql = [
+            constants.DROP,
+            constants.PUBLICATION,
+            constants.IF_EXISTS,
+            self._item_name(item),
+        ]
         self._add_item(item, create_sql, drop_sql)
 
     def _dump_role(self, item: models.Item) -> typing.NoReturn:
-        create_sql = [constants.CREATE, constants.ROLE,
-                      utils.quote_ident(item.definition.name)]
+        create_sql = [
+            constants.CREATE,
+            constants.ROLE,
+            utils.quote_ident(item.definition.name),
+        ]
         if item.definition.options.bypass_rls is not None:
-            create_sql.append(self._format_bool_option(
-                'BYPASSRLS', item.definition.options.create_db))
+            create_sql.append(
+                self._format_bool_option(
+                    'BYPASSRLS', item.definition.options.create_db
+                )
+            )
         if item.definition.options.connection_limit is not None:
-            create_sql += ['CONNECTION LIMIT',
-                           str(item.definition.options.connection_limit)]
+            create_sql += [
+                'CONNECTION LIMIT',
+                str(item.definition.options.connection_limit),
+            ]
         if item.definition.options.create_db is not None:
-            create_sql.append(self._format_bool_option(
-                'CREATEDB', item.definition.options.create_db))
+            create_sql.append(
+                self._format_bool_option(
+                    'CREATEDB', item.definition.options.create_db
+                )
+            )
         if item.definition.options.create_role is not None:
-            create_sql.append(self._format_bool_option(
-                'CREATEROLE', item.definition.options.create_role))
+            create_sql.append(
+                self._format_bool_option(
+                    'CREATEROLE', item.definition.options.create_role
+                )
+            )
         if item.definition.options.inherit is not None:
-            create_sql.append(self._format_bool_option(
-                'INHERIT', item.definition.options.inherit))
+            create_sql.append(
+                self._format_bool_option(
+                    'INHERIT', item.definition.options.inherit
+                )
+            )
         if item.definition.options.login is not None:
-            create_sql.append(self._format_bool_option(
-                'LOGIN', item.definition.options.login))
+            create_sql.append(
+                self._format_bool_option(
+                    'LOGIN', item.definition.options.login
+                )
+            )
         if item.definition.options.superuser is not None:
-            create_sql.append(self._format_bool_option(
-                'SUPERUSER', item.definition.options.superuser))
-        drop_sql = [constants.DROP, constants.ROLE, constants.IF_EXISTS,
-                    utils.quote_ident(item.definition.name)]
+            create_sql.append(
+                self._format_bool_option(
+                    'SUPERUSER', item.definition.options.superuser
+                )
+            )
+        drop_sql = [
+            constants.DROP,
+            constants.ROLE,
+            constants.IF_EXISTS,
+            utils.quote_ident(item.definition.name),
+        ]
         self._add_item(
-            item, create_sql,
-            drop_sql if item.definition.name != self.project.superuser else [])
+            item,
+            create_sql,
+            drop_sql if item.definition.name != self.project.superuser else [],
+        )
 
     def _dump_schema(self, item: models.Item) -> typing.NoReturn:
-        create_sql = [constants.CREATE, constants.SCHEMA,
-                      constants.IF_NOT_EXISTS, self._item_name(item)]
+        create_sql = [
+            constants.CREATE,
+            constants.SCHEMA,
+            constants.IF_NOT_EXISTS,
+            self._item_name(item),
+        ]
         if item.definition.authorization:
             create_sql.append(constants.AUTHORIZATION)
             create_sql.append(utils.quote_ident(item.definition.authorization))
-        drop_sql = [constants.DROP, constants.SCHEMA, constants.IF_EXISTS,
-                    self._item_name(item)]
+        drop_sql = [
+            constants.DROP,
+            constants.SCHEMA,
+            constants.IF_EXISTS,
+            self._item_name(item),
+        ]
         self._add_item(item, create_sql, drop_sql)
 
     def _dump_sequence(self, item: models.Item) -> typing.NoReturn:
         if item.definition.sql:
             create_sql, drop_sql = [item.definition.sql], []
         else:
-            create_sql = [constants.CREATE, constants.SEQUENCE,
-                          self._item_name(item)]
+            create_sql = [
+                constants.CREATE,
+                constants.SEQUENCE,
+                self._item_name(item),
+            ]
             if item.definition.data_type:
                 create_sql.append(constants.AS)
                 create_sql.append(item.definition.data_type)
@@ -660,40 +901,67 @@ class Dump:
             if item.definition.owned_by:
                 create_sql.append('OWNED BY')
                 create_sql.append(item.definition.owned_by)
-            drop_sql = [constants.DROP, constants.SEQUENCE,
-                        constants.IF_EXISTS, self._item_name(item)]
+            drop_sql = [
+                constants.DROP,
+                constants.SEQUENCE,
+                constants.IF_EXISTS,
+                self._item_name(item),
+            ]
         self._add_item(item, create_sql, drop_sql)
 
     def _dump_server(self, item: models.Item) -> typing.NoReturn:
-        create_sql = [constants.CREATE, constants.SERVER,
-                      self._item_name(item)]
+        create_sql = [
+            constants.CREATE,
+            constants.SERVER,
+            self._item_name(item),
+        ]
         if item.definition.type:
-            create_sql += [constants.TYPE,
-                           utils.postgres_value(item.definition.type)]
+            create_sql += [
+                constants.TYPE,
+                utils.postgres_value(item.definition.type),
+            ]
         if item.definition.version:
-            create_sql += [constants.VERSION,
-                           utils.postgres_value(item.definition.version)]
-        create_sql += [constants.FOREIGN_DATA_WRAPPER,
-                       item.definition.foreign_data_wrapper]
+            create_sql += [
+                constants.VERSION,
+                utils.postgres_value(item.definition.version),
+            ]
+        create_sql += [
+            constants.FOREIGN_DATA_WRAPPER,
+            item.definition.foreign_data_wrapper,
+        ]
         if item.definition.options:
             options = []
             for k, v in item.definition.options.items():
-                options.append('{} {}'.format(k, utils.postgres_value(v)))
-            create_sql.append('{} {}'.format(
-                constants.OPTIONS, ', '.join(options)))
-        drop_sql = [constants.DROP, constants.SERVER, constants.IF_EXISTS,
-                    self._item_name(item)]
+                options.append(f'{k} {utils.postgres_value(v)}')
+            create_sql.append(
+                '{} {}'.format(constants.OPTIONS, ', '.join(options))
+            )
+        drop_sql = [
+            constants.DROP,
+            constants.SERVER,
+            constants.IF_EXISTS,
+            self._item_name(item),
+        ]
         self._add_item(item, create_sql, drop_sql)
 
     def _dump_subscription(self, item: models.Item) -> typing.NoReturn:
-        create_sql = [constants.CREATE, constants.SUBSCRIPTION,
-                      self._item_name(item), 'CONNECTION',
-                      item.definition.connection, constants.PUBLICATION,
-                      ', '.join(item.definition.publications)]
+        create_sql = [
+            constants.CREATE,
+            constants.SUBSCRIPTION,
+            self._item_name(item),
+            'CONNECTION',
+            item.definition.connection,
+            constants.PUBLICATION,
+            ', '.join(item.definition.publications),
+        ]
         if item.definition.parameters:
             create_sql += [constants.WITH, self._format_parameters(item)]
-        drop_sql = [constants.DROP, constants.SUBSCRIPTION,
-                    constants.IF_EXISTS, self._item_name(item)]
+        drop_sql = [
+            constants.DROP,
+            constants.SUBSCRIPTION,
+            constants.IF_EXISTS,
+            self._item_name(item),
+        ]
         self._add_item(item, create_sql, drop_sql)
 
     def _dump_table(self, item: models.TableItem) -> typing.NoReturn:
@@ -713,7 +981,8 @@ class Dump:
                     create_sql.append(
                         'INCLUDING'
                         if getattr(item.definition.like_table, field)
-                        else 'EXCLUDING')
+                        else 'EXCLUDING'
+                    )
                     create_sql.append(field)
             else:
                 inner_sql = []
@@ -722,14 +991,21 @@ class Dump:
                         inner_sql.append(self._dump_table_column(column))
                 for item in item.definition.unique_constraints or []:
                     inner_sql.append(
-                        self._format_sql_constraint(constants.UNIQUE, item))
+                        self._format_sql_constraint(constants.UNIQUE, item)
+                    )
                 if item.definition.primary_key:
-                    inner_sql.append(self._format_sql_constraint(
-                        'PRIMARY KEY', item.definition.primary_key))
+                    inner_sql.append(
+                        self._format_sql_constraint(
+                            'PRIMARY KEY', item.definition.primary_key
+                        )
+                    )
                 for fk in item.definition.foreign_keys or []:
-                    fk_sql = ['FOREIGN KEY ({})'.format(', '.join(fk.columns)),
-                              'REFERENCES', fk.references.name,
-                              '({})'.format(', '.join(fk.references.columns))]
+                    fk_sql = [
+                        'FOREIGN KEY ({})'.format(', '.join(fk.columns)),
+                        'REFERENCES',
+                        fk.references.name,
+                        '({})'.format(', '.join(fk.references.columns)),
+                    ]
                     if fk.match_type:
                         fk_sql.append('MATCH')
                         fk_sql.append(fk.match_type)
@@ -767,13 +1043,17 @@ class Dump:
                 create_sql.append(constants.WITH)
                 params = []
                 for key, value in item.definition.storage_parameters.items():
-                    params.append('{}={}'.format(key, value))
+                    params.append(f'{key}={value}')
                 create_sql.append(', '.join(params))
             if item.definition.tablespace:
                 create_sql.append(constants.TABLESPACE)
                 create_sql.append(item.definition.tablespace)
-            drop_sql = [constants.DROP, constants.TABLE,
-                        constants.IF_EXISTS, self._item_name(item)]
+            drop_sql = [
+                constants.DROP,
+                constants.TABLE,
+                constants.IF_EXISTS,
+                self._item_name(item),
+            ]
         self._add_item(item, create_sql, drop_sql)
         for index in item.definition.indexes or []:
             self._dump_index(index, item)
@@ -803,23 +1083,36 @@ class Dump:
 
     @staticmethod
     def _dump_table_like_table_fields(item: models.Item) -> list:
-        return [f for f in dataclasses.fields(item.definition.like_table)
-                if f.startswith('include_')
-                and getattr(item.definition.like_table, f) is not None]
+        return [
+            f
+            for f in dataclasses.fields(item.definition.like_table)
+            if f.startswith('include_')
+            and getattr(item.definition.like_table, f) is not None
+        ]
 
     def _dump_tablespace(self, item: models.Item) -> typing.NoReturn:
-        create_sql = [constants.CREATE, constants.TABLESPACE,
-                      self._item_name(item),
-                      constants.OWNER, item.definition.owner,
-                      constants.LOCATION, item.definition.location]
+        create_sql = [
+            constants.CREATE,
+            constants.TABLESPACE,
+            self._item_name(item),
+            constants.OWNER,
+            item.definition.owner,
+            constants.LOCATION,
+            item.definition.location,
+        ]
         if item.definition.options:
             options = []
             for k, v in item.definition.options.items():
-                options.append('{}={}'.format(k, utils.postgres_value(v)))
-            create_sql.append('{} ({})'.format(
-                constants.WITH, ','.join(options)))
-        drop_sql = [constants.DROP, constants.TABLESPACE,
-                    constants.IF_EXISTS, self._item_name(item)]
+                options.append(f'{k}={utils.postgres_value(v)}')
+            create_sql.append(
+                '{} ({})'.format(constants.WITH, ','.join(options))
+            )
+        drop_sql = [
+            constants.DROP,
+            constants.TABLESPACE,
+            constants.IF_EXISTS,
+            self._item_name(item),
+        ]
         self._add_item(item, create_sql, drop_sql)
 
     def _dump_text_search(self, item: models.Item) -> typing.NoReturn:
@@ -834,15 +1127,24 @@ class Dump:
                 else:
                     raise RuntimeError
                 create_sql = [
-                    constants.CREATE, constants.TEXT_SEARCH_CONFIGURATION,
-                    utils.quote_ident(config.name), '({})'.format(value)]
-                drop_sql = [constants.DROP,
-                            constants.TEXT_SEARCH_CONFIGURATION,
-                            constants.IF_EXISTS,
-                            utils.quote_ident(config.name)]
+                    constants.CREATE,
+                    constants.TEXT_SEARCH_CONFIGURATION,
+                    utils.quote_ident(config.name),
+                    f'({value})',
+                ]
+                drop_sql = [
+                    constants.DROP,
+                    constants.TEXT_SEARCH_CONFIGURATION,
+                    constants.IF_EXISTS,
+                    utils.quote_ident(config.name),
+                ]
             self._add_text_search_item(
-                item, constants.TEXT_SEARCH_CONFIGURATION,
-                create_sql, drop_sql, config.comment)
+                item,
+                constants.TEXT_SEARCH_CONFIGURATION,
+                create_sql,
+                drop_sql,
+                config.comment,
+            )
 
         for dictionary in item.definition.dictionaries or []:
             if dictionary.sql:
@@ -851,41 +1153,60 @@ class Dump:
                 value = [' '.join(['TEMPLATE', '=', dictionary.template])]
                 if dictionary.options:
                     for k, v in dictionary.options.items():
-                        value.append('{} = {}'.format(
-                            k, utils.postgres_value(v)))
+                        value.append(f'{k} = {utils.postgres_value(v)}')
                 create_sql = [
-                    constants.CREATE, constants.TEXT_SEARCH_DICTIONARY,
+                    constants.CREATE,
+                    constants.TEXT_SEARCH_DICTIONARY,
                     utils.quote_ident(dictionary.name),
-                    '({})'.format(', '.join(value))]
-                drop_sql = [constants.DROP, constants.TEXT_SEARCH_DICTIONARY,
-                            constants.IF_EXISTS,
-                            utils.quote_ident(dictionary.name)]
+                    '({})'.format(', '.join(value)),
+                ]
+                drop_sql = [
+                    constants.DROP,
+                    constants.TEXT_SEARCH_DICTIONARY,
+                    constants.IF_EXISTS,
+                    utils.quote_ident(dictionary.name),
+                ]
             self._add_text_search_item(
-                item, constants.TEXT_SEARCH_DICTIONARY, create_sql, drop_sql,
-                dictionary.comment)
+                item,
+                constants.TEXT_SEARCH_DICTIONARY,
+                create_sql,
+                drop_sql,
+                dictionary.comment,
+            )
 
         for parser in item.definition.parsers or []:
             if parser.sql:
                 create_sql, drop_sql = [parser.sql], []
             else:
-                value = [' '.join(['START', '=', parser.start_function]),
-                         ' '.join(
-                             ['GETTOKEN', '=', parser.gettoken_function]),
-                         ' '.join(['END', '=', parser.end_function]),
-                         ' '.join(
-                             ['LEXTYPES', '=', parser.lextypes_function])]
+                value = [
+                    ' '.join(['START', '=', parser.start_function]),
+                    ' '.join(['GETTOKEN', '=', parser.gettoken_function]),
+                    ' '.join(['END', '=', parser.end_function]),
+                    ' '.join(['LEXTYPES', '=', parser.lextypes_function]),
+                ]
                 if parser.headline_function:
-                    value.append(' '.join(
-                        ['HEADLINE', '=', parser.headline_function]))
-                create_sql = [constants.CREATE, constants.TEXT_SEARCH_PARSER,
-                              utils.quote_ident(parser.name),
-                              '({})'.format(', '.join(value))]
-                drop_sql = [constants.DROP, constants.TEXT_SEARCH_PARSER,
-                            constants.IF_EXISTS,
-                            utils.quote_ident(parser.name)]
+                    value.append(
+                        ' '.join(['HEADLINE', '=', parser.headline_function])
+                    )
+                create_sql = [
+                    constants.CREATE,
+                    constants.TEXT_SEARCH_PARSER,
+                    utils.quote_ident(parser.name),
+                    '({})'.format(', '.join(value)),
+                ]
+                drop_sql = [
+                    constants.DROP,
+                    constants.TEXT_SEARCH_PARSER,
+                    constants.IF_EXISTS,
+                    utils.quote_ident(parser.name),
+                ]
             self._add_text_search_item(
-                item, constants.TEXT_SEARCH_PARSER, create_sql, drop_sql,
-                parser.comment)
+                item,
+                constants.TEXT_SEARCH_PARSER,
+                create_sql,
+                drop_sql,
+                parser.comment,
+            )
 
         for template in item.definition.templates or []:
             if template.sql:
@@ -894,110 +1215,148 @@ class Dump:
                 value = []
                 if template.init_function:
                     value.append(
-                        ' '.join(['INIT', '=', template.init_function]))
+                        ' '.join(['INIT', '=', template.init_function])
+                    )
                 value.append(
-                    ' '.join(['LEXIZE', '=', template.lexize_function]))
-                create_sql = [constants.CREATE, constants.TEXT_SEARCH_TEMPLATE,
-                              utils.quote_ident(template.name),
-                              '({})'.format(', '.join(value))]
-                drop_sql = [constants.DROP, constants.TEXT_SEARCH_TEMPLATE,
-                            constants.IF_EXISTS,
-                            utils.quote_ident(template.name)]
+                    ' '.join(['LEXIZE', '=', template.lexize_function])
+                )
+                create_sql = [
+                    constants.CREATE,
+                    constants.TEXT_SEARCH_TEMPLATE,
+                    utils.quote_ident(template.name),
+                    '({})'.format(', '.join(value)),
+                ]
+                drop_sql = [
+                    constants.DROP,
+                    constants.TEXT_SEARCH_TEMPLATE,
+                    constants.IF_EXISTS,
+                    utils.quote_ident(template.name),
+                ]
             self._add_text_search_item(
-                item, constants.TEXT_SEARCH_TEMPLATE, create_sql, drop_sql,
-                template.comment)
+                item,
+                constants.TEXT_SEARCH_TEMPLATE,
+                create_sql,
+                drop_sql,
+                template.comment,
+            )
 
-    def _dump_trigger(self, trigger: models.Trigger,
-                      parent: models.TableItem) -> typing.NoReturn:
+    def _dump_trigger(
+        self, trigger: models.Trigger, parent: models.TableItem
+    ) -> typing.NoReturn:
         if trigger.sql:
             create_sql, drop_sql = [trigger.sql], []
         else:
             create_sql = [
-                constants.CREATE, constants.TRIGGER,
-                trigger.name, trigger.when,
-                ' {} '.format(constants.OR).join(trigger.events),
-                constants.ON, self._item_name(parent)]
+                constants.CREATE,
+                constants.TRIGGER,
+                trigger.name,
+                trigger.when,
+                f' {constants.OR} '.join(trigger.events),
+                constants.ON,
+                self._item_name(parent),
+            ]
             if trigger.for_each:
                 create_sql += [constants.FOR_EACH, trigger.for_each]
             if trigger.condition:
                 create_sql += [constants.WHEN, trigger.condition]
-            create_sql += [constants.EXECUTE, constants.FUNCTION,
-                           trigger.function]
+            create_sql += [
+                constants.EXECUTE,
+                constants.FUNCTION,
+                trigger.function,
+            ]
             if trigger.arguments:
-                create_sql.append('({})'.format(
-                    ', '.join([str(a) for a in trigger.arguments])))
-            drop_sql = [constants.DROP, constants.TRIGGER, constants.IF_EXISTS,
-                        trigger.name, constants.ON, self._item_name(parent)]
+                create_sql.append(
+                    '({})'.format(
+                        ', '.join([str(a) for a in trigger.arguments])
+                    )
+                )
+            drop_sql = [
+                constants.DROP,
+                constants.TRIGGER,
+                constants.IF_EXISTS,
+                trigger.name,
+                constants.ON,
+                self._item_name(parent),
+            ]
         entry = self._add_entry(
-            constants.TRIGGER, parent.definition.schema, trigger.name,
-            parent.definition.owner, create_sql, drop_sql,
-            [self._dump_id_map[parent.id]])
-        if getattr(trigger, 'comment'):
+            constants.TRIGGER,
+            parent.definition.schema,
+            trigger.name,
+            parent.definition.owner,
+            create_sql,
+            drop_sql,
+            [self._dump_id_map[parent.id]],
+        )
+        if trigger.comment:
             self._add_comment(
-                constants.TRIGGER, parent.definition.schema, trigger.name,
-                parent.definition.owner, entry.dump_id, None, trigger.comment)
+                constants.TRIGGER,
+                parent.definition.schema,
+                trigger.name,
+                parent.definition.owner,
+                entry.dump_id,
+                None,
+                trigger.comment,
+            )
 
     def _dump_type(self, item: models.Item) -> typing.NoReturn:
         if item.definition.sql:
             create_sql, drop_sql = [item.definition.sql], []
         else:
-            create_sql = [constants.CREATE, constants.TYPE,
-                          self._item_name(item), constants.AS]
+            create_sql = [
+                constants.CREATE,
+                constants.TYPE,
+                self._item_name(item),
+                constants.AS,
+            ]
             if item.definition.type == 'base':
                 options = [
-                    'INPUT = {}'.format(item.definition.input),
-                    'OUTPUT = {}'.format(
-                        item.definition.output)]
+                    f'INPUT = {item.definition.input}',
+                    f'OUTPUT = {item.definition.output}',
+                ]
                 if item.definition.receive:
-                    options.append('RECEIVE = {}'.format(
-                        item.definition.receive))
+                    options.append(f'RECEIVE = {item.definition.receive}')
                 if item.definition.send:
-                    options.append('SEND = {}'.format(
-                        item.definition.receive))
+                    options.append(f'SEND = {item.definition.receive}')
                 if item.definition.typmod_in:
-                    options.append('TYPMOD_IN = {}'.format(
-                        item.definition.typmod_in))
+                    options.append(f'TYPMOD_IN = {item.definition.typmod_in}')
                 if item.definition.typmod_out:
-                    options.append('TYPMOD_OUT = {}'.format(
-                        item.definition.typmod_out))
+                    options.append(
+                        f'TYPMOD_OUT = {item.definition.typmod_out}'
+                    )
                 if item.definition.analyze:
-                    options.append('ANALYZE = {}'.format(
-                        item.definition.analyze))
+                    options.append(f'ANALYZE = {item.definition.analyze}')
                 if item.definition.internal_length:
-                    options.append('INTERNALLENGTH = {}'.format(
-                        item.definition.internal_length))
+                    options.append(
+                        f'INTERNALLENGTH = {item.definition.internal_length}'
+                    )
                 if item.definition.passed_by_value:
                     options.append('PASSEDBYVALUE')
                 if item.definition.alignment:
-                    options.append('ALIGNMENT = {}'.format(
-                        item.definition.alignment))
+                    options.append(f'ALIGNMENT = {item.definition.alignment}')
                 if item.definition.storage:
-                    options.append('STORAGE = {}'.format(
-                        item.definition.storage))
+                    options.append(f'STORAGE = {item.definition.storage}')
                 if item.definition.like_type:
-                    options.append('LIKE = {}'.format(
-                        item.definition.like_type))
+                    options.append(f'LIKE = {item.definition.like_type}')
                 if item.definition.category:
-                    options.append('CATEGORY = {}'.format(
-                        utils.postgres_value(
-                            item.definition.category)))
+                    options.append(
+                        f'CATEGORY = {utils.postgres_value(item.definition.category)}'
+                    )
                 if item.definition.preferred:
-                    options.append('PREFERRED = {}'.format(
-                        item.definition.preferred))
+                    options.append(f'PREFERRED = {item.definition.preferred}')
                 if item.definition.default:
-                    options.append('DEFAULT = {}'.format(
-                        utils.postgres_value(
-                            item.definition.default)))
+                    options.append(
+                        f'DEFAULT = {utils.postgres_value(item.definition.default)}'
+                    )
                 if item.definition.element:
-                    options.append('ELEMENT = {}'.format(
-                        item.definition.element))
+                    options.append(f'ELEMENT = {item.definition.element}')
                 if item.definition.delimiter:
-                    options.append('DELIMITER = {}'.format(
-                        utils.postgres_value(
-                            item.definition.delimiter)))
+                    options.append(
+                        f'DELIMITER = {utils.postgres_value(item.definition.delimiter)}'
+                    )
                 if item.definition.collatable:
-                    options.append('COLLATABLE = {}'.format(
-                        item.definition.collatable))
+                    options.append(
+                        f'COLLATABLE = {item.definition.collatable}'
+                    )
                 create_sql.append('({})'.format(', '.join(options)))
             elif item.definition.type == 'composite':
                 columns = []
@@ -1010,56 +1369,85 @@ class Dump:
                 create_sql.append('({})'.format(', '.join(columns)))
             elif item.definition.type == 'enum':
                 create_sql.append('ENUM')
-                create_sql.append('({})'.format(', '.join(
-                    utils.postgres_value(e) for e in
-                    item.definition.enum)))
+                create_sql.append(
+                    '({})'.format(
+                        ', '.join(
+                            utils.postgres_value(e)
+                            for e in item.definition.enum
+                        )
+                    )
+                )
             elif item.definition.type == 'range':
                 create_sql.append('RANGE')
-                options = ['SUBTYPE = {}'.format(
-                    item.definition.subtype)]
+                options = [f'SUBTYPE = {item.definition.subtype}']
                 if item.definition.subtype_opclass:
-                    options.append('SUBTYPE_OPCLASS = {}'.format(
-                        item.definition.subtype))
+                    options.append(
+                        f'SUBTYPE_OPCLASS = {item.definition.subtype}'
+                    )
                 if item.definition.collation:
-                    options.append('COLLATION = {}'.format(
-                        item.definition.collation))
+                    options.append(f'COLLATION = {item.definition.collation}')
                 if item.definition.collation:
-                    options.append('CANONICAL = {}'.format(
-                        item.definition.canonical))
+                    options.append(f'CANONICAL = {item.definition.canonical}')
                 if item.definition.subtype_diff:
-                    options.append('SUBTYPE_DIFF = {}'.format(
-                        item.definition.subtype_diff))
+                    options.append(
+                        f'SUBTYPE_DIFF = {item.definition.subtype_diff}'
+                    )
                 create_sql.append('({})'.format(', '.join(options)))
-            drop_sql = [constants.DROP, constants.TYPE, constants.IF_EXISTS,
-                        self._item_name(item)]
+            drop_sql = [
+                constants.DROP,
+                constants.TYPE,
+                constants.IF_EXISTS,
+                self._item_name(item),
+            ]
         self._add_item(item, create_sql, drop_sql)
 
     def _dump_user(self, item: models.Item) -> typing.NoReturn:
-        create_sql = [constants.CREATE, constants.USER,
-                      utils.quote_ident(item.definition.name)]
+        create_sql = [
+            constants.CREATE,
+            constants.USER,
+            utils.quote_ident(item.definition.name),
+        ]
         if item.definition.options.bypass_rls is not None:
-            create_sql.append(self._format_bool_option(
-                'BYPASSRLS', item.definition.options.create_db))
+            create_sql.append(
+                self._format_bool_option(
+                    'BYPASSRLS', item.definition.options.create_db
+                )
+            )
         if item.definition.options.connection_limit is not None:
-            create_sql += ['CONNECTION LIMIT',
-                           str(item.definition.options.connection_limit)]
+            create_sql += [
+                'CONNECTION LIMIT',
+                str(item.definition.options.connection_limit),
+            ]
         if item.definition.options.create_db is not None:
-            create_sql.append(self._format_bool_option(
-                'CREATEDB', item.definition.options.create_db))
+            create_sql.append(
+                self._format_bool_option(
+                    'CREATEDB', item.definition.options.create_db
+                )
+            )
         if item.definition.options.create_role is not None:
-            create_sql.append(self._format_bool_option(
-                'CREATEROLE', item.definition.options.create_role))
+            create_sql.append(
+                self._format_bool_option(
+                    'CREATEROLE', item.definition.options.create_role
+                )
+            )
         if item.definition.options.inherit is not None:
-            create_sql.append(self._format_bool_option(
-                'INHERIT', item.definition.options.inherit))
+            create_sql.append(
+                self._format_bool_option(
+                    'INHERIT', item.definition.options.inherit
+                )
+            )
         create_sql.append('LOGIN')
         if item.definition.options.superuser is not None:
-            create_sql.append(self._format_bool_option(
-                'SUPERUSER', item.definition.options.superuser))
+            create_sql.append(
+                self._format_bool_option(
+                    'SUPERUSER', item.definition.options.superuser
+                )
+            )
         if item.definition.valid_until:
             create_sql.append('VALID UNTIL')
             create_sql.append(
-                utils.postgres_value(item.definition.valid_until))
+                utils.postgres_value(item.definition.valid_until)
+            )
         if item.definition.password is None:
             create_sql.append('PASSWORD NULL')
         elif item.definition.password:
@@ -1067,28 +1455,44 @@ class Dump:
                 create_sql.append('ENCRYPTED')
             create_sql.append('PASSWORD')
             create_sql.append(utils.postgres_value(item.definition.password))
-        drop_sql = [constants.DROP, constants.USER, constants.IF_EXISTS,
-                    utils.quote_ident(item.definition.name)]
+        drop_sql = [
+            constants.DROP,
+            constants.USER,
+            constants.IF_EXISTS,
+            utils.quote_ident(item.definition.name),
+        ]
         self._add_item(
-            item, create_sql,
-            drop_sql if item.definition.name != self.project.superuser else [])
+            item,
+            create_sql,
+            drop_sql if item.definition.name != self.project.superuser else [],
+        )
 
     def _dump_user_mapping(self, item: models.Item) -> typing.NoReturn:
         for server in item.definition.servers:
             create_sql = [
-                constants.CREATE, constants.USER_MAPPING, constants.FOR,
-                utils.quote_ident(item.definition.name), constants.SERVER,
-                utils.quote_ident(server.name)]
+                constants.CREATE,
+                constants.USER_MAPPING,
+                constants.FOR,
+                utils.quote_ident(item.definition.name),
+                constants.SERVER,
+                utils.quote_ident(server.name),
+            ]
             if server.options:
                 opts = []
                 for k, v in server.options.items():
-                    opts.append('{} {}'.format(k, utils.postgres_value(v)))
-                create_sql.append('{} ({})'.format(
-                    constants.OPTIONS, ','.join(opts)))
+                    opts.append(f'{k} {utils.postgres_value(v)}')
+                create_sql.append(
+                    '{} ({})'.format(constants.OPTIONS, ','.join(opts))
+                )
             drop_sql = [
-                constants.DROP, constants.USER_MAPPING, constants.IF_EXISTS,
-                constants.FOR, utils.quote_ident(item.definition.name),
-                constants.SERVER, utils.quote_ident(server.name)]
+                constants.DROP,
+                constants.USER_MAPPING,
+                constants.IF_EXISTS,
+                constants.FOR,
+                utils.quote_ident(item.definition.name),
+                constants.SERVER,
+                utils.quote_ident(server.name),
+            ]
             self._add_item(item, create_sql, drop_sql)
 
     def _dump_view(self, item: models.Item) -> typing.NoReturn:
@@ -1101,8 +1505,11 @@ class Dump:
             create_sql.append(constants.VIEW)
             create_sql.append(self._item_name(item))
             if item.definition.columns:
-                create_sql.append('({})'.format(
-                    ', '.join([c.name for c in item.definition.columns])))
+                create_sql.append(
+                    '({})'.format(
+                        ', '.join([c.name for c in item.definition.columns])
+                    )
+                )
             if item.definition.check_option:
                 create_sql.append('WITH check_option = ')
                 create_sql.append(item.definition.check_option)
@@ -1111,26 +1518,32 @@ class Dump:
                 create_sql.append(item.definition.security_barrier)
             create_sql.append(constants.AS)
             create_sql.append(item.definition.query)
-            drop_sql = [constants.DROP, constants.VIEW, constants.IF_EXISTS,
-                        self._item_name(item)]
+            drop_sql = [
+                constants.DROP,
+                constants.VIEW,
+                constants.IF_EXISTS,
+                self._item_name(item),
+            ]
         self._add_item(item, create_sql, drop_sql)
 
     @staticmethod
-    def _format_bool_option(name: str, value: typing.Optional[bool]) -> str:
-        return name if value else 'NO{}'.format(name)
+    def _format_bool_option(name: str, value: bool | None) -> str:
+        return name if value else f'NO{name}'
 
     @staticmethod
     def _format_parameters(item: models.Item) -> str:
         params = []
         for k, v in item.definition.parameters.items():
-            params.append('{} = {}'.format(k, utils.postgres_value(v)))
+            params.append(f'{k} = {utils.postgres_value(v)}')
         return ', '.join(params)
 
     @staticmethod
-    def _format_sql_constraint(constraint_type: str,
-                               constraint: models.ConstraintColumns) -> str:
-        sql = ['{} ({})'.format(constraint_type,
-                                ', '.join(constraint.columns))]
+    def _format_sql_constraint(
+        constraint_type: str, constraint: models.ConstraintColumns
+    ) -> str:
+        sql = [
+            '{} ({})'.format(constraint_type, ', '.join(constraint.columns))
+        ]
         if constraint.include:
             sql.append(', '.join(constraint.include))
         return ' '.join(sql)
@@ -1138,7 +1551,5 @@ class Dump:
     @staticmethod
     def _item_name(item: models.Item) -> str:
         if getattr(item.definition, 'schema', None):
-            return '{}.{}'.format(
-                utils.quote_ident(item.definition.schema),
-                utils.quote_ident(item.definition.name))
+            return f'{utils.quote_ident(item.definition.schema)}.{utils.quote_ident(item.definition.name)}'
         return utils.quote_ident(item.definition.name)

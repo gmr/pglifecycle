@@ -1,8 +1,8 @@
-# coding=utf-8
 """
 Generates Project Structure
 
 """
+
 import collections
 import dataclasses
 import logging
@@ -26,8 +26,9 @@ SET_PATTERN = re.compile(r"SET .* = '(?P<value>.*)'")
 YAML_EXTENSION = 'yaml'
 
 
-def _filter(entries: typing.List[dump.Entry], desc: str,
-            parent_id: int = None) -> typing.Generator[dump.Entry, None, None]:
+def _filter(
+    entries: list[dump.Entry], desc: str, parent_id: int | None = None
+) -> typing.Generator[dump.Entry, None, None]:
     """Return a filtered list of the provided entries.
 
     Generator function that iterates over the entries provided and
@@ -57,15 +58,15 @@ def _function_filename(tag, filenames):
     base = tag.split('(')[0]
     parts = tag.count(',')
     if parts:
-        filename = '{}-{}'.format(base, parts)
+        filename = f'{base}-{parts}'
     else:
         filename = base
 
     while filename in filenames:
         if parts:
-            filename = '{}-{}_{}'.format(base, parts, counter)
+            filename = f'{base}-{parts}_{counter}'
         else:
-            filename = '{}_{}'.format(base, counter)
+            filename = f'{base}_{counter}'
         counter += 1
     LOGGER.debug('Returning filename: %r', filename)
     return filename
@@ -73,7 +74,7 @@ def _function_filename(tag, filenames):
 
 _FILENAME_MAP = {
     constants.FUNCTION: _function_filename,
-    constants.PROCEDURE: _function_filename
+    constants.PROCEDURE: _function_filename,
 }
 
 
@@ -83,17 +84,19 @@ def _prettify(sql: str) -> str:
 
 def _remove_null_values(values: dict) -> dict:
     for key, value in list(values.items()):
-        if value is None or \
-                isinstance(value, (dict, list, str)) and not value:
+        if value is None or (
+            isinstance(value, (dict, list, str)) and not value
+        ):
             del values[key]
         elif isinstance(value, dict):
             values[key] = _remove_null_values(value)
             if not value:
                 del values[key]
         elif isinstance(value, list):
-            values[key] = [_remove_null_values(v)
-                           if isinstance(v, dict) else v
-                           for v in value]
+            values[key] = [
+                _remove_null_values(v) if isinstance(v, dict) else v
+                for v in value
+            ]
     return values
 
 
@@ -106,8 +109,10 @@ class Generate:
         self.project_path = pathlib.Path(args.dest)
         self.tempdir = tempfile.TemporaryDirectory()
         self.dump = None
-        self.dump_path = args.dump or pathlib.Path(self.tempdir.name) / \
-            'pg-lifecycle-{}'.format(os.getpid())
+        self.dump_path = (
+            args.dump
+            or pathlib.Path(self.tempdir.name) / f'pg-lifecycle-{os.getpid()}'
+        )
         self.files_created = []
         self._processed = set()
         self._roles = {}
@@ -121,21 +126,24 @@ class Generate:
     def run(self) -> typing.NoReturn:
         """Implement as core logic for generating the project"""
         if self.project_path.exists() and not self.args.force:
-            common.exit_application('{} already exists'.format(
-                self.project_path), 3)
+            common.exit_application(f'{self.project_path} already exists', 3)
 
         LOGGER.info('Generating project in %s', self.project_path)
         LOGGER.debug('args: %r', self.args)
 
         if self.args.ignore:
-            with open(self.args.ignore, 'r') as handle:
+            with open(self.args.ignore) as handle:
                 for line in handle:
                     self.ignore.add(line.strip())
             LOGGER.info('Ignoring %i files', len(self.ignore))
 
         if self.args.extract:
-            LOGGER.info('Dumping schema from postgresql://%s:%s/%s',
-                        self.args.host, self.args.port, self.args.dbname)
+            LOGGER.info(
+                'Dumping schema from postgresql://%s:%s/%s',
+                self.args.host,
+                self.args.port,
+                self.args.dbname,
+            )
             pgdump.dump(self.args, self.dump_path)
 
         LOGGER.debug('Loading dump from %s', self.dump_path)
@@ -176,10 +184,13 @@ class Generate:
         self._create_files(constants.VIEW)
 
         remaining = collections.Counter()
-        for entry in [e for e in self.dump.entries
-                      if e.dump_id not in self.processed
-                      and e.desc != constants.SEARCHPATH]:
-            remaining['{}:{}'.format(entry.section, entry.desc)] += 1
+        for entry in [
+            e
+            for e in self.dump.entries
+            if e.dump_id not in self.processed
+            and e.desc != constants.SEARCHPATH
+        ]:
+            remaining[f'{entry.section}:{entry.desc}'] += 1
 
         for key in sorted(remaining.keys(), reverse=True):
             LOGGER.info('Remaining %s: %i', key, remaining[key])
@@ -187,9 +198,14 @@ class Generate:
         if self.args.save_remaining:
             LOGGER.debug('Writing remaining.yaml')
             with open(self.project_path / 'remaining.yaml', 'w') as handle:
-                storage.yaml_dump(handle, [
-                    dataclasses.asdict(e) for e in self.dump.entries
-                    if e.dump_id not in self.processed])
+                storage.yaml_dump(
+                    handle,
+                    [
+                        dataclasses.asdict(e)
+                        for e in self.dump.entries
+                        if e.dump_id not in self.processed
+                    ],
+                )
 
         if self.args.gitkeep:
             storage.remove_unneeded_gitkeeps(self.project_path)
@@ -216,32 +232,41 @@ class Generate:
         comments = {
             'pg_dump version': self.dump.dump_version,
             'postgres version': self.dump.server_version,
-            'dumped at': arrow.get(self.dump.timestamp).format(ISO_FORMAT)
+            'dumped at': arrow.get(self.dump.timestamp).format(ISO_FORMAT),
         }
-        project = {
-            'name': self.dump.dbname
-        }
+        project = {'name': self.dump.dbname}
         for entry in self.dump.entries:
             if entry.defn.startswith('SET '):
                 self._mark_processed(entry.dump_id)
                 match = SET_PATTERN.match(entry.defn)
                 project[entry.tag.lower()] = match.group(1)
-        project.update({
-            'extensions': self._find_extensions(),
-            'languages': self._find_languages(),
-            'shell_types': self._find_shell_types()
-        })
+        project.update(
+            {
+                'extensions': self._find_extensions(),
+                'languages': self._find_languages(),
+                'shell_types': self._find_shell_types(),
+            }
+        )
         project = _remove_null_values(project)
         self.files_created.append(
-            storage.save(self.project_path, 'project.yaml', constants.DATABASE,
-                         self.dump.dbname, project, comments))
+            storage.save(
+                self.project_path,
+                'project.yaml',
+                constants.DATABASE,
+                self.dump.dbname,
+                project,
+                comments,
+            )
+        )
 
     def _create_files(self, object_type: str) -> typing.NoReturn:
         """Generate the schema files for the given object type"""
         LOGGER.info('Creating %s files', object_type.lower())
-        formatter = getattr(self.structure,
-                            object_type.lower().replace(' ', '_'),
-                            self.structure.generic)
+        formatter = getattr(
+            self.structure,
+            object_type.lower().replace(' ', '_'),
+            self.structure.generic,
+        )
         for entry in _filter(self.dump.entries, object_type):
             self._mark_processed(entry.dump_id)
             data = formatter(entry)
@@ -249,49 +274,59 @@ class Generate:
             filename = None
             if entry.desc in _FILENAME_MAP:
                 filename = _FILENAME_MAP[entry.desc](
-                    entry.tag, self.files_created)
+                    entry.tag, self.files_created
+                )
             file_path = self._object_path(entry, filename)
             if str(file_path) in self.ignore:
                 LOGGER.debug('Skipping %s', file_path)
                 continue
             self.files_created.append(
-                storage.save(self.project_path, file_path, entry.desc,
-                             entry.tag, data))
+                storage.save(
+                    self.project_path, file_path, entry.desc, entry.tag, data
+                )
+            )
 
     def _create_group_files(self) -> typing.NoReturn:
         """Generate the group files based upon the collected information"""
         LOGGER.info('Creating group files')
         for role in [
-                r for r in self._roles.values() if r['type'] == constants.GROUP
+            r for r in self._roles.values() if r['type'] == constants.GROUP
         ]:
             data = {
                 'name': role['role'],
                 'grants': {
-                    '{}s'.format(k.lower()): v
-                    for k, v in role['grant'].items() if v
+                    f'{k.lower()}s': v for k, v in role['grant'].items() if v
                 },
                 'revocations': {
-                    '{}s'.format(k.lower()): v
-                    for k, v in role['revoke'].items() if v
+                    f'{k.lower()}s': v for k, v in role['revoke'].items() if v
                 },
                 'options': role.get('options'),
-                'settings': role.get('settings')
+                'settings': role.get('settings'),
             }
             file_path = constants.PATHS[constants.GROUP] / '{}.{}'.format(
-                role['role'], YAML_EXTENSION)
+                role['role'], YAML_EXTENSION
+            )
             if str(file_path) in self.ignore:
                 LOGGER.debug('Skipping %s', file_path)
                 continue
             self.files_created.append(
-                storage.save(self.project_path, file_path,
-                             constants.GROUP, role['role'], data))
+                storage.save(
+                    self.project_path,
+                    file_path,
+                    constants.GROUP,
+                    role['role'],
+                    data,
+                )
+            )
 
     def _create_namespace_files(self, object_type: str) -> typing.NoReturn:
         """Generate the schema files for the given object type"""
         LOGGER.info('Creating %s files', object_type.lower())
-        formatter = getattr(self.structure,
-                            object_type.lower().replace(' ', '_'),
-                            self.structure.generic)
+        formatter = getattr(
+            self.structure,
+            object_type.lower().replace(' ', '_'),
+            self.structure.generic,
+        )
         namespace = {}
         for entry in _filter(self.dump.entries, object_type):
             self._mark_processed(entry.dump_id)
@@ -301,17 +336,22 @@ class Generate:
             data = self._remove_empty_values(data)
             namespace[entry.namespace].append(data)
         for value in namespace.keys():
-            key = '{}S'.format(object_type)
-            file_path = constants.PATHS[object_type] / '{}.{}'.format(
-                value, YAML_EXTENSION)
+            key = f'{object_type}S'
+            file_path = (
+                constants.PATHS[object_type] / f'{value}.{YAML_EXTENSION}'
+            )
             if str(file_path) in self.ignore:
                 LOGGER.debug('Skipping %s', file_path)
                 continue
             self.files_created.append(
                 storage.save(
-                    self.project_path, file_path, key, value, {
-                        'schema': value,
-                        key.lower(): namespace[value]}))
+                    self.project_path,
+                    file_path,
+                    key,
+                    value,
+                    {'schema': value, key.lower(): namespace[value]},
+                )
+            )
 
     def _create_operator_files(self) -> typing.NoReturn:
         """Generate the schema files for operators"""
@@ -332,36 +372,43 @@ class Generate:
                 self.files_created.append(
                     storage.save(
                         self.project_path,
-                        constants.PATHS[constants.OPERATOR] / '{}.{}'.format(
-                            value, YAML_EXTENSION), '{}S'.format(
-                                constants.OPERATOR), value, {
-                                    'operators': namespace[value]}))
+                        constants.PATHS[constants.OPERATOR]
+                        / f'{value}.{YAML_EXTENSION}',
+                        f'{constants.OPERATOR}S',
+                        value,
+                        {'operators': namespace[value]},
+                    )
+                )
 
     def _create_role_files(self) -> typing.NoReturn:
         """Generate the role files based upon the collected information"""
         LOGGER.info('Creating role file')
         for role in [
-                r for r in self._roles.values()
-                if not r.get('password') and r['type'] == constants.ROLE
+            r
+            for r in self._roles.values()
+            if not r.get('password') and r['type'] == constants.ROLE
         ]:
             data = {
                 'name': role['role'],
                 'grants': {
-                    '{}s'.format(k.lower()): v
-                    for k, v in role['grant'].items() if v
+                    f'{k.lower()}s': v for k, v in role['grant'].items() if v
                 },
                 'revocations': {
-                    '{}s'.format(k.lower()): v
-                    for k, v in role['revoke'].items() if v
+                    f'{k.lower()}s': v for k, v in role['revoke'].items() if v
                 },
                 'options': role.get('options'),
-                'settings': role.get('settings')
+                'settings': role.get('settings'),
             }
             self.files_created.append(
-                storage.save(self.project_path,
-                             constants.PATHS[constants.ROLE] / '{}.{}'.format(
-                                 role['role'], YAML_EXTENSION), constants.ROLE,
-                             role['role'], data))
+                storage.save(
+                    self.project_path,
+                    constants.PATHS[constants.ROLE]
+                    / '{}.{}'.format(role['role'], YAML_EXTENSION),
+                    constants.ROLE,
+                    role['role'],
+                    data,
+                )
+            )
 
     def _create_schema_files(self) -> typing.NoReturn:
         """Generate the schema files for the given object type"""
@@ -373,34 +420,44 @@ class Generate:
             self.files_created.append(
                 storage.save(
                     self.project_path,
-                    constants.PATHS[constants.SCHEMA] / '{}.{}'.format(
-                        entry.tag, YAML_EXTENSION),
-                    entry.desc, entry.tag, data))
+                    constants.PATHS[constants.SCHEMA]
+                    / f'{entry.tag}.{YAML_EXTENSION}',
+                    entry.desc,
+                    entry.tag,
+                    data,
+                )
+            )
 
     def _create_user_files(self) -> typing.NoReturn:
         """Generate the role files based upon the collected information"""
         LOGGER.info('Creating user files')
-        for role in [r for r in self._roles.values()
-                     if r.get('password') or r['type'] == constants.USER]:
+        for role in [
+            r
+            for r in self._roles.values()
+            if r.get('password') or r['type'] == constants.USER
+        ]:
             data = {
                 'name': role['role'],
                 'password': role['password'],
                 'grants': {
-                    '{}s'.format(k.lower()): v
-                    for k, v in role['grant'].items() if v
+                    f'{k.lower()}s': v for k, v in role['grant'].items() if v
                 },
                 'revocations': {
-                    '{}s'.format(k.lower()): v
-                    for k, v in role['revoke'].items() if v
+                    f'{k.lower()}s': v for k, v in role['revoke'].items() if v
                 },
                 'options': role.get('options'),
-                'settings': role.get('settings')
+                'settings': role.get('settings'),
             }
             self.files_created.append(
-                storage.save(self.project_path,
-                             constants.PATHS[constants.USER] / '{}.{}'.format(
-                                 role['role'], YAML_EXTENSION), constants.USER,
-                             role['role'], data))
+                storage.save(
+                    self.project_path,
+                    constants.PATHS[constants.USER]
+                    / '{}.{}'.format(role['role'], YAML_EXTENSION),
+                    constants.USER,
+                    role['role'],
+                    data,
+                )
+            )
 
     @staticmethod
     def _empty_grant() -> dict:
@@ -412,41 +469,49 @@ class Generate:
             'grant': self._empty_grant(),
             'revoke': self._empty_grant(),
             'options': [],
-            'settings': []
+            'settings': [],
         }
 
     def _extract_roles(self) -> typing.NoReturn:
         LOGGER.debug('Dumping roles')
-        dump_path = pathlib.Path(self.tempdir.name) / \
-            'pg-lifecycle-{}-roles'.format(os.getpid())
+        dump_path = (
+            pathlib.Path(self.tempdir.name)
+            / f'pg-lifecycle-{os.getpid()}-roles'
+        )
         pgdump.dump_roles(self.args, dump_path)
         with open(dump_path) as handle:
-            for line in handle.readlines():
+            for line in handle:
                 line = line.rstrip()
                 if not line or line.startswith('--') or line.startswith('SET'):
                     continue
                 parsed = parse.sql(line)
                 if parsed['role'] not in self._roles:
                     self._roles[parsed['role']] = self._empty_role()
-                if 'options' in parsed and parsed['options']:
+                if parsed.get('options'):
                     self._roles[parsed['role']]['options'] += parsed['options']
                     del parsed['options']
-                if 'settings' in parsed and parsed['settings']:
+                if parsed.get('settings'):
                     self._roles[parsed['role']]['settings'].append(
-                        parsed['settings'])
+                        parsed['settings']
+                    )
                     del parsed['settings']
-                if 'grant' in parsed and parsed['grant']:
+                if parsed.get('grant'):
                     self._roles[parsed['role']]['grant'][
-                        constants.ROLE].append(parsed['grant'])
+                        constants.ROLE
+                    ].append(parsed['grant'])
                     del parsed['grant']
-                elif 'revoke' in parsed and parsed['revoke']:
+                elif parsed.get('revoke'):
                     self._roles[parsed['role']]['revoke'][
-                        constants.ROLE].append(parsed['revoke'])
+                        constants.ROLE
+                    ].append(parsed['revoke'])
                     del parsed['revoke']
-                for key, value in [(k, v) for k, v in parsed.items()
-                                   if v is not None]:
-                    if key not in self._roles[parsed['role']].keys() or \
-                            not self._roles[parsed['role']][key]:
+                for key, value in [
+                    (k, v) for k, v in parsed.items() if v is not None
+                ]:
+                    if (
+                        key not in self._roles[parsed['role']].keys()
+                        or not self._roles[parsed['role']][key]
+                    ):
                         self._roles[parsed['role']][key] = value
 
     def _find_extensions(self) -> list:
@@ -454,12 +519,7 @@ class Generate:
         for entry in _filter(self.dump.entries, constants.EXTENSION):
             self._mark_processed(entry.dump_id)
             # parsed = parse.sql(entry.defn) @ TODO work through this
-            extensions.append(
-                {
-                    'name': entry.tag,
-                    'schema': entry.namespace
-                }
-            )
+            extensions.append({'name': entry.tag, 'schema': entry.namespace})
         return extensions
 
     def _find_languages(self) -> list:
@@ -480,9 +540,14 @@ class Generate:
         self._processed.add(dump_id)
 
     @staticmethod
-    def _object_path(entry: dump.Entry, name_override: str = None) -> str:
-        return constants.PATHS[entry.desc] / entry.namespace / '{}.{}'.format(
-            name_override or entry.tag, YAML_EXTENSION)
+    def _object_path(
+        entry: dump.Entry, name_override: str | None = None
+    ) -> str:
+        return (
+            constants.PATHS[entry.desc]
+            / entry.namespace
+            / f'{name_override or entry.tag}.{YAML_EXTENSION}'
+        )
 
     def _process_acls(self) -> typing.NoReturn:
         def _maybe_ignore_revoke(acls: list) -> list:
@@ -508,27 +573,31 @@ class Generate:
                 op = acl['type'].lower()
                 subj = acl['subject']['type'].replace('_', ' ')
                 if acl['subject']['type'] in [
-                        constants.DATABASE, constants.SCHEMA,
-                        constants.SEQUENCE, constants.TABLE
+                    constants.DATABASE,
+                    constants.SCHEMA,
+                    constants.SEQUENCE,
+                    constants.TABLE,
                 ]:
-                    self._roles[acl['to']][op][subj][acl['subject'][
-                        'name']] = acl['privileges']
+                    self._roles[acl['to']][op][subj][
+                        acl['subject']['name']
+                    ] = acl['privileges']
                 elif acl['subject']['type'] == constants.FUNCTION:
                     if not isinstance(acl['subject']['name']['args'], list):
                         name = '{}({})'.format(
                             '.'.join(acl['subject']['name']['name']),
-                            acl['subject']['name']['args'])
+                            acl['subject']['name']['args'],
+                        )
                     else:
-                        name = '{}({})'.format('.'.join(
-                            acl['subject']['name']['name']),
-                            ', '.join(acl['subject']['name']['args']))
+                        name = '{}({})'.format(
+                            '.'.join(acl['subject']['name']['name']),
+                            ', '.join(acl['subject']['name']['args']),
+                        )
                     self._roles[acl['to']][op][subj][name] = acl['privileges']
                 else:
-                    raise ValueError('Unsupported ACL: {!r}'.format(acl))
+                    raise ValueError(f'Unsupported ACL: {acl!r}')
             self._mark_processed(entry.dump_id)
 
-    def _remove_empty_values(self, data: typing.Dict[str, typing.Any]) \
-            -> dict:
+    def _remove_empty_values(self, data: dict[str, typing.Any]) -> dict:
         """Remove keys from a dict that are empty or null and values
         where it should be omitted due to cli args
 
@@ -536,18 +605,21 @@ class Generate:
 
         """
         for key, value in list(data.items()):
-            if ((not value and not isinstance(value, int))
-                    or value is None
-                    or (key == 'owner' and self.args.no_owner)
-                    or (key == 'tablespace' and self.args.no_tablespaces)
-                    or (key == 'security label'
-                        and self.args.no_security_labels)):
+            if (
+                (not value and not isinstance(value, int))
+                or value is None
+                or (key == 'owner' and self.args.no_owner)
+                or (key == 'tablespace' and self.args.no_tablespaces)
+                or (key == 'security label' and self.args.no_security_labels)
+            ):
                 del data[key]
             if isinstance(value, dict):
                 data[key] = self._remove_empty_values(value)
             elif isinstance(value, list):
-                data[key] = [self._remove_empty_values(i)
-                             if isinstance(i, dict) else i for i in value]
+                data[key] = [
+                    self._remove_empty_values(i) if isinstance(i, dict) else i
+                    for i in value
+                ]
         return _remove_null_values(data)
 
 
@@ -570,7 +642,7 @@ class Structure:
             'comment': self._find_comment(entry),
             'sql': _prettify(entry.defn),
             'dependencies': self._resolve_dependencies(entry.dependencies),
-            'acls': self._find_acls(entry)
+            'acls': self._find_acls(entry),
         }
 
     def operator(self, entry: dump.Entry) -> dict:
@@ -581,7 +653,7 @@ class Structure:
             'owner': entry.owner,
             'comment': self._find_comment(entry),
             'sql': _prettify(entry.defn),
-            'dependencies': self._resolve_dependencies(entry.dependencies)
+            'dependencies': self._resolve_dependencies(entry.dependencies),
         }
 
     def schema(self, entry: dump.Entry) -> dict:
@@ -593,7 +665,7 @@ class Structure:
             'owner': entry.owner,
             'comment': self._find_comment(entry),
             'sql': _prettify(entry.defn),
-            'acls': self._find_acls(entry)
+            'acls': self._find_acls(entry),
         }
 
     def sequence(self, entry: dump.Entry) -> dict:
@@ -619,7 +691,7 @@ class Structure:
             'comment': self._find_comment(entry),
             'sql': _prettify(entry.defn),
             'dependencies': self._resolve_dependencies(entry.dependencies),
-            'acls': self._find_acls(entry)
+            'acls': self._find_acls(entry),
         }
 
     def table(self, entry: dump.Entry) -> dict:
@@ -636,14 +708,16 @@ class Structure:
             'comments': self._find_column_comments(entry),
             'defaults': self._find_children(entry, constants.DEFAULT),
             'check constraints': self._find_children(
-                entry, constants.CHECK_CONSTRAINT),
+                entry, constants.CHECK_CONSTRAINT
+            ),
             'constraints': self._find_children(entry, constants.CONSTRAINT),
             'foreign keys': self._find_children(
-                entry, constants.FK_CONSTRAINT),
+                entry, constants.FK_CONSTRAINT
+            ),
             'indexes': self._find_children(entry, constants.INDEX),
             'rules': self._find_children(entry, constants.RULE),
             'triggers': self._find_children(entry, constants.TRIGGER),
-            'acls': self._find_acls(entry)
+            'acls': self._find_acls(entry),
         }
 
     def view(self, entry: dump.Entry) -> dict:
@@ -660,7 +734,7 @@ class Structure:
             'dependencies': self._resolve_dependencies(entry.dependencies),
             'rules': self._find_children(entry, constants.RULE),
             'triggers': self._find_children(entry, constants.TRIGGER),
-            'acls': self._find_acls(entry)
+            'acls': self._find_acls(entry),
         }
 
     def _find_acls(self, parent: dump.Entry) -> list:
@@ -689,18 +763,23 @@ class Structure:
                     LOGGER.debug('Parsed: %r', parsed)
                     parsed_child = parsed.get('relation')
                     if parsed_child and '.' not in parsed_child:
-                        parsed_child = '{}.{}'.format(entry.namespace,
-                                                      parsed_child)
-                    LOGGER.debug('Checking %r against %r', parsed_child,
-                                 parent_name)
+                        parsed_child = f'{entry.namespace}.{parsed_child}'
+                    LOGGER.debug(
+                        'Checking %r against %r', parsed_child, parent_name
+                    )
                     if parsed_child == parent_name:
                         add_child = True
                         break
                     elif parsed_child is None:
                         raise RuntimeError
             if add_child:
-                LOGGER.debug('Adding %s child %s to %s - %r', entry_type,
-                             self._object_name(entry), parent_name, entry)
+                LOGGER.debug(
+                    'Adding %s child %s to %s - %r',
+                    entry_type,
+                    self._object_name(entry),
+                    parent_name,
+                    entry,
+                )
                 self._mark_processed(entry.dump_id)
                 deps = self._resolve_dependencies(entry.dependencies)
                 try:
@@ -715,7 +794,7 @@ class Structure:
                     'comment': self._find_comment(entry),
                     'sql': _prettify(entry.defn),
                     'dependencies': deps,
-                    'acls': self._find_children(entry, constants.ACL)
+                    'acls': self._find_children(entry, constants.ACL),
                 }
                 child = _remove_null_values(child)
                 children.append(child)
@@ -729,21 +808,26 @@ class Structure:
                 comments.append(_prettify(entry.defn))
         return comments
 
-    def _find_comment(self, parent: dump.Entry) -> typing.Optional[str]:
+    def _find_comment(self, parent: dump.Entry) -> str | None:
         parent_name = parent.tag
         if '(' in parent_name:
-            parent_name = parent_name[:parent_name.find('(')]
+            parent_name = parent_name[: parent_name.find('(')]
         if parent.desc == constants.TRIGGER:
             expectation = 'ON {}'.format(parent_name.split(' ')[0])
         else:
-            expectation = '{} {}'.format(parent.desc, parent_name)
+            expectation = f'{parent.desc} {parent_name}'
         for entry in _filter(self.entries, constants.COMMENT, parent.dump_id):
             LOGGER.debug('Expectation: %r / %r', expectation, entry.tag)
-            if ((parent.desc == constants.TRIGGER and entry.tag.startswith(
-                    constants.TRIGGER) and entry.tag.endswith(expectation))
-                    or entry.tag.startswith(expectation)):
-                LOGGER.debug('Comment matches expectation (%r): %r',
-                             expectation, entry.dump_id)
+            if (
+                parent.desc == constants.TRIGGER
+                and entry.tag.startswith(constants.TRIGGER)
+                and entry.tag.endswith(expectation)
+            ) or entry.tag.startswith(expectation):
+                LOGGER.debug(
+                    'Comment matches expectation (%r): %r',
+                    expectation,
+                    entry.dump_id,
+                )
                 self._mark_processed(entry.dump_id)
                 parsed = parse.sql(entry.defn)
                 return parsed['comment']
@@ -756,7 +840,7 @@ class Structure:
     def _object_name(value: dump.Entry) -> str:
         if not value.namespace:
             return value.tag
-        return '{}.{}'.format(value.namespace, value.tag)
+        return f'{value.namespace}.{value.tag}'
 
     def _resolve_dependencies(self, dependencies: list) -> list:
         """Resolve the dependencies to a list of dictionaries describing
@@ -777,5 +861,5 @@ class Structure:
             values.append({entry.desc: self._object_name(entry)})
         self.dependency_cache[key] = values
         if len(self.dependency_cache.keys()) > 1024:
-            del self.dependency_cache[list(self.dependency_cache.keys())[0]]
+            del self.dependency_cache[next(iter(self.dependency_cache.keys()))]
         return self.dependency_cache[key]

@@ -2,6 +2,7 @@
 Common interface for working with YAML files
 
 """
+
 import logging
 import pathlib
 import typing
@@ -14,8 +15,9 @@ LOGGER = logging.getLogger(__name__)
 
 def is_yaml(path: pathlib.Path) -> bool:
     """Returns `True` if the file exists and ends with a YAML extension"""
-    return (path.is_file()
-            and (path.name.endswith('.yml') or path.name.endswith('.yaml')))
+    return path.is_file() and (
+        path.name.endswith('.yml') or path.name.endswith('.yaml')
+    )
 
 
 def load(path: pathlib.Path) -> dict:
@@ -28,9 +30,8 @@ def load(path: pathlib.Path) -> dict:
         try:
             return yaml.safe_load(handle)
         except scanner.ScannerError as error:
-            LOGGER.critical('Failed to parse YAML from %s: %s',
-                            path, error)
-            raise RuntimeError('YAML parse failure')
+            LOGGER.critical('Failed to parse YAML from %s: %s', path, error)
+            raise RuntimeError('YAML parse failure') from error
 
 
 def save(path: pathlib.Path, data: dict) -> typing.NoReturn:

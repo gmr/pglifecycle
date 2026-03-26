@@ -1,0 +1,137 @@
+[build-system]
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pglifecycle"
+description = "A PostgreSQL schema management tool"
+readme = "README.md"
+license = "BSD-3-Clause"
+requires-python = ">=3.11"
+dynamic = ["version"]
+authors = [{ name = "Gavin M. Roy", email = "gavinmroy@gmail.com" }]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: BSD License",
+    "Natural Language :: English",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: SQL",
+    "Topic :: Database",
+    "Topic :: System :: Systems Administration",
+    "Topic :: Software Development",
+]
+dependencies = [
+    "arrow",
+    "jsonschema>=4",
+    "pgdumplib>=4,<5",
+    "pgparse",
+    "ruamel.yaml",
+    "stringcase",
+    "toposort",
+]
+
+[project.scripts]
+pglifecycle = "pglifecycle.cli:run"
+
+[project.urls]
+Homepage = "https://github.com/gmr/pglifecycle"
+Documentation = "https://gmr.github.io/pglifecycle/"
+
+[dependency-groups]
+dev = [
+    "build",
+    "coverage[toml]",
+    "faker",
+    "pre-commit",
+    "psycopg[binary]",
+    "pytest",
+    "ruff",
+]
+docs = [
+    "mkdocs>=1.5,<2",
+    "mkdocs-material>9.5,<10",
+    "mkdocstrings[python]>=0.26,<1",
+]
+
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.build.hooks.vcs]
+version-file = "pglifecycle/_version.py"
+
+[tool.hatch.build.targets.wheel]
+include = ["pglifecycle"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+source = ["pglifecycle"]
+command_line = "-m pytest"
+
+[tool.coverage.report]
+show_missing = true
+
+[tool.coverage.html]
+directory = "build/coverage"
+
+[tool.coverage.xml]
+output = "build/coverage.xml"
+
+[tool.ruff]
+line-length = 79
+target-version = "py312"
+exclude = ["pglifecycle/_version.py"]
+
+[tool.ruff.format]
+quote-style = "single"
+
+[tool.ruff.lint]
+select = [
+    "BLE",      # flake8-blind-except
+    "C4",       # flake8-comprehensions
+    "C90",      # mccabe
+    "E", "W",   # pycodestyle
+    "F",        # pyflakes
+    "G",        # flake8-logging-format
+    "I",        # isort
+    "N",        # pep8-naming
+    "Q",        # flake8-quotes
+    "S",        # flake8-bandit
+    "ASYNC",    # flake8-async
+    "B",        # flake8-bugbear
+    "DTZ",      # flake8-datetimez
+    "FURB",     # refurb
+    "RUF",      # ruff-specific
+    "T20",      # flake8-print
+    "UP",       # pyupgrade
+]
+ignore = [
+    "C901",     # Too complex - pre-existing, fix incrementally
+    "E501",     # Line too long - pre-existing, fix incrementally
+    "RUF012",   # Mutable class attributes - pre-existing pattern
+    "RSE",      # contradicts Python Style Guide
+    "S311",     # Not doing cryptography
+]
+flake8-quotes = { inline-quotes = "single" }
+
+[tool.ruff.lint.mccabe]
+max-complexity = 15
+
+[tool.ruff.lint.per-file-ignores]
+"bin/**/*.py" = ["S", "T20"]
+"pglifecycle/dump.py" = ["B020"]
+"pglifecycle/pgdump.py" = ["S603"]
+"tests/**/*.py" = ["S"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["pglifecycle"]

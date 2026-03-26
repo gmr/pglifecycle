@@ -2,13 +2,14 @@
 Data validation using bundled JSON-Schema files
 
 """
+
 import functools
+import importlib.resources
 import logging
 import pathlib
 
 import jsonschema
 from jsonschema import exceptions
-import pkg_resources
 
 from pglifecycle import yaml
 
@@ -26,11 +27,14 @@ def validate_object(obj_type: str, name: str, data: dict) -> bool:
     try:
         jsonschema.validate(data, schema)
     except exceptions.ValidationError as error:
-        LOGGER.critical('Validation error for %s %s: %s for %r: %s',
-                        obj_type, name, error.message,
-                        error.path[0] if error.path
-                        else error.absolute_schema_path[0],
-                        error.instance)
+        LOGGER.critical(
+            'Validation error for %s %s: %s for %r: %s',
+            obj_type,
+            name,
+            error.message,
+            error.path[0] if error.path else error.absolute_schema_path[0],
+            error.instance,
+        )
         return False
     return True
 
@@ -43,11 +47,17 @@ def _load_schemata(obj_type: str) -> dict:
     :raises: FileNotFoundError
 
     """
-    schema_path = pathlib.Path(pkg_resources.resource_filename(
-        'pglifecycle', 'schemata/{}.yml'.format(obj_type).replace(' ', '_')))
+    schema_path = pathlib.Path(
+        str(
+            importlib.resources.files('pglifecycle')
+            / 'schemata'
+            / f'{obj_type}.yml'.replace(' ', '_')
+        )
+    )
     if not schema_path.exists():
         raise FileNotFoundError(
-            'Schema file not found for object type {!r}'.format(obj_type))
+            f'Schema file not found for object type {obj_type!r}'
+        )
     return _preprocess(yaml.load(schema_path))
 
 
@@ -57,14 +67,15 @@ def _preprocess(schema: dict) -> dict:
 
     """
     schema_out = {}
-    for key, value in [(k, v) for k, v in schema.items()]:
+    for key, value in list(schema.items()):
         if key == '$package_schema':
             schema_out.update(_load_schemata(value))
         elif isinstance(value, dict):
             schema_out[key] = _preprocess(value)
         elif isinstance(value, list):
-            schema_out[key] = [_preprocess(v) if isinstance(v, dict) else v
-                               for v in value]
+            schema_out[key] = [
+                _preprocess(v) if isinstance(v, dict) else v for v in value
+            ]
         else:
             schema_out[key] = value
     return schema_out

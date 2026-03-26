@@ -1,0 +1,16 @@
+#!/usr/bin/env sh
+set -e
+./bootstrap
+
+
+echo '
+LINTING
+'
+pre-commit run --all-files
+
+echo '
+RUNNING TESTS
+'
+coverage run
+coverage report
+coverage xml
