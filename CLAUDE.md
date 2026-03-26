@@ -5,7 +5,8 @@ A PostgreSQL schema management tool.
 ## Development
 
 ```bash
-./bootstrap          # Full setup: venv, deps, docker, fixtures
+uv sync              # Install dependencies
+./bootstrap          # Full setup: deps, docker, fixtures
 ci/test              # Run linting + tests with coverage
 ```
 
@@ -13,7 +14,7 @@ ci/test              # Run linting + tests with coverage
 
 - **pyproject.toml** with hatchling build backend
 - **hatch-vcs** for version management from git tags
-- **uv** or **pip** for dependency management
+- **uv** for dependency management
 - **dependency-groups** for dev/docs extras
 
 ## Testing

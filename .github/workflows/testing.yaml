@@ -38,9 +38,11 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
 
-      - name: Set up Python
-        uses: actions/setup-python@v6
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
         with:
           python-version: '${{ matrix.python }}'
 
@@ -68,13 +70,13 @@ jobs:
           docker cp postgres:/data/. build/data/
 
       - name: Lint Check
-        run: pre-commit run --all-files
+        run: uv run pre-commit run --all-files
 
       - name: Run tests
         run: |
-          coverage run
-          coverage report
-          coverage xml
+          uv run coverage run
+          uv run coverage report
+          uv run coverage xml
 
       - name: Upload Coverage
         uses: codecov/codecov-action@v5

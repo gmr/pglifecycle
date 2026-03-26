@@ -13,5 +13,4 @@ bak/
 build/
 dist/
 env/
-pglifecycle/_version.py
 site/

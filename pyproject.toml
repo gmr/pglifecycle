@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling", "hatch-vcs"]
+requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
@@ -8,10 +8,10 @@ description = "A PostgreSQL schema management tool"
 readme = "README.md"
 license = "BSD-3-Clause"
 requires-python = ">=3.11"
-dynamic = ["version"]
+version = "1.0.0b1"
 authors = [{ name = "Gavin M. Roy", email = "gavinmroy@gmail.com" }]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "Intended Audience :: System Administrators",
     "License :: OSI Approved :: BSD License",
@@ -52,6 +52,7 @@ dev = [
     "faker",
     "pre-commit",
     "psycopg[binary]",
+    "python-dotenv",
     "pytest",
     "ruff",
 ]
@@ -60,12 +61,6 @@ docs = [
     "mkdocs-material>9.5,<10",
     "mkdocstrings[python]>=0.26,<1",
 ]
-
-[tool.hatch.version]
-source = "vcs"
-
-[tool.hatch.build.hooks.vcs]
-version-file = "pglifecycle/_version.py"
 
 [tool.hatch.build.targets.wheel]
 include = ["pglifecycle"]
@@ -90,7 +85,7 @@ output = "build/coverage.xml"
 [tool.ruff]
 line-length = 79
 target-version = "py312"
-exclude = ["pglifecycle/_version.py"]
+exclude = []
 
 [tool.ruff.format]
 quote-style = "single"

@@ -6,6 +6,57 @@ Common Constants
 import enum
 import pathlib
 
+
+class ResolvableIntEnum(enum.IntEnum):
+    """IntEnum that can resolve both integer and string values.
+
+    Newer libpg_query returns string values with prefixes like
+    'AT_', 'OBJECT_', 'DEFELEM_', etc. instead of integers.
+
+    """
+
+    @classmethod
+    def resolve(cls, value):
+        """Resolve from an int or prefixed string (e.g. 'AT_AddConstraint')."""
+        if isinstance(value, int):
+            return cls(value)
+        if isinstance(value, str):
+            # Try direct name lookup first (e.g. 'ADD_COLUMN')
+            name = value.upper()
+            if name in cls.__members__:
+                return cls[name]
+            # Strip common prefixes and try again
+            for prefix in (
+                'AT_',
+                'OBJECT_',
+                'DEFELEM_',
+                'VAR_SET_',
+                'VIEW_CHECK_OPTION_',
+                'FUNC_PARAM_',
+            ):
+                if name.startswith(prefix):
+                    stripped = name[len(prefix) :]
+                    if stripped in cls.__members__:
+                        return cls[stripped]
+            # Try converting CamelCase to UPPER_SNAKE
+            import re
+
+            snake = re.sub(r'(?<=[a-z0-9])([A-Z])', r'_\1', value)
+            snake = snake.upper()
+            for prefix in (
+                'AT_',
+                'OBJECT_',
+                'DEFELEM_',
+                'VAR_SET_',
+                'VIEW_CHECK_OPTION_',
+                'FUNC_PARAM_',
+            ):
+                snake = snake.removeprefix(prefix)
+            if snake in cls.__members__:
+                return cls[snake]
+        return cls(value)
+
+
 ALTER = 'ALTER'
 COMMENT = 'COMMENT'
 CREATE = 'CREATE'
@@ -75,6 +126,7 @@ COLLATION = 'COLLATION'
 CONSTRAINT = 'CONSTRAINT'
 CONVERSION = 'CONVERSION'
 DATABASE = 'DATABASE'
+DEFAULT_ACL = 'DEFAULT ACL'
 DIRECTIVE = 'DIRECTIVE'
 DIRECTIVES = 'DIRECTIVES'
 DML = 'DML'
@@ -93,6 +145,7 @@ FK_CONSTRAINT = 'FK CONSTRAINT'
 FUNCTION = 'FUNCTION'
 GROUP = 'GROUP'
 INDEX = 'INDEX'
+INDEX_ATTACH = 'INDEX ATTACH'
 LARGE_OBJECT = 'LARGE OBJECT'
 LOCATION = 'LOCATION'
 MATERIALIZED_VIEW = 'MATERIALIZED VIEW'
@@ -108,6 +161,7 @@ RECURSIVE = 'RECURSIVE'
 ROLE = 'ROLE'
 RULE = 'RULE'
 SEARCHPATH = 'SEARCHPATH'
+TABLE_ATTACH = 'TABLE ATTACH'
 SEQUENCE_OWNED_BY = 'SEQUENCE OWNED BY'
 SEQUENCE_SET = 'SEQUENCE SET'
 SCHEMA = 'SCHEMA'
@@ -174,6 +228,7 @@ PATHS = {
     SEQUENCE: pathlib.Path('sequences'),
     SERVER: pathlib.Path('servers'),
     SUBSCRIPTION: pathlib.Path('subscriptions'),
+    FOREIGN_TABLE: pathlib.Path('tables'),
     TABLE: pathlib.Path('tables'),
     TABLESPACE: pathlib.Path('tablespaces'),
     TEXT_SEARCH: pathlib.Path('text_search'),
@@ -271,15 +326,57 @@ A_EXPR_KIND = {
     12: 'NOT BETWEEN',
     13: 'BETWEEN SYMMETRIC',
     14: 'NOT BETWEEN SYMMETRIC',
+    'AEXPR_OP': None,
+    'AEXPR_OP_ANY': 'ANY',
+    'AEXPR_OP_ALL': 'ALL',
+    'AEXPR_DISTINCT': 'IS DISTINCT FROM',
+    'AEXPR_NOT_DISTINCT': 'IS NOT DISTINCT FROM',
+    'AEXPR_NULLIF': 'NULLIF',
+    'AEXPR_IN': 'IN',
+    'AEXPR_LIKE': 'LIKE',
+    'AEXPR_ILIKE': 'ILIKE',
+    'AEXPR_SIMILAR': 'SIMILAR',
+    'AEXPR_BETWEEN': 'BETWEEN',
+    'AEXPR_NOT_BETWEEN': 'NOT BETWEEN',
+    'AEXPR_BETWEEN_SYM': 'BETWEEN SYMMETRIC',
+    'AEXPR_NOT_BETWEEN_SYM': 'NOT BETWEEN SYMMETRIC',
 }
 
-ACL_OBJECT_TYPE = {1: 'TABLE', 10: 'SCHEMA'}
+ACL_OBJECT_TYPE = {
+    1: 'TABLE',
+    10: 'SCHEMA',
+    'OBJECT_TABLE': 'TABLE',
+    'OBJECT_SCHEMA': 'SCHEMA',
+}
 
-ACL_ROLE_TYPE = {0: 'USER', 3: 'PUBLIC'}
+ACL_ROLE_TYPE = {
+    0: 'USER',
+    3: 'PUBLIC',
+    'ROLESPEC_CSTRING': 'USER',
+    'ROLESPEC_PUBLIC': 'PUBLIC',
+}
 
-BOOL_OP = {0: 'AND', 1: 'OR', 2: 'NOT'}
+BOOL_OP = {
+    0: 'AND',
+    1: 'OR',
+    2: 'NOT',
+    'AND_EXPR': 'AND',
+    'OR_EXPR': 'OR',
+    'NOT_EXPR': 'NOT',
+}
 
-BOOL_TEST = {1: 'TRUE', 2: 'FALSE', 't': 'TRUE', 'f': 'FALSE'}
+BOOL_TEST = {
+    1: 'TRUE',
+    2: 'FALSE',
+    't': 'TRUE',
+    'f': 'FALSE',
+    'IS_TRUE': 'TRUE',
+    'IS_NOT_TRUE': 'NOT TRUE',
+    'IS_FALSE': 'FALSE',
+    'IS_NOT_FALSE': 'NOT FALSE',
+    'IS_UNKNOWN': 'UNKNOWN',
+    'IS_NOT_UNKNOWN': 'NOT UNKNOWN',
+}
 
 FK_ACTION = {
     'a': None,  # NO ACTION
@@ -327,12 +424,36 @@ JOIN_TYPE = {
     7: 'UNIQUE INNER',
 }
 
-NULL_ORDERING = {0: None, 1: 'FIRST', 2: 'LAST'}
-NULL_TEST = {0: 'IS', 1: 'IS NOT'}
+NULL_ORDERING = {
+    0: None,
+    1: 'FIRST',
+    2: 'LAST',
+    'SORTBY_NULLS_DEFAULT': None,
+    'SORTBY_NULLS_FIRST': 'FIRST',
+    'SORTBY_NULLS_LAST': 'LAST',
+}
+NULL_TEST = {
+    0: 'IS',
+    1: 'IS NOT',
+    'IS_NULL': 'IS',
+    'IS_NOT_NULL': 'IS NOT',
+}
 
-ON_CONFLICT = {1: 'DO NOTHING', 2: 'DO UPDATE SET'}
+ON_CONFLICT = {
+    1: 'DO NOTHING',
+    2: 'DO UPDATE SET',
+    'ONCONFLICT_NOTHING': 'DO NOTHING',
+    'ONCONFLICT_UPDATE': 'DO UPDATE SET',
+}
 
-ORDERING = {0: None, 1: 'ASC', 2: 'DESC'}
+ORDERING = {
+    0: None,
+    1: 'ASC',
+    2: 'DESC',
+    'SORTBY_DEFAULT': None,
+    'SORTBY_ASC': 'ASC',
+    'SORTBY_DESC': 'DESC',
+}
 
 ROW_COMPARE = {
     1: '<',
@@ -369,7 +490,7 @@ TRIGGER_AFTER = 0x00000000
 TRIGGER_INSTEAD = 1 << 6
 
 
-class AlterTableType(enum.IntEnum):
+class AlterTableType(ResolvableIntEnum):
     """Enum identifying the alter_table_cmd type"""
 
     ADD_COLUMN = 0
@@ -440,7 +561,7 @@ class AlterTableType(enum.IntEnum):
     DROP_IDENTITY = 65
 
 
-class DefElemAction(enum.IntEnum):
+class DefElemAction(ResolvableIntEnum):
     """Actions for a DefElem"""
 
     UNSPECIFIED = 0
@@ -457,9 +578,28 @@ class FunctionParameterMode(enum.Enum):
     INOUT = 98  # b
     VARADIC = 118  # v
     TABLE = 116  # t
+    DEFAULT = 0  # default mode
+
+    @classmethod
+    def resolve(cls, value):
+        """Resolve from an int, char code, or FUNC_PARAM_* string."""
+        if isinstance(value, int):
+            try:
+                return cls(value)
+            except ValueError:
+                pass
+        if isinstance(value, str):
+            upper = value.upper()
+            if upper in cls.__members__:
+                return cls[upper]
+            if upper.startswith('FUNC_PARAM_'):
+                name = upper[11:]
+                if name in cls.__members__:
+                    return cls[name]
+        return cls(value)
 
 
-class ObjectType(enum.IntEnum):
+class ObjectType(ResolvableIntEnum):
     """PostgreSQL Object Types"""
 
     ACCESS_METHOD = 0
@@ -509,10 +649,11 @@ class ObjectType(enum.IntEnum):
     TSTEMPLATE = 44
     TYPE = 45
     USER_MAPPING = 46
+
     VIEW = 47
 
 
-class VariableSetKind(enum.IntEnum):
+class VariableSetKind(ResolvableIntEnum):
     """Defines the various set statement kinds"""
 
     VALUE = 0
@@ -523,7 +664,7 @@ class VariableSetKind(enum.IntEnum):
     RESET_ALL = 5
 
 
-class ViewCheckOption(enum.IntEnum):
+class ViewCheckOption(ResolvableIntEnum):
     """Defines ViewCheckOption values"""
 
     UNDEFINED: 0

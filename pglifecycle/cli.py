@@ -10,7 +10,7 @@ import pathlib
 import pwd
 from os import path
 
-from pglifecycle import common, project, version
+from pglifecycle import common, generate_project, project, version
 
 LOGGER = logging.getLogger(__name__)
 LOGGING_FORMAT = '[%(asctime)-15s] %(levelname)-8s %(message)s'
@@ -323,13 +323,13 @@ def run():
             ).create(args.force, args.no_gitkeep is False)
         except RuntimeError as error:
             common.exit_application(str(error), 4)
-    elif args.action == 'generate-project':
+    elif args.action == 'generate':
         if not args.dest:
             common.exit_application('Destination not specified', 2)
         if args.gitkeep and args.remove_empty_dirs:
             common.exit_application(
                 'Can not specify --gitkeep and --remove-empty-dirs', 2
             )
-        #  generate_project.Generate(args).run()
+        generate_project.Generate(args).run()
     else:
         common.exit_application('Invalid action specified', 1)

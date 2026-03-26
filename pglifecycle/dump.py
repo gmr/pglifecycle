@@ -9,7 +9,7 @@ import os
 import typing
 
 import pgdumplib
-import pgdumplib.dump
+import pgdumplib.models
 
 from pglifecycle import constants, models, utils
 
@@ -76,15 +76,15 @@ class Dump:
         drop_stmt: list[str],
         dependencies: list[int] | None = None,
         tablespace: str | None = None,
-    ) -> pgdumplib.dump.Entry:
+    ) -> pgdumplib.models.Entry:
         LOGGER.debug('Adding %s %s.%s', desc, namespace, name)
         return self._dump.add_entry(
-            desc,
-            namespace,
-            name,
-            owner,
-            '{};\n'.format(' '.join(defn)),
-            '{};\n'.format(' '.join(drop_stmt)),
+            desc=desc,
+            namespace=namespace,
+            tag=name,
+            owner=owner,
+            defn='{};\n'.format(' '.join(defn)),
+            drop_stmt='{};\n'.format(' '.join(drop_stmt)),
             dependencies=dependencies or [],
             tablespace=tablespace,
         )

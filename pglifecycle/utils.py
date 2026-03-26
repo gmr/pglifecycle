@@ -33,5 +33,5 @@ def split_name(value: str) -> tuple[str | None, str]:
     """Take a postgres ident and return the proper namespace & tag value"""
     parts = value.partition('.')
     if (parts[1], parts[2]) == ('', ''):
-        return None, value
+        return '', value
     return parts[0], parts[2]

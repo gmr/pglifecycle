@@ -7,9 +7,9 @@ import random
 from os import path
 
 import faker
-import psycopg2
+import psycopg
 from faker.providers import address, internet, misc, person
-from psycopg2 import errors
+from psycopg import errors
 
 LOGGER = logging.getLogger(__name__)
 LOGGING_FORMAT = '[%(asctime)-15s] %(levelname)-8s %(message)s'
@@ -308,10 +308,10 @@ def main(args):
 
     """
     configure_logging(args)
-    conn = psycopg2.connect(
+    conn = psycopg.connect(
         host=args.host, port=args.port, dbname=args.dbname, user=args.username
     )
-    conn.set_session(autocommit=True)
+    conn.autocommit = True
     cursor = conn.cursor()
     generate_users(args, cursor)
     conn.close()

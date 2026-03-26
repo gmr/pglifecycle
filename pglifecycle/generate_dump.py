@@ -10,9 +10,9 @@ import pathlib
 import typing
 
 import pgdumplib
-import pgdumplib.dump as dump
-import ruamel.yaml as yaml
+import pgdumplib.models
 import toposort
+from ruamel.yaml import YAML
 
 from pglifecycle import constants, parse, utils
 
@@ -96,7 +96,7 @@ class Generate:
         name: str,
         sql: str,
         owner: str | None = None,
-    ) -> dump.Entry:
+    ) -> pgdumplib.models.Entry:
         entry = self._dump.add_entry(
             desc=desc,
             dump_id=self._next_dump_id(),
@@ -155,7 +155,7 @@ class Generate:
         )
 
     def _build_acls_for_object(
-        self, entry: pgdumplib.dump.Entry
+        self, entry: pgdumplib.models.Entry
     ) -> tuple[list, str]:
         dependencies = set({})
         if entry.desc in [
@@ -335,7 +335,7 @@ class Generate:
             LOGGER.warning('No defined role, group, or user named %s', name)
 
     def _maybe_add_comment(
-        self, entry: pgdumplib.dump.Entry, data: dict
+        self, entry: pgdumplib.models.Entry, data: dict
     ) -> typing.NoReturn:
         if 'comment' in data:
             if isinstance(data['comment'], dict):
@@ -433,9 +433,9 @@ class Generate:
             else:
                 dependencies, sql = self._build_acls_for_object(entry)
             acl = self._dump.add_entry(
-                constants.ACL,
-                entry.namespace if entry else '',
-                entry.tag if entry else tag,
+                desc=constants.ACL,
+                namespace=entry.namespace if entry else '',
+                tag=entry.tag if entry else tag,
                 defn=sql,
                 dependencies=list(dependencies),
                 dump_id=self._next_dump_id(),
@@ -451,11 +451,11 @@ class Generate:
                 continue
             tablespace = item.get('tablespace', parent.get('tablespace', ''))
             entry = self._dump.add_entry(
-                ct,
-                cs,
-                cn,
-                item.get('owner', self._get_owner(parent)),
-                item['sql'],
+                desc=ct,
+                namespace=cs,
+                tag=cn,
+                owner=item.get('owner', self._get_owner(parent)),
+                defn=item['sql'],
                 dependencies=self._dependencies[dump_id],
                 tablespace=tablespace,
                 dump_id=dump_id,
@@ -531,9 +531,9 @@ class Generate:
             self._dump_id = None  # Reset the dump_id to get max from pgdumplib
             if sequence:
                 acl = self._dump.add_entry(
-                    constants.SEQUENCE_SET,
-                    sequence[2],
-                    sequence[3],
+                    desc=constants.SEQUENCE_SET,
+                    namespace=sequence[2],
+                    tag=sequence[3],
                     defn=f'ALTER SEQUENCE {sequence[2]}.{sequence[3]} RESTART WITH {max_value + 1};\n',
                     dependencies=[sequence[0]],
                     dump_id=self._next_dump_id(),
@@ -629,11 +629,11 @@ class Generate:
                 continue
             definition = self._inventory[obj_type][schema][name].definition
             entry = self._dump.add_entry(
-                obj_type,
-                schema,
-                name,
-                self._get_owner(definition),
-                definition['sql'],
+                desc=obj_type,
+                namespace=schema,
+                tag=name,
+                owner=self._get_owner(definition),
+                defn=definition['sql'],
                 dependencies=self._dependencies[dump_id],
                 tablespace=definition.get('tablespace', ''),
                 dump_id=dump_id,
@@ -753,7 +753,7 @@ class Generate:
 
     def _process_role_create(
         self, dump_id: int, dependencies: dict
-    ) -> pgdumplib.dump.Entry:
+    ) -> pgdumplib.models.Entry:
         desc, schema, name = self._reverse_lookup[dump_id]
         definition = self._inventory[desc][schema][name].definition
         if definition.get('create', True):
@@ -823,7 +823,7 @@ class Generate:
             return drop_if_exists.dump_id
 
     def _process_role_settings(
-        self, entry: pgdumplib.dump.Entry, settings: list
+        self, entry: pgdumplib.models.Entry, settings: list
     ) -> typing.NoReturn:
         for setting in settings:
             if setting['type'] == 'VALUE':
@@ -915,9 +915,9 @@ class Generate:
                         item.definition['owned_by'],
                     ]
                     acl = self._dump.add_entry(
-                        constants.SEQUENCE_OWNED_BY,
-                        item.definition.get('schema', schema),
-                        item.definition.get('name', name),
+                        desc=constants.SEQUENCE_OWNED_BY,
+                        namespace=item.definition.get('schema', schema),
+                        tag=item.definition.get('name', name),
                         defn='\n'.join(sql),
                         dependencies=[parent.dump_id],
                         dump_id=self._next_dump_id(),
@@ -1015,14 +1015,16 @@ class Generate:
     @staticmethod
     def _read_file(path: pathlib.Path) -> dict:
         with path.open() as handle:
-            return yaml.safe_load(handle)
+            yml = YAML(typ='safe', pure=True)
+            return yml.load(handle)
 
     def _read_project_file(self) -> _Project:
         project_file = self._project_path / 'project.yaml'
         if not project_file.exists():
             raise RuntimeError('Missing project file')
         with open(project_file) as handle:
-            return _Project(**yaml.safe_load(handle))
+            yml = YAML(typ='safe', pure=True)
+            return _Project(**yml.load(handle))
 
     def _save_dump(self) -> typing.NoReturn:
         LOGGER.debug('Saving dump')

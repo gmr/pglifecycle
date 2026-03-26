@@ -23,8 +23,6 @@ fi
 
 unset PYTHONDEBUG
 export COMPOSE_DISABLE_ENV_FILE=1
-export PIP_DISABLE_PIP_VERSION_CHECK=1
-export PYTHON_ROOT_USER_ACTION=ignore
 export PYTHONWARNINGS=ignore
 
 TEST_HOST=${TEST_HOST:-127.0.0.1}
@@ -54,34 +52,21 @@ get_exposed_port() {
 	fi
 }
 
-if test "$CI" != 'true'
-then
-	if test -e ./.venv/bin/activate
-	then
-		. ./.venv/bin/activate
-	else
-		python3 -m venv --upgrade-deps .venv
-		. ./.venv/bin/activate
-	fi
-fi
-
 mkdir -p build build/data
 
-pip install --upgrade pip
-
 printf 'Installing package...'
-pip install -e '.[dev]'
+uv sync --all-groups
 echo ' done.'
 
-if test -d .git && test -f .pre-commit-config.yaml
+if test "$CI" != 'true'
 then
-	printf 'Installing pre-commit hook...'
-	pre-commit install --install-hooks
-	echo ' done.'
-fi
+	if test -d .git && test -f .pre-commit-config.yaml
+	then
+		printf 'Installing pre-commit hook...'
+		uv run pre-commit install --install-hooks
+		echo ' done.'
+	fi
 
-if test "${CI}" != 'true'
-then
 	printf 'Cleaning environment...'
 	docker compose down --remove-orphans --volumes
 	echo ' done.'
@@ -99,29 +84,16 @@ else
 fi
 
 printf 'Generating .env...'
-if test "${CI}" = 'true'
-then
-	cat > .env <<EOF
-export FILE_CACHE_ENABLED=no
-export TEST_HOST=localhost
-export PGHOST=localhost
-export PGPORT=5432
-export PGDATABASE=postgres
-export PGUSER=postgres
-export PGPASSWORD=postgres
-export POSTGRES_URI=postgresql://postgres:postgres@localhost:5432/postgres
-EOF
-else
-	cat > .env <<EOF
+cat > .env <<EOF
 export FILE_CACHE_ENABLED=no
 export TEST_HOST=${TEST_HOST}
 export PGHOST=${TEST_HOST}
 export PGPORT=${PGPORT}
 export PGDATABASE=postgres
 export PGUSER=postgres
-export POSTGRES_URI=postgresql://postgres@${TEST_HOST}:${PGPORT}/postgres
+export PGPASSWORD=${PGPASSWORD:-postgres}
+export POSTGRES_URI=postgresql://postgres:postgres@${TEST_HOST}:${PGPORT}/postgres
 EOF
-fi
 echo ' done.'
 
 echo "Running pgbench ... "
@@ -134,9 +106,9 @@ echo ' done.'
 printf "Generating fixture data ... "
 if test "${CI}" = 'true'
 then
-	PGPASSWORD=postgres python bin/generate-fixture-data.py -U postgres -h localhost -p 5432 -d postgres
+	PGPASSWORD=postgres uv run python bin/generate-fixture-data.py -U postgres -h localhost -p 5432 -d postgres
 else
-	python bin/generate-fixture-data.py -U postgres -h "${TEST_HOST}" -p "${PGPORT}" -d postgres
+	uv run python bin/generate-fixture-data.py -U postgres -h "${TEST_HOST}" -p "${PGPORT}" -d postgres
 fi
 echo ' done.'
 

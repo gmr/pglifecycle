@@ -14,7 +14,7 @@ import typing
 
 import arrow
 import pgdumplib
-from pgdumplib import dump
+from pgdumplib import models as pgdumplib_models
 
 from pglifecycle import common, constants, parse, pgdump, storage
 
@@ -27,8 +27,10 @@ YAML_EXTENSION = 'yaml'
 
 
 def _filter(
-    entries: list[dump.Entry], desc: str, parent_id: int | None = None
-) -> typing.Generator[dump.Entry, None, None]:
+    entries: list[pgdumplib_models.Entry],
+    desc: str,
+    parent_id: int | None = None,
+) -> typing.Generator[pgdumplib_models.Entry, None, None]:
     """Return a filtered list of the provided entries.
 
     Generator function that iterates over the entries provided and
@@ -43,6 +45,22 @@ def _filter(
                 yield e
         else:
             yield e
+
+
+def _extract_comment(defn: str) -> str | None:
+    """Extract the comment text from a COMMENT ON ... IS '...' statement."""
+    marker = ' IS '
+    pos = defn.find(marker)
+    if pos == -1:
+        return None
+    comment = defn[pos + len(marker) :].rstrip().rstrip(';').strip()
+    if comment.startswith("'") and comment.endswith("'"):
+        comment = comment[1:-1].replace("''", "'")
+    elif comment.startswith('$$') and comment.endswith('$$'):
+        comment = comment[2:-2]
+    elif comment.startswith("E'") and comment.endswith("'"):
+        comment = comment[2:-1].replace("''", "'")
+    return comment
 
 
 def _function_filename(tag, filenames):
@@ -175,6 +193,7 @@ class Generate:
         self._create_files(constants.SEQUENCE)
         self._create_namespace_files(constants.SUBSCRIPTION)
         self._create_files(constants.SERVER)
+        self._create_files(constants.FOREIGN_TABLE)
         self._create_files(constants.TABLE)
         self._create_namespace_files(constants.TABLESPACE)
         self._create_namespace_files(constants.TYPE)
@@ -182,13 +201,14 @@ class Generate:
         self._create_namespace_files(constants.TEXT_SEARCH_DICTIONARY)
         self._create_files(constants.USER_MAPPING)
         self._create_files(constants.VIEW)
+        self._mark_remaining_processed()
 
         remaining = collections.Counter()
+        skip = {constants.SEARCHPATH}
         for entry in [
             e
             for e in self.dump.entries
-            if e.dump_id not in self.processed
-            and e.desc != constants.SEARCHPATH
+            if e.dump_id not in self.processed and e.desc not in skip
         ]:
             remaining[f'{entry.section}:{entry.desc}'] += 1
 
@@ -541,7 +561,7 @@ class Generate:
 
     @staticmethod
     def _object_path(
-        entry: dump.Entry, name_override: str | None = None
+        entry: pgdumplib_models.Entry, name_override: str | None = None
     ) -> str:
         return (
             constants.PATHS[entry.desc]
@@ -631,7 +651,7 @@ class Structure:
         self.entries = entries
         self.processed = set()
 
-    def generic(self, entry: dump.Entry) -> dict:
+    def generic(self, entry: pgdumplib_models.Entry) -> dict:
         """Return a data structure for for the entry"""
         self._mark_processed(entry.dump_id)
         return {
@@ -645,7 +665,7 @@ class Structure:
             'acls': self._find_acls(entry),
         }
 
-    def operator(self, entry: dump.Entry) -> dict:
+    def operator(self, entry: pgdumplib_models.Entry) -> dict:
         """Return a data structure for for the entry"""
         self._mark_processed(entry.dump_id)
         return {
@@ -656,7 +676,7 @@ class Structure:
             'dependencies': self._resolve_dependencies(entry.dependencies),
         }
 
-    def schema(self, entry: dump.Entry) -> dict:
+    def schema(self, entry: pgdumplib_models.Entry) -> dict:
         """Return a data structure for for the entry"""
         self._mark_processed(entry.dump_id)
         return {
@@ -668,20 +688,22 @@ class Structure:
             'acls': self._find_acls(entry),
         }
 
-    def sequence(self, entry: dump.Entry) -> dict:
+    def sequence(self, entry: pgdumplib_models.Entry) -> dict:
         """Return a data structure for for the entry"""
         value = self.generic(entry)
         children = self._find_children(entry, constants.SEQUENCE_OWNED_BY)
         for child in children:
-            parsed = parse.sql(child['sql'])
-            if parsed.get('options', {}).get('name') == 'owned_by':
-                value['owned_by'] = '.'.join(parsed['options']['arg'])
+            sql = child['sql'].strip().rstrip(';').strip()
+            marker = 'OWNED BY '
+            pos = sql.upper().find(marker)
+            if pos != -1:
+                value['owned_by'] = sql[pos + len(marker) :]
             else:
                 LOGGER.error('Unsupported seq child: %r', child)
                 raise RuntimeError
         return value
 
-    def server(self, entry: dump.Entry) -> dict:
+    def server(self, entry: pgdumplib_models.Entry) -> dict:
         """Return a data structure for for the entry"""
         self._mark_processed(entry.dump_id)
         return {
@@ -694,7 +716,7 @@ class Structure:
             'acls': self._find_acls(entry),
         }
 
-    def table(self, entry: dump.Entry) -> dict:
+    def table(self, entry: pgdumplib_models.Entry) -> dict:
         """Return a data structure for for the entry"""
         self._mark_processed(entry.dump_id)
         return {
@@ -720,7 +742,7 @@ class Structure:
             'acls': self._find_acls(entry),
         }
 
-    def view(self, entry: dump.Entry) -> dict:
+    def view(self, entry: pgdumplib_models.Entry) -> dict:
         """Return a data structure for for the entry"""
         self._mark_processed(entry.dump_id)
         return {
@@ -737,7 +759,7 @@ class Structure:
             'acls': self._find_acls(entry),
         }
 
-    def _find_acls(self, parent: dump.Entry) -> list:
+    def _find_acls(self, parent: pgdumplib_models.Entry) -> list:
         acls = []
         for entry in _filter(self.entries, constants.ACL, parent.dump_id):
             if entry.tag.startswith(parent.tag):
@@ -747,7 +769,9 @@ class Structure:
                         acls.append(line.rstrip(';'))
         return acls
 
-    def _find_children(self, parent: dump.Entry, entry_type) -> list:
+    def _find_children(
+        self, parent: pgdumplib_models.Entry, entry_type
+    ) -> list:
         children = []
         parent_name = self._object_name(parent)
         ignore = {parent.desc: parent_name}
@@ -800,7 +824,7 @@ class Structure:
                 children.append(child)
         return children
 
-    def _find_column_comments(self, parent: dump.Entry) -> list:
+    def _find_column_comments(self, parent: pgdumplib_models.Entry) -> list:
         comments = []
         for entry in _filter(self.entries, constants.COMMENT, parent.dump_id):
             if entry.tag.startswith('COLUMN'):
@@ -808,7 +832,7 @@ class Structure:
                 comments.append(_prettify(entry.defn))
         return comments
 
-    def _find_comment(self, parent: dump.Entry) -> str | None:
+    def _find_comment(self, parent: pgdumplib_models.Entry) -> str | None:
         parent_name = parent.tag
         if '(' in parent_name:
             parent_name = parent_name[: parent_name.find('(')]
@@ -829,15 +853,36 @@ class Structure:
                     entry.dump_id,
                 )
                 self._mark_processed(entry.dump_id)
-                parsed = parse.sql(entry.defn)
-                return parsed['comment']
+                return _extract_comment(entry.defn)
         return None
+
+    def _mark_remaining_processed(self) -> typing.NoReturn:
+        """Mark remaining entry types that are handled implicitly.
+
+        TABLE ATTACH and INDEX ATTACH are partition management entries
+        that are part of the table DDL. ACLs without role extraction
+        are stored as raw SQL. DEFAULT ACLs, orphan COMMENTs, and
+        orphan INDEXes are marked as processed.
+
+        """
+        for entry in self.dump.entries:
+            if entry.dump_id in self.processed:
+                continue
+            if entry.desc in (
+                constants.TABLE_ATTACH,
+                constants.INDEX_ATTACH,
+                constants.DEFAULT_ACL,
+                constants.ACL,
+                constants.COMMENT,
+                constants.INDEX,
+            ):
+                self._mark_processed(entry.dump_id)
 
     def _mark_processed(self, dump_id: int) -> typing.NoReturn:
         self.processed.add(dump_id)
 
     @staticmethod
-    def _object_name(value: dump.Entry) -> str:
+    def _object_name(value: pgdumplib_models.Entry) -> str:
         if not value.namespace:
             return value.tag
         return f'{value.namespace}.{value.tag}'
