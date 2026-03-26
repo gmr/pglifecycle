@@ -40,8 +40,6 @@ def _filter(
 
     """
     for e in [e for e in entries if e.desc == desc]:
-        if e.namespace == 'pg_catalog':
-            continue
         if parent_id is not None:
             if parent_id in e.dependencies:
                 yield e
