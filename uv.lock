@@ -752,6 +752,7 @@ dev = [
     { name = "pre-commit" },
     { name = "psycopg", extra = ["binary"] },
     { name = "pytest" },
+    { name = "python-dotenv" },
     { name = "ruff" },
 ]
 docs = [
@@ -779,6 +780,7 @@ dev = [
     { name = "pre-commit" },
     { name = "psycopg", extras = ["binary"] },
     { name = "pytest" },
+    { name = "python-dotenv" },
     { name = "ruff" },
 ]
 docs = [
@@ -973,6 +975,15 @@ dependencies = [
 sdist = { url = "https://pypi.aweber.io/repository/pypi/packages/python-discovery/1.2.0/python_discovery-1.2.0.tar.gz", hash = "sha256:7d33e350704818b09e3da2bd419d37e21e7c30db6e0977bb438916e06b41b5b1" }
 wheels = [
     { url = "https://pypi.aweber.io/repository/pypi/packages/python-discovery/1.2.0/python_discovery-1.2.0-py3-none-any.whl", hash = "sha256:1e108f1bbe2ed0ef089823d28805d5ad32be8e734b86a5f212bf89b71c266e4a" },
+]
+
+[[package]]
+name = "python-dotenv"
+version = "1.2.2"
+source = { registry = "https://pypi.aweber.io/repository/pypi/simple/" }
+sdist = { url = "https://pypi.aweber.io/repository/pypi/packages/python-dotenv/1.2.2/python_dotenv-1.2.2.tar.gz", hash = "sha256:2c371a91fbd7ba082c2c1dc1f8bf89ca22564a087c2c287cd9b662adde799cf3" }
+wheels = [
+    { url = "https://pypi.aweber.io/repository/pypi/packages/python-dotenv/1.2.2/python_dotenv-1.2.2-py3-none-any.whl", hash = "sha256:1d8214789a24de455a8b8bd8ae6fe3c6b69a5e3d64aa8a8e5d68e694bbcb285a" },
 ]
 
 [[package]]
