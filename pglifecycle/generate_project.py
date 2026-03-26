@@ -14,7 +14,7 @@ import typing
 
 import arrow
 import pgdumplib
-from pgdumplib import dump
+from pgdumplib import models as pgdumplib_models
 
 from pglifecycle import common, constants, parse, pgdump, storage
 
@@ -27,8 +27,10 @@ YAML_EXTENSION = 'yaml'
 
 
 def _filter(
-    entries: list[dump.Entry], desc: str, parent_id: int | None = None
-) -> typing.Generator[dump.Entry, None, None]:
+    entries: list[pgdumplib_models.Entry],
+    desc: str,
+    parent_id: int | None = None,
+) -> typing.Generator[pgdumplib_models.Entry, None, None]:
     """Return a filtered list of the provided entries.
 
     Generator function that iterates over the entries provided and
@@ -541,7 +543,7 @@ class Generate:
 
     @staticmethod
     def _object_path(
-        entry: dump.Entry, name_override: str | None = None
+        entry: pgdumplib_models.Entry, name_override: str | None = None
     ) -> str:
         return (
             constants.PATHS[entry.desc]
@@ -631,7 +633,7 @@ class Structure:
         self.entries = entries
         self.processed = set()
 
-    def generic(self, entry: dump.Entry) -> dict:
+    def generic(self, entry: pgdumplib_models.Entry) -> dict:
         """Return a data structure for for the entry"""
         self._mark_processed(entry.dump_id)
         return {
@@ -645,7 +647,7 @@ class Structure:
             'acls': self._find_acls(entry),
         }
 
-    def operator(self, entry: dump.Entry) -> dict:
+    def operator(self, entry: pgdumplib_models.Entry) -> dict:
         """Return a data structure for for the entry"""
         self._mark_processed(entry.dump_id)
         return {
@@ -656,7 +658,7 @@ class Structure:
             'dependencies': self._resolve_dependencies(entry.dependencies),
         }
 
-    def schema(self, entry: dump.Entry) -> dict:
+    def schema(self, entry: pgdumplib_models.Entry) -> dict:
         """Return a data structure for for the entry"""
         self._mark_processed(entry.dump_id)
         return {
@@ -668,7 +670,7 @@ class Structure:
             'acls': self._find_acls(entry),
         }
 
-    def sequence(self, entry: dump.Entry) -> dict:
+    def sequence(self, entry: pgdumplib_models.Entry) -> dict:
         """Return a data structure for for the entry"""
         value = self.generic(entry)
         children = self._find_children(entry, constants.SEQUENCE_OWNED_BY)
@@ -681,7 +683,7 @@ class Structure:
                 raise RuntimeError
         return value
 
-    def server(self, entry: dump.Entry) -> dict:
+    def server(self, entry: pgdumplib_models.Entry) -> dict:
         """Return a data structure for for the entry"""
         self._mark_processed(entry.dump_id)
         return {
@@ -694,7 +696,7 @@ class Structure:
             'acls': self._find_acls(entry),
         }
 
-    def table(self, entry: dump.Entry) -> dict:
+    def table(self, entry: pgdumplib_models.Entry) -> dict:
         """Return a data structure for for the entry"""
         self._mark_processed(entry.dump_id)
         return {
@@ -720,7 +722,7 @@ class Structure:
             'acls': self._find_acls(entry),
         }
 
-    def view(self, entry: dump.Entry) -> dict:
+    def view(self, entry: pgdumplib_models.Entry) -> dict:
         """Return a data structure for for the entry"""
         self._mark_processed(entry.dump_id)
         return {
@@ -737,7 +739,7 @@ class Structure:
             'acls': self._find_acls(entry),
         }
 
-    def _find_acls(self, parent: dump.Entry) -> list:
+    def _find_acls(self, parent: pgdumplib_models.Entry) -> list:
         acls = []
         for entry in _filter(self.entries, constants.ACL, parent.dump_id):
             if entry.tag.startswith(parent.tag):
@@ -747,7 +749,9 @@ class Structure:
                         acls.append(line.rstrip(';'))
         return acls
 
-    def _find_children(self, parent: dump.Entry, entry_type) -> list:
+    def _find_children(
+        self, parent: pgdumplib_models.Entry, entry_type
+    ) -> list:
         children = []
         parent_name = self._object_name(parent)
         ignore = {parent.desc: parent_name}
@@ -800,7 +804,7 @@ class Structure:
                 children.append(child)
         return children
 
-    def _find_column_comments(self, parent: dump.Entry) -> list:
+    def _find_column_comments(self, parent: pgdumplib_models.Entry) -> list:
         comments = []
         for entry in _filter(self.entries, constants.COMMENT, parent.dump_id):
             if entry.tag.startswith('COLUMN'):
@@ -808,7 +812,7 @@ class Structure:
                 comments.append(_prettify(entry.defn))
         return comments
 
-    def _find_comment(self, parent: dump.Entry) -> str | None:
+    def _find_comment(self, parent: pgdumplib_models.Entry) -> str | None:
         parent_name = parent.tag
         if '(' in parent_name:
             parent_name = parent_name[: parent_name.find('(')]
@@ -837,7 +841,7 @@ class Structure:
         self.processed.add(dump_id)
 
     @staticmethod
-    def _object_name(value: dump.Entry) -> str:
+    def _object_name(value: pgdumplib_models.Entry) -> str:
         if not value.namespace:
             return value.tag
         return f'{value.namespace}.{value.tag}'
