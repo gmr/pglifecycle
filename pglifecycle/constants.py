@@ -509,6 +509,17 @@ class ObjectType(enum.IntEnum):
     TSTEMPLATE = 44
     TYPE = 45
     USER_MAPPING = 46
+
+    @classmethod
+    def resolve(cls, value):
+        """Resolve an ObjectType from an int or OBJECT_* string."""
+        if isinstance(value, int):
+            return cls(value)
+        if isinstance(value, str) and value.startswith('OBJECT_'):
+            name = value[7:]  # Strip 'OBJECT_' prefix
+            return cls[name]
+        return cls(value)
+
     VIEW = 47
 
 

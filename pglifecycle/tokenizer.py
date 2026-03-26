@@ -214,7 +214,7 @@ class Reformatter:
 
     def _comment_stmt(self, node: dict) -> dict:
         return {
-            'type': constants.ObjectType(node['objtype']).name,
+            'type': constants.ObjectType.resolve(node['objtype']).name,
             'name': '.'.join(self.reformat(node['object'])),
             'comment': node['comment'],
         }
@@ -644,10 +644,13 @@ class Reformatter:
         return name
 
     def _rename_stmt(self, node: dict) -> dict:
-        if node['renameType'] == constants.ObjectType.COLUMN:
+        if (
+            constants.ObjectType.resolve(node['renameType'])
+            == constants.ObjectType.COLUMN
+        ):
             return {
                 'stmt_type': 'ALTER {}'.format(
-                    constants.ObjectType(node['relationType']).name
+                    constants.ObjectType.resolve(node['relationType']).name
                 ),
                 'relation': self.reformat(node['relation']),
                 'commands': [
@@ -658,10 +661,13 @@ class Reformatter:
                     }
                 ],
             }
-        elif node['renameType'] == constants.ObjectType.TABLE:
+        elif (
+            constants.ObjectType.resolve(node['renameType'])
+            == constants.ObjectType.TABLE
+        ):
             return {
                 'stmt_type': 'RENAME {}'.format(
-                    constants.ObjectType(node['renameType']).name
+                    constants.ObjectType.resolve(node['renameType']).name
                 ),
                 'old_name': self.reformat(node['relation']),
                 'new_name': node['newname'],
@@ -670,7 +676,7 @@ class Reformatter:
             }
         return {
             'stmt_type': 'RENAME {}'.format(
-                constants.ObjectType(node['renameType']).name
+                constants.ObjectType.resolve(node['renameType']).name
             ),
             'old_name': node['subname'],
             'new_name': node['newname'],
