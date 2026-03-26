@@ -26,6 +26,8 @@ class Reformatter:
     ) -> dict | int | list | str | None:
         """Reformat the node to generate a pgpretty data structure"""
         if isinstance(node, dict):
+            if 'relname' in node:
+                return self._relation(node)
             for key in node.keys():
                 name = f'_{stringcase.snakecase(key)}'
                 LOGGER.debug('%s(%r)', name, node)
