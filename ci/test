@@ -6,11 +6,11 @@ set -e
 echo '
 LINTING
 '
-pre-commit run --all-files
+uv run pre-commit run --all-files
 
 echo '
 RUNNING TESTS
 '
-coverage run
-coverage report
-coverage xml
+uv run coverage run
+uv run coverage report
+uv run coverage xml

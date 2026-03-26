@@ -23,8 +23,6 @@ fi
 
 unset PYTHONDEBUG
 export COMPOSE_DISABLE_ENV_FILE=1
-export PIP_DISABLE_PIP_VERSION_CHECK=1
-export PYTHON_ROOT_USER_ACTION=ignore
 export PYTHONWARNINGS=ignore
 
 TEST_HOST=${TEST_HOST:-127.0.0.1}
@@ -54,34 +52,21 @@ get_exposed_port() {
 	fi
 }
 
-if test "$CI" != 'true'
-then
-	if test -e ./.venv/bin/activate
-	then
-		. ./.venv/bin/activate
-	else
-		python3 -m venv --upgrade-deps .venv
-		. ./.venv/bin/activate
-	fi
-fi
-
 mkdir -p build build/data
 
-pip install --upgrade pip
-
 printf 'Installing package...'
-pip install -e '.[dev]'
+uv sync
 echo ' done.'
 
-if test -d .git && test -f .pre-commit-config.yaml
+if test "$CI" != 'true'
 then
-	printf 'Installing pre-commit hook...'
-	pre-commit install --install-hooks
-	echo ' done.'
-fi
+	if test -d .git && test -f .pre-commit-config.yaml
+	then
+		printf 'Installing pre-commit hook...'
+		uv run pre-commit install --install-hooks
+		echo ' done.'
+	fi
 
-if test "${CI}" != 'true'
-then
 	printf 'Cleaning environment...'
 	docker compose down --remove-orphans --volumes
 	echo ' done.'
@@ -134,9 +119,9 @@ echo ' done.'
 printf "Generating fixture data ... "
 if test "${CI}" = 'true'
 then
-	PGPASSWORD=postgres python bin/generate-fixture-data.py -U postgres -h localhost -p 5432 -d postgres
+	PGPASSWORD=postgres uv run python bin/generate-fixture-data.py -U postgres -h localhost -p 5432 -d postgres
 else
-	python bin/generate-fixture-data.py -U postgres -h "${TEST_HOST}" -p "${PGPORT}" -d postgres
+	uv run python bin/generate-fixture-data.py -U postgres -h "${TEST_HOST}" -p "${PGPORT}" -d postgres
 fi
 echo ' done.'
 

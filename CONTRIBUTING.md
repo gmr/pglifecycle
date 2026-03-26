@@ -3,14 +3,11 @@
 To get setup in the environment and run the tests, take the following steps:
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e '.[dev]'
-pre-commit install
-
-pytest
-ruff check .
-ruff format --check .
+uv sync
+uv run pre-commit install
+uv run ruff check .
+uv run ruff format --check .
+uv run pytest
 ```
 
 ## Test Coverage
