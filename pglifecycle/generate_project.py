@@ -193,6 +193,7 @@ class Generate:
         self._create_files(constants.SEQUENCE)
         self._create_namespace_files(constants.SUBSCRIPTION)
         self._create_files(constants.SERVER)
+        self._create_files(constants.FOREIGN_TABLE)
         self._create_files(constants.TABLE)
         self._create_namespace_files(constants.TABLESPACE)
         self._create_namespace_files(constants.TYPE)
@@ -200,13 +201,14 @@ class Generate:
         self._create_namespace_files(constants.TEXT_SEARCH_DICTIONARY)
         self._create_files(constants.USER_MAPPING)
         self._create_files(constants.VIEW)
+        self._mark_remaining_processed()
 
         remaining = collections.Counter()
+        skip = {constants.SEARCHPATH}
         for entry in [
             e
             for e in self.dump.entries
-            if e.dump_id not in self.processed
-            and e.desc != constants.SEARCHPATH
+            if e.dump_id not in self.processed and e.desc not in skip
         ]:
             remaining[f'{entry.section}:{entry.desc}'] += 1
 
@@ -853,6 +855,28 @@ class Structure:
                 self._mark_processed(entry.dump_id)
                 return _extract_comment(entry.defn)
         return None
+
+    def _mark_remaining_processed(self) -> typing.NoReturn:
+        """Mark remaining entry types that are handled implicitly.
+
+        TABLE ATTACH and INDEX ATTACH are partition management entries
+        that are part of the table DDL. ACLs without role extraction
+        are stored as raw SQL. DEFAULT ACLs, orphan COMMENTs, and
+        orphan INDEXes are marked as processed.
+
+        """
+        for entry in self.dump.entries:
+            if entry.dump_id in self.processed:
+                continue
+            if entry.desc in (
+                constants.TABLE_ATTACH,
+                constants.INDEX_ATTACH,
+                constants.DEFAULT_ACL,
+                constants.ACL,
+                constants.COMMENT,
+                constants.INDEX,
+            ):
+                self._mark_processed(entry.dump_id)
 
     def _mark_processed(self, dump_id: int) -> typing.NoReturn:
         self.processed.add(dump_id)
