@@ -6,7 +6,11 @@
 //! `ConstraintElem`, ...) and carry no named fields — extraction walks
 //! the tree by kind via the [`NodeExt`] helpers.
 
+mod function;
+mod object;
 mod table;
+mod trigger;
+mod view;
 
 use tree_sitter::Node;
 
@@ -26,6 +30,26 @@ pub enum Statement {
         table: QualifiedName,
         name: Option<String>,
         constraint: TableConstraint,
+    },
+    CreateSchema(models::Schema),
+    CreateDomain(models::Domain),
+    CreateType(Box<models::Type>),
+    CreateSequence(models::Sequence),
+    /// ALTER SEQUENCE — only the options present in the statement are
+    /// set; the assembly merges them into the owning sequence
+    AlterSequence(models::Sequence),
+    CreateView(models::View),
+    CreateMaterializedView(models::MaterializedView),
+    CreateFunction(Box<models::Function>),
+    CreateTrigger {
+        table: QualifiedName,
+        trigger: models::Trigger,
+    },
+    /// COMMENT ON `on` `target` IS `comment`
+    Comment {
+        on: String,
+        target: QualifiedName,
+        comment: String,
     },
     /// Parsed successfully but not (yet) a supported statement type
     Unsupported(String),
@@ -97,11 +121,58 @@ fn dispatch(node: &Node, src: &str) -> Result<Vec<Statement>, String> {
         "CreateStmt" => Ok(vec![table::create_table(node, src)?]),
         "IndexStmt" => Ok(vec![table::create_index(node, src)?]),
         "AlterTableStmt" => table::alter_table(node, src),
+        "CreateSchemaStmt" => Ok(vec![object::create_schema(node, src)?]),
+        "CreateDomainStmt" => Ok(vec![object::create_domain(node, src)?]),
+        "DefineStmt" if node.has("kw_type") => {
+            Ok(vec![object::create_type(node, src)?])
+        }
+        "CreateSeqStmt" | "AlterSeqStmt" => {
+            Ok(vec![object::create_sequence(node, src)?])
+        }
+        "ViewStmt" => Ok(vec![view::create_view(node, src)?]),
+        "CreateMatViewStmt" => {
+            Ok(vec![view::create_materialized_view(node, src)?])
+        }
+        "CreateFunctionStmt" => {
+            Ok(vec![function::create_function(node, src)?])
+        }
+        "CreateTrigStmt" => Ok(vec![trigger::create_trigger(node, src)?]),
+        "CommentStmt" => Ok(vec![object::comment(node, src)?]),
         other => Ok(vec![Statement::Unsupported(other.to_string())]),
     }
 }
 
-fn truncate(value: &str, len: usize) -> &str {
+/// Extract a possibly-qualified name from an `any_name` / `func_name`
+/// node (ColId head + attrs); multi-part names keep everything before
+/// the final part as the schema
+pub(crate) fn any_name(node: &Node, src: &str) -> QualifiedName {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(head) = node
+        .child_of_kind("ColId")
+        .or_else(|| node.child_of_kind("type_function_name"))
+    {
+        parts.push(unquote(head.text(src)));
+    }
+    for attr in node.find_all("attr_name") {
+        parts.push(unquote(attr.text(src)));
+    }
+    match parts.len() {
+        0 => QualifiedName::default(),
+        1 => QualifiedName {
+            schema: None,
+            name: parts.remove(0),
+        },
+        _ => {
+            let name = parts.pop().unwrap_or_default();
+            QualifiedName {
+                schema: Some(parts.join(".")),
+                name,
+            }
+        }
+    }
+}
+
+pub(crate) fn truncate(value: &str, len: usize) -> &str {
     match value.char_indices().nth(len) {
         Some((offset, _)) => &value[..offset],
         None => value,
