@@ -86,18 +86,18 @@ impl Parser {
             let Some(node) = stmt.named_child(0) else {
                 continue;
             };
-            statements.push(dispatch(&node, sql)?);
+            statements.extend(dispatch(&node, sql)?);
         }
         Ok(statements)
     }
 }
 
-fn dispatch(node: &Node, src: &str) -> Result<Statement, String> {
+fn dispatch(node: &Node, src: &str) -> Result<Vec<Statement>, String> {
     match node.kind() {
-        "CreateStmt" => table::create_table(node, src),
-        "IndexStmt" => table::create_index(node, src),
+        "CreateStmt" => Ok(vec![table::create_table(node, src)?]),
+        "IndexStmt" => Ok(vec![table::create_index(node, src)?]),
         "AlterTableStmt" => table::alter_table(node, src),
-        other => Ok(Statement::Unsupported(other.to_string())),
+        other => Ok(vec![Statement::Unsupported(other.to_string())]),
     }
 }
 
@@ -174,12 +174,20 @@ fn collect<'tree>(
 }
 
 /// Extract (schema, name) from a `qualified_name` node
-pub(crate) fn qualified_name(node: &Node, src: &str) -> QualifiedName {
+pub(crate) fn qualified_name(
+    node: &Node,
+    src: &str,
+) -> Result<QualifiedName, String> {
     let head = node
         .child_of_kind("ColId")
         .map(|n| unquote(n.text(src)))
-        .unwrap_or_default();
-    match node.find("attr_name") {
+        .ok_or_else(|| {
+            format!(
+                "qualified_name missing ColId: {}",
+                truncate(node.text(src), 80)
+            )
+        })?;
+    Ok(match node.find("attr_name") {
         Some(attr) => QualifiedName {
             schema: Some(head),
             name: unquote(attr.text(src)),
@@ -188,7 +196,7 @@ pub(crate) fn qualified_name(node: &Node, src: &str) -> QualifiedName {
             schema: None,
             name: head,
         },
-    }
+    })
 }
 
 /// Strip identifier quoting: `"Name"` → `Name`, `""` escapes collapse

@@ -17,8 +17,8 @@ pub(crate) fn create_table(
 ) -> Result<Statement, String> {
     let name = node
         .find("qualified_name")
-        .map(|n| qualified_name(&n, src))
         .ok_or_else(|| String::from("CREATE TABLE without a name"))?;
+    let name = qualified_name(&name, src)?;
     let mut table = Table {
         name: name.name,
         schema: name.schema.unwrap_or_default(),
@@ -133,8 +133,8 @@ pub(crate) fn create_index(
     let table = node
         .find("relation_expr")
         .and_then(|n| n.find("qualified_name"))
-        .map(|n| qualified_name(&n, src))
         .ok_or_else(|| String::from("CREATE INDEX without a relation"))?;
+    let table = qualified_name(&table, src)?;
     let name = node
         .child_of_kind("opt_single_name")
         .map(|n| unquote(n.text(src)))
@@ -206,16 +206,18 @@ fn direction(node: &Node) -> Option<String> {
         .map(|n| if n.has("kw_desc") { "DESC" } else { "ASC" }.to_string())
 }
 
-/// ALTER TABLE ... ADD CONSTRAINT (other forms → Unsupported)
+/// ALTER TABLE ... ADD CONSTRAINT, one statement per command
+/// (other forms → Unsupported)
 pub(crate) fn alter_table(
     node: &Node,
     src: &str,
-) -> Result<Statement, String> {
+) -> Result<Vec<Statement>, String> {
     let table = node
         .find("relation_expr")
         .and_then(|n| n.find("qualified_name"))
-        .map(|n| qualified_name(&n, src))
         .ok_or_else(|| String::from("ALTER TABLE without a relation"))?;
+    let table = qualified_name(&table, src)?;
+    let mut statements = Vec::new();
     for cmd in node.find_all("alter_table_cmd") {
         if !cmd.has("kw_add") {
             continue;
@@ -224,16 +226,19 @@ pub(crate) fn alter_table(
             continue;
         };
         let (name, parsed) = table_constraint(&constraint, src)?;
-        return Ok(Statement::AddConstraint {
-            table,
+        statements.push(Statement::AddConstraint {
+            table: table.clone(),
             name,
             constraint: parsed,
         });
     }
-    Ok(Statement::Unsupported(format!(
-        "ALTER TABLE {table}: {}",
-        crate::ddl::truncate(node.text(src), 80)
-    )))
+    if statements.is_empty() {
+        statements.push(Statement::Unsupported(format!(
+            "ALTER TABLE {table}: {}",
+            crate::ddl::truncate(node.text(src), 80)
+        )));
+    }
+    Ok(statements)
 }
 
 /// Parse a TableConstraint node into (name, constraint)
@@ -310,8 +315,8 @@ fn foreign_key(
     let columns = column_list(elem, src);
     let references = elem
         .find("qualified_name")
-        .map(|n| qualified_name(&n, src))
         .ok_or_else(|| String::from("FOREIGN KEY without a reference"))?;
+    let references = qualified_name(&references, src)?;
     let ref_columns: Vec<String> = elem
         .child_of_kind("opt_column_and_period_list")
         .map(|n| {
@@ -565,6 +570,26 @@ mod tests {
         assert_eq!(fk.references.columns, vec!["id"]);
         assert_eq!(fk.on_delete, Some("CASCADE".into()));
         assert_eq!(fk.on_update, Some("CASCADE".into()));
+    }
+
+    #[test]
+    fn parses_alter_table_multiple_constraints() {
+        let mut parser = Parser::new().unwrap();
+        let statements = parser
+            .parse(
+                "ALTER TABLE t ADD CONSTRAINT positive CHECK (value > 0), \
+                 ADD CONSTRAINT t_value_key UNIQUE (value);",
+            )
+            .unwrap();
+        assert_eq!(statements.len(), 2);
+        let Statement::AddConstraint { name, .. } = &statements[0] else {
+            panic!("expected AddConstraint, got {:?}", statements[0])
+        };
+        assert_eq!(name.as_deref(), Some("positive"));
+        let Statement::AddConstraint { name, .. } = &statements[1] else {
+            panic!("expected AddConstraint, got {:?}", statements[1])
+        };
+        assert_eq!(name.as_deref(), Some("t_value_key"));
     }
 
     #[test]

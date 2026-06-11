@@ -8,8 +8,9 @@ selected pieces of [postgres-lsp](https://crates.io/crates/postgres-lsp-parse).
 
 ## Goals
 
-- Functional parity with the Python tool: `create`, `build`, and `generate`
-  commands operating on the same YAML project layout.
+- Functional parity with the Python tool: `create`, `build`, and `pull`
+  (which replaces the Python `generate`; see Phase 3) commands operating
+  on the same YAML project layout.
 - Two new capabilities beyond parity (see New Capabilities below):
   database-to-repo updates of an existing project (`pull`), and
   repo-to-database schema synchronization (`deploy`).
