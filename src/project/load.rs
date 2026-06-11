@@ -405,10 +405,10 @@ fn object_name(defn: &Value) -> Result<String, String> {
 
 /// Set a string key on a mapping unless it is already present
 fn inject(defn: &mut Value, key: &str, value: &str) {
-    if let Value::Object(map) = defn {
-        if !map.contains_key(key) {
-            map.insert(key.to_string(), Value::String(value.to_string()));
-        }
+    if let Value::Object(map) = defn
+        && !map.contains_key(key)
+    {
+        map.insert(key.to_string(), Value::String(value.to_string()));
     }
 }
 
