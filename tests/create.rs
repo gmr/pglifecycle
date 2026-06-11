@@ -13,8 +13,8 @@ fn run_create(dest: &Path, extra: &[&str]) -> std::process::Output {
 
 #[test]
 fn creates_skeleton_project() {
-    let tmp = std::env::temp_dir().join("pglc-test-create");
-    let _ = fs::remove_dir_all(&tmp);
+    let parent = tempfile::tempdir().unwrap();
+    let tmp = parent.path().join("pglc-test-create");
     let output = run_create(&tmp, &[]);
     assert!(output.status.success());
     for subdir in ["tables", "functions", "schemata", "views", "dml"] {
@@ -27,25 +27,23 @@ fn creates_skeleton_project() {
         "---\nname: pglc-test-create\nencoding: UTF-8\n\
          stdstrings: true\nsuperuser: postgres\n"
     );
-    let _ = fs::remove_dir_all(&tmp);
 }
 
 #[test]
 fn refuses_existing_destination_without_force() {
-    let tmp = std::env::temp_dir().join("pglc-test-create-exists");
-    let _ = fs::remove_dir_all(&tmp);
+    let parent = tempfile::tempdir().unwrap();
+    let tmp = parent.path().join("pglc-test-create-exists");
     fs::create_dir_all(&tmp).unwrap();
     let output = run_create(&tmp, &[]);
     assert!(!output.status.success());
     let output = run_create(&tmp, &["--force"]);
     assert!(output.status.success());
-    let _ = fs::remove_dir_all(&tmp);
 }
 
 #[test]
 fn create_honors_options() {
-    let tmp = std::env::temp_dir().join("pglc-test-create-opts");
-    let _ = fs::remove_dir_all(&tmp);
+    let parent = tempfile::tempdir().unwrap();
+    let tmp = parent.path().join("pglc-test-create-opts");
     let output = run_create(
         &tmp,
         &[
@@ -67,5 +65,4 @@ fn create_honors_options() {
         "---\nname: example\nencoding: LATIN1\n\
          stdstrings: false\nsuperuser: admin\n"
     );
-    let _ = fs::remove_dir_all(&tmp);
 }

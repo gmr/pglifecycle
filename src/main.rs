@@ -27,7 +27,7 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
             eprintln!("error: {message}");
-            ExitCode::from(4)
+            ExitCode::FAILURE
         }
     }
 }
@@ -43,14 +43,21 @@ fn configure_logging(args: &cli::Cli) {
     let config = simplelog::Config::default();
     if let Some(path) = &args.log_file {
         if let Ok(handle) = std::fs::File::create(path) {
-            let _ = simplelog::WriteLogger::init(level, config, handle);
+            if let Err(err) =
+                simplelog::WriteLogger::init(level, config, handle)
+            {
+                eprintln!("warning: failed to initialize file logging: {err}");
+            }
             return;
         }
+        eprintln!("warning: failed to create log file {}", path.display());
     }
-    let _ = simplelog::TermLogger::init(
+    if let Err(err) = simplelog::TermLogger::init(
         level,
         config,
         simplelog::TerminalMode::Stdout,
         simplelog::ColorChoice::Auto,
-    );
+    ) {
+        eprintln!("warning: failed to initialize terminal logging: {err}");
+    }
 }
