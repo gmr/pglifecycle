@@ -3,6 +3,7 @@
 .idea
 .venv
 .vscode
-build/
+/build/
 site/
-target/
+/target/
+!/src/build/

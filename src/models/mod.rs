@@ -93,6 +93,68 @@ impl Definition {
         }
     }
 
+    /// The owning role, where the type has one
+    pub fn owner(&self) -> Option<&str> {
+        match self {
+            Definition::Aggregate(d) => Some(&d.owner),
+            Definition::Cast(d) => Some(&d.owner),
+            Definition::Collation(d) => Some(&d.owner),
+            Definition::Conversion(d) => Some(&d.owner),
+            Definition::Domain(d) => Some(&d.owner),
+            Definition::ForeignDataWrapper(d) => Some(&d.owner),
+            Definition::Function(d) => Some(&d.owner),
+            Definition::MaterializedView(d) => Some(&d.owner),
+            Definition::Operator(d) => Some(&d.owner),
+            Definition::Schema(d) => Some(&d.owner),
+            Definition::Sequence(d) => Some(&d.owner),
+            Definition::Table(d) => Some(&d.owner),
+            Definition::Tablespace(d) => Some(&d.owner),
+            Definition::Type(d) => Some(&d.owner),
+            Definition::View(d) => Some(&d.owner),
+            _ => None,
+        }
+    }
+
+    /// The object comment, where the type has one
+    pub fn comment(&self) -> Option<&str> {
+        match self {
+            Definition::Aggregate(d) => d.comment.as_deref(),
+            Definition::Cast(d) => d.comment.as_deref(),
+            Definition::Collation(d) => d.comment.as_deref(),
+            Definition::Conversion(d) => d.comment.as_deref(),
+            Definition::Domain(d) => d.comment.as_deref(),
+            Definition::EventTrigger(d) => d.comment.as_deref(),
+            Definition::Extension(d) => d.comment.as_deref(),
+            Definition::ForeignDataWrapper(d) => d.comment.as_deref(),
+            Definition::Function(d) => d.comment.as_deref(),
+            Definition::Group(d) => d.comment.as_deref(),
+            Definition::Language(d) => d.comment.as_deref(),
+            Definition::MaterializedView(d) => d.comment.as_deref(),
+            Definition::Operator(d) => d.comment.as_deref(),
+            Definition::Publication(d) => d.comment.as_deref(),
+            Definition::Role(d) => d.comment.as_deref(),
+            Definition::Schema(d) => d.comment.as_deref(),
+            Definition::Sequence(d) => d.comment.as_deref(),
+            Definition::Server(d) => d.comment.as_deref(),
+            Definition::Subscription(d) => d.comment.as_deref(),
+            Definition::Table(d) => d.comment.as_deref(),
+            Definition::Tablespace(d) => d.comment.as_deref(),
+            Definition::Type(d) => d.comment.as_deref(),
+            Definition::User(d) => d.comment.as_deref(),
+            Definition::View(d) => d.comment.as_deref(),
+            Definition::TextSearch(_) | Definition::UserMapping(_) => None,
+        }
+    }
+
+    /// The tablespace assignment, where the type has one
+    pub fn tablespace(&self) -> Option<&str> {
+        match self {
+            Definition::MaterializedView(d) => d.tablespace.as_deref(),
+            Definition::Table(d) => d.tablespace.as_deref(),
+            _ => None,
+        }
+    }
+
     /// The schema the object belongs to, where the type has one
     pub fn schema(&self) -> Option<&str> {
         match self {

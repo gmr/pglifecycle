@@ -47,7 +47,7 @@ selected pieces of [postgres-lsp](https://crates.io/crates/postgres-lsp-parse).
 | — (new capability) | SQL/PL-pgSQL formatting for clean YAML diffs | **libpgfmt 1.1** — format view queries and function bodies during `generate` |
 | ruamel.yaml | YAML I/O with literal block scalars | serde + a YAML emitter with scalar-style control (see Risks) |
 | jsonschema | Validate YAML objects against `schemata/*.yml` | **jsonschema** crate (Stranger6667) — validate via `serde_json::Value` |
-| toposort | Build-order linearization | **petgraph** for the project-level graph; libpgdump also re-sorts entries on `save()` as a backstop |
+| toposort | Build-order linearization | **libpgdump's weighted topological sort** (the pg_dump_sort.c port run by `save()`) — inventory dependency edges are recorded on the archive entries and ordering is delegated entirely to it; no petgraph |
 | argparse | CLI | **clap** (derive) |
 | pg_dump subprocess (`pgdump.py`) | Extract schema from live database | unchanged — `std::process::Command` wrapping `pg_dump -Fc` |
 | stringcase, arrow, python-dotenv, faker | Misc / dev-only | heck (case conversion); the rest are fixture-generation only and stay in `bin/` as-is |
@@ -103,7 +103,6 @@ src/
 ├── project/           # load, validate, dependency graph (project.py)
 │   ├── load.rs        #   YAML walk in _READ_ORDER
 │   ├── validate.rs    #   jsonschema against schemata/*.yml (validation.py)
-│   └── graph.rs       #   petgraph toposort (replaces toposort)
 ├── build/             # project → libpgdump archive (dump.py, 1,555 lines)
 │   ├── mod.rs         #   per-object SQL rendering
 │   └── acls.rs        #   GRANT/REVOKE generation
@@ -169,8 +168,9 @@ in both but differs.
 
 - **Pipeline:** load + validate the repo (the `build` front half) → snapshot
   the live database into the same models (the `pull` front half) → `diff` →
-  render an ordered DDL script. Creates are ordered by the petgraph
-  toposort; drops in reverse topological order.
+  render an ordered DDL script. Creates are ordered by libpgdump's
+  weighted toposort over the dependency edges; drops in reverse
+  topological order.
 - **Output first, execution second.** Default is a plan: the SQL script on
   stdout (or `-o FILE`) plus a human-readable summary. `--apply` executes
   it, wrapped in a single transaction (PostgreSQL DDL is transactional;
@@ -212,8 +212,9 @@ ships something testable against the Python implementation.
   byte-diff — see Risks).
 
 ### Phase 2 — `build`
-- Dependency caching/application, petgraph toposort, per-object SQL
-  rendering, ACLs, comments; emit via `libpgdump::new()` + `add_entry()`.
+- Dependency caching/application, per-object SQL rendering, ACLs,
+  comments; emit via `libpgdump::new()` + `add_entry()`, recording
+  dependency edges so libpgdump's weighted toposort orders the archive.
 - This ports `dump.py`, the largest and highest-complexity module.
 - **Gate (parity):** build `test-project/` with both implementations;
   compare archives entry-by-entry (`libpgdump::load` both, diff
