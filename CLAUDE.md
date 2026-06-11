@@ -1,42 +1,36 @@
 # pglifecycle
 
-A PostgreSQL schema management tool.
+A PostgreSQL schema management tool, being rewritten in Rust. See PLAN.md
+for the rewrite plan and phase gates.
 
 ## Development
 
 ```bash
-uv sync              # Install dependencies
-./bootstrap          # Full setup: deps, docker, fixtures
-ci/test              # Run linting + tests with coverage
+cargo build          # Build the binary
+cargo test           # Run tests
+cargo fmt            # Format (max_width 79, see rustfmt.toml)
+cargo clippy --all-targets -- -D warnings
 ```
 
-## Build System
+The Python implementation this replaces lives on `main`; reference it via:
 
-- **pyproject.toml** with hatchling build backend
-- **hatch-vcs** for version management from git tags
-- **uv** for dependency management
-- **dependency-groups** for dev/docs extras
+```bash
+git clone --depth 1 --branch main https://github.com/gmr/pglifecycle /tmp/pglifecycle-py
+```
+
+It is the parity oracle until the round-trip gates in PLAN.md pass.
 
 ## Testing
 
-- **pytest** as the test runner
-- **coverage** for code coverage reporting
-- Tests live in `tests/`
-- Integration tests require PostgreSQL (via Docker Compose)
-
-## Code Style
-
-- **ruff** for linting and formatting
-- 79 character line length
-- Single quotes
-- Pre-commit hooks configured
+- Integration tests live in `tests/`
+- Round-trip tests require PostgreSQL (via Docker Compose)
+- `fixtures/` holds the test database schema
 
 ## Key Directories
 
-- `pglifecycle/` - Main package
-- `pglifecycle/schemata/` - YAML schema definitions for PostgreSQL objects
-- `tests/` - Test suite
+- `src/` - Rust sources (module map in PLAN.md)
+- `schemata/` - JSON-Schema (YAML) definitions for PostgreSQL objects —
+  the on-disk project contract, carried over from Python unchanged
+- `test-project/` - Example project structure (parity contract)
 - `fixtures/` - Test database schema
 - `bin/` - Utility scripts (fixture data generation)
-- `test-project/` - Example project structure
-- `ci/` - CI scripts
