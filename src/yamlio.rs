@@ -205,6 +205,16 @@ mod tests {
     }
 
     #[test]
+    fn preserves_multiple_trailing_newlines() {
+        for body in ["text\n\n", "text\n\n\n"] {
+            let value = json!({ "body": body });
+            let emitted = dump(&value);
+            assert!(emitted.contains("|+"));
+            assert_eq!(load_str(&emitted).unwrap(), value);
+        }
+    }
+
+    #[test]
     fn quotes_ambiguous_scalars() {
         let value = json!({
             "a": "true", "b": "123", "c": "===", "d": "with: colon",
