@@ -40,21 +40,24 @@ fn configure_logging(args: &cli::Cli) {
     } else {
         log::LevelFilter::Warn
     };
-    let config = simplelog::Config::default();
     if let Some(path) = &args.log_file {
         if let Ok(handle) = std::fs::File::create(path) {
-            if let Err(err) =
-                simplelog::WriteLogger::init(level, config, handle)
-            {
+            if let Err(err) = simplelog::WriteLogger::init(
+                level,
+                simplelog::Config::default(),
+                handle,
+            ) {
                 eprintln!("warning: failed to initialize file logging: {err}");
+            } else {
+                return;
             }
-            return;
+        } else {
+            eprintln!("warning: failed to create log file {}", path.display());
         }
-        eprintln!("warning: failed to create log file {}", path.display());
     }
     if let Err(err) = simplelog::TermLogger::init(
         level,
-        config,
+        simplelog::Config::default(),
         simplelog::TerminalMode::Stdout,
         simplelog::ColorChoice::Auto,
     ) {
