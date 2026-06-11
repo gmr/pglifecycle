@@ -1,0 +1,17 @@
+[package]
+name = "pglifecycle"
+version = "2.0.0-alpha.0"
+edition = "2024"
+description = "PostgreSQL schema management tool"
+license = "BSD-3-Clause"
+repository = "https://github.com/gmr/pglifecycle"
+rust-version = "1.85"
+
+[dependencies]
+clap = { version = "4", features = ["derive", "env"] }
+log = "0.4"
+simplelog = "0.12"
+
+[profile.release]
+lto = true
+strip = true
