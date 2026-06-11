@@ -8,8 +8,9 @@ selected pieces of [postgres-lsp](https://crates.io/crates/postgres-lsp-parse).
 
 ## Goals
 
-- Functional parity with the Python tool: `create`, `build`, and `generate`
-  commands operating on the same YAML project layout.
+- Functional parity with the Python tool: `create`, `build`, and `pull`
+  (which replaces the Python `generate`; see Phase 3) commands operating
+  on the same YAML project layout.
 - Two new capabilities beyond parity (see New Capabilities below):
   database-to-repo updates of an existing project (`pull`), and
   repo-to-database schema synchronization (`deploy`).
@@ -225,17 +226,27 @@ ships something testable against the Python implementation.
 
 ### Phase 3 — `pull` (bootstrap mode; replaces `generate`)
 - Parse `pg_dump -Fc` with libpgdump, classify entries, extract structure
-  from DDL via the `ddl` module, write the YAML project. Use libpgfmt
-  (AWeber style) for view queries and function bodies. Port `--extract-roles`
-  (pg_dumpall subprocess) and the ignore/remaining-yaml options. The
-  command ships as `pull` (see New Capabilities); semantics in this phase
-  match Python `generate --extract` exactly.
-- This ports `generate_dump.py` + `generate_project.py` + `tokenizer.py` —
-  the bulk of the remaining work.
+  from DDL via the `ddl` module, and write the YAML project **in the
+  structured format** (the test-project/ shape: columns, constraints,
+  indexes as data — not raw SQL). Use libpgfmt (AWeber style) for view
+  queries and function bodies. Port `--extract-roles` (pg_dumpall
+  subprocess) and the ignore/remaining-yaml options. The command ships as
+  `pull` (see New Capabilities).
+- **Decision (2026-06-11):** the Python `generate` emitted sql-passthrough
+  YAML (raw DDL in `sql:` keys, children as nested sql entries). That
+  output violates the schemata contract (`additionalProperties: false`)
+  and cannot be loaded by `project.load` in either implementation — the
+  Python round-trip never worked end-to-end, and `generate` on main
+  crashes outright (`_mark_remaining_processed` lives on the wrong
+  class). Output parity with Python `generate` is therefore dropped as a
+  gate; the structured format honors the schemata contract and gives
+  Phases 5–6 the model-level data the `diff` module requires.
+- This replaces `generate_project.py` + `tokenizer.py`; lands as several
+  PRs (the `ddl` module per statement family, then pgdump.rs + the pull
+  assembly).
 - **Gate (round-trip):** `fixtures/schema.sql` → Docker pg → `pg_dump` →
-  Rust `generate` → Rust `build` → `pg_restore` → re-dump → schema diff is
-  empty. Also: Rust `generate` output vs Python `generate` output on the
-  same dump (semantic YAML diff).
+  Rust `pull` → load + validate against the schemata → Rust `build` →
+  `pg_restore` → re-dump → schema diff is empty.
 
 ### Phase 4 — Cutover
 - Port docs (mkdocs → keep, or switch to README + docs.rs), release
