@@ -16,7 +16,10 @@ fn main() {
         let Some(defn) = entry.defn.as_deref() else {
             continue;
         };
-        if defn.trim().is_empty() || defn.starts_with("SET ") {
+        let trimmed = defn.trim();
+        if trimmed.is_empty()
+            || trimmed.to_ascii_uppercase().starts_with("SET ")
+        {
             continue;
         }
         match parser.parse(defn) {

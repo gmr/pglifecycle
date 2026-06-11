@@ -221,7 +221,11 @@ pub(crate) fn create_type(
                 }
                 "element" => value.element = Some(arg),
                 "delimiter" => value.delimiter = Some(unstring(&arg)),
-                "collatable" => value.collatable = Some(true),
+                "collatable" => {
+                    value.collatable = Some(
+                        arg.is_empty() || arg.eq_ignore_ascii_case("true"),
+                    );
+                }
                 _ => {
                     log::warn!(
                         "Unsupported base type option {key:?} for {}",

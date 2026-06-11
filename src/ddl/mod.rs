@@ -157,7 +157,14 @@ pub(crate) fn any_name(node: &Node, src: &str) -> QualifiedName {
         parts.push(unquote(attr.text(src)));
     }
     match parts.len() {
-        0 => QualifiedName::default(),
+        0 => {
+            log::warn!(
+                "No name parts found in {} node: {:?}",
+                node.kind(),
+                truncate(node.text(src), 64)
+            );
+            QualifiedName::default()
+        }
         1 => QualifiedName {
             schema: None,
             name: parts.remove(0),
