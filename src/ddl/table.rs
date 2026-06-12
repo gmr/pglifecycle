@@ -624,7 +624,7 @@ mod tests {
 
     #[test]
     fn other_statements_are_unsupported() {
-        let statement = parse_one("CREATE VIEW v AS SELECT 1;");
+        let statement = parse_one("GRANT USAGE ON SCHEMA test TO PUBLIC;");
         assert!(matches!(statement, Statement::Unsupported(_)));
     }
 }
