@@ -1,4 +1,4 @@
-#!/usr/bin/env sh
+#!/usr/bin/env bash
 # Phase 3 round-trip gate (PLAN.md):
 #
 #   fixtures/schema.sql -> PostgreSQL -> pg_dump -Fc -> pull ->
@@ -9,7 +9,7 @@
 # compose.yaml container; override with PGHOST/PGPORT/PGUSER) and the
 # postgres client tools on PATH. All commands run via psql/pg_dump
 # against two scratch databases that are dropped and recreated.
-set -eu
+set -euo pipefail
 
 PGHOST="${PGHOST:-localhost}"
 PGPORT="${PGPORT:-5432}"
@@ -19,7 +19,7 @@ export PGHOST PGPORT PGUSER
 SOURCE_DB=roundtrip_source
 RESTORED_DB=roundtrip_restored
 WORKDIR="$(mktemp -d)"
-trap 'rm -rf "$WORKDIR"' EXIT
+trap 'rm -rf "$WORKDIR"' EXIT INT TERM
 
 echo "==> Building pglifecycle"
 cargo build --quiet

@@ -1770,17 +1770,31 @@ fn push_role_options(
 }
 
 /// DEFAULT clause rendering: strings that look like SQL expressions
-/// (quoted literals, casts, function calls, keyword-like all-caps)
-/// pass through raw; everything else renders as a literal. Deviation
-/// 9: Python quoted every string, producing unrestorable SQL for
-/// expression defaults like `uuid_generate_v4()`.
+/// (quoted literals, casts, function calls, parameterless keyword
+/// expressions like `CURRENT_TIMESTAMP`) pass through raw; everything
+/// else renders as a literal. Deviation 9: Python quoted every string,
+/// producing unrestorable SQL for expression defaults like
+/// `uuid_generate_v4()`.
 fn render_default(value: &Value) -> String {
     if let Value::String(s) = value {
+        const RAW_KEYWORDS: &[&str] = &[
+            "CURRENT_CATALOG",
+            "CURRENT_DATE",
+            "CURRENT_ROLE",
+            "CURRENT_SCHEMA",
+            "CURRENT_TIME",
+            "CURRENT_TIMESTAMP",
+            "CURRENT_USER",
+            "LOCALTIME",
+            "LOCALTIMESTAMP",
+            "NULL",
+            "SESSION_USER",
+            "USER",
+        ];
         let expression = s.starts_with('\'')
-            || s.ends_with(')')
+            || (s.contains('(') && s.ends_with(')'))
             || s.contains("::")
-            || (!s.is_empty()
-                && s.chars().all(|c| c.is_ascii_uppercase() || c == '_'));
+            || RAW_KEYWORDS.iter().any(|kw| s.eq_ignore_ascii_case(kw));
         if expression {
             return s.clone();
         }

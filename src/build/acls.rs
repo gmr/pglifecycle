@@ -13,39 +13,40 @@ use std::collections::BTreeMap;
 use serde_json::{Map, Value};
 
 use crate::constants::ObjectType;
-use crate::models::{Acls, Definition};
+use crate::models::{Acls, Definition, Item};
 use crate::project::Project;
 use crate::utils::quote_ident;
 
 use super::Builder;
 
-/// `(Acls field, GRANT keyword, dependency object type)`
-const SECTIONS: &[(&str, &str, Option<ObjectType>)] = &[
-    ("columns", "TABLE", Some(ObjectType::Table)),
-    ("databases", "DATABASE", None),
-    ("domains", "DOMAIN", Some(ObjectType::Domain)),
+/// PostgreSQL grants on views and materialized views use the same
+/// TABLE/COLUMN syntax as tables, so relation ACLs may target any of
+/// the three
+const RELATIONS: &[ObjectType] = &[
+    ObjectType::Table,
+    ObjectType::View,
+    ObjectType::MaterializedView,
+];
+
+/// `(Acls field, GRANT keyword, dependency object types)`
+const SECTIONS: &[(&str, &str, &[ObjectType])] = &[
+    ("columns", "TABLE", RELATIONS),
+    ("databases", "DATABASE", &[]),
+    ("domains", "DOMAIN", &[ObjectType::Domain]),
     (
         "foreign_data_wrappers",
         "FOREIGN DATA WRAPPER",
-        Some(ObjectType::ForeignDataWrapper),
+        &[ObjectType::ForeignDataWrapper],
     ),
-    (
-        "foreign_servers",
-        "FOREIGN SERVER",
-        Some(ObjectType::Server),
-    ),
-    ("functions", "FUNCTION", Some(ObjectType::Function)),
-    (
-        "languages",
-        "LANGUAGE",
-        Some(ObjectType::ProceduralLanguage),
-    ),
-    ("large_objects", "LARGE OBJECT", None),
-    ("schemata", "SCHEMA", Some(ObjectType::Schema)),
-    ("sequences", "SEQUENCE", Some(ObjectType::Sequence)),
-    ("tables", "TABLE", Some(ObjectType::Table)),
-    ("tablespaces", "TABLESPACE", Some(ObjectType::Tablespace)),
-    ("types", "TYPE", Some(ObjectType::Type)),
+    ("foreign_servers", "FOREIGN SERVER", &[ObjectType::Server]),
+    ("functions", "FUNCTION", &[ObjectType::Function]),
+    ("languages", "LANGUAGE", &[ObjectType::ProceduralLanguage]),
+    ("large_objects", "LARGE OBJECT", &[]),
+    ("schemata", "SCHEMA", &[ObjectType::Schema]),
+    ("sequences", "SEQUENCE", &[ObjectType::Sequence]),
+    ("tables", "TABLE", RELATIONS),
+    ("tablespaces", "TABLESPACE", &[ObjectType::Tablespace]),
+    ("types", "TYPE", &[ObjectType::Type]),
 ];
 
 #[derive(Default)]
@@ -77,7 +78,7 @@ pub(super) fn dump_acls(
         }
     }
     for ((section, object), acl) in &objects {
-        let (key, keyword, dep_type) = SECTIONS[*section];
+        let (key, keyword, dep_types) = SECTIONS[*section];
         // column grants attach to their table's entry
         let target = match key {
             "columns" => match object.rsplit_once('.') {
@@ -99,8 +100,8 @@ pub(super) fn dump_acls(
         };
         let mut owner = builder.superuser.clone();
         let mut dependencies = Vec::new();
-        if let Some(dep_type) = dep_type {
-            match find_object(builder, project, dep_type, &target) {
+        if !dep_types.is_empty() {
+            match find_object(builder, project, dep_types, &target) {
                 Some((dump_id, item_owner)) => {
                     dependencies.push(dump_id);
                     if let Some(item_owner) = item_owner {
@@ -108,8 +109,7 @@ pub(super) fn dump_acls(
                     }
                 }
                 None => log::warn!(
-                    "ACL target {} {target} not found in the project",
-                    dep_type.as_str()
+                    "ACL target {keyword} {target} not found in the project"
                 ),
             }
         }
@@ -209,22 +209,48 @@ fn statement(
 fn find_object(
     builder: &Builder,
     project: &Project,
-    desc: ObjectType,
+    descs: &[ObjectType],
     object: &str,
 ) -> Option<(i32, Option<String>)> {
     let (schema, name) = match object.split_once('.') {
         Some((schema, name)) => (Some(schema), name),
         None => (None, object),
     };
-    // function objects are keyed `schema.name(args)`
-    let name = name.split('(').next().unwrap_or(name);
-    let item = project.inventory.iter().find(|item| {
-        item.desc == desc
-            && item.definition.name() == name
-            && (desc.is_schemaless() || item.definition.schema() == schema)
-    })?;
+    let item = if descs == [ObjectType::Function] {
+        find_function(project, schema, name)
+    } else {
+        project.inventory.iter().find(|item| {
+            descs.contains(&item.desc)
+                && item.definition.name() == name
+                && (item.desc.is_schemaless()
+                    || item.definition.schema() == schema)
+        })
+    }?;
     let dump_id = builder.dump_id_map.get(&item.id)?;
     Some((*dump_id, item.definition.owner().map(str::to_string)))
+}
+
+/// Function ACLs are keyed `schema.name(args)`: match the identity
+/// signature exactly, falling back to the bare name only when it is
+/// unambiguous, so overloads never bind to the wrong entry
+fn find_function<'a>(
+    project: &'a Project,
+    schema: Option<&str>,
+    name: &str,
+) -> Option<&'a Item> {
+    let functions = project.inventory.iter().filter(|item| {
+        item.desc == ObjectType::Function && item.definition.schema() == schema
+    });
+    if let Some(item) = functions.clone().find(|item| {
+        matches!(&item.definition, Definition::Function(f)
+            if f.identity() == name)
+    }) {
+        return Some(item);
+    }
+    let base = name.split('(').next().unwrap_or(name);
+    let mut matches = functions.filter(|item| item.definition.name() == base);
+    let item = matches.next()?;
+    matches.next().is_none().then_some(item)
 }
 
 fn section<'a>(acls: &'a Acls, key: &str) -> Option<&'a Map<String, Value>> {
