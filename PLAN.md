@@ -30,10 +30,10 @@ selected pieces of [postgres-lsp](https://crates.io/crates/postgres-lsp-parse).
   phase gates below are the merge criteria for the PR that completes each
   phase.
 - The Python code is never present on the rewrite branch. Agents working on
-  the rewrite reference it via a shallow clone of `main`:
+  the rewrite reference it via a shallow clone of the `python-final` tag:
 
-  ```
-  git clone --depth 1 --branch main https://github.com/gmr/pglifecycle /tmp/pglifecycle-py
+  ```bash
+  git clone --depth 1 --branch python-final https://github.com/gmr/pglifecycle /tmp/pglifecycle-py
   ```
 
   The Python tool is the parity oracle (run from the clone via `uv run`)
