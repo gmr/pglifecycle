@@ -503,12 +503,7 @@ mod tests {
         assert_eq!(index.unique, None);
     }
 
-    // tree-sitter-postgres 1.1.6 gap: index_elem_options requires
-    // collate + opclass + direction + nulls as a mandatory sequence,
-    // so bare `DESC` / `NULLS LAST` fail to parse. Needs an upstream
-    // grammar fix (each component optional, per gram.y).
     #[test]
-    #[ignore = "tree-sitter-postgres 1.1.6: index_elem_options not optional"]
     fn parses_index_options() {
         let statement = parse_one(
             "CREATE INDEX i ON t (created_at DESC NULLS LAST) \
@@ -607,11 +602,7 @@ mod tests {
         assert_eq!(constraint, TableConstraint::Check("value > 0".into()));
     }
 
-    // tree-sitter-postgres 1.1.6 gap: the quoted_identifier token
-    // exists but is not reachable from ColId/ColLabel, so any quoted
-    // identifier fails to parse. Needs an upstream grammar fix.
     #[test]
-    #[ignore = "tree-sitter-postgres 1.1.6: quoted_identifier not in ColId"]
     fn quoted_identifiers_unquote() {
         let statement =
             parse_one("CREATE TABLE \"Sch\"\"ema\".\"Tab le\" (id int);");
