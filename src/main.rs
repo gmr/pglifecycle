@@ -3,7 +3,7 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use pglifecycle::{build, cli, project, skeleton};
+use pglifecycle::{build, cli, project, pull, skeleton};
 
 fn main() -> ExitCode {
     let args = cli::Cli::parse();
@@ -17,7 +17,7 @@ fn main() -> ExitCode {
         cli::Action::Build(args) => project::load(&args.project)
             .and_then(|p| build::build(&p, &args.destination)),
         cli::Action::Create(create) => skeleton::create(create),
-        cli::Action::Pull(_) => Err("pull is not implemented yet".to_string()),
+        cli::Action::Pull(args) => pull::pull(args),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
