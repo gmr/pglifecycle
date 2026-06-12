@@ -20,6 +20,14 @@
 //! 7. Table column collations render `COLLATE x` (Python crashed)
 //! 8. Base/range type options render from their own fields (Python
 //!    read `receive` for SEND and `subtype` for SUBTYPE_OPCLASS)
+//! 9. String DEFAULT values that look like SQL expressions render raw
+//!    (Python quoted every string, e.g. `DEFAULT 'uuid_generate_v4()'`)
+//! 10. CREATE INDEX names render unqualified (Python emitted
+//!     `CREATE INDEX schema.name`, which PostgreSQL rejects)
+//! 11. Roles with `create: false` (e.g. PUBLIC) emit no entry (Python
+//!     emitted CREATE ROLE anyway)
+
+mod acls;
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -27,7 +35,7 @@ use std::path::Path;
 use serde_json::{Map, Value};
 
 use crate::models::{
-    Acls, Column, ConstraintColumns, Definition, Index, Item, RoleOptions,
+    Column, ConstraintColumns, Definition, Index, Item, RoleOptions,
     TablePartitionColumn, Trigger, ViewColumn,
 };
 use crate::project::Project;
@@ -49,6 +57,7 @@ pub fn build(project: &Project, destination: &Path) -> Result<(), String> {
     for item in &project.inventory {
         builder.dump_item(item)?;
     }
+    acls::dump_acls(&mut builder, project)?;
     // record inventory dependency edges on the entries so the weighted
     // pg_dump topological sort in libpgdump (run by save) can order
     // them; the Python implementation instead pre-ordered its adds with
@@ -206,7 +215,11 @@ impl Builder {
         parent_dump_id: i32,
         comment: &str,
     ) -> Result<(), String> {
-        let name = if namespace.is_empty() {
+        // extensions record the schema they install into as their
+        // namespace, but COMMENT ON EXTENSION takes an unqualified name
+        let name = if desc == "EXTENSION" {
+            quote_ident(tag)
+        } else if namespace.is_empty() {
             tag.to_string()
         } else {
             format!("{namespace}.{tag}")
@@ -451,7 +464,7 @@ impl Builder {
         }
         if let Some(default) = &d.default {
             create.push("DEFAULT".into());
-            create.push(postgres_value(&Value::String(default.clone())));
+            create.push(render_default(&Value::String(default.clone())));
         }
         if let Some(constraints) = &d.check_constraints {
             let mut rendered = Vec::new();
@@ -846,6 +859,11 @@ impl Builder {
         let Definition::Role(d) = &item.definition else {
             unreachable!()
         };
+        // create: false defines a role without creating it (e.g.
+        // PUBLIC); deviation 11 — Python emitted CREATE ROLE anyway
+        if d.create == Some(false) {
+            return Ok(());
+        }
         let mut create =
             vec!["CREATE".into(), "ROLE".into(), quote_ident(&d.name)];
         if let Some(options) = &d.options {
@@ -1103,7 +1121,10 @@ impl Builder {
         parent: &Item,
         table: &crate::models::Table,
     ) -> Result<(), String> {
-        let name = format!(
+        // index names cannot be schema-qualified in CREATE INDEX; the
+        // index lives in its table's schema (deviation 10 — Python
+        // emitted `CREATE INDEX schema.name`, which does not parse)
+        let qualified = format!(
             "{}.{}",
             quote_ident(&table.schema),
             quote_ident(&index.name)
@@ -1113,7 +1134,7 @@ impl Builder {
             create.push("UNIQUE".into());
         }
         create.push("INDEX".into());
-        create.push(name.clone());
+        create.push(quote_ident(&index.name));
         create.push("ON".into());
         if index.recurse == Some(false) {
             create.push("ONLY".into());
@@ -1174,7 +1195,7 @@ impl Builder {
             create.push("WHERE".into());
             create.push(where_clause.clone());
         }
-        let drop = vec!["DROP INDEX IF EXISTS".into(), name];
+        let drop = vec!["DROP INDEX IF EXISTS".into(), qualified];
         let parent_dump_id = self.dump_id_map[&parent.id];
         let dump_id = self.add_entry(
             "INDEX",
@@ -1748,6 +1769,39 @@ fn push_role_options(
     push_bool_option(sql, "SUPERUSER", options.superuser);
 }
 
+/// DEFAULT clause rendering: strings that look like SQL expressions
+/// (quoted literals, casts, function calls, parameterless keyword
+/// expressions like `CURRENT_TIMESTAMP`) pass through raw; everything
+/// else renders as a literal. Deviation 9: Python quoted every string,
+/// producing unrestorable SQL for expression defaults like
+/// `uuid_generate_v4()`.
+fn render_default(value: &Value) -> String {
+    if let Value::String(s) = value {
+        const RAW_KEYWORDS: &[&str] = &[
+            "CURRENT_CATALOG",
+            "CURRENT_DATE",
+            "CURRENT_ROLE",
+            "CURRENT_SCHEMA",
+            "CURRENT_TIME",
+            "CURRENT_TIMESTAMP",
+            "CURRENT_USER",
+            "LOCALTIME",
+            "LOCALTIMESTAMP",
+            "NULL",
+            "SESSION_USER",
+            "USER",
+        ];
+        let expression = s.starts_with('\'')
+            || (s.contains('(') && s.ends_with(')'))
+            || s.contains("::")
+            || RAW_KEYWORDS.iter().any(|kw| s.eq_ignore_ascii_case(kw));
+        if expression {
+            return s.clone();
+        }
+    }
+    postgres_value(value)
+}
+
 fn render_table_column(column: &Column) -> String {
     let mut sql = vec![column.name.clone(), column.data_type.clone()];
     if let Some(collation) = &column.collation {
@@ -1763,7 +1817,7 @@ fn render_table_column(column: &Column) -> String {
     }
     if let Some(default) = &column.default {
         sql.push("DEFAULT".into());
-        sql.push(postgres_value(default));
+        sql.push(render_default(default));
     }
     if let Some(generated) = &column.generated {
         if let Some(expression) = &generated.expression {
@@ -1850,8 +1904,3 @@ fn render_parameters(parameters: &Map<String, Value>) -> String {
         .collect::<Vec<_>>()
         .join(", ")
 }
-
-// Acls intentionally unused for now: the Python build never emitted
-// grants/revocations into the archive; ACL entries arrive with the
-// pull/deploy work.
-const _: fn(&Acls) = |_| {};

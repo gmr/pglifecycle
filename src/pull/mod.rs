@@ -561,7 +561,7 @@ impl Assembly {
         if let Some(function) = self
             .functions
             .iter_mut()
-            .find(|f| f.schema == schema && function_identity(f) == name)
+            .find(|f| f.schema == schema && f.identity() == name)
         {
             function.comment = Some(comment.to_string());
             return true;
@@ -756,31 +756,6 @@ fn cancel_revokes(statements: Vec<Statement>) -> Vec<Statement> {
             _ => true,
         })
         .collect()
-}
-
-/// The identity signature (`name(mode name type, ...)`) used to match
-/// `COMMENT ON FUNCTION` targets; mirrors
-/// `pg_get_function_identity_arguments` — defaults are omitted, `IN`
-/// modes are implicit and OUT/TABLE parameters are excluded
-fn function_identity(function: &models::Function) -> String {
-    let args: Vec<String> = function
-        .parameters
-        .iter()
-        .flatten()
-        .filter(|p| p.mode != "OUT" && p.mode != "TABLE")
-        .map(|p| {
-            let mut parts: Vec<&str> = Vec::new();
-            if p.mode != "IN" {
-                parts.push(&p.mode);
-            }
-            if let Some(name) = &p.name {
-                parts.push(name);
-            }
-            parts.push(&p.data_type);
-            parts.join(" ")
-        })
-        .collect();
-    format!("{}({})", function.name, args.join(", "))
 }
 
 /// The quoted value from a `SET name = 'value';` entry definition

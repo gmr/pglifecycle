@@ -56,6 +56,33 @@ pub struct Function {
     pub comment: Option<String>,
 }
 
+impl Function {
+    /// The identity signature (`name(mode name type, ...)`) used to
+    /// match `COMMENT ON FUNCTION` and ACL targets; mirrors
+    /// `pg_get_function_identity_arguments` — defaults are omitted,
+    /// `IN` modes are implicit and OUT/TABLE parameters are excluded
+    pub fn identity(&self) -> String {
+        let args: Vec<String> = self
+            .parameters
+            .iter()
+            .flatten()
+            .filter(|p| p.mode != "OUT" && p.mode != "TABLE")
+            .map(|p| {
+                let mut parts: Vec<&str> = Vec::new();
+                if p.mode != "IN" {
+                    parts.push(&p.mode);
+                }
+                if let Some(name) = &p.name {
+                    parts.push(name);
+                }
+                parts.push(&p.data_type);
+                parts.join(" ")
+            })
+            .collect();
+        format!("{}({})", self.name, args.join(", "))
+    }
+}
+
 /// Represents a single parameter for a function
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

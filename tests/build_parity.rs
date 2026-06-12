@@ -26,10 +26,14 @@ const DEVIATIONS: &[(&str, &str, &str)] = &[
     ("ENCODING", "", "ENCODING"),
     ("STDSTRINGS", "", "STDSTRINGS"),
     ("SEARCHPATH", "", "SEARCHPATH"),
-    // BYPASSRLS rendered from create_db in Python
+    // Python emitted CREATE ROLE for create: false roles (and
+    // rendered BYPASSRLS from create_db); the Rust build skips them
     ("ROLE", "", "postgres"),
     // Python interpolated a Python list repr into WHEN TAG IN
     ("EVENT TRIGGER", "", "disable_alter_domain"),
+    // Python emitted CREATE INDEX schema.name, which does not parse
+    ("INDEX", "test", "empty_table_created_at"),
+    ("INDEX", "test", "users_unique_email"),
     // Python's loader dropped primary keys and rendered ON_DELETE /
     // ON_UPDATE
     ("TABLE", "test", "addresses"),
@@ -67,12 +71,23 @@ const CORRECTED: &[(&str, &str, &str, &str)] = &[
         "SET standard_conforming_strings = 'on';\n",
     ),
     ("SEARCHPATH", "", "", "SELECT pg_catalog.set_config"),
-    ("ROLE", "", "postgres", "NOBYPASSRLS CREATEDB"),
     (
         "EVENT TRIGGER",
         "",
         "disable_alter_domain",
         "WHEN TAG IN ('ALTER DOMAIN')",
+    ),
+    (
+        "INDEX",
+        "test",
+        "empty_table_created_at",
+        "CREATE INDEX empty_table_created_at ON test.empty_table",
+    ),
+    (
+        "INDEX",
+        "test",
+        "users_unique_email",
+        "CREATE UNIQUE INDEX users_unique_email ON test.users",
     ),
     (
         "TABLE",
@@ -87,6 +102,10 @@ const CORRECTED: &[(&str, &str, &str, &str)] = &[
         "value TEXT, PRIMARY KEY (id) )",
     ),
     ("TABLE", "test", "users", "icon oid, PRIMARY KEY (id) )"),
+    // expression defaults render raw (Python quoted them)
+    ("TABLE", "test", "users", "DEFAULT uuid_generate_v4()"),
+    ("TABLE", "test", "users", "DEFAULT CURRENT_TIMESTAMP"),
+    ("TABLE", "test", "users", "DEFAULT 'en-US'"),
     (
         "TEXT SEARCH CONFIGURATION",
         "test",
@@ -194,10 +213,12 @@ fn matches_python_build_output() {
         .iter()
         .filter(|(key, ..)| {
             // exclude the corrected/recovered entries from the exact
-            // comparison; asserted separately below
-            !CORRECTED
-                .iter()
-                .any(|(d, n, t, _)| &entry_key(d, n, t) == key)
+            // comparison; asserted separately below. ACL entries are
+            // new in the Rust build (Python never emitted them)
+            key.0 != "ACL"
+                && !CORRECTED
+                    .iter()
+                    .any(|(d, n, t, _)| &entry_key(d, n, t) == key)
                 && !RECOVERED_COMMENTS
                     .iter()
                     .any(|(tag, _)| key == &entry_key("COMMENT", "test", tag))
@@ -234,7 +255,21 @@ fn matches_python_build_output() {
         assert!(defn.contains(comment), "{key:?} missing comment text");
     }
 
-    // 60 Python entries + 4 recovered text search comments
+    // the developers group's grant emits an ACL entry, which the
+    // Python build never did
+    let acl = rust_tuples
+        .iter()
+        .find(|(key, ..)| key.0 == "ACL")
+        .expect("missing ACL entry");
+    assert_eq!(acl.0, entry_key("ACL", "public", "TABLE empty_table"));
+    assert_eq!(
+        acl.2,
+        "GRANT SELECT, INSERT, DELETE, UPDATE ON TABLE \
+         public.empty_table TO developers;\n"
+    );
+
+    // 60 Python entries + 4 recovered text search comments + 1 ACL
+    // - 1 create: false role
     assert_eq!(dump.entries().len(), 64);
 }
 
