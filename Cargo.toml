@@ -18,7 +18,7 @@ serde_json = { version = "1.0.150", features = ["preserve_order"] }
 serde_norway = "0.9.42"
 simplelog = "0.12"
 tree-sitter = "0.26"
-tree-sitter-postgres = "1.1"
+tree-sitter-postgres = "1.2"
 
 [dev-dependencies]
 libpgdump = "2.1"
