@@ -22,7 +22,7 @@ databases:
 ### Homebrew
 
 ```bash
-brew install gmr/pglifecycle/pglifecycle
+brew install gmr/gmr/pglifecycle
 ```
 
 ### Cargo
