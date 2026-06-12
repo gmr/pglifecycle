@@ -615,7 +615,7 @@ mod tests {
 
     #[test]
     fn other_statements_are_unsupported() {
-        let statement = parse_one("GRANT USAGE ON SCHEMA test TO PUBLIC;");
+        let statement = parse_one("VACUUM ANALYZE test.users;");
         assert!(matches!(statement, Statement::Unsupported(_)));
     }
 }
