@@ -325,7 +325,25 @@ pub(crate) fn comment(node: &Node, src: &str) -> Result<Statement, String> {
                 object_type
                     .push(kind.trim_start_matches("kw_").to_uppercase());
             }
+            // most object types nest their keywords (e.g.
+            // `object_type_any_name (kw_table)`)
+            kind if kind.starts_with("object_type") && past_on => {
+                collect_keywords(&child, &mut object_type);
+            }
             "any_name" => target = Some(any_name(&child, src)),
+            "function_with_argtypes" => {
+                let mut name = child
+                    .find("func_name")
+                    .map(|n| any_name(&n, src))
+                    .unwrap_or_default();
+                let args: Vec<&str> = child
+                    .find_all("func_arg")
+                    .iter()
+                    .map(|a| a.text(src))
+                    .collect();
+                name.name = format!("{}({})", name.name, args.join(", "));
+                target = Some(name);
+            }
             "qualified_name" => {
                 target = Some(crate::ddl::qualified_name(&child, src)?);
             }
@@ -347,6 +365,18 @@ pub(crate) fn comment(node: &Node, src: &str) -> Result<Statement, String> {
         target: target.unwrap_or_default(),
         comment: text,
     })
+}
+
+/// Collect all `kw_*` descendants, uppercased without the prefix
+fn collect_keywords(node: &Node, into: &mut Vec<String>) {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.kind().starts_with("kw_") {
+            into.push(child.kind().trim_start_matches("kw_").to_uppercase());
+        } else {
+            collect_keywords(&child, into);
+        }
+    }
 }
 
 /// `a.b.c` → schema `a.b`, name `c` (COLUMN comments use three parts)
@@ -396,6 +426,22 @@ mod tests {
         let mut statements = parser.parse(sql).unwrap();
         assert_eq!(statements.len(), 1, "expected one statement");
         statements.remove(0)
+    }
+
+    #[test]
+    fn parses_function_comment_with_signature() {
+        let Statement::Comment {
+            on,
+            target,
+            comment,
+        } = parse_one("COMMENT ON FUNCTION test.fn(integer, text) IS 'x';")
+        else {
+            panic!("expected Comment")
+        };
+        assert_eq!(on, "FUNCTION");
+        assert_eq!(target.schema.as_deref(), Some("test"));
+        assert_eq!(target.name, "fn(integer, text)");
+        assert_eq!(comment, "x");
     }
 
     #[test]

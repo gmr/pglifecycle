@@ -13,6 +13,8 @@ mod table;
 mod trigger;
 mod view;
 
+pub(crate) use table::apply_constraint;
+
 use tree_sitter::Node;
 
 use crate::models;
