@@ -35,7 +35,16 @@ pub fn write(assembly: &Assembly, args: &cli::Pull) -> Result<(), String> {
         )?;
     }
     for table in &assembly.tables {
-        writer.save(nested("tables", &table.schema, &table.name), table)?;
+        let mut value = serialize(table)?;
+        if let (Some(map), Some(dependencies)) =
+            (value.as_object_mut(), table_dependencies(table))
+        {
+            map.insert(String::from("dependencies"), dependencies);
+        }
+        writer.save_value(
+            nested("tables", &table.schema, &table.name),
+            &value,
+        )?;
     }
     for view in &assembly.views {
         writer.save(nested("views", &view.schema, &view.name), view)?;
@@ -249,6 +258,22 @@ impl Writer {
         std::fs::write(&path, yamlio::dump(value))
             .map_err(|e| format!("failed to write {}: {e}", path.display()))
     }
+}
+
+/// Foreign keys order table creation: emit a `dependencies` key so
+/// the build's topological sort restores referenced tables first
+fn table_dependencies(table: &models::Table) -> Option<Value> {
+    let this = format!("{}.{}", table.schema, table.name);
+    let mut references: Vec<String> = table
+        .foreign_keys
+        .iter()
+        .flatten()
+        .map(|fk| fk.references.name.clone())
+        .filter(|name| *name != this)
+        .collect();
+    references.sort();
+    references.dedup();
+    (!references.is_empty()).then(|| json!({"tables": references}))
 }
 
 /// `user.yml` does not allow the `login` option (login is implied)
