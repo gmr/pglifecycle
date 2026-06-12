@@ -19,7 +19,16 @@ export PGHOST PGPORT PGUSER
 SOURCE_DB=roundtrip_source
 RESTORED_DB=roundtrip_restored
 WORKDIR="$(mktemp -d)"
-trap 'rm -rf "$WORKDIR"' EXIT INT TERM
+
+cleanup() {
+    rm -rf "$WORKDIR"
+    psql -d postgres -q -c "DROP DATABASE IF EXISTS ${RESTORED_DB}" \
+        >/dev/null 2>&1 || true
+    psql -d postgres -q -c "DROP DATABASE IF EXISTS ${SOURCE_DB}" \
+        >/dev/null 2>&1 || true
+}
+
+trap cleanup EXIT INT TERM
 
 echo "==> Building pglifecycle"
 cargo build --quiet
