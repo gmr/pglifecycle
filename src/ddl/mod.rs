@@ -6,6 +6,7 @@
 //! `ConstraintElem`, ...) and carry no named fields — extraction walks
 //! the tree by kind via the [`NodeExt`] helpers.
 
+mod acl;
 mod function;
 mod object;
 mod table;
@@ -51,8 +52,77 @@ pub enum Statement {
         target: QualifiedName,
         comment: String,
     },
+    /// GRANT/REVOKE privileges ON objects TO/FROM roles
+    Acl(Acl),
+    /// GRANT `roles` TO `members` (or REVOKE ... FROM)
+    RoleMembership {
+        revoke: bool,
+        roles: Vec<String>,
+        members: Vec<String>,
+    },
+    CreateRole(RoleDef),
+    /// ALTER ROLE ... WITH options — the assembly merges these into
+    /// the role created by CREATE ROLE
+    AlterRole(RoleDef),
+    /// ALTER ROLE `role` SET `name` TO `value`
+    AlterRoleSetting {
+        role: String,
+        name: String,
+        value: String,
+    },
     /// Parsed successfully but not (yet) a supported statement type
     Unsupported(String),
+}
+
+/// A parsed GRANT or REVOKE statement
+#[derive(Clone, Debug, PartialEq)]
+pub struct Acl {
+    pub revoke: bool,
+    pub privileges: Vec<Privilege>,
+    pub target: AclTarget,
+    /// Formatted object names: `schema.name` for schema-qualified
+    /// kinds, `schema.fn(args)` for functions, bare names otherwise
+    pub objects: Vec<String>,
+    /// The grantee roles
+    pub roles: Vec<String>,
+    pub with_grant_option: bool,
+}
+
+/// One granted/revoked privilege, with columns for column grants
+#[derive(Clone, Debug, PartialEq)]
+pub struct Privilege {
+    /// Uppercased privilege name (`SELECT`, `USAGE`, `ALL`, ...)
+    pub name: String,
+    pub columns: Option<Vec<String>>,
+}
+
+/// The object kind a GRANT/REVOKE applies to; variants map onto the
+/// [`crate::models::Acls`] sections
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum AclTarget {
+    Database,
+    Domain,
+    ForeignDataWrapper,
+    ForeignServer,
+    Function,
+    Language,
+    LargeObject,
+    Schema,
+    Sequence,
+    Table,
+    Tablespace,
+    Type,
+}
+
+/// A CREATE ROLE / ALTER ROLE definition; user-only attributes
+/// (password, valid_until) ride along so the assembly can classify
+/// the role as a user, group, or role
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RoleDef {
+    pub name: String,
+    pub options: models::RoleOptions,
+    pub password: Option<String>,
+    pub valid_until: Option<String>,
 }
 
 /// A table constraint from inline DDL or ALTER TABLE ... ADD
@@ -138,6 +208,12 @@ fn dispatch(node: &Node, src: &str) -> Result<Vec<Statement>, String> {
         }
         "CreateTrigStmt" => Ok(vec![trigger::create_trigger(node, src)?]),
         "CommentStmt" => Ok(vec![object::comment(node, src)?]),
+        "GrantStmt" => Ok(vec![acl::grant(node, src, false)?]),
+        "RevokeStmt" => Ok(vec![acl::grant(node, src, true)?]),
+        "GrantRoleStmt" => Ok(vec![acl::grant_role(node, src, false)?]),
+        "RevokeRoleStmt" => Ok(vec![acl::grant_role(node, src, true)?]),
+        "CreateRoleStmt" | "AlterRoleStmt" => Ok(vec![acl::role(node, src)?]),
+        "AlterRoleSetStmt" => Ok(vec![acl::role_setting(node, src)?]),
         other => Ok(vec![Statement::Unsupported(other.to_string())]),
     }
 }
