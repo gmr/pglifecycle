@@ -4,7 +4,7 @@ A pglifecycle project is a directory of YAML files, one file per
 database object, validated against the JSON-Schema definitions in
 [`schemata/`](https://github.com/gmr/pglifecycle/tree/main/schemata).
 
-```
+```text
 my-project/
 ├── project.yaml          # name, encoding, extensions, languages
 ├── schemata/             # one file per schema
