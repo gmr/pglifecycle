@@ -19,11 +19,25 @@ databases:
 
 ## Installation
 
-### Homebrew
+### Homebrew (macOS / Linux)
 
 ```bash
-brew install gmr/gmr/pglifecycle
+brew tap gmr/postgres
+brew install pglifecycle
 ```
+
+> [!NOTE]
+> Homebrew 6.0 added [tap trust](https://docs.brew.sh/Tap-Trust), and some
+> versions fail to install third-party taps inside the build sandbox (the
+> error mentions `build.rb ... exited with 1`). If you hit this, trust the
+> formula first:
+>
+> ```bash
+> brew trust --formula gmr/postgres/pglifecycle
+> ```
+>
+> or, as a temporary workaround, set `HOMEBREW_NO_REQUIRE_TAP_TRUST=1` for
+> the install.
 
 ### Cargo
 

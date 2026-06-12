@@ -19,11 +19,23 @@ data, not opaque SQL.
 
 ## Installation
 
-### Homebrew
+### Homebrew (macOS / Linux)
+
+pglifecycle is published in the shared [gmr/postgres
+tap](https://github.com/gmr/homebrew-postgres):
 
 ```bash
-brew install gmr/gmr/pglifecycle
+brew tap gmr/postgres
+brew install pglifecycle
 ```
+
+!!! note
+    Homebrew 6.0 added [tap trust](https://docs.brew.sh/Tap-Trust), and
+    some versions fail to install third-party taps inside the build
+    sandbox (the error mentions `build.rb ... exited with 1`). If you
+    hit this, trust the formula first with
+    `brew trust --formula gmr/postgres/pglifecycle`, or set
+    `HOMEBREW_NO_REQUIRE_TAP_TRUST=1` for the install.
 
 ### Cargo
 
