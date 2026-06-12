@@ -9,6 +9,7 @@
 mod writer;
 
 use std::collections::BTreeMap;
+use std::io::IsTerminal;
 
 use serde_json::{Map, Value};
 
@@ -20,32 +21,50 @@ pub fn pull(args: &cli::Pull) -> Result<(), String> {
     if args.destination.exists() && !args.force {
         return Err(format!("{} already exists", args.destination.display()));
     }
-    let (dump_path, temporary) = match &args.dump {
-        Some(path) => (path.clone(), false),
+    if args.no_owner {
+        return Err(String::from(
+            "--no-owner is not supported by pull: owner metadata is \
+             required to generate the project",
+        ));
+    }
+    if args.password && !std::io::stdin().is_terminal() {
+        return Err(String::from(
+            "--password requires an interactive terminal; set PGPASSWORD \
+             or use a pgpass file instead",
+        ));
+    }
+    let mut temp_dump: Option<tempfile::NamedTempFile> = None;
+    let dump_path = match &args.dump {
+        Some(path) => path.clone(),
         None => {
-            let path = std::env::temp_dir()
-                .join(format!("pglifecycle-{}", std::process::id()));
-            pgdump::dump(args, &path)?;
-            (path, true)
+            let file = tempfile::Builder::new()
+                .prefix("pglifecycle-")
+                .suffix(".dump")
+                .tempfile()
+                .map_err(|e| format!("failed to create temp file: {e}"))?;
+            pgdump::dump(args, file.path())?;
+            let path = file.path().to_path_buf();
+            temp_dump = Some(file);
+            path
         }
     };
     log::info!("Loading dump from {}", dump_path.display());
     let dump = libpgdump::load(&dump_path).map_err(|e| {
         format!("failed to load dump {}: {e}", dump_path.display())
     })?;
-    if temporary {
-        let _ = std::fs::remove_file(&dump_path);
-    }
+    drop(temp_dump);
     let mut assembly = Assembly::default();
     assembly.ingest(&dump)?;
     if args.extract_roles {
-        let path = std::env::temp_dir()
-            .join(format!("pglifecycle-{}-roles", std::process::id()));
-        pgdump::dump_roles(args, &path)?;
-        let text = std::fs::read_to_string(&path).map_err(|e| {
-            format!("failed to read roles dump {}: {e}", path.display())
+        let file = tempfile::Builder::new()
+            .prefix("pglifecycle-roles-")
+            .suffix(".sql")
+            .tempfile()
+            .map_err(|e| format!("failed to create temp file: {e}"))?;
+        pgdump::dump_roles(args, file.path())?;
+        let text = std::fs::read_to_string(file.path()).map_err(|e| {
+            format!("failed to read roles dump {}: {e}", file.path().display())
         })?;
-        let _ = std::fs::remove_file(&path);
         assembly.ingest_roles(&text)?;
     }
     assembly.format_sql();
@@ -514,14 +533,7 @@ impl Assembly {
                 .find(|v| v.schema == schema && v.name == *name)
                 .map(|v| v.comment = Some(comment.clone()))
                 .is_some(),
-            "FUNCTION" => {
-                let base = name.split('(').next().unwrap_or(name);
-                self.functions
-                    .iter_mut()
-                    .find(|f| f.schema == schema && f.name == base)
-                    .map(|f| f.comment = Some(comment.clone()))
-                    .is_some()
-            }
+            "FUNCTION" => self.apply_function_comment(&schema, name, &comment),
             "INDEX" => self
                 .tables
                 .iter_mut()
@@ -535,6 +547,37 @@ impl Assembly {
         if !found {
             log::warn!("Comment on unmatched object: {on} {target}");
         }
+    }
+
+    /// `COMMENT ON FUNCTION schema.fn(args)` — match the full identity
+    /// signature so overloaded functions are not conflated; fall back
+    /// to the base name only when it is unambiguous
+    fn apply_function_comment(
+        &mut self,
+        schema: &str,
+        name: &str,
+        comment: &str,
+    ) -> bool {
+        if let Some(function) = self
+            .functions
+            .iter_mut()
+            .find(|f| f.schema == schema && function_identity(f) == name)
+        {
+            function.comment = Some(comment.to_string());
+            return true;
+        }
+        let base = name.split('(').next().unwrap_or(name);
+        let mut candidates = self
+            .functions
+            .iter_mut()
+            .filter(|f| f.schema == schema && f.name == base);
+        let first = candidates.next();
+        if candidates.next().is_some() {
+            return false;
+        }
+        first
+            .map(|f| f.comment = Some(comment.to_string()))
+            .is_some()
     }
 
     /// `COMMENT ON COLUMN schema.table.column` — the ddl layer puts
@@ -713,6 +756,31 @@ fn cancel_revokes(statements: Vec<Statement>) -> Vec<Statement> {
             _ => true,
         })
         .collect()
+}
+
+/// The identity signature (`name(mode name type, ...)`) used to match
+/// `COMMENT ON FUNCTION` targets; mirrors
+/// `pg_get_function_identity_arguments` — defaults are omitted, `IN`
+/// modes are implicit and OUT/TABLE parameters are excluded
+fn function_identity(function: &models::Function) -> String {
+    let args: Vec<String> = function
+        .parameters
+        .iter()
+        .flatten()
+        .filter(|p| p.mode != "OUT" && p.mode != "TABLE")
+        .map(|p| {
+            let mut parts: Vec<&str> = Vec::new();
+            if p.mode != "IN" {
+                parts.push(&p.mode);
+            }
+            if let Some(name) = &p.name {
+                parts.push(name);
+            }
+            parts.push(&p.data_type);
+            parts.join(" ")
+        })
+        .collect();
+    format!("{}({})", function.name, args.join(", "))
 }
 
 /// The quoted value from a `SET name = 'value';` entry definition
@@ -926,6 +994,51 @@ mod tests {
         let mut assembly = Assembly::default();
         assembly.ingest(&fixture_dump()).unwrap();
         assembly
+    }
+
+    #[test]
+    fn function_comments_match_overloads() {
+        let mut dump = libpgdump::new("fixtures", "UTF8", "18.0").unwrap();
+        add(&mut dump, OT::Schema, "", "test", "CREATE SCHEMA test;");
+        add(
+            &mut dump,
+            OT::Function,
+            "test",
+            "fn(a integer)",
+            "CREATE FUNCTION test.fn(a integer) RETURNS integer \
+             LANGUAGE sql AS $$ SELECT a $$;",
+        );
+        add(
+            &mut dump,
+            OT::Function,
+            "test",
+            "fn(a text)",
+            "CREATE FUNCTION test.fn(a text) RETURNS text \
+             LANGUAGE sql AS $$ SELECT a $$;",
+        );
+        add(
+            &mut dump,
+            OT::Comment,
+            "test",
+            "FUNCTION fn(a text)",
+            "COMMENT ON FUNCTION test.fn(a text) IS 'text variant';",
+        );
+        let mut assembly = Assembly::default();
+        assembly.ingest(&dump).unwrap();
+        assert_eq!(assembly.functions.len(), 2);
+        let data_type = |f: &models::Function| {
+            f.parameters.as_ref().unwrap()[0].data_type.clone()
+        };
+        for function in &assembly.functions {
+            match data_type(function).as_str() {
+                "integer" => assert_eq!(function.comment, None),
+                "text" => assert_eq!(
+                    function.comment.as_deref(),
+                    Some("text variant")
+                ),
+                other => panic!("unexpected parameter type {other}"),
+            }
+        }
     }
 
     #[test]

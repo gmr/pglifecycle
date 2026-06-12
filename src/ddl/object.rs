@@ -331,6 +331,19 @@ pub(crate) fn comment(node: &Node, src: &str) -> Result<Statement, String> {
                 collect_keywords(&child, &mut object_type);
             }
             "any_name" => target = Some(any_name(&child, src)),
+            "function_with_argtypes" => {
+                let mut name = child
+                    .find("func_name")
+                    .map(|n| any_name(&n, src))
+                    .unwrap_or_default();
+                let args: Vec<&str> = child
+                    .find_all("func_arg")
+                    .iter()
+                    .map(|a| a.text(src))
+                    .collect();
+                name.name = format!("{}({})", name.name, args.join(", "));
+                target = Some(name);
+            }
             "qualified_name" => {
                 target = Some(crate::ddl::qualified_name(&child, src)?);
             }
@@ -413,6 +426,22 @@ mod tests {
         let mut statements = parser.parse(sql).unwrap();
         assert_eq!(statements.len(), 1, "expected one statement");
         statements.remove(0)
+    }
+
+    #[test]
+    fn parses_function_comment_with_signature() {
+        let Statement::Comment {
+            on,
+            target,
+            comment,
+        } = parse_one("COMMENT ON FUNCTION test.fn(integer, text) IS 'x';")
+        else {
+            panic!("expected Comment")
+        };
+        assert_eq!(on, "FUNCTION");
+        assert_eq!(target.schema.as_deref(), Some("test"));
+        assert_eq!(target.name, "fn(integer, text)");
+        assert_eq!(comment, "x");
     }
 
     #[test]

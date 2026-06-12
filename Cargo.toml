@@ -18,12 +18,12 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0.150", features = ["preserve_order"] }
 serde_norway = "0.9.42"
 simplelog = "0.12"
+tempfile = "3"
 tree-sitter = "0.26"
 tree-sitter-postgres = "1.2"
 
 [dev-dependencies]
 libpgdump = "2.1"
-tempfile = "3"
 
 [profile.release]
 lto = true
