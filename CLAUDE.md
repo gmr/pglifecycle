@@ -12,10 +12,11 @@ cargo fmt            # Format (max_width 79, see rustfmt.toml)
 cargo clippy --all-targets -- -D warnings
 ```
 
-The Python implementation this replaces lives on `main`; reference it via:
+The Python implementation this replaces is preserved at the
+`python-final` tag; reference it via:
 
 ```bash
-git clone --depth 1 --branch main https://github.com/gmr/pglifecycle /tmp/pglifecycle-py
+git clone --depth 1 --branch python-final https://github.com/gmr/pglifecycle /tmp/pglifecycle-py
 ```
 
 It is the parity oracle until the round-trip gates in PLAN.md pass.
