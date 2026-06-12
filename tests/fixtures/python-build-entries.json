@@ -1,0 +1,756 @@
+[
+ {
+  "dump_id": 1,
+  "desc": "ENCODING",
+  "namespace": "",
+  "tag": "ENCODING",
+  "owner": "",
+  "defn": "SET client_encoding = 'UTF-8';\n",
+  "drop_stmt": "",
+  "tablespace": null,
+  "dependencies": [],
+  "section": "Pre-Data"
+ },
+ {
+  "dump_id": 2,
+  "desc": "STDSTRINGS",
+  "namespace": "",
+  "tag": "STDSTRINGS",
+  "owner": "",
+  "defn": "SET standard_conforming_strings = 'on';\n",
+  "drop_stmt": "",
+  "tablespace": null,
+  "dependencies": [],
+  "section": "Pre-Data"
+ },
+ {
+  "dump_id": 3,
+  "desc": "SEARCHPATH",
+  "namespace": "",
+  "tag": "SEARCHPATH",
+  "owner": "",
+  "defn": "SELECT pg_catalog.set_config('search_path', '', false);\n",
+  "drop_stmt": "",
+  "tablespace": null,
+  "dependencies": [],
+  "section": "Pre-Data"
+ },
+ {
+  "dump_id": 44,
+  "desc": "GROUP",
+  "namespace": "",
+  "tag": "developers",
+  "owner": "postgres",
+  "defn": "CREATE GROUP developers INHERIT;\n",
+  "drop_stmt": "DROP GROUP IF EXISTS developers;\n",
+  "tablespace": null,
+  "dependencies": [],
+  "section": "None"
+ },
+ {
+  "dump_id": 45,
+  "desc": "ROLE",
+  "namespace": "",
+  "tag": "postgres",
+  "owner": "postgres",
+  "defn": "CREATE ROLE postgres BYPASSRLS CREATEDB CREATEROLE INHERIT LOGIN SUPERUSER;\n",
+  "drop_stmt": ";\n",
+  "tablespace": null,
+  "dependencies": [],
+  "section": "None"
+ },
+ {
+  "dump_id": 46,
+  "desc": "USER",
+  "namespace": "",
+  "tag": "fwd_user",
+  "owner": "postgres",
+  "defn": "CREATE USER fwd_user NOBYPASSRLS NOCREATEDB NOCREATEROLE INHERIT LOGIN NOSUPERUSER PASSWORD NULL;\n",
+  "drop_stmt": "DROP USER IF EXISTS fwd_user;\n",
+  "tablespace": null,
+  "dependencies": [],
+  "section": "None"
+ },
+ {
+  "dump_id": 9,
+  "desc": "SCHEMA",
+  "namespace": "",
+  "tag": "test",
+  "owner": "postgres",
+  "defn": "CREATE SCHEMA IF NOT EXISTS test;\n",
+  "drop_stmt": "DROP SCHEMA IF EXISTS test;\n",
+  "tablespace": null,
+  "dependencies": [],
+  "section": "Pre-Data"
+ },
+ {
+  "dump_id": 4,
+  "desc": "EXTENSION",
+  "namespace": "public",
+  "tag": "citext",
+  "owner": "",
+  "defn": "CREATE EXTENSION IF NOT EXISTS citext WITH SCHEMA public;\n",
+  "drop_stmt": "DROP EXTENSION IF EXISTS citext;\n",
+  "tablespace": null,
+  "dependencies": [],
+  "section": "Pre-Data"
+ },
+ {
+  "dump_id": 5,
+  "desc": "EXTENSION",
+  "namespace": "public",
+  "tag": "postgres_fdw",
+  "owner": "",
+  "defn": "CREATE EXTENSION IF NOT EXISTS postgres_fdw WITH SCHEMA public;\n",
+  "drop_stmt": "DROP EXTENSION IF EXISTS postgres_fdw;\n",
+  "tablespace": null,
+  "dependencies": [],
+  "section": "Pre-Data"
+ },
+ {
+  "dump_id": 6,
+  "desc": "EXTENSION",
+  "namespace": "public",
+  "tag": "uuid-ossp",
+  "owner": "",
+  "defn": "CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\" WITH SCHEMA public;\n",
+  "drop_stmt": "DROP EXTENSION IF EXISTS \"uuid-ossp\";\n",
+  "tablespace": null,
+  "dependencies": [],
+  "section": "Pre-Data"
+ },
+ {
+  "dump_id": 48,
+  "desc": "AGGREGATE",
+  "namespace": "test",
+  "tag": "test_agg",
+  "owner": "postgres",
+  "defn": "CREATE AGGREGATE test.test_agg (IN integer) (SFUNC = test.test_aggregate, STYPE = integer);\n",
+  "drop_stmt": "DROP AGGREGATE IF EXISTS test.test_agg (IN integer);\n",
+  "tablespace": null,
+  "dependencies": [],
+  "section": "Pre-Data"
+ },
+ {
+  "dump_id": 11,
+  "desc": "OPERATOR",
+  "namespace": "test",
+  "tag": "===",
+  "owner": "postgres",
+  "defn": "CREATE OPERATOR test.=== (PROCEDURE = area_equal_procedure, LEFTARG = box, RIGHTARG = box, COMMUTATOR = ===, NEGATOR = !==, RESTRICT = area_restriction_procedure, JOIN = area_join_procedure, HASHES, MERGES);\n",
+  "drop_stmt": "DROP OPERATOR IF EXISTS test.=== (box, box);\n",
+  "tablespace": null,
+  "dependencies": [],
+  "section": "Pre-Data"
+ },
+ {
+  "dump_id": 32,
+  "desc": "CAST",
+  "namespace": "test",
+  "tag": "(int4 AS timestamp)",
+  "owner": "postgres",
+  "defn": "CREATE CAST (int4 AS timestamp) WITH FUNCTION to_timestamp(int4) AS ASSIGNMENT;\n",
+  "drop_stmt": "DROP CAST IF EXISTS (int4 AS timestamp);\n",
+  "tablespace": null,
+  "dependencies": [],
+  "section": "Pre-Data"
+ },
+ {
+  "dump_id": 13,
+  "desc": "COLLATION",
+  "namespace": "test",
+  "tag": "french",
+  "owner": "postgres",
+  "defn": "CREATE COLLATION test.french (LOCALE = fr_FR.utf8);\n",
+  "drop_stmt": "DROP COLLATION IF EXISTS test.french;\n",
+  "tablespace": null,
+  "dependencies": [],
+  "section": "Pre-Data"
+ },
+ {
+  "dump_id": 14,
+  "desc": "CONVERSION",
+  "namespace": "test",
+  "tag": "myconv",
+  "owner": "postgres",
+  "defn": "CREATE CONVERSION test.myconv FOR UTF8 TO LATIN1 FROM utf8_to_latin1;\n",
+  "drop_stmt": "DROP CONVERSION IF EXISTS test.myconv;\n",
+  "tablespace": null,
+  "dependencies": [],
+  "section": "Pre-Data"
+ },
+ {
+  "dump_id": 8,
+  "desc": "PROCEDURAL LANGUAGE",
+  "namespace": "",
+  "tag": "plpython3u",
+  "owner": "postgres",
+  "defn": "CREATE OR REPLACE LANGUAGE plpython3u;\n",
+  "drop_stmt": "DROP LANGUAGE IF EXISTS plpython3u;\n",
+  "tablespace": null,
+  "dependencies": [],
+  "section": "Pre-Data"
+ },
+ {
+  "dump_id": 7,
+  "desc": "FOREIGN DATA WRAPPER",
+  "namespace": "",
+  "tag": "file",
+  "owner": "postgres",
+  "defn": "CREATE FOREIGN DATA WRAPPER file HANDLER file_fdw_handler NO VALIDATOR;\n",
+  "drop_stmt": "DROP FOREIGN DATA WRAPPER IF EXISTS file;\n",
+  "tablespace": null,
+  "dependencies": [],
+  "section": "Pre-Data"
+ },
+ {
+  "dump_id": 53,
+  "desc": "SERVER",
+  "namespace": "",
+  "tag": "localhost",
+  "owner": "postgres",
+  "defn": "CREATE SERVER localhost FOREIGN DATA WRAPPER postgres_fdw OPTIONS host 'localhost', port 5432, user 'fdw_user', dbname 'postgres';\n",
+  "drop_stmt": "DROP SERVER IF EXISTS localhost;\n",
+  "tablespace": null,
+  "dependencies": [],
+  "section": "Pre-Data"
+ },
+ {
+  "dump_id": 19,
+  "desc": "DOMAIN",
+  "namespace": "test",
+  "tag": "email_address",
+  "owner": "postgres",
+  "defn": "CREATE DOMAIN test.email_address AS citext CONSTRAINT CHECK (value ~ '^[a-zA-Z0-9.!#$%&''*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$');\n",
+  "drop_stmt": "DROP DOMAIN IF EXISTS test.email_address;\n",
+  "tablespace": null,
+  "dependencies": [],
+  "section": "Pre-Data"
+ },
+ {
+  "dump_id": 49,
+  "desc": "DOMAIN",
+  "namespace": "test",
+  "tag": "bcp47_locale",
+  "owner": "postgres",
+  "defn": "CREATE DOMAIN test.bcp47_locale AS text CONSTRAINT CHECK (value ~ '^[a-z]{2}-[A-Z]{2,3}$');\n",
+  "drop_stmt": "DROP DOMAIN IF EXISTS test.bcp47_locale;\n",
+  "tablespace": null,
+  "dependencies": [],
+  "section": "Pre-Data"
+ },
+ {
+  "dump_id": 15,
+  "desc": "TYPE",
+  "namespace": "test",
+  "tag": "address_type",
+  "owner": "postgres",
+  "defn": "CREATE TYPE test.address_type AS ENUM ('billing', 'delivery');\n",
+  "drop_stmt": "DROP TYPE IF EXISTS test.address_type;\n",
+  "tablespace": null,
+  "dependencies": [],
+  "section": "Pre-Data"
+ },
+ {
+  "dump_id": 16,
+  "desc": "TYPE",
+  "namespace": "test",
+  "tag": "user_state",
+  "owner": "postgres",
+  "defn": "CREATE TYPE test.user_state AS ENUM ('removed', 'suspended', 'unverified', 'verified');\n",
+  "drop_stmt": "DROP TYPE IF EXISTS test.user_state;\n",
+  "tablespace": null,
+  "dependencies": [],
+  "section": "Pre-Data"
+ },
+ {
+  "dump_id": 17,
+  "desc": "TYPE",
+  "namespace": "test",
+  "tag": "compfoo",
+  "owner": "postgres",
+  "defn": "CREATE TYPE test.compfoo AS (f1 int, f2 text);\n",
+  "drop_stmt": "DROP TYPE IF EXISTS test.compfoo;\n",
+  "tablespace": null,
+  "dependencies": [],
+  "section": "Pre-Data"
+ },
+ {
+  "dump_id": 18,
+  "desc": "TYPE",
+  "namespace": "test",
+  "tag": "float8_range",
+  "owner": "postgres",
+  "defn": "CREATE TYPE test.float8_range AS RANGE (SUBTYPE = float8, SUBTYPE_DIFF = float8mi);\n",
+  "drop_stmt": "DROP TYPE IF EXISTS test.float8_range;\n",
+  "tablespace": null,
+  "dependencies": [],
+  "section": "Pre-Data"
+ },
+ {
+  "dump_id": 21,
+  "desc": "TABLESPACE",
+  "namespace": "",
+  "tag": "temp",
+  "owner": "postgres",
+  "defn": "CREATE TABLESPACE temp OWNER postgres LOCATION /tmp;\n",
+  "drop_stmt": "DROP TABLESPACE IF EXISTS temp;\n",
+  "tablespace": null,
+  "dependencies": [],
+  "section": "Pre-Data"
+ },
+ {
+  "dump_id": 23,
+  "desc": "TABLE",
+  "namespace": "test",
+  "tag": "empty_table",
+  "owner": "postgres",
+  "defn": "CREATE TABLE test.empty_table ( id BIGINT NOT NULL GENERATED ALWAYS AS IDENTITY, created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT 'CURRENT_TIMESTAMP', last_modified_at TIMESTAMP WITH TIME ZONE, value TEXT );\n",
+  "drop_stmt": "DROP TABLE IF EXISTS test.empty_table;\n",
+  "tablespace": null,
+  "dependencies": [],
+  "section": "Pre-Data"
+ },
+ {
+  "dump_id": 27,
+  "desc": "SEQUENCE",
+  "namespace": "test",
+  "tag": "empty_table_id",
+  "owner": "postgres",
+  "defn": "CREATE SEQUENCE test.empty_table_id AS BIGINT INCREMENT BY 10 MAXVALUE 1000000 START WITH 100 CACHE 2 OWNED BY test.empty_table;\n",
+  "drop_stmt": "DROP SEQUENCE IF EXISTS test.empty_table_id;\n",
+  "tablespace": null,
+  "dependencies": [],
+  "section": "Pre-Data"
+ },
+ {
+  "dump_id": 28,
+  "desc": "FUNCTION",
+  "namespace": "test",
+  "tag": "disable_alter_domain()",
+  "owner": "postgres",
+  "defn": "CREATE FUNCTION disable_alter_domain() RETURNS event_trigger LANGUAGE plpgsql AS $$\nBEGIN\n  IF tg_tag = 'ALTER DOMAIN' THEN\n    RAISE EXCEPTION '% is disabled', tg_tag;\n  END IF;\nEND;\n\n$$;\n",
+  "drop_stmt": "DROP FUNCTION IF EXISTS disable_alter_domain();\n",
+  "tablespace": null,
+  "dependencies": [],
+  "section": "Pre-Data"
+ },
+ {
+  "dump_id": 29,
+  "desc": "FUNCTION",
+  "namespace": "test",
+  "tag": "test_aggregate(integer, integer)",
+  "owner": "postgres",
+  "defn": "CREATE FUNCTION test_aggregate(integer, integer) RETURNS INTEGER LANGUAGE sql AS $$\nSELECT array_agg($1);\n\n$$;\n",
+  "drop_stmt": "DROP FUNCTION IF EXISTS test_aggregate(integer, integer);\n",
+  "tablespace": null,
+  "dependencies": [],
+  "section": "Pre-Data"
+ },
+ {
+  "dump_id": 30,
+  "desc": "FUNCTION",
+  "namespace": "test",
+  "tag": "utf8_to_latin1(integer, integer, cstring, internal, integer)",
+  "owner": "postgres",
+  "defn": "CREATE FUNCTION utf8_to_latin1(IN source_encoding_id INTEGER, IN destination_encoding_id INTEGER, IN source CSTRING, IN destination INTERNAL, IN source_length INTEGER) RETURNS TEXT LANGUAGE plpython3u AS $$\nreturn source.encode('UTF8').decode('LATIN-1')\n\n$$;\n",
+  "drop_stmt": "DROP FUNCTION IF EXISTS utf8_to_latin1(IN source_encoding_id INTEGER, IN destination_encoding_id INTEGER, IN source CSTRING, IN destination INTERNAL, IN source_length INTEGER);\n",
+  "tablespace": null,
+  "dependencies": [],
+  "section": "Pre-Data"
+ },
+ {
+  "dump_id": 34,
+  "desc": "TEXT SEARCH CONFIGURATION",
+  "namespace": "test",
+  "tag": "Copy of default things",
+  "owner": "postgres",
+  "defn": "CREATE TEXT SEARCH CONFIGURATION custom_english (['PARSER', '=', 'custom_default']);\n",
+  "drop_stmt": "DROP TEXT SEARCH CONFIGURATION IF EXISTS custom_english;\n",
+  "tablespace": null,
+  "dependencies": [],
+  "section": "Pre-Data"
+ },
+ {
+  "dump_id": 35,
+  "desc": "TEXT SEARCH CONFIGURATION",
+  "namespace": "test",
+  "tag": "Copy of german config",
+  "owner": "postgres",
+  "defn": "CREATE TEXT SEARCH CONFIGURATION custom_german (['SOURCE', '=', 'german']);\n",
+  "drop_stmt": "DROP TEXT SEARCH CONFIGURATION IF EXISTS custom_german;\n",
+  "tablespace": null,
+  "dependencies": [],
+  "section": "Pre-Data"
+ },
+ {
+  "dump_id": 36,
+  "desc": "TEXT SEARCH DICTIONARY",
+  "namespace": "test",
+  "tag": "",
+  "owner": "postgres",
+  "defn": "CREATE TEXT SEARCH DICTIONARY custom_simple (TEMPLATE = custom_snowball, language = 'english', stopwords = 'english');\n",
+  "drop_stmt": "DROP TEXT SEARCH DICTIONARY IF EXISTS custom_simple;\n",
+  "tablespace": null,
+  "dependencies": [],
+  "section": "Pre-Data"
+ },
+ {
+  "dump_id": 37,
+  "desc": "TEXT SEARCH PARSER",
+  "namespace": "test",
+  "tag": "Simple copy of the default parser values",
+  "owner": "postgres",
+  "defn": "CREATE TEXT SEARCH PARSER custom_default (START = prsd_start, GETTOKEN = prsd_nexttoken, END = prsd_end, LEXTYPES = prsd_lextype, HEADLINE = prsd_headline);\n",
+  "drop_stmt": "DROP TEXT SEARCH PARSER IF EXISTS custom_default;\n",
+  "tablespace": null,
+  "dependencies": [],
+  "section": "Pre-Data"
+ },
+ {
+  "dump_id": 38,
+  "desc": "TEXT SEARCH TEMPLATE",
+  "namespace": "test",
+  "tag": "Copied from the snowball template",
+  "owner": "postgres",
+  "defn": "CREATE TEXT SEARCH TEMPLATE custom_snowball (INIT = dsnowball_init, LEXIZE = dsnowball_lexize);\n",
+  "drop_stmt": "DROP TEXT SEARCH TEMPLATE IF EXISTS custom_snowball;\n",
+  "tablespace": null,
+  "dependencies": [],
+  "section": "Pre-Data"
+ },
+ {
+  "dump_id": 42,
+  "desc": "SUBSCRIPTION",
+  "namespace": "",
+  "tag": "localhost_test",
+  "owner": "postgres",
+  "defn": "CREATE SUBSCRIPTION localhost_test CONNECTION host=localhost port=5432 dbname=logical_replication user=postgres PUBLICATION all_tables WITH copy_data = True, create_slot = True, enabled = True, synchronous_commit = 'on', connect = True;\n",
+  "drop_stmt": "DROP SUBSCRIPTION IF EXISTS localhost_test;\n",
+  "tablespace": null,
+  "dependencies": [],
+  "section": "Pre-Data"
+ },
+ {
+  "dump_id": 47,
+  "desc": "USER MAPPING",
+  "namespace": "",
+  "tag": "postgres",
+  "owner": "postgres",
+  "defn": "CREATE USER MAPPING FOR postgres SERVER localhost OPTIONS (user 'fdw_user');\n",
+  "drop_stmt": "DROP USER MAPPING IF EXISTS FOR postgres SERVER localhost;\n",
+  "tablespace": null,
+  "dependencies": [],
+  "section": "Pre-Data"
+ },
+ {
+  "dump_id": 51,
+  "desc": "TABLE",
+  "namespace": "test",
+  "tag": "addresses",
+  "owner": "postgres",
+  "defn": "CREATE TABLE test.addresses ( id UUID NOT NULL DEFAULT 'uuid_generate_v4()', created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT 'CURRENT_TIMESTAMP', last_modified_at TIMESTAMP WITH TIME ZONE, user_id UUID NOT NULL, address1 TEXT NOT NULL, address2 TEXT, address3 TEXT, locality TEXT NOT NULL, region TEXT, postal_code TEXT NOT NULL, country TEXT NOT NULL, FOREIGN KEY (user_id) REFERENCES test.users (id) ON_DELETE CASCADE ON_UPDATE CASCADE );\n",
+  "drop_stmt": "DROP TABLE IF EXISTS test.addresses;\n",
+  "tablespace": null,
+  "dependencies": [],
+  "section": "Pre-Data"
+ },
+ {
+  "dump_id": 55,
+  "desc": "TABLE",
+  "namespace": "test",
+  "tag": "users",
+  "owner": "postgres",
+  "defn": "CREATE TABLE test.users ( id UUID NOT NULL DEFAULT 'uuid_generate_v4()', created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT 'CURRENT_TIMESTAMP', last_modified_at, TIMESTAMP WITH TIME ZONE,, state user_state NOT NULL DEFAULT 'unverified', email email_address NOT NULL, name TEXT NOT NULL, surname TEXT NOT NULL, display_name TEXT, locale bcp47_locale NOT NULL DEFAULT 'en-US', password_salt TEXT NOT NULL, password TEXT NOT NULL, signup_ip INET NOT NULL, icon oid );\n",
+  "drop_stmt": "DROP TABLE IF EXISTS test.users;\n",
+  "tablespace": null,
+  "dependencies": [],
+  "section": "Pre-Data"
+ },
+ {
+  "dump_id": 58,
+  "desc": "VIEW",
+  "namespace": "test",
+  "tag": "user_addresses",
+  "owner": "postgres",
+  "defn": "CREATE VIEW test.user_addresses AS SELECT id,\n       created_at,\n       last_modified_at,\n       state,\n       email,\n       name,\n       surname,\n       display_name,\n       locale,\n       password_salt,\n       password,\n       signup_ip,\n       icon\n  FROM test.users\n WHERE id IN (SELECT DISTINCT id FROM test.addresses WHERE country = 'US';\n;\n",
+  "drop_stmt": "DROP VIEW IF EXISTS test.user_addresses;\n",
+  "tablespace": null,
+  "dependencies": [],
+  "section": "Pre-Data"
+ },
+ {
+  "dump_id": 25,
+  "desc": "INDEX",
+  "namespace": "test",
+  "tag": "empty_table_created_at",
+  "owner": "postgres",
+  "defn": "CREATE INDEX test.empty_table_created_at ON test.empty_table ( created_at DESC NULLS LAST );\n",
+  "drop_stmt": "DROP INDEX IF EXISTS test.empty_table_created_at;\n",
+  "tablespace": null,
+  "dependencies": [
+   23
+  ],
+  "section": "Post-Data"
+ },
+ {
+  "dump_id": 57,
+  "desc": "INDEX",
+  "namespace": "test",
+  "tag": "users_unique_email",
+  "owner": "postgres",
+  "defn": "CREATE UNIQUE INDEX test.users_unique_email ON test.users ( email );\n",
+  "drop_stmt": "DROP INDEX IF EXISTS test.users_unique_email;\n",
+  "tablespace": null,
+  "dependencies": [
+   55
+  ],
+  "section": "Post-Data"
+ },
+ {
+  "dump_id": 39,
+  "desc": "EVENT TRIGGER",
+  "namespace": "",
+  "tag": "disable_alter_domain",
+  "owner": "postgres",
+  "defn": "CREATE EVENT TRIGGER disable_alter_domain ON ddl_command_start WHEN TAG IN (['ALTER DOMAIN']) EXECUTE FUNCTION test.disable_alter_domain();\n",
+  "drop_stmt": "DROP EVENT TRIGGER IF EXISTS disable_alter_domain;\n",
+  "tablespace": null,
+  "dependencies": [],
+  "section": "Post-Data"
+ },
+ {
+  "dump_id": 40,
+  "desc": "PUBLICATION",
+  "namespace": "",
+  "tag": "test",
+  "owner": "postgres",
+  "defn": "CREATE PUBLICATION test FOR ALL TABLES;\n",
+  "drop_stmt": "DROP PUBLICATION IF EXISTS test;\n",
+  "tablespace": null,
+  "dependencies": [],
+  "section": "Post-Data"
+ },
+ {
+  "dump_id": 60,
+  "desc": "MATERIALIZED VIEW",
+  "namespace": "test",
+  "tag": "user_addresses",
+  "owner": "postgres",
+  "defn": "CREATE MATERIALIZED VIEW test.user_addresses (user_id, email, address1, address2, address3, locality, region, postal_code, country) TABLESPACE temp AS SELECT a.id AS user_id,\n       a.email,\n       b.address1,\n       b.address2,\n       b.address3,\n       b.locality,\n       b.region,\n       b.postal_code,\n       b.country\n  FROM test.users AS a\n  JOIN test.addresses AS b\n    ON b.user_id = a.id;\n;\n",
+  "drop_stmt": "DROP MATERIALIZED VIEW IF EXISTS test.user_addresses;\n",
+  "tablespace": "temp",
+  "dependencies": [],
+  "section": "Post-Data"
+ },
+ {
+  "dump_id": 10,
+  "desc": "COMMENT",
+  "namespace": "",
+  "tag": "test",
+  "owner": "postgres",
+  "defn": "COMMENT ON SCHEMA test IS $$Common test schema$$;\n;\n",
+  "drop_stmt": ";\n",
+  "tablespace": null,
+  "dependencies": [
+   9
+  ],
+  "section": "None"
+ },
+ {
+  "dump_id": 12,
+  "desc": "COMMENT",
+  "namespace": "test",
+  "tag": "===",
+  "owner": "postgres",
+  "defn": "COMMENT ON OPERATOR test.=== IS $$Ripped directly from Postgres docs - should not work$$;\n;\n",
+  "drop_stmt": ";\n",
+  "tablespace": null,
+  "dependencies": [
+   11
+  ],
+  "section": "None"
+ },
+ {
+  "dump_id": 20,
+  "desc": "COMMENT",
+  "namespace": "test",
+  "tag": "email_address",
+  "owner": "postgres",
+  "defn": "COMMENT ON DOMAIN test.email_address IS $$Validates an email address against a simplified regex$$;\n;\n",
+  "drop_stmt": ";\n",
+  "tablespace": null,
+  "dependencies": [
+   19
+  ],
+  "section": "None"
+ },
+ {
+  "dump_id": 22,
+  "desc": "COMMENT",
+  "namespace": "",
+  "tag": "temp",
+  "owner": "postgres",
+  "defn": "COMMENT ON TABLESPACE temp IS $$It's temporary$$;\n;\n",
+  "drop_stmt": ";\n",
+  "tablespace": null,
+  "dependencies": [
+   21
+  ],
+  "section": "None"
+ },
+ {
+  "dump_id": 24,
+  "desc": "COMMENT",
+  "namespace": "test",
+  "tag": "empty_table",
+  "owner": "postgres",
+  "defn": "COMMENT ON TABLE test.empty_table IS $$Simple table without much substance$$;\n;\n",
+  "drop_stmt": ";\n",
+  "tablespace": null,
+  "dependencies": [
+   23
+  ],
+  "section": "None"
+ },
+ {
+  "dump_id": 26,
+  "desc": "COMMENT",
+  "namespace": "test",
+  "tag": "empty_table_created_at",
+  "owner": "postgres",
+  "defn": "COMMENT ON INDEX test.empty_table_created_at IS $$Index covering the created_at column$$;\n;\n",
+  "drop_stmt": ";\n",
+  "tablespace": null,
+  "dependencies": [
+   25
+  ],
+  "section": "None"
+ },
+ {
+  "dump_id": 31,
+  "desc": "COMMENT",
+  "namespace": "test",
+  "tag": "utf8_to_latin1(integer, integer, cstring, internal, integer)",
+  "owner": "postgres",
+  "defn": "COMMENT ON FUNCTION test.utf8_to_latin1(integer, integer, cstring, internal, integer) IS $$Used for a conversion to convert from UTF-8 to Latin-1$$;\n;\n",
+  "drop_stmt": ";\n",
+  "tablespace": null,
+  "dependencies": [
+   30
+  ],
+  "section": "None"
+ },
+ {
+  "dump_id": 33,
+  "desc": "COMMENT",
+  "namespace": "test",
+  "tag": "(int4 AS timestamp)",
+  "owner": "postgres",
+  "defn": "COMMENT ON CAST test.(int4 AS timestamp) IS $$Test cast for sure$$;\n;\n",
+  "drop_stmt": ";\n",
+  "tablespace": null,
+  "dependencies": [
+   32
+  ],
+  "section": "None"
+ },
+ {
+  "dump_id": 41,
+  "desc": "COMMENT",
+  "namespace": "",
+  "tag": "test",
+  "owner": "postgres",
+  "defn": "COMMENT ON PUBLICATION test IS $$Test publication exposing all tables$$;\n;\n",
+  "drop_stmt": ";\n",
+  "tablespace": null,
+  "dependencies": [
+   40
+  ],
+  "section": "None"
+ },
+ {
+  "dump_id": 43,
+  "desc": "COMMENT",
+  "namespace": "",
+  "tag": "localhost_test",
+  "owner": "postgres",
+  "defn": "COMMENT ON SUBSCRIPTION localhost_test IS $$Test logical replication subscription that requires a local database\nsetup with the name `logical_replication` and a publication named\n`all_tables`.\n$$;\n;\n",
+  "drop_stmt": ";\n",
+  "tablespace": null,
+  "dependencies": [
+   42
+  ],
+  "section": "None"
+ },
+ {
+  "dump_id": 50,
+  "desc": "COMMENT",
+  "namespace": "test",
+  "tag": "bcp47_locale",
+  "owner": "postgres",
+  "defn": "COMMENT ON DOMAIN test.bcp47_locale IS $$Simplified locale check, doesn't fully conform to BCP-47$$;\n;\n",
+  "drop_stmt": ";\n",
+  "tablespace": null,
+  "dependencies": [
+   49
+  ],
+  "section": "None"
+ },
+ {
+  "dump_id": 52,
+  "desc": "COMMENT",
+  "namespace": "test",
+  "tag": "addresses",
+  "owner": "postgres",
+  "defn": "COMMENT ON TABLE test.addresses IS $$Generic contact addresses table$$;\n;\n",
+  "drop_stmt": ";\n",
+  "tablespace": null,
+  "dependencies": [
+   51
+  ],
+  "section": "None"
+ },
+ {
+  "dump_id": 54,
+  "desc": "COMMENT",
+  "namespace": "",
+  "tag": "localhost",
+  "owner": "postgres",
+  "defn": "COMMENT ON SERVER localhost IS $$Example FDW that conencts back to the same server on a different DB$$;\n;\n",
+  "drop_stmt": ";\n",
+  "tablespace": null,
+  "dependencies": [
+   53
+  ],
+  "section": "None"
+ },
+ {
+  "dump_id": 56,
+  "desc": "COMMENT",
+  "namespace": "test",
+  "tag": "users",
+  "owner": "postgres",
+  "defn": "COMMENT ON TABLE test.users IS $$Sample user table$$;\n;\n",
+  "drop_stmt": ";\n",
+  "tablespace": null,
+  "dependencies": [
+   55
+  ],
+  "section": "None"
+ },
+ {
+  "dump_id": 59,
+  "desc": "COMMENT",
+  "namespace": "test",
+  "tag": "user_addresses",
+  "owner": "postgres",
+  "defn": "COMMENT ON VIEW test.user_addresses IS $$This is a test view$$;\n;\n",
+  "drop_stmt": ";\n",
+  "tablespace": null,
+  "dependencies": [
+   58
+  ],
+  "section": "None"
+ }
+]

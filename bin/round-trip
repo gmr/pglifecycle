@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# Phase 3 round-trip gate (PLAN.md):
+#
+#   fixtures/schema.sql -> PostgreSQL -> pg_dump -Fc -> pull ->
+#   load + validate -> build -> pg_restore -> pg_dump --schema-only
+#   of both databases -> diff is empty
+#
+# Requires a PostgreSQL superuser connection (defaults target the
+# compose.yaml container; override with PGHOST/PGPORT/PGUSER) and the
+# postgres client tools on PATH. All commands run via psql/pg_dump
+# against two scratch databases that are dropped and recreated.
+set -euo pipefail
+
+PGHOST="${PGHOST:-localhost}"
+PGPORT="${PGPORT:-5432}"
+PGUSER="${PGUSER:-postgres}"
+export PGHOST PGPORT PGUSER
+
+SOURCE_DB=roundtrip_source
+RESTORED_DB=roundtrip_restored
+WORKDIR="$(mktemp -d)"
+
+cleanup() {
+    rm -rf "$WORKDIR"
+    psql -d postgres -q -c "DROP DATABASE IF EXISTS ${RESTORED_DB}" \
+        >/dev/null 2>&1 || true
+    psql -d postgres -q -c "DROP DATABASE IF EXISTS ${SOURCE_DB}" \
+        >/dev/null 2>&1 || true
+}
+
+trap cleanup EXIT INT TERM
+
+echo "==> Building pglifecycle"
+cargo build --quiet
+
+echo "==> Creating ${SOURCE_DB} from fixtures/schema.sql"
+psql -d postgres -q -c "DROP DATABASE IF EXISTS ${SOURCE_DB}"
+psql -d postgres -q -c "CREATE DATABASE ${SOURCE_DB}"
+psql -d "${SOURCE_DB}" -q -v ON_ERROR_STOP=1 -f fixtures/schema.sql
+
+echo "==> pg_dump ${SOURCE_DB}"
+pg_dump -d "${SOURCE_DB}" -Fc --schema-only -f "${WORKDIR}/source.dump"
+
+echo "==> pull"
+./target/debug/pglifecycle pull --dump "${WORKDIR}/source.dump" \
+    "${WORKDIR}/project"
+
+echo "==> build (loads and validates the pulled project)"
+./target/debug/pglifecycle build "${WORKDIR}/project" \
+    "${WORKDIR}/build.dump"
+
+echo "==> pg_restore into ${RESTORED_DB}"
+psql -d postgres -q -c "DROP DATABASE IF EXISTS ${RESTORED_DB}"
+psql -d postgres -q -c "CREATE DATABASE ${RESTORED_DB}"
+pg_restore -d "${RESTORED_DB}" --no-owner --exit-on-error \
+    "${WORKDIR}/build.dump"
+
+echo "==> Comparing schema-only dumps"
+# the \restrict/\unrestrict psql guards carry a random per-dump token
+pg_dump -d "${SOURCE_DB}" --schema-only --no-owner \
+    | grep -v '^\\\(un\)\{0,1\}restrict ' > "${WORKDIR}/source.sql"
+pg_dump -d "${RESTORED_DB}" --schema-only --no-owner \
+    | grep -v '^\\\(un\)\{0,1\}restrict ' > "${WORKDIR}/restored.sql"
+if diff -u "${WORKDIR}/source.sql" "${WORKDIR}/restored.sql"; then
+    echo "Round-trip gate passed: schema diff is empty"
+else
+    echo "Round-trip gate FAILED: schemas differ" >&2
+    exit 1
+fi

@@ -1,0 +1,30 @@
+[package]
+name = "pglifecycle"
+version = "2.0.0-alpha.0"
+edition = "2024"
+description = "PostgreSQL schema management tool"
+license = "BSD-3-Clause"
+repository = "https://github.com/gmr/pglifecycle"
+rust-version = "1.88"
+
+[dependencies]
+clap = { version = "4", features = ["derive", "env"] }
+include_dir = "0.7.4"
+jsonschema = { version = "0.46.5", default-features = false }
+libpgdump = "2.1"
+libpgfmt = "1.1.2"
+log = "0.4"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = { version = "1.0.150", features = ["preserve_order"] }
+serde_norway = "0.9.42"
+simplelog = "0.12"
+tempfile = "3"
+tree-sitter = "0.26"
+tree-sitter-postgres = "1.2"
+
+[dev-dependencies]
+libpgdump = "2.1"
+
+[profile.release]
+lto = true
+strip = true
