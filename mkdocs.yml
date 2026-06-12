@@ -4,10 +4,6 @@ site_url: https://gmr.github.io/pglifecycle/
 repo_url: https://github.com/gmr/pglifecycle
 repo_name: gmr/pglifecycle
 
-exclude_docs: |
-  *.rst
-  conf.py
-
 theme:
   name: material
   palette:
@@ -36,17 +32,6 @@ theme:
 
 plugins:
   - search
-  - mkdocstrings:
-      handlers:
-        python:
-          paths: [.]
-          options:
-            docstring_style: google
-            show_source: true
-            show_root_heading: true
-            show_root_toc_entry: true
-            heading_level: 2
-            members_order: source
 
 markdown_extensions:
   - admonition
@@ -62,3 +47,5 @@ markdown_extensions:
 
 nav:
   - Home: index.md
+  - Commands: commands.md
+  - Project Format: project-format.md
