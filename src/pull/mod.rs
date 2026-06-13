@@ -6,6 +6,7 @@
 //! module into models and child entries (indexes, constraints,
 //! triggers, comments, ACLs, OWNED BY) are merged into their owners.
 
+mod update;
 mod writer;
 
 use std::collections::BTreeMap;
@@ -18,7 +19,15 @@ use crate::models;
 use crate::{cli, pgdump};
 
 pub fn pull(args: &cli::Pull) -> Result<(), String> {
-    if args.destination.exists() && !args.force {
+    if args.update {
+        if !args.destination.join("project.yaml").exists() {
+            return Err(format!(
+                "--update requires an existing project; {} has no \
+                 project.yaml",
+                args.destination.display()
+            ));
+        }
+    } else if args.destination.exists() && !args.force {
         return Err(format!("{} already exists", args.destination.display()));
     }
     if args.no_owner {
@@ -68,7 +77,12 @@ pub fn pull(args: &cli::Pull) -> Result<(), String> {
         assembly.ingest_roles(&text)?;
     }
     assembly.format_sql();
-    writer::write(&assembly, args)
+    let files = writer::render(&assembly, args)?;
+    if args.update {
+        update::merge(&files, args)
+    } else {
+        writer::write_bootstrap(&files, args)
+    }
 }
 
 /// A dump entry that was not assembled into the project models

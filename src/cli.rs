@@ -113,6 +113,15 @@ pub struct Pull {
     #[arg(long)]
     pub force: bool,
 
+    /// Merge into an existing project, rewriting only changed files
+    #[arg(long, conflicts_with = "force")]
+    pub update: bool,
+
+    /// With --update, delete project files whose objects no longer
+    /// exist in the database
+    #[arg(long, requires = "update")]
+    pub prune: bool,
+
     /// Create a .gitkeep file in empty directories
     #[arg(long, conflicts_with = "remove_empty_dirs")]
     pub gitkeep: bool,

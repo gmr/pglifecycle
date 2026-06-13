@@ -45,6 +45,16 @@ echo "==> pull"
 ./target/debug/pglifecycle pull --dump "${WORKDIR}/source.dump" \
     "${WORKDIR}/project"
 
+echo "==> pull --update from the same dump (no-op gate)"
+cp -R "${WORKDIR}/project" "${WORKDIR}/project-before"
+./target/debug/pglifecycle pull --update --dump "${WORKDIR}/source.dump" \
+    "${WORKDIR}/project"
+if ! diff -r "${WORKDIR}/project-before" "${WORKDIR}/project"; then
+    echo "Update gate FAILED: pull --update from an unchanged dump" \
+        "modified the project" >&2
+    exit 1
+fi
+
 echo "==> build (loads and validates the pulled project)"
 ./target/debug/pglifecycle build "${WORKDIR}/project" \
     "${WORKDIR}/build.dump"

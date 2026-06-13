@@ -1,7 +1,7 @@
 //! YAML project emission for `pull` (ports the storage half of
 //! generate_project.py / storage.py)
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value, json};
@@ -10,13 +10,16 @@ use crate::constants::PROJECT_DIRS;
 use crate::pull::{Assembly, RoleState};
 use crate::{cli, models, yamlio};
 
-pub fn write(assembly: &Assembly, args: &cli::Pull) -> Result<(), String> {
-    log::info!("Writing project to {}", args.destination.display());
-    let writer = Writer {
-        root: args.destination.clone(),
+/// Render the project files for an assembly as `relative path →
+/// YAML text`, honoring the `--ignore` file
+pub fn render(
+    assembly: &Assembly,
+    args: &cli::Pull,
+) -> Result<BTreeMap<PathBuf, String>, String> {
+    let mut writer = Writer {
         ignore: read_ignore(args.ignore.as_deref())?,
+        files: BTreeMap::new(),
     };
-    writer.create_directories(args.gitkeep)?;
     writer.write_project_file(assembly)?;
     for schema in &assembly.schemas {
         writer.save(
@@ -76,6 +79,27 @@ pub fn write(assembly: &Assembly, args: &cli::Pull) -> Result<(), String> {
             &Value::Array(entries),
         )?;
     }
+    Ok(writer.files)
+}
+
+/// Write the full rendered file set into a new project tree (bootstrap
+/// mode)
+pub fn write_bootstrap(
+    files: &BTreeMap<PathBuf, String>,
+    args: &cli::Pull,
+) -> Result<(), String> {
+    log::info!("Writing project to {}", args.destination.display());
+    create_directories(&args.destination, args.gitkeep)?;
+    for (relative, content) in files {
+        let path = args.destination.join(relative);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                format!("failed to create {}: {e}", parent.display())
+            })?;
+        }
+        std::fs::write(&path, content)
+            .map_err(|e| format!("failed to write {}: {e}", path.display()))?;
+    }
     if args.gitkeep {
         remove_unneeded_gitkeeps(&args.destination)?;
     }
@@ -86,28 +110,31 @@ pub fn write(assembly: &Assembly, args: &cli::Pull) -> Result<(), String> {
 }
 
 struct Writer {
-    root: PathBuf,
     ignore: BTreeSet<String>,
+    files: BTreeMap<PathBuf, String>,
+}
+
+fn create_directories(root: &Path, gitkeep: bool) -> Result<(), String> {
+    for dir in PROJECT_DIRS {
+        let path = root.join(dir);
+        std::fs::create_dir_all(&path).map_err(|e| {
+            format!("failed to create {}: {e}", path.display())
+        })?;
+        if gitkeep {
+            let path = path.join(".gitkeep");
+            std::fs::write(&path, "").map_err(|e| {
+                format!("failed to create {}: {e}", path.display())
+            })?;
+        }
+    }
+    Ok(())
 }
 
 impl Writer {
-    fn create_directories(&self, gitkeep: bool) -> Result<(), String> {
-        for dir in PROJECT_DIRS {
-            let path = self.root.join(dir);
-            std::fs::create_dir_all(&path).map_err(|e| {
-                format!("failed to create {}: {e}", path.display())
-            })?;
-            if gitkeep {
-                let path = path.join(".gitkeep");
-                std::fs::write(&path, "").map_err(|e| {
-                    format!("failed to create {}: {e}", path.display())
-                })?;
-            }
-        }
-        Ok(())
-    }
-
-    fn write_project_file(&self, assembly: &Assembly) -> Result<(), String> {
+    fn write_project_file(
+        &mut self,
+        assembly: &Assembly,
+    ) -> Result<(), String> {
         let mut project = Map::new();
         project.insert(
             String::from("name"),
@@ -140,7 +167,7 @@ impl Writer {
 
     /// Function files are named by function; overloads get a numeric
     /// suffix (generate_project.py _function_filename, simplified)
-    fn write_functions(&self, assembly: &Assembly) -> Result<(), String> {
+    fn write_functions(&mut self, assembly: &Assembly) -> Result<(), String> {
         let mut used: BTreeSet<(String, String)> = BTreeSet::new();
         for function in &assembly.functions {
             let mut filename = function.name.clone();
@@ -159,7 +186,7 @@ impl Writer {
     }
 
     /// Types are written as per-schema container files (types.yml)
-    fn write_types(&self, assembly: &Assembly) -> Result<(), String> {
+    fn write_types(&mut self, assembly: &Assembly) -> Result<(), String> {
         let mut schemas: Vec<&str> =
             assembly.types.iter().map(|t| t.schema.as_str()).collect();
         schemas.sort_unstable();
@@ -182,7 +209,7 @@ impl Writer {
     /// Classify accumulated role state into user and role files; a
     /// password or expiry makes a user (pg_dumpall does not
     /// distinguish groups)
-    fn write_roles(&self, assembly: &Assembly) -> Result<(), String> {
+    fn write_roles(&mut self, assembly: &Assembly) -> Result<(), String> {
         for (name, state) in &assembly.roles {
             if !state.settings.is_empty() {
                 // role.yml declares settings as an array of objects but
@@ -231,7 +258,7 @@ impl Writer {
     }
 
     fn save<T: serde::Serialize>(
-        &self,
+        &mut self,
         relative: PathBuf,
         value: &T,
     ) -> Result<(), String> {
@@ -240,7 +267,7 @@ impl Writer {
     }
 
     fn save_value(
-        &self,
+        &mut self,
         relative: PathBuf,
         value: &Value,
     ) -> Result<(), String> {
@@ -249,14 +276,8 @@ impl Writer {
             log::debug!("Skipping ignored file {key}");
             return Ok(());
         }
-        let path = self.root.join(&relative);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                format!("failed to create {}: {e}", parent.display())
-            })?;
-        }
-        std::fs::write(&path, yamlio::dump(value))
-            .map_err(|e| format!("failed to write {}: {e}", path.display()))
+        self.files.insert(relative, yamlio::dump(value));
+        Ok(())
     }
 }
 
@@ -294,7 +315,9 @@ fn nested(directory: &str, schema: &str, name: &str) -> PathBuf {
         .join(format!("{name}.yaml"))
 }
 
-fn read_ignore(path: Option<&Path>) -> Result<BTreeSet<String>, String> {
+pub(crate) fn read_ignore(
+    path: Option<&Path>,
+) -> Result<BTreeSet<String>, String> {
     let Some(path) = path else {
         return Ok(BTreeSet::new());
     };
