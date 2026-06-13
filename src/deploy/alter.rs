@@ -520,7 +520,8 @@ fn enum_type(repo: &Type, db: &Type) -> Resolution {
     let mut alters: Vec<Alter> = repo_values[db_values.len()..]
         .iter()
         .map(|value| {
-            Alter::new(format!("ALTER TYPE {name} ADD VALUE '{value}';\n"))
+            let escaped = value.replace('\'', "''");
+            Alter::new(format!("ALTER TYPE {name} ADD VALUE '{escaped}';\n"))
         })
         .collect();
     if repo.comment != db.comment {
@@ -1016,6 +1017,22 @@ mod tests {
         assert_eq!(
             sql(&alters),
             vec!["ALTER TYPE test.state ADD VALUE 'c';\n"]
+        );
+    }
+
+    #[test]
+    fn enum_append_escapes_single_quotes() {
+        let db: Type = serde_json::from_value(serde_json::json!({
+            "name": "state", "schema": "test", "owner": "postgres",
+            "type": "enum", "enum": ["a"],
+        }))
+        .unwrap();
+        let mut repo = db.clone();
+        repo.enum_values = Some(vec!["a".into(), "can't".into()]);
+        let alters = statements(enum_type(&repo, &db));
+        assert_eq!(
+            sql(&alters),
+            vec!["ALTER TYPE test.state ADD VALUE 'can''t';\n"]
         );
     }
 
