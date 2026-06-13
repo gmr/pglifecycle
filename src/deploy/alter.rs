@@ -12,7 +12,7 @@ use crate::build;
 use crate::deploy::diff::canonical_type;
 use crate::models::{
     CheckConstraint, Column, Definition, Domain, Extension, ForeignKey, Index,
-    Schema, Sequence, Table, Trigger, Type,
+    Schema, Sequence, Table, Trigger, Type, View, ViewColumn,
 };
 use crate::utils::quote_ident;
 
@@ -74,13 +74,53 @@ pub(crate) fn resolve(repo: &Definition, database: &Definition) -> Resolution {
                 Resolution::Replace
             }
         }
-        (Definition::View(_), Definition::View(_)) => Resolution::OrReplace,
+        (Definition::View(repo), Definition::View(db)) => view(repo, db),
         _ => Resolution::Replace,
     }
 }
 
 fn qualified(schema: &str, name: &str) -> String {
     format!("{}.{}", quote_ident(schema), quote_ident(name))
+}
+
+/// CREATE OR REPLACE VIEW only succeeds when the new query's output
+/// columns stay compatible with the existing view: same names in the
+/// same order, with new columns added only at the end. A rename,
+/// reorder, or removal must fall back to the gated drop+recreate path.
+/// Column types can also force a drop, but the project model does not
+/// carry view column types, so only the name-level guard is applied
+/// here.
+fn view(repo: &View, db: &View) -> Resolution {
+    if view_columns_compatible(repo, db) {
+        Resolution::OrReplace
+    } else {
+        Resolution::Replace
+    }
+}
+
+fn view_column_name(column: &ViewColumn) -> &str {
+    match column {
+        ViewColumn::Name(name) => name,
+        ViewColumn::Detailed { name, .. } => name,
+    }
+}
+
+/// True when `repo`'s columns are the `db` columns optionally followed
+/// by additional columns (the only mutation CREATE OR REPLACE VIEW
+/// permits). Absent column metadata on either side is treated as
+/// unknown, so the caller keeps the existing OR REPLACE behavior
+/// rather than forcing an unnecessary drop.
+fn view_columns_compatible(repo: &View, db: &View) -> bool {
+    let (Some(repo_cols), Some(db_cols)) = (&repo.columns, &db.columns) else {
+        return true;
+    };
+    if repo_cols.len() < db_cols.len() {
+        return false;
+    }
+    repo_cols
+        .iter()
+        .zip(db_cols.iter())
+        .all(|(r, d)| view_column_name(r) == view_column_name(d))
 }
 
 fn table(repo: &Table, db: &Table) -> Resolution {
@@ -978,6 +1018,60 @@ mod tests {
         assert!(matches!(
             resolve(&v("SELECT 2"), &v("SELECT 1")),
             Resolution::OrReplace
+        ));
+    }
+
+    fn view_with_columns(columns: serde_json::Value) -> Definition {
+        Definition::View(
+            serde_json::from_value(serde_json::json!({
+                "name": "v", "schema": "test", "owner": "postgres",
+                "query": "SELECT 1", "columns": columns,
+            }))
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn view_appended_column_uses_or_replace() {
+        assert!(matches!(
+            resolve(
+                &view_with_columns(serde_json::json!(["a", "b"])),
+                &view_with_columns(serde_json::json!(["a"])),
+            ),
+            Resolution::OrReplace
+        ));
+    }
+
+    #[test]
+    fn view_renamed_column_replaces() {
+        assert!(matches!(
+            resolve(
+                &view_with_columns(serde_json::json!(["a", "c"])),
+                &view_with_columns(serde_json::json!(["a", "b"])),
+            ),
+            Resolution::Replace
+        ));
+    }
+
+    #[test]
+    fn view_reordered_column_replaces() {
+        assert!(matches!(
+            resolve(
+                &view_with_columns(serde_json::json!(["b", "a"])),
+                &view_with_columns(serde_json::json!(["a", "b"])),
+            ),
+            Resolution::Replace
+        ));
+    }
+
+    #[test]
+    fn view_removed_column_replaces() {
+        assert!(matches!(
+            resolve(
+                &view_with_columns(serde_json::json!(["a"])),
+                &view_with_columns(serde_json::json!(["a", "b"])),
+            ),
+            Resolution::Replace
         ));
     }
 

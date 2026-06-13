@@ -95,9 +95,15 @@ if grep -Eq 'DROP TABLE|DROP COLUMN|ALTER COLUMN .* TYPE' \
     cat "${WORKDIR}/gated.sql" >&2
     exit 1
 fi
+APPLY_ERR="${WORKDIR}/apply.err"
 if ./target/debug/pglifecycle deploy --apply -d "${TARGET_DB}" \
-        "${WORKDIR}/project" 2>/dev/null; then
+        "${WORKDIR}/project" > /dev/null 2>"${APPLY_ERR}"; then
     echo "Safety gate FAILED: --apply did not refuse pending drops" >&2
+    exit 1
+fi
+if ! grep -q "destructive statement(s) are pending" "${APPLY_ERR}"; then
+    echo "Safety gate FAILED: --apply failed for an unexpected reason" >&2
+    cat "${APPLY_ERR}" >&2
     exit 1
 fi
 echo "Safety gate passed: drops excluded and --apply refused"

@@ -1,7 +1,7 @@
 //! pg_dump / pg_dumpall subprocess wrappers (ports pgdump.py)
 
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use crate::cli;
 
@@ -57,6 +57,10 @@ pub fn dump_roles(conn: &cli::Connection, path: &Path) -> Result<(), String> {
 pub fn apply(conn: &cli::Connection, script: &Path) -> Result<(), String> {
     let mut command = Command::new("psql");
     connection_args(&mut command, conn);
+    // connection_args may add -W when a password prompt is requested;
+    // inherit stdin so psql can read the prompted password (output()
+    // otherwise closes stdin)
+    command.stdin(Stdio::inherit());
     if let Some(dbname) = &conn.dbname {
         command.arg("-d").arg(dbname);
     }
