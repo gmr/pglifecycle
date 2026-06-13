@@ -316,7 +316,15 @@ fn indexes(table: &str, repo: &Table, db: &Table, alters: &mut Vec<Alter>) {
                 quote_ident(&index.name)
             )
         },
-        |index| format!("{};\n", build::render_index(index, table).join(" ")),
+        |index| {
+            let mut sql =
+                format!("{};\n", build::render_index(index, table).join(" "));
+            if let Some(comment) = &index.comment {
+                let name = format!("{schema}.{}", quote_ident(&index.name));
+                sql.push_str(&comment_on("INDEX", &name, Some(comment)));
+            }
+            sql
+        },
     );
 }
 
@@ -352,7 +360,18 @@ fn triggers(
             )
         },
         |trigger| {
-            format!("{};\n", build::render_trigger(trigger, table).0.join(" "))
+            let mut sql = format!(
+                "{};\n",
+                build::render_trigger(trigger, table).0.join(" ")
+            );
+            if let Some(comment) = &trigger.comment {
+                let name = format!(
+                    "{} ON {table}",
+                    quote_ident(trigger.name.as_deref().unwrap_or_default())
+                );
+                sql.push_str(&comment_on("TRIGGER", &name, Some(comment)));
+            }
+            sql
         },
     );
     true
@@ -572,6 +591,31 @@ mod tests {
     }
 
     #[test]
+    fn recreated_index_emits_its_comment() {
+        let mut repo = base_table();
+        repo["indexes"] = serde_json::json!([{
+            "name": "users_email_idx",
+            "columns": [{"name": "email"}],
+            "comment": "lookup by email",
+        }]);
+        let mut db = base_table();
+        db["indexes"] = serde_json::json!([{
+            "name": "users_email_idx",
+            "columns": [{"name": "id"}],
+        }]);
+        let alters = statements(table(&parse_table(repo), &parse_table(db)));
+        assert_eq!(
+            sql(&alters),
+            vec![
+                "DROP INDEX IF EXISTS test.users_email_idx;\n",
+                "CREATE INDEX users_email_idx ON test.users ( email );\n\
+                 COMMENT ON INDEX test.users_email_idx IS \
+                 $$lookup by email$$;\n",
+            ]
+        );
+    }
+
+    #[test]
     fn triggers_reconcile_by_name() {
         let mut repo = base_table();
         repo["triggers"] = serde_json::json!([{
@@ -589,6 +633,39 @@ mod tests {
                 "CREATE TRIGGER set_last_modified BEFORE UPDATE ON \
                  test.users FOR EACH ROW EXECUTE FUNCTION \
                  test.set_last_modified();\n"
+            ]
+        );
+    }
+
+    #[test]
+    fn recreated_trigger_emits_its_comment() {
+        let mut repo = base_table();
+        repo["triggers"] = serde_json::json!([{
+            "name": "set_last_modified",
+            "when": "BEFORE",
+            "events": ["UPDATE"],
+            "for_each": "ROW",
+            "function": "test.set_last_modified()",
+            "comment": "stamp updates",
+        }]);
+        let mut db = base_table();
+        db["triggers"] = serde_json::json!([{
+            "name": "set_last_modified",
+            "when": "BEFORE",
+            "events": ["INSERT"],
+            "for_each": "ROW",
+            "function": "test.set_last_modified()",
+        }]);
+        let alters = statements(table(&parse_table(repo), &parse_table(db)));
+        assert_eq!(
+            sql(&alters),
+            vec![
+                "DROP TRIGGER IF EXISTS set_last_modified ON test.users;\n",
+                "CREATE TRIGGER set_last_modified BEFORE UPDATE ON \
+                 test.users FOR EACH ROW EXECUTE FUNCTION \
+                 test.set_last_modified();\n\
+                 COMMENT ON TRIGGER set_last_modified ON test.users IS \
+                 $$stamp updates$$;\n",
             ]
         );
     }

@@ -51,13 +51,18 @@ fn resolutions(
     project: &project::Project,
     diff: &Diff,
 ) -> BTreeMap<usize, Resolution> {
+    let inventory_by_id = project
+        .inventory
+        .iter()
+        .map(|item| (item.id, &item.definition))
+        .collect::<BTreeMap<_, _>>();
     diff.changed
         .iter()
         .map(|(id, database)| {
-            (
-                *id,
-                alter::resolve(&project.inventory[*id].definition, database),
-            )
+            let repo = inventory_by_id
+                .get(id)
+                .expect("changed item id missing from project inventory");
+            (*id, alter::resolve(repo, database))
         })
         .collect()
 }
