@@ -326,6 +326,47 @@ fn update_rewrites_only_changed_files() {
 }
 
 #[test]
+fn prune_removes_stale_remaining_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let archive = dir.path().join("fixtures.dump");
+    fixture_archive(&archive);
+    let dest = dir.path().join("project");
+    pull::pull(&pull_args(&archive, &dest)).expect("bootstrap failed");
+    std::fs::write(dest.join("remaining.yaml"), "[]\n").unwrap();
+
+    pull::pull(&pull_args_with(&archive, &dest, &["--update", "--prune"]))
+        .expect("prune failed");
+
+    assert!(
+        !dest.join("remaining.yaml").exists(),
+        "stale remaining.yaml must be pruned"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn prune_does_not_follow_symlinked_directories() {
+    let dir = tempfile::tempdir().unwrap();
+    let archive = dir.path().join("fixtures.dump");
+    fixture_archive(&archive);
+    let dest = dir.path().join("project");
+    pull::pull(&pull_args(&archive, &dest)).expect("bootstrap failed");
+    let outside = dir.path().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    let outside_file = outside.join("other.yaml");
+    std::fs::write(&outside_file, "outside: true\n").unwrap();
+    std::os::unix::fs::symlink(&outside, dest.join("views/linked")).unwrap();
+
+    pull::pull(&pull_args_with(&archive, &dest, &["--update", "--prune"]))
+        .expect("prune failed");
+
+    assert!(
+        outside_file.exists(),
+        "files behind a symlinked directory must not be pruned"
+    );
+}
+
+#[test]
 fn update_requires_existing_project() {
     let dir = tempfile::tempdir().unwrap();
     let archive = dir.path().join("fixtures.dump");

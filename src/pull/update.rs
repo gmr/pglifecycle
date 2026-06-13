@@ -82,14 +82,26 @@ pub fn merge(
     Ok(())
 }
 
-/// YAML files on disk under the managed directories that the render
-/// did not produce and the ignore file does not cover
+/// The root-level file `--save-remaining` emits; managed for
+/// staleness like the directories above
+const REMAINING_FILE: &str = "remaining.yaml";
+
+/// YAML files on disk under the managed directories (plus the
+/// root-level `remaining.yaml`) that the render did not produce and
+/// the ignore file does not cover
 fn stale_files(
     root: &Path,
     files: &BTreeMap<PathBuf, String>,
     ignore: &BTreeSet<String>,
 ) -> Result<Vec<PathBuf>, String> {
     let mut stale = Vec::new();
+    let remaining = PathBuf::from(REMAINING_FILE);
+    if root.join(&remaining).is_file()
+        && !files.contains_key(&remaining)
+        && !ignore.contains(REMAINING_FILE)
+    {
+        stale.push(remaining);
+    }
     for dir in MANAGED_DIRS {
         let top = root.join(dir);
         if !top.is_dir() {
@@ -103,7 +115,13 @@ fn stale_files(
                 let entry =
                     entry.map_err(|e| format!("failed to read entry: {e}"))?;
                 let path = entry.path();
-                if path.is_dir() {
+                let file_type = entry.file_type().map_err(|e| {
+                    format!("failed to read type for {}: {e}", path.display())
+                })?;
+                if file_type.is_symlink() {
+                    continue;
+                }
+                if file_type.is_dir() {
                     pending.push(path);
                     continue;
                 }
@@ -144,7 +162,13 @@ fn remove_emptied_directories(root: &Path) -> Result<(), String> {
                 let entry =
                     entry.map_err(|e| format!("failed to read entry: {e}"))?;
                 let path = entry.path();
-                if path.is_dir() {
+                let file_type = entry.file_type().map_err(|e| {
+                    format!("failed to read type for {}: {e}", path.display())
+                })?;
+                if file_type.is_symlink() {
+                    continue;
+                }
+                if file_type.is_dir() {
                     directories.push(path.clone());
                     pending.push(path);
                 }
