@@ -167,7 +167,7 @@ fn collect(
 }
 
 /// One GRANT or REVOKE statement for a role on an object
-fn statement(
+pub(crate) fn statement(
     revoke: bool,
     keyword: &str,
     section: &str,

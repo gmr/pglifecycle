@@ -11,6 +11,7 @@ mod writer;
 
 use std::collections::BTreeMap;
 use std::io::IsTerminal;
+use std::path::Path;
 
 use serde_json::{Map, Value};
 
@@ -36,22 +37,51 @@ pub fn pull(args: &cli::Pull) -> Result<(), String> {
              required to generate the project",
         ));
     }
-    if args.password && !std::io::stdin().is_terminal() {
+    if args.connection.password && !std::io::stdin().is_terminal() {
         return Err(String::from(
             "--password requires an interactive terminal; set PGPASSWORD \
              or use a pgpass file instead",
         ));
     }
+    let ddl = pgdump::DumpDdl {
+        no_owner: args.no_owner,
+        no_privileges: args.no_privileges,
+        no_security_labels: args.no_security_labels,
+        no_tablespaces: args.no_tablespaces,
+    };
+    let (assembly, _) = snapshot(
+        args.dump.as_deref(),
+        &args.connection,
+        &ddl,
+        args.extract_roles,
+    )?;
+    let files = writer::render(&assembly, args)?;
+    if args.update {
+        update::merge(&files, args)
+    } else {
+        writer::write_bootstrap(&files, args)
+    }
+}
+
+/// Snapshot a database (or an existing dump file) into an [`Assembly`],
+/// returning the loaded dump alongside it for callers that need the
+/// archive's entry order
+pub fn snapshot(
+    dump_path: Option<&Path>,
+    conn: &cli::Connection,
+    ddl: &pgdump::DumpDdl,
+    extract_roles: bool,
+) -> Result<(Assembly, libpgdump::Dump), String> {
     let mut temp_dump: Option<tempfile::NamedTempFile> = None;
-    let dump_path = match &args.dump {
-        Some(path) => path.clone(),
+    let dump_path = match dump_path {
+        Some(path) => path.to_path_buf(),
         None => {
             let file = tempfile::Builder::new()
                 .prefix("pglifecycle-")
                 .suffix(".dump")
                 .tempfile()
                 .map_err(|e| format!("failed to create temp file: {e}"))?;
-            pgdump::dump(args, file.path())?;
+            pgdump::dump(conn, ddl, file.path())?;
             let path = file.path().to_path_buf();
             temp_dump = Some(file);
             path
@@ -64,25 +94,20 @@ pub fn pull(args: &cli::Pull) -> Result<(), String> {
     drop(temp_dump);
     let mut assembly = Assembly::default();
     assembly.ingest(&dump)?;
-    if args.extract_roles {
+    if extract_roles {
         let file = tempfile::Builder::new()
             .prefix("pglifecycle-roles-")
             .suffix(".sql")
             .tempfile()
             .map_err(|e| format!("failed to create temp file: {e}"))?;
-        pgdump::dump_roles(args, file.path())?;
+        pgdump::dump_roles(conn, file.path())?;
         let text = std::fs::read_to_string(file.path()).map_err(|e| {
             format!("failed to read roles dump {}: {e}", file.path().display())
         })?;
         assembly.ingest_roles(&text)?;
     }
     assembly.format_sql();
-    let files = writer::render(&assembly, args)?;
-    if args.update {
-        update::merge(&files, args)
-    } else {
-        writer::write_bootstrap(&files, args)
-    }
+    Ok((assembly, dump))
 }
 
 /// A dump entry that was not assembled into the project models

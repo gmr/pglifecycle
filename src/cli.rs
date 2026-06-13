@@ -90,50 +90,11 @@ pub struct Create {
     pub destination: PathBuf,
 }
 
+/// PostgreSQL connection options shared by commands that talk to a
+/// database; mirrors the client tools and their PG* environment
+/// variables
 #[derive(Args)]
-#[command(disable_help_flag = true)]
-pub struct Pull {
-    /// Print help
-    #[arg(long, action = clap::ArgAction::Help)]
-    help: Option<bool>,
-
-    /// Use a pre-existing pg_dump file instead of connecting to a database
-    #[arg(short = 'D', long)]
-    pub dump: Option<PathBuf>,
-
-    /// Extract roles (and users) from an existing cluster
-    #[arg(short = 'r', long)]
-    pub extract_roles: bool,
-
-    /// Specify a file with files to skip writing
-    #[arg(short, long)]
-    pub ignore: Option<PathBuf>,
-
-    /// Write to destination path even if it already exists
-    #[arg(long)]
-    pub force: bool,
-
-    /// Merge into an existing project, rewriting only changed files
-    #[arg(long, conflicts_with = "force")]
-    pub update: bool,
-
-    /// With --update, delete project files whose objects no longer
-    /// exist in the database
-    #[arg(long, requires = "update")]
-    pub prune: bool,
-
-    /// Create a .gitkeep file in empty directories
-    #[arg(long, conflicts_with = "remove_empty_dirs")]
-    pub gitkeep: bool,
-
-    /// Remove empty directories after generation
-    #[arg(long)]
-    pub remove_empty_dirs: bool,
-
-    /// Save any unparsed/unprocessed dump items to remaining.yaml
-    #[arg(long)]
-    pub save_remaining: bool,
-
+pub struct Connection {
     /// database name to connect to
     #[arg(
         short,
@@ -183,6 +144,54 @@ pub struct Pull {
     /// Role to assume when connecting to a database
     #[arg(long, help_heading = "Connection Options")]
     pub role: Option<String>,
+}
+
+#[derive(Args)]
+#[command(disable_help_flag = true)]
+pub struct Pull {
+    /// Print help
+    #[arg(long, action = clap::ArgAction::Help)]
+    help: Option<bool>,
+
+    /// Use a pre-existing pg_dump file instead of connecting to a database
+    #[arg(short = 'D', long)]
+    pub dump: Option<PathBuf>,
+
+    /// Extract roles (and users) from an existing cluster
+    #[arg(short = 'r', long)]
+    pub extract_roles: bool,
+
+    /// Specify a file with files to skip writing
+    #[arg(short, long)]
+    pub ignore: Option<PathBuf>,
+
+    /// Write to destination path even if it already exists
+    #[arg(long)]
+    pub force: bool,
+
+    /// Merge into an existing project, rewriting only changed files
+    #[arg(long, conflicts_with = "force")]
+    pub update: bool,
+
+    /// With --update, delete project files whose objects no longer
+    /// exist in the database
+    #[arg(long, requires = "update")]
+    pub prune: bool,
+
+    /// Create a .gitkeep file in empty directories
+    #[arg(long, conflicts_with = "remove_empty_dirs")]
+    pub gitkeep: bool,
+
+    /// Remove empty directories after generation
+    #[arg(long)]
+    pub remove_empty_dirs: bool,
+
+    /// Save any unparsed/unprocessed dump items to remaining.yaml
+    #[arg(long)]
+    pub save_remaining: bool,
+
+    #[command(flatten)]
+    pub connection: Connection,
 
     /// skip restoration of object ownership
     #[arg(short = 'O', long, help_heading = "DDL Options")]
