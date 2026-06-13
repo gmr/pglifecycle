@@ -5,14 +5,17 @@
 //! Output first: the script goes to stdout or `--output` and is meant
 //! to be applied separately (e.g. `psql --single-transaction
 //! -v ON_ERROR_STOP=1 -f deploy.sql` in a CI step). Destructive
-//! statements — DROPs for objects missing from the repo and the
-//! drop+recreate fallback for in-place changes deploy cannot yet
-//! express — are excluded unless `--allow-drop` is given.
+//! statements — DROPs for objects missing from the repo, data-losing
+//! column changes, and the drop+recreate fallback for changes with no
+//! in-place form — are excluded unless `--allow-drop` is given.
 
+mod alter;
 mod diff;
 
+use std::collections::BTreeMap;
 use std::io::IsTerminal;
 
+use crate::deploy::alter::Resolution;
 use crate::deploy::diff::{Change, Diff, ObjectKey};
 use crate::utils::quote_ident;
 use crate::{build, cli, constants, pgdump, project, pull};
@@ -34,11 +37,29 @@ pub fn deploy(args: &cli::Deploy) -> Result<(), String> {
     let (assembly, snapshot) =
         pull::snapshot(args.dump.as_deref(), &args.connection, &ddl, false)?;
     let diff = diff::diff(&project, &assembly);
+    let resolutions = resolutions(&project, &diff);
     let mut output = build::assemble(&project)?;
     output.dump.sort_entries();
-    let plan = plan(&diff, &output, &snapshot, args)?;
+    let plan = plan(&diff, &resolutions, &output, &snapshot, args)?;
     report(&diff, &plan);
     write_script(&plan, &project.name, &source, args)
+}
+
+/// Resolve each changed item into in-place statements or the
+/// drop+recreate fallback
+fn resolutions(
+    project: &project::Project,
+    diff: &Diff,
+) -> BTreeMap<usize, Resolution> {
+    diff.changed
+        .iter()
+        .map(|(id, database)| {
+            (
+                *id,
+                alter::resolve(&project.inventory[*id].definition, database),
+            )
+        })
+        .collect()
 }
 
 /// One statement in the deploy plan
@@ -59,10 +80,11 @@ struct Plan {
 
 /// Assemble the ordered plan: DROPs for database-only objects first
 /// (reverse snapshot order), then the repo archive's entries in
-/// topological order — plain CREATEs for added objects, gated
-/// drop+recreate for changed ones
+/// topological order — plain CREATEs for added objects, in-place
+/// ALTERs where a renderer exists, gated drop+recreate otherwise
 fn plan(
     diff: &Diff,
+    resolutions: &BTreeMap<usize, Resolution>,
     output: &build::BuildOutput,
     snapshot: &libpgdump::Dump,
     args: &cli::Deploy,
@@ -144,22 +166,50 @@ fn plan(
         };
         if changes.iter().all(|c| *c == Change::Added) {
             push(false, Statement { label, sql: defn });
-        } else if changes.contains(&Change::Changed)
-            && changes
+            continue;
+        }
+        if !changes.contains(&Change::Changed)
+            || !changes
                 .iter()
                 .all(|c| matches!(c, Change::Added | Change::Changed))
         {
-            // drop+recreate fallback: the object's own entry leads
-            // with its DROP; child entries (indexes, triggers,
-            // comments, ACLs) are recreated alongside it
-            let mut sql = String::new();
-            if direct.is_some()
-                && let Some(drop) = &entry.drop_stmt
-            {
-                sql.push_str(drop);
+            continue;
+        }
+        // the object's own entry: emit its in-place statements, or
+        // lead with its DROP for the drop+recreate fallback
+        if let Some(id) = direct {
+            match resolutions.get(id) {
+                Some(Resolution::Statements(alters)) => {
+                    for alter in alters {
+                        push(
+                            alter.destructive,
+                            Statement {
+                                label: label.clone(),
+                                sql: alter.sql.clone(),
+                            },
+                        );
+                    }
+                }
+                _ => {
+                    let mut sql = String::new();
+                    if let Some(drop) = &entry.drop_stmt {
+                        sql.push_str(drop);
+                    }
+                    sql.push_str(&defn);
+                    push(true, Statement { label, sql });
+                }
             }
-            sql.push_str(&defn);
-            push(true, Statement { label, sql });
+            continue;
+        }
+        // child entries (indexes, triggers, comments, ACLs): ride
+        // along only with a drop+recreate — in-place resolutions
+        // reconcile their children themselves
+        let replace = owners.iter().any(|id| {
+            diff.items.get(id) == Some(&Change::Changed)
+                && matches!(resolutions.get(id), Some(Resolution::Replace))
+        });
+        if replace {
+            push(true, Statement { label, sql: defn });
         }
     }
     Ok(Plan {

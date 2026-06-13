@@ -95,6 +95,10 @@ pub enum Change {
 pub struct Diff {
     /// Inventory item id → change classification
     pub items: BTreeMap<usize, Change>,
+    /// Inventory item id → the database-side definition, for items
+    /// classified [`Change::Changed`] (the ALTER renderers need both
+    /// sides)
+    pub changed: BTreeMap<usize, Definition>,
     /// Objects in the database with no repo counterpart → DROP
     pub removed: Vec<ObjectKey>,
 }
@@ -114,6 +118,7 @@ pub fn diff(project: &Project, assembly: &Assembly) -> Diff {
     let mut database = database_index(assembly);
     let existing = existence_index(assembly);
     let mut items = BTreeMap::new();
+    let mut changed = BTreeMap::new();
     for item in &project.inventory {
         let change = if SKIPPED.contains(&item.desc) {
             log::debug!(
@@ -130,6 +135,7 @@ pub fn diff(project: &Project, assembly: &Assembly) -> Diff {
                     if normalized(&item.definition) == normalized(&db) {
                         Change::Unchanged
                     } else {
+                        changed.insert(item.id, db);
                         Change::Changed
                     }
                 }
@@ -146,7 +152,11 @@ pub fn diff(project: &Project, assembly: &Assembly) -> Diff {
         items.insert(item.id, change);
     }
     let removed = database.into_keys().collect();
-    Diff { items, removed }
+    Diff {
+        items,
+        changed,
+        removed,
+    }
 }
 
 /// Object types the [`Assembly`] parses into models; everything else
@@ -275,7 +285,7 @@ fn normalize(value: &mut Value) {
 /// server's `integer` (PLAN.md risk #5). A length/precision modifier
 /// (`varchar(255)`, `numeric(10,2)`) and an array suffix are split
 /// off the base name so the alias can be matched and reattached.
-fn canonical_type(data_type: &str) -> String {
+pub(crate) fn canonical_type(data_type: &str) -> String {
     let (body, array) = match data_type.trim_end().strip_suffix("[]") {
         Some(body) => (body.trim_end(), "[]"),
         None => (data_type.trim_end(), ""),

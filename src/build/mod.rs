@@ -1061,35 +1061,7 @@ impl Builder {
                     inner.push(render_constraint("PRIMARY KEY", primary_key));
                 }
                 for fk in d.foreign_keys.as_deref().unwrap_or_default() {
-                    let mut fk_sql = vec![
-                        format!("FOREIGN KEY ({})", fk.columns.join(", ")),
-                        "REFERENCES".into(),
-                        fk.references.name.clone(),
-                        format!("({})", fk.references.columns.join(", ")),
-                    ];
-                    if let Some(match_type) = &fk.match_type {
-                        fk_sql.push("MATCH".into());
-                        fk_sql.push(match_type.clone());
-                    }
-                    if let Some(on_delete) = &fk.on_delete
-                        && on_delete != "NO ACTION"
-                    {
-                        fk_sql.push("ON DELETE".into());
-                        fk_sql.push(on_delete.clone());
-                    }
-                    if let Some(on_update) = &fk.on_update
-                        && on_update != "NO ACTION"
-                    {
-                        fk_sql.push("ON UPDATE".into());
-                        fk_sql.push(on_update.clone());
-                    }
-                    if fk.deferrable == Some(true) {
-                        fk_sql.push("DEFERRABLE".into());
-                    }
-                    if fk.initially_deferred == Some(true) {
-                        fk_sql.push("INITIALLY DEFERRED".into());
-                    }
-                    inner.push(fk_sql.join(" "));
+                    inner.push(render_foreign_key(fk));
                 }
                 create.push(inner.join(", "));
                 create.push(")".into());
@@ -1152,72 +1124,7 @@ impl Builder {
             quote_ident(&table.schema),
             quote_ident(&index.name)
         );
-        let mut create = vec!["CREATE".into()];
-        if index.unique == Some(true) {
-            create.push("UNIQUE".into());
-        }
-        create.push("INDEX".into());
-        create.push(quote_ident(&index.name));
-        create.push("ON".into());
-        if index.recurse == Some(false) {
-            create.push("ONLY".into());
-        }
-        create.push(self.item_name(parent));
-        if let Some(method) = &index.method {
-            create.push("USING".into());
-            create.push(method.clone());
-        }
-        create.push("(".into());
-        let columns: Vec<String> = index
-            .columns
-            .as_deref()
-            .unwrap_or_default()
-            .iter()
-            .map(|c| {
-                let mut sql = vec![
-                    c.name
-                        .clone()
-                        .or_else(|| c.expression.clone())
-                        .unwrap_or_default(),
-                ];
-                if let Some(collation) = &c.collation {
-                    sql.push("COLLATION".into());
-                    sql.push(collation.clone());
-                }
-                if let Some(opclass) = &c.opclass {
-                    sql.push(opclass.clone());
-                }
-                if let Some(direction) = &c.direction {
-                    sql.push(direction.clone());
-                }
-                if let Some(null_placement) = &c.null_placement {
-                    sql.push("NULLS".into());
-                    sql.push(null_placement.clone());
-                }
-                sql.join(" ")
-            })
-            .collect();
-        create.push(columns.join(", "));
-        create.push(")".into());
-        if let Some(include) = &index.include {
-            create.push(format!("INCLUDE ({})", include.join(", ")));
-        }
-        if let Some(storage_parameters) = &index.storage_parameters {
-            create.push("WITH".into());
-            let params: Vec<String> = storage_parameters
-                .iter()
-                .map(|(k, v)| format!("{k}={}", raw_value(v)))
-                .collect();
-            create.push(params.join(", "));
-        }
-        if let Some(tablespace) = &index.tablespace {
-            create.push("TABLESPACE".into());
-            create.push(tablespace.clone());
-        }
-        if let Some(where_clause) = &index.where_clause {
-            create.push("WHERE".into());
-            create.push(where_clause.clone());
-        }
+        let create = render_index(index, &self.item_name(parent));
         let drop = vec!["DROP INDEX IF EXISTS".into(), qualified];
         let parent_dump_id = self.dump_id_map[&parent.id];
         let dump_id = self.add_entry(
@@ -1250,42 +1157,7 @@ impl Builder {
         table: &crate::models::Table,
     ) -> Result<(), String> {
         let name = trigger.name.clone().unwrap_or_default();
-        let (create, drop) = if let Some(sql) = &trigger.sql {
-            (vec![sql.clone()], vec![])
-        } else {
-            let mut create = vec![
-                "CREATE".into(),
-                "TRIGGER".into(),
-                name.clone(),
-                trigger.when.clone().unwrap_or_default(),
-                trigger.events.clone().unwrap_or_default().join(" OR "),
-                "ON".into(),
-                self.item_name(parent),
-            ];
-            if let Some(for_each) = &trigger.for_each {
-                create.push("FOR EACH".into());
-                create.push(for_each.clone());
-            }
-            if let Some(condition) = &trigger.condition {
-                create.push("WHEN".into());
-                create.push(condition.clone());
-            }
-            create.push("EXECUTE".into());
-            create.push("FUNCTION".into());
-            create.push(trigger.function.clone().unwrap_or_default());
-            if let Some(arguments) = &trigger.arguments {
-                let args: Vec<String> =
-                    arguments.iter().map(raw_value).collect();
-                create.push(format!("({})", args.join(", ")));
-            }
-            let drop = vec![
-                "DROP TRIGGER IF EXISTS".into(),
-                name.clone(),
-                "ON".into(),
-                self.item_name(parent),
-            ];
-            (create, drop)
-        };
+        let (create, drop) = render_trigger(trigger, &self.item_name(parent));
         let parent_dump_id = self.dump_id_map[&parent.id];
         let dump_id = self.add_entry(
             "TRIGGER",
@@ -1798,7 +1670,7 @@ fn push_role_options(
 /// else renders as a literal. Deviation 9: Python quoted every string,
 /// producing unrestorable SQL for expression defaults like
 /// `uuid_generate_v4()`.
-fn render_default(value: &Value) -> String {
+pub(crate) fn render_default(value: &Value) -> String {
     if let Value::String(s) = value {
         const RAW_KEYWORDS: &[&str] = &[
             "CURRENT_CATALOG",
@@ -1825,7 +1697,7 @@ fn render_default(value: &Value) -> String {
     postgres_value(value)
 }
 
-fn render_table_column(column: &Column) -> String {
+pub(crate) fn render_table_column(column: &Column) -> String {
     let mut sql = vec![column.name.clone(), column.data_type.clone()];
     if let Some(collation) = &column.collation {
         sql.push("COLLATE".into());
@@ -1856,9 +1728,158 @@ fn render_table_column(column: &Column) -> String {
     sql.join(" ")
 }
 
+/// CREATE INDEX rendering, shared by build and deploy; `table_name`
+/// is the quoted, qualified table
+pub(crate) fn render_index(index: &Index, table_name: &str) -> Vec<String> {
+    let mut create = vec!["CREATE".into()];
+    if index.unique == Some(true) {
+        create.push("UNIQUE".into());
+    }
+    create.push("INDEX".into());
+    create.push(quote_ident(&index.name));
+    create.push("ON".into());
+    if index.recurse == Some(false) {
+        create.push("ONLY".into());
+    }
+    create.push(table_name.to_string());
+    if let Some(method) = &index.method {
+        create.push("USING".into());
+        create.push(method.clone());
+    }
+    create.push("(".into());
+    let columns: Vec<String> = index
+        .columns
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .map(|c| {
+            let mut sql = vec![
+                c.name
+                    .clone()
+                    .or_else(|| c.expression.clone())
+                    .unwrap_or_default(),
+            ];
+            if let Some(collation) = &c.collation {
+                sql.push("COLLATION".into());
+                sql.push(collation.clone());
+            }
+            if let Some(opclass) = &c.opclass {
+                sql.push(opclass.clone());
+            }
+            if let Some(direction) = &c.direction {
+                sql.push(direction.clone());
+            }
+            if let Some(null_placement) = &c.null_placement {
+                sql.push("NULLS".into());
+                sql.push(null_placement.clone());
+            }
+            sql.join(" ")
+        })
+        .collect();
+    create.push(columns.join(", "));
+    create.push(")".into());
+    if let Some(include) = &index.include {
+        create.push(format!("INCLUDE ({})", include.join(", ")));
+    }
+    if let Some(storage_parameters) = &index.storage_parameters {
+        create.push("WITH".into());
+        let params: Vec<String> = storage_parameters
+            .iter()
+            .map(|(k, v)| format!("{k}={}", raw_value(v)))
+            .collect();
+        create.push(params.join(", "));
+    }
+    if let Some(tablespace) = &index.tablespace {
+        create.push("TABLESPACE".into());
+        create.push(tablespace.clone());
+    }
+    if let Some(where_clause) = &index.where_clause {
+        create.push("WHERE".into());
+        create.push(where_clause.clone());
+    }
+    create
+}
+
+/// CREATE TRIGGER / DROP TRIGGER rendering, shared by build and
+/// deploy; `table_name` is the quoted, qualified table
+pub(crate) fn render_trigger(
+    trigger: &Trigger,
+    table_name: &str,
+) -> (Vec<String>, Vec<String>) {
+    if let Some(sql) = &trigger.sql {
+        return (vec![sql.clone()], vec![]);
+    }
+    let name = trigger.name.clone().unwrap_or_default();
+    let mut create = vec![
+        "CREATE".into(),
+        "TRIGGER".into(),
+        name.clone(),
+        trigger.when.clone().unwrap_or_default(),
+        trigger.events.clone().unwrap_or_default().join(" OR "),
+        "ON".into(),
+        table_name.to_string(),
+    ];
+    if let Some(for_each) = &trigger.for_each {
+        create.push("FOR EACH".into());
+        create.push(for_each.clone());
+    }
+    if let Some(condition) = &trigger.condition {
+        create.push("WHEN".into());
+        create.push(condition.clone());
+    }
+    create.push("EXECUTE".into());
+    create.push("FUNCTION".into());
+    create.push(trigger.function.clone().unwrap_or_default());
+    if let Some(arguments) = &trigger.arguments {
+        let args: Vec<String> = arguments.iter().map(raw_value).collect();
+        create.push(format!("({})", args.join(", ")));
+    }
+    let drop = vec![
+        "DROP TRIGGER IF EXISTS".into(),
+        name,
+        "ON".into(),
+        table_name.to_string(),
+    ];
+    (create, drop)
+}
+
+/// FOREIGN KEY clause rendering, shared by the inline table form and
+/// deploy's `ADD CONSTRAINT`
+pub(crate) fn render_foreign_key(fk: &crate::models::ForeignKey) -> String {
+    let mut fk_sql = vec![
+        format!("FOREIGN KEY ({})", fk.columns.join(", ")),
+        "REFERENCES".into(),
+        fk.references.name.clone(),
+        format!("({})", fk.references.columns.join(", ")),
+    ];
+    if let Some(match_type) = &fk.match_type {
+        fk_sql.push("MATCH".into());
+        fk_sql.push(match_type.clone());
+    }
+    if let Some(on_delete) = &fk.on_delete
+        && on_delete != "NO ACTION"
+    {
+        fk_sql.push("ON DELETE".into());
+        fk_sql.push(on_delete.clone());
+    }
+    if let Some(on_update) = &fk.on_update
+        && on_update != "NO ACTION"
+    {
+        fk_sql.push("ON UPDATE".into());
+        fk_sql.push(on_update.clone());
+    }
+    if fk.deferrable == Some(true) {
+        fk_sql.push("DEFERRABLE".into());
+    }
+    if fk.initially_deferred == Some(true) {
+        fk_sql.push("INITIALLY DEFERRED".into());
+    }
+    fk_sql.join(" ")
+}
+
 /// UNIQUE / PRIMARY KEY constraint rendering
 /// (ports _format_sql_constraint; INCLUDE columns get a proper clause)
-fn render_constraint(
+pub(crate) fn render_constraint(
     constraint_type: &str,
     constraint: &ConstraintColumns,
 ) -> String {
