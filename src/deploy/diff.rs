@@ -27,7 +27,7 @@ pub struct ObjectKey {
 impl ObjectKey {
     pub fn new(desc: ObjectType, definition: &Definition) -> Self {
         let name = match definition {
-            Definition::Function(f) => f.identity(),
+            Definition::Function(f) => function_key_name(f),
             _ => definition.name(),
         };
         // extension names are database-unique; their schema field is
@@ -38,6 +38,30 @@ impl ObjectKey {
         };
         Self { desc, schema, name }
     }
+}
+
+/// The function identity signature with canonicalized parameter
+/// types, so a repo `fn(int4)` keys identically to the server's
+/// `fn(integer)` (mirrors [`crate::models::Function::identity`])
+fn function_key_name(function: &crate::models::Function) -> String {
+    let args: Vec<String> = function
+        .parameters
+        .iter()
+        .flatten()
+        .filter(|p| p.mode != "OUT" && p.mode != "TABLE")
+        .map(|p| {
+            let mut parts: Vec<String> = Vec::new();
+            if p.mode != "IN" {
+                parts.push(p.mode.clone());
+            }
+            if let Some(name) = &p.name {
+                parts.push(name.clone());
+            }
+            parts.push(canonical_type(&p.data_type));
+            parts.join(" ")
+        })
+        .collect();
+    format!("{}({})", function.name, args.join(", "))
 }
 
 impl std::fmt::Display for ObjectKey {
@@ -248,11 +272,17 @@ fn normalize(value: &mut Value) {
 
 /// Canonicalize common type-name aliases the way PostgreSQL does on
 /// ingest, so a hand-edited `int4` does not falsely diff against the
-/// server's `integer` (PLAN.md risk #5)
+/// server's `integer` (PLAN.md risk #5). A length/precision modifier
+/// (`varchar(255)`, `numeric(10,2)`) and an array suffix are split
+/// off the base name so the alias can be matched and reattached.
 fn canonical_type(data_type: &str) -> String {
-    let (name, array) = match data_type.strip_suffix("[]") {
-        Some(name) => (name, "[]"),
-        None => (data_type, ""),
+    let (body, array) = match data_type.trim_end().strip_suffix("[]") {
+        Some(body) => (body.trim_end(), "[]"),
+        None => (data_type.trim_end(), ""),
+    };
+    let (name, modifier) = match body.find('(') {
+        Some(index) => (body[..index].trim_end(), &body[index..]),
+        None => (body, ""),
     };
     let canonical = match name {
         "bool" => "boolean",
@@ -268,7 +298,7 @@ fn canonical_type(data_type: &str) -> String {
         "varchar" => "character varying",
         other => other,
     };
-    format!("{canonical}{array}")
+    format!("{canonical}{modifier}{array}")
 }
 
 #[cfg(test)]
@@ -336,5 +366,52 @@ mod tests {
             name: String::from("test"),
         };
         assert_eq!(key.to_string(), "SCHEMA test");
+    }
+
+    #[test]
+    fn existence_key_strips_signature() {
+        // unmodeled-type overloads conflate to one existence key: an
+        // aggregate present in both sides under any overload reads as
+        // "exists" regardless of argument types (documented limit —
+        // these types are existence-checked, not diffed)
+        assert_eq!(
+            existence_key("AGGREGATE", "test", "sum(integer)"),
+            existence_key("AGGREGATE", "test", "sum(numeric)")
+        );
+        assert_ne!(
+            existence_key("AGGREGATE", "test", "sum(integer)"),
+            existence_key("AGGREGATE", "test", "max(integer)")
+        );
+    }
+
+    #[test]
+    fn function_key_canonicalizes_parameter_types() {
+        let repo: crate::models::Function =
+            serde_json::from_value(serde_json::json!({
+                "name": "f",
+                "schema": "test",
+                "owner": "postgres",
+                "returns": "integer",
+                "language": "sql",
+                "parameters": [{"mode": "IN", "data_type": "int4"}],
+            }))
+            .unwrap();
+        let server: crate::models::Function =
+            serde_json::from_value(serde_json::json!({
+                "name": "f",
+                "schema": "test",
+                "owner": "postgres",
+                "returns": "integer",
+                "language": "sql",
+                "parameters": [{"mode": "IN", "data_type": "integer"}],
+            }))
+            .unwrap();
+        assert_eq!(
+            ObjectKey::new(ObjectType::Function, &Definition::Function(repo)),
+            ObjectKey::new(
+                ObjectType::Function,
+                &Definition::Function(server)
+            )
+        );
     }
 }

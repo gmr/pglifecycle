@@ -182,7 +182,7 @@ fn script_header_is_self_describing() {
     assert!(script.starts_with("-- pglifecycle deploy\n"));
     assert!(script.contains("-- project: fixtures\n"));
     assert!(script.contains("-- source: dump "));
-    assert!(script.contains("-- destructive statements: included\n"));
+    assert!(script.contains("-- destructive statements: none\n"));
 }
 
 #[test]

@@ -52,6 +52,9 @@ struct Statement {
 struct Plan {
     included: Vec<Statement>,
     excluded: Vec<Statement>,
+    /// How many of `included` are destructive (non-zero only with
+    /// `--allow-drop`)
+    included_destructive: usize,
 }
 
 /// Assemble the ordered plan: DROPs for database-only objects first
@@ -66,36 +69,46 @@ fn plan(
 ) -> Result<Plan, String> {
     let mut included = Vec::new();
     let mut excluded = Vec::new();
+    let mut included_destructive = 0usize;
     let mut push = |destructive: bool, statement: Statement| {
         if destructive && !args.allow_drop {
             excluded.push(statement);
         } else {
+            if destructive {
+                included_destructive += 1;
+            }
             included.push(statement);
         }
     };
     // pg_dump archives are stored in dependency order, so dropping in
     // reverse entry order removes dependents before dependencies
-    let removed: Vec<&ObjectKey> = snapshot
+    let wanted: std::collections::BTreeSet<&ObjectKey> =
+        diff.removed.iter().collect();
+    let mut emitted: std::collections::BTreeSet<&ObjectKey> =
+        std::collections::BTreeSet::new();
+    let ordered: Vec<&ObjectKey> = snapshot
         .entries()
         .iter()
         .rev()
         .filter_map(entry_key)
-        .filter_map(|key| diff.removed.iter().find(|r| **r == key))
+        .filter_map(|key| wanted.get(&key).copied())
         .collect();
-    for key in &removed {
-        push(
-            true,
-            Statement {
-                label: key.to_string(),
-                sql: drop_sql(key),
-            },
-        );
+    for key in ordered {
+        if emitted.insert(key) {
+            push(
+                true,
+                Statement {
+                    label: key.to_string(),
+                    sql: drop_sql(key),
+                },
+            );
+        }
     }
     // database-only objects whose snapshot entry could not be keyed
     // (should not happen for modeled types) still need dropping;
     // append them after the ordered ones
     for key in &diff.removed {
-        if !removed.contains(&key) {
+        if !emitted.contains(key) {
             push(
                 true,
                 Statement {
@@ -149,7 +162,11 @@ fn plan(
             push(true, Statement { label, sql });
         }
     }
-    Ok(Plan { included, excluded })
+    Ok(Plan {
+        included,
+        excluded,
+        included_destructive,
+    })
 }
 
 /// Log what the plan skipped or excluded so the script is honest
@@ -193,14 +210,19 @@ fn write_script(
         "-- pglifecycle deploy\n-- project: {project}\n-- source: \
          {source}\n"
     );
-    if plan.excluded.is_empty() {
-        script.push_str("-- destructive statements: included\n");
-    } else {
+    if !plan.excluded.is_empty() {
         script.push_str(&format!(
             "-- destructive statements: {} excluded (re-run with \
              --allow-drop)\n",
             plan.excluded.len()
         ));
+    } else if plan.included_destructive > 0 {
+        script.push_str(&format!(
+            "-- destructive statements: {} included\n",
+            plan.included_destructive
+        ));
+    } else {
+        script.push_str("-- destructive statements: none\n");
     }
     if plan.included.is_empty() {
         script.push_str("-- no changes: the database matches the project\n");
