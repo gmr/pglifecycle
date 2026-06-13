@@ -874,7 +874,47 @@ impl Builder {
         } else {
             vec!["DROP ROLE IF EXISTS".into(), quote_ident(&d.name)]
         };
-        self.add_item(item, create, drop, false)
+        self.add_item(item, create, drop, false)?;
+        self.dump_role_settings(item, "ROLE", &d.name, d.settings.as_deref())
+    }
+
+    /// Emit one `ALTER ROLE|USER name SET guc TO value` entry per
+    /// setting, each depending on the role/user create entry so the
+    /// topological sort applies it after the role exists
+    fn dump_role_settings(
+        &mut self,
+        item: &Item,
+        keyword: &str,
+        name: &str,
+        settings: Option<&[Map<String, Value>]>,
+    ) -> Result<(), String> {
+        let Some(settings) = settings else {
+            return Ok(());
+        };
+        let Some(&parent_dump_id) = self.dump_id_map.get(&item.id) else {
+            return Ok(());
+        };
+        let owner = self.superuser.clone();
+        for object in settings {
+            for (setting, value) in object {
+                let defn = vec![format!(
+                    "ALTER {keyword} {} SET {setting} TO {}",
+                    quote_ident(name),
+                    render_setting_value(value)
+                )];
+                self.add_entry(
+                    keyword,
+                    "",
+                    name,
+                    &owner,
+                    &defn,
+                    &[],
+                    &[parent_dump_id],
+                    None,
+                )?;
+            }
+        }
+        Ok(())
     }
 
     fn dump_schema(&mut self, item: &Item) -> Result<(), String> {
@@ -1670,7 +1710,8 @@ impl Builder {
         } else {
             vec!["DROP USER IF EXISTS".into(), quote_ident(&d.name)]
         };
-        self.add_item(item, create, drop, false)
+        self.add_item(item, create, drop, false)?;
+        self.dump_role_settings(item, "USER", &d.name, d.settings.as_deref())
     }
 
     fn dump_user_mapping(&mut self, item: &Item) -> Result<(), String> {
@@ -1767,6 +1808,24 @@ fn push_role_options(
         push_bool_option(sql, "LOGIN", options.login);
     }
     push_bool_option(sql, "SUPERUSER", options.superuser);
+}
+
+/// `ALTER ROLE ... SET guc TO value` value rendering: a list (e.g.
+/// `search_path`) joins its elements bare, a scalar renders as a
+/// single-quoted literal
+fn render_setting_value(value: &Value) -> String {
+    match value {
+        Value::Array(items) => items
+            .iter()
+            .map(|item| match item {
+                Value::String(s) => s.clone(),
+                other => other.to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join(", "),
+        Value::String(s) => postgres_value(&Value::String(s.clone())),
+        other => other.to_string(),
+    }
 }
 
 /// DEFAULT clause rendering: strings that look like SQL expressions

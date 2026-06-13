@@ -89,8 +89,10 @@ pub struct Role {
     pub revocations: Option<Acls>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub options: Option<RoleOptions>,
+    /// `ALTER ROLE ... SET` parameters, as the schema's array of
+    /// `{ name: value }` objects (role.yml / user.yml `settings`)
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub settings: Option<Map<String, Value>>,
+    pub settings: Option<Vec<Map<String, Value>>>,
 }
 
 /// Options for a role or user
@@ -134,6 +136,8 @@ pub struct User {
     pub revocations: Option<Acls>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub options: Option<RoleOptions>,
+    /// `ALTER ROLE ... SET` parameters, as the schema's array of
+    /// `{ name: value }` objects (role.yml / user.yml `settings`)
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub settings: Option<Map<String, Value>>,
+    pub settings: Option<Vec<Map<String, Value>>>,
 }

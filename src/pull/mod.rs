@@ -407,7 +407,16 @@ impl Assembly {
             Statement::CreateRole(def) => self.merge_role(def, true),
             Statement::AlterRole(def) => self.merge_role(def, false),
             Statement::AlterRoleSetting { role, name, value } => {
-                self.role(&role).settings.insert(name, Value::String(value));
+                // a single element stays a scalar; a list (e.g.
+                // search_path) keeps its elements so it round-trips as
+                // `SET search_path TO a, b` rather than one bogus value
+                let value = match value.as_slice() {
+                    [single] => Value::String(single.clone()),
+                    _ => Value::Array(
+                        value.into_iter().map(Value::String).collect(),
+                    ),
+                };
+                self.role(&role).settings.insert(name, value);
             }
             Statement::RoleMembership {
                 revoke,
@@ -1143,7 +1152,8 @@ mod tests {
                  CREATE ROLE readonly;\n\
                  ALTER ROLE readonly WITH NOLOGIN;\n\
                  GRANT readonly TO app GRANTED BY postgres;\n\
-                 ALTER ROLE app SET search_path TO test;\n\
+                 ALTER ROLE app SET search_path TO test, public;\n\
+                 ALTER ROLE app SET work_mem TO '64MB';\n\
                  \\unrestrict abc123\n",
             )
             .unwrap();
@@ -1154,12 +1164,104 @@ mod tests {
         assert_eq!(app.options.login, Some(true));
         assert_eq!(app.options.superuser, Some(false));
         assert_eq!(app.grants.roles, vec!["readonly"]);
+        // a multi-element setting keeps its list shape; a scalar stays
+        // a string
         assert_eq!(
             app.settings.get("search_path"),
-            Some(&Value::String("test".into()))
+            Some(&Value::Array(vec![
+                Value::String("test".into()),
+                Value::String("public".into()),
+            ]))
+        );
+        assert_eq!(
+            app.settings.get("work_mem"),
+            Some(&Value::String("64MB".into()))
         );
         let readonly = &assembly.roles["readonly"];
         assert!(readonly.created);
         assert_eq!(readonly.options.login, Some(false));
+    }
+
+    /// Role settings survive the full pull → write → load → build
+    /// path: emitted in the schema's array-of-objects shape (so the
+    /// project validates and loads), then rendered back as
+    /// `ALTER ROLE ... SET` entries in the build archive
+    #[test]
+    fn role_settings_round_trip_through_build() {
+        use clap::Parser;
+        let mut assembly = Assembly {
+            dbname: String::from("settings"),
+            ..Assembly::default()
+        };
+        assembly
+            .ingest_roles(
+                "CREATE ROLE app;\n\
+                 ALTER ROLE app SET search_path TO test, public;\n\
+                 ALTER ROLE app SET work_mem TO '64MB';\n",
+            )
+            .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("project");
+        let dump = dir.path().join("unused.dump");
+        let args = match cli::Cli::try_parse_from([
+            "pglifecycle",
+            "pull",
+            "--dump",
+            dump.to_str().unwrap(),
+            dest.to_str().unwrap(),
+        ])
+        .unwrap()
+        .action
+        {
+            cli::Action::Pull(args) => args,
+            _ => unreachable!(),
+        };
+        let files = writer::render(&assembly, &args).unwrap();
+        writer::write_bootstrap(&files, &args).unwrap();
+
+        // load validates each file against its schema, so a successful
+        // load proves the emitted settings shape matches role.yml
+        let project = crate::project::load(&dest).unwrap();
+        let role = project
+            .inventory
+            .iter()
+            .find_map(|item| match &item.definition {
+                models::Definition::Role(role) if role.name == "app" => {
+                    Some(role)
+                }
+                _ => None,
+            })
+            .expect("app role");
+        assert_eq!(
+            role.settings,
+            Some(vec![
+                serde_json::from_value(serde_json::json!({
+                    "search_path": ["test", "public"]
+                }))
+                .unwrap(),
+                serde_json::from_value(serde_json::json!({
+                    "work_mem": "64MB"
+                }))
+                .unwrap(),
+            ])
+        );
+
+        let archive = dir.path().join("settings.dump");
+        crate::build::build(&project, &archive).unwrap();
+        let built = libpgdump::load(&archive).unwrap();
+        let settings: Vec<&str> = built
+            .entries()
+            .iter()
+            .filter_map(|e| e.defn.as_deref())
+            .filter(|defn| defn.starts_with("ALTER ROLE"))
+            .collect();
+        assert_eq!(
+            settings,
+            vec![
+                "ALTER ROLE app SET search_path TO test, public;\n",
+                "ALTER ROLE app SET work_mem TO '64MB';\n",
+            ]
+        );
     }
 }
