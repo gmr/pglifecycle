@@ -88,19 +88,19 @@ fn missing_objects_are_created() {
         script.contains("CREATE VIEW test.us_users"),
         "missing view CREATE in:\n{script}"
     );
-    // the users table and function differ (nickname column, function
-    // body): in-place ALTER is not supported yet, so without
-    // --allow-drop nothing destructive may appear
+    // the database has an extra column (nickname) and a changed
+    // function: the column drop and the function replace are both
+    // destructive, so without --allow-drop neither may appear
     assert!(!script.contains("DROP TABLE"), "gated drop in:\n{script}");
     assert!(
-        !script.contains("CREATE TABLE"),
-        "drop+recreate must be gated:\n{script}"
+        !script.contains("DROP COLUMN"),
+        "destructive column change must be gated:\n{script}"
     );
     assert!(script.contains("excluded"), "header must note exclusions");
 }
 
 #[test]
-fn changed_objects_replace_with_allow_drop() {
+fn table_reconciles_in_place_function_replaces() {
     let dir = tempfile::tempdir().unwrap();
     let baseline = dir.path().join("fixtures.dump");
     fixture_archive(&baseline);
@@ -111,19 +111,18 @@ fn changed_objects_replace_with_allow_drop() {
 
     let script = deploy_script(&project, &mutated, &["--allow-drop"]);
 
-    // the changed table is dropped and recreated from the repo
+    // the table is reconciled in place — the database's extra column
+    // is dropped, not the whole table
     assert!(
-        script.contains("DROP TABLE IF EXISTS test.users"),
-        "missing table drop in:\n{script}"
+        !script.contains("DROP TABLE"),
+        "table must be altered, not replaced:\n{script}"
     );
     assert!(
-        script.contains("CREATE TABLE test.users"),
-        "missing table recreate in:\n{script}"
+        script.contains("ALTER TABLE test.users DROP COLUMN nickname;"),
+        "missing in-place column drop in:\n{script}"
     );
-    assert!(
-        !script.contains("nickname"),
-        "the repo (without nickname) is authoritative:\n{script}"
-    );
+    // the function has no in-place renderer yet, so it drop+recreates
+    // from the repo body
     assert!(
         script.contains("DROP FUNCTION IF EXISTS"),
         "missing function replace in:\n{script}"
@@ -132,15 +131,31 @@ fn changed_objects_replace_with_allow_drop() {
         script.contains("CURRENT_TIMESTAMP"),
         "recreated function must use the repo body:\n{script}"
     );
-    // the table's primary key, index, and comment ride along with the
-    // recreate
+}
+
+#[test]
+fn added_column_reconciles_in_place() {
+    let dir = tempfile::tempdir().unwrap();
+    let baseline = dir.path().join("fixtures.dump");
+    fixture_archive(&baseline);
+    let mutated = dir.path().join("mutated.dump");
+    mutated_archive(&mutated);
+    // project has the nickname column (from mutated); the database
+    // (baseline) does not — deploy should ADD it, non-destructively
+    let project = dir.path().join("project");
+    pull_project(&mutated, &project);
+
+    // no --allow-drop: a column add is not destructive, so it is
+    // included; its presence in the script proves that
+    let script = deploy_script(&project, &baseline, &[]);
+
     assert!(
-        script.contains("users_unique_email"),
-        "missing index recreate in:\n{script}"
+        script.contains("ALTER TABLE test.users ADD COLUMN nickname text;"),
+        "missing in-place column add in:\n{script}"
     );
     assert!(
-        script.contains("COMMENT ON TABLE test.users"),
-        "missing comment recreate in:\n{script}"
+        !script.contains("DROP TABLE"),
+        "an added column must not trigger a replace:\n{script}"
     );
 }
 
