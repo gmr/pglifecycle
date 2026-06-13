@@ -51,6 +51,32 @@ pub fn dump_roles(conn: &cli::Connection, path: &Path) -> Result<(), String> {
     execute(command)
 }
 
+/// Apply a SQL script to the database in a single transaction via
+/// `psql`, aborting on the first error. Returns psql's stderr on
+/// failure so the caller can map it back to a statement.
+pub fn apply(conn: &cli::Connection, script: &Path) -> Result<(), String> {
+    let mut command = Command::new("psql");
+    connection_args(&mut command, conn);
+    if let Some(dbname) = &conn.dbname {
+        command.arg("-d").arg(dbname);
+    }
+    command.arg("-X");
+    command.arg("-q");
+    command.arg("--single-transaction");
+    command.arg("-v").arg("ON_ERROR_STOP=1");
+    command.arg("-f").arg(script);
+    log::debug!("Executing {command:?}");
+    let output = command.output().map_err(|e| {
+        format!("failed to run {:?}: {e}", command.get_program())
+    })?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr)
+            .trim()
+            .to_string());
+    }
+    Ok(())
+}
+
 fn connection_args(command: &mut Command, conn: &cli::Connection) {
     command.arg("-h").arg(&conn.host);
     command.arg("-p").arg(conn.port.to_string());

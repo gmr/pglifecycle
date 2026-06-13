@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+# Phase 6 deploy gates (PLAN.md):
+#
+#   1. Equivalence — deploy --apply against an empty database yields the
+#      same schema as build + pg_restore (schema-only dumps match).
+#   2. Convergence — mutate the database, deploy --apply --allow-drop,
+#      then a re-deploy produces an empty plan.
+#   3. Safety — without --allow-drop the script has no destructive
+#      statements and --apply refuses while drops are pending.
+#
+# Requires a PostgreSQL superuser connection (defaults target the
+# compose.yaml container; override with PGHOST/PGPORT/PGUSER) and the
+# postgres client tools on PATH.
+set -euo pipefail
+
+PGHOST="${PGHOST:-localhost}"
+PGPORT="${PGPORT:-5432}"
+PGUSER="${PGUSER:-postgres}"
+export PGHOST PGPORT PGUSER
+
+SOURCE_DB=deploy_source
+TARGET_DB=deploy_target
+WORKDIR="$(mktemp -d)"
+
+cleanup() {
+    rm -rf "$WORKDIR"
+    psql -d postgres -q -c "DROP DATABASE IF EXISTS ${TARGET_DB}" \
+        >/dev/null 2>&1 || true
+    psql -d postgres -q -c "DROP DATABASE IF EXISTS ${SOURCE_DB}" \
+        >/dev/null 2>&1 || true
+}
+trap cleanup EXIT INT TERM
+
+# Schema-only dump with the per-dump \restrict token stripped
+dump_schema() {
+    pg_dump -d "$1" --schema-only --no-owner \
+        | grep -v '^\\\(un\)\{0,1\}restrict '
+}
+
+echo "==> Building pglifecycle"
+cargo build --quiet
+
+echo "==> Creating ${SOURCE_DB} from fixtures/schema.sql"
+psql -d postgres -q -c "DROP DATABASE IF EXISTS ${SOURCE_DB}"
+psql -d postgres -q -c "CREATE DATABASE ${SOURCE_DB}"
+psql -d "${SOURCE_DB}" -q -v ON_ERROR_STOP=1 -f fixtures/schema.sql
+
+echo "==> pull a project from ${SOURCE_DB}"
+pg_dump -d "${SOURCE_DB}" -Fc --schema-only -f "${WORKDIR}/source.dump"
+./target/debug/pglifecycle pull --dump "${WORKDIR}/source.dump" \
+    "${WORKDIR}/project"
+
+echo "==> Gate 1: equivalence (deploy --apply into an empty database)"
+psql -d postgres -q -c "DROP DATABASE IF EXISTS ${TARGET_DB}"
+psql -d postgres -q -c "CREATE DATABASE ${TARGET_DB}"
+./target/debug/pglifecycle deploy --apply -d "${TARGET_DB}" \
+    "${WORKDIR}/project"
+dump_schema "${SOURCE_DB}" > "${WORKDIR}/source.sql"
+dump_schema "${TARGET_DB}" > "${WORKDIR}/target.sql"
+if diff -u "${WORKDIR}/source.sql" "${WORKDIR}/target.sql"; then
+    echo "Equivalence gate passed: schema diff is empty"
+else
+    echo "Equivalence gate FAILED: deployed schema differs from source" >&2
+    exit 1
+fi
+
+echo "==> Gate 2: convergence (mutate, deploy --apply, re-deploy is empty)"
+# exercise a column add (gated drop), a nullability flip (in place),
+# and a domain default (in-place ALTER DOMAIN)
+psql -d "${TARGET_DB}" -q -v ON_ERROR_STOP=1 <<'SQL'
+ALTER TABLE test.users ADD COLUMN scratch text;
+ALTER TABLE test.users ALTER COLUMN display_name SET NOT NULL;
+ALTER DOMAIN test.bcp47_locale SET DEFAULT 'en-US';
+SQL
+./target/debug/pglifecycle deploy --apply --allow-drop -d "${TARGET_DB}" \
+    "${WORKDIR}/project"
+./target/debug/pglifecycle deploy -o "${WORKDIR}/replan.sql" \
+    -d "${TARGET_DB}" "${WORKDIR}/project"
+if grep -q '^-- no changes' "${WORKDIR}/replan.sql"; then
+    echo "Convergence gate passed: re-deploy is an empty plan"
+else
+    echo "Convergence gate FAILED: re-deploy is not empty" >&2
+    cat "${WORKDIR}/replan.sql" >&2
+    exit 1
+fi
+
+echo "==> Gate 3: safety (drops gated without --allow-drop)"
+psql -d "${TARGET_DB}" -q -v ON_ERROR_STOP=1 \
+    -c "ALTER TABLE test.users ADD COLUMN scratch text;"
+./target/debug/pglifecycle deploy -o "${WORKDIR}/gated.sql" \
+    -d "${TARGET_DB}" "${WORKDIR}/project"
+if grep -Eq 'DROP TABLE|DROP COLUMN|ALTER COLUMN .* TYPE' \
+        "${WORKDIR}/gated.sql"; then
+    echo "Safety gate FAILED: destructive statement in the script" >&2
+    cat "${WORKDIR}/gated.sql" >&2
+    exit 1
+fi
+if ./target/debug/pglifecycle deploy --apply -d "${TARGET_DB}" \
+        "${WORKDIR}/project" 2>/dev/null; then
+    echo "Safety gate FAILED: --apply did not refuse pending drops" >&2
+    exit 1
+fi
+echo "Safety gate passed: drops excluded and --apply refused"
+
+echo "All deploy gates passed"

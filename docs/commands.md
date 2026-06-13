@@ -36,34 +36,68 @@ pglifecycle build PROJECT DEST
 Compare a live database (or an existing dump) against the project and
 emit the DDL needed to make the database match: `CREATE` for objects
 missing from the database, `DROP` for objects missing from the
-project, and a drop+recreate fallback for objects that exist in both
-but differ. The script goes to stdout (or `-o FILE`) with a summary on
-stderr; it is meant to be applied separately, for example as a CI
-step:
+project, and an in-place reconciliation (or a drop+recreate fallback)
+for objects that exist in both but differ. The script goes to stdout
+(or `-o FILE`) with a summary on stderr; by default nothing is
+executed, so it can be applied as a separate CI step:
 
 ```bash
 pglifecycle deploy -o deploy.sql PROJECT
 psql --single-transaction -v ON_ERROR_STOP=1 -f deploy.sql
 ```
 
+`--apply` runs the script directly instead, in a single transaction
+via `psql` (it rolls back on the first error and refuses while gated
+destructive statements are pending).
+
 | Option | Description |
 | --- | --- |
 | `-D, --dump FILE` | Compare against a `pg_dump -Fc` file instead of connecting |
 | `-o, --output FILE` | Write the DDL script to FILE instead of stdout |
+| `--apply` | Execute the script in one transaction via psql (conflicts with `--dump`) |
 | `--allow-drop` | Include destructive statements in the script |
 | `-x, --no-privileges` | Do not include GRANT/REVOKE |
 
 The connection options match `pull` (see below).
 
-Destructive statements — `DROP` for database-only objects and the
-drop+recreate fallback for changed ones — are excluded from the script
-unless `--allow-drop` is given; each exclusion is reported on stderr
-and counted in the script header. Ownership is not managed (the script
-behaves like `pg_restore --no-owner`), and roles, users, groups, and
-tablespaces are skipped entirely: they are cluster-level objects a
-single-database dump cannot capture. Object types `pull` does not yet
-model (aggregates, casts, operators, …) are created when missing but
-otherwise only existence-checked and left untouched.
+### Change reconciliation
+
+Objects that differ between the project and the database are
+reconciled in place where PostgreSQL can express it:
+
+- **Tables** — add column, set/drop default, set/drop not-null,
+  add/drop check constraints and foreign keys, primary-key and unique
+  additions, index and trigger create/drop, and comment changes.
+  Dropping a column, changing a column type, reordering columns, and
+  partitioning/storage changes fall back to drop+recreate.
+- **Functions and views** — `CREATE OR REPLACE` (a function whose
+  return type changed must be dropped first, so it falls back).
+- **Sequences** — a single `ALTER SEQUENCE` of the changed options.
+- **Domains** — set/drop default; a base-type or constraint change
+  falls back.
+- **Enum types** — `ALTER TYPE ... ADD VALUE` for appended values;
+  reordering or removing values falls back.
+- **Extensions** — `ALTER EXTENSION ... UPDATE` / `SET SCHEMA`.
+- Everything else falls back to drop+recreate.
+
+### Destructive statements and limits
+
+Destructive statements — `DROP` for database-only objects, data-losing
+column changes, and every drop+recreate fallback — are excluded from
+the script unless `--allow-drop` is given; each exclusion is reported
+on stderr and counted in the script header, and `--apply` refuses while
+any are pending. Index, trigger, and constraint drops issued while
+reconciling a table are *not* gated: they lose no data and the project
+is authoritative.
+
+Ownership is not managed (the script behaves like
+`pg_restore --no-owner`), and roles, users, groups, and tablespaces are
+skipped entirely — they are cluster-level objects a single-database
+dump cannot capture. Object types `pull` does not yet model
+(aggregates, casts, operators, …) are created when missing but
+otherwise only existence-checked and left untouched. Privileges on
+created objects are emitted (unless `-x`); privilege changes on objects
+that already exist are not yet diffed.
 
 ## pull
 

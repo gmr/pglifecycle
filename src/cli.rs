@@ -109,6 +109,11 @@ pub struct Deploy {
     #[arg(short = 'o', long)]
     pub output: Option<PathBuf>,
 
+    /// Execute the script against the database in a single transaction
+    /// via psql instead of only printing it
+    #[arg(long, conflicts_with = "dump")]
+    pub apply: bool,
+
     /// Include destructive statements (DROP, drop+recreate fallbacks)
     /// in the script
     #[arg(long)]
