@@ -211,15 +211,7 @@ impl Writer {
     /// distinguish groups)
     fn write_roles(&mut self, assembly: &Assembly) -> Result<(), String> {
         for (name, state) in &assembly.roles {
-            if !state.settings.is_empty() {
-                // role.yml declares settings as an array of objects but
-                // the model (and the Python build) expects a mapping;
-                // skip emission until the contract is reconciled
-                log::warn!(
-                    "Skipping settings for role {name}: not representable \
-                     in the current role schema"
-                );
-            }
+            let settings = role_settings(state);
             if state.password.is_some() || state.valid_until.is_some() {
                 let user = models::User {
                     name: name.clone(),
@@ -230,7 +222,7 @@ impl Writer {
                     grants: state.grants.to_acls(),
                     revocations: state.revocations.to_acls(),
                     options: user_options(state),
-                    settings: None,
+                    settings,
                 };
                 self.save(
                     Path::new("users").join(format!("{name}.yaml")),
@@ -246,7 +238,7 @@ impl Writer {
                     revocations: state.revocations.to_acls(),
                     options: (state.options != models::RoleOptions::default())
                         .then(|| state.options.clone()),
-                    settings: None,
+                    settings,
                 };
                 self.save(
                     Path::new("roles").join(format!("{name}.yaml")),
@@ -302,6 +294,27 @@ fn user_options(state: &RoleState) -> Option<models::RoleOptions> {
     let mut options = state.options.clone();
     options.login = None;
     (options != models::RoleOptions::default()).then_some(options)
+}
+
+/// Convert accumulated `ALTER ROLE ... SET` state (a `name → value`
+/// map) into the schema's `settings` array of single-key objects, one
+/// per parameter, ordered by name for a deterministic diff
+fn role_settings(state: &RoleState) -> Option<Vec<Map<String, Value>>> {
+    if state.settings.is_empty() {
+        return None;
+    }
+    let mut names: Vec<&String> = state.settings.keys().collect();
+    names.sort();
+    Some(
+        names
+            .into_iter()
+            .map(|name| {
+                let mut object = Map::new();
+                object.insert(name.clone(), state.settings[name].clone());
+                object
+            })
+            .collect(),
+    )
 }
 
 fn serialize<T: serde::Serialize>(value: &T) -> Result<Value, String> {

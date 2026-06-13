@@ -126,7 +126,7 @@ pub(crate) fn role_setting(
     Ok(Statement::AlterRoleSetting {
         role,
         name,
-        value: values.join(", "),
+        value: values,
     })
 }
 
@@ -505,7 +505,7 @@ mod tests {
         };
         assert_eq!(role, "app_user");
         assert_eq!(name, "search_path");
-        assert_eq!(value, "test, public");
+        assert_eq!(value, vec!["test", "public"]);
     }
 
     #[test]

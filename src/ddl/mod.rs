@@ -66,11 +66,12 @@ pub enum Statement {
     /// ALTER ROLE ... WITH options — the assembly merges these into
     /// the role created by CREATE ROLE
     AlterRole(RoleDef),
-    /// ALTER ROLE `role` SET `name` TO `value`
+    /// ALTER ROLE `role` SET `name` TO `value` — `value` keeps the
+    /// parsed elements (a single scalar or a list like `search_path`)
     AlterRoleSetting {
         role: String,
         name: String,
-        value: String,
+        value: Vec<String>,
     },
     /// Parsed successfully but not (yet) a supported statement type
     Unsupported(String),
