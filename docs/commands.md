@@ -48,6 +48,8 @@ pglifecycle pull [OPTIONS] DEST
 | `-r, --extract-roles` | Extract roles and users via `pg_dumpall --roles-only` |
 | `-i, --ignore FILE` | File listing project paths to skip writing |
 | `--force` | Write to `DEST` even if it already exists |
+| `--update` | Merge into an existing project, rewriting only changed files |
+| `--prune` | With `--update`, delete files whose objects left the database |
 | `--gitkeep` | Create `.gitkeep` files in empty directories |
 | `--remove-empty-dirs` | Remove empty directories after generation |
 | `--save-remaining` | Save unprocessed dump entries to `remaining.yaml` |
@@ -73,6 +75,18 @@ DDL options:
 | `-x, --no-privileges` | Do not include GRANT/REVOKE |
 | `--no-security-labels` | Do not include security label assignments |
 | `--no-tablespaces` | Do not include tablespace assignments |
+
+With `--update`, `DEST` must be an existing project (it must contain
+`project.yaml`). The pull is rendered as usual but only files whose
+content actually changed are written, so `git diff` afterwards shows
+exactly what changed in the database. Files for objects that no longer
+exist in the database are reported as warnings and left in place;
+`--prune` deletes them instead (confined to the directories `pull`
+manages — `dml/` and other project content is never touched). Paths
+listed in the `--ignore` file are neither rewritten nor pruned. Note
+that overloaded function files are numbered in dump order
+(`name.yaml`, `name_1.yaml`, …), so adding or removing an overload can
+renumber a sibling's file.
 
 Roles are classified when written: a role with a password or
 `VALID UNTIL` becomes a file in `users/`; everything else lands in
