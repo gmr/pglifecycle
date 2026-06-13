@@ -47,6 +47,30 @@ pub fn build(project: &Project, destination: &Path) -> Result<(), String> {
         destination.display(),
         project.name
     );
+    let output = assemble(project)?;
+    output
+        .dump
+        .save(destination)
+        .map_err(|e| format!("failed to save archive: {e}"))?;
+    log::debug!(
+        "Saved pg_dump -Fc compatible dump to {} with {} entries",
+        destination.display(),
+        output.dump.entries().len(),
+    );
+    Ok(())
+}
+
+/// An assembled (unsaved) archive plus the mapping from dump ids back
+/// to inventory item ids, for callers that need to relate entries to
+/// the items that produced them
+pub struct BuildOutput {
+    pub dump: libpgdump::Dump,
+    pub item_ids: HashMap<i32, usize>,
+}
+
+/// Render the project into an in-memory archive (everything `build`
+/// does except saving it)
+pub fn assemble(project: &Project) -> Result<BuildOutput, String> {
     let dump = libpgdump::new(&project.name, &project.encoding, "18.0")
         .map_err(|e| e.to_string())?;
     let mut builder = Builder {
@@ -77,16 +101,15 @@ pub fn build(project: &Project, destination: &Path) -> Result<(), String> {
             entry.dependencies.extend(deps);
         }
     }
-    builder
-        .dump
-        .save(destination)
-        .map_err(|e| format!("failed to save archive: {e}"))?;
-    log::debug!(
-        "Saved pg_dump -Fc compatible dump to {} with {} entries",
-        destination.display(),
-        builder.dump.entries().len(),
-    );
-    Ok(())
+    let item_ids = builder
+        .dump_id_map
+        .iter()
+        .map(|(item_id, dump_id)| (*dump_id, *item_id))
+        .collect();
+    Ok(BuildOutput {
+        dump: builder.dump,
+        item_ids,
+    })
 }
 
 struct Builder {

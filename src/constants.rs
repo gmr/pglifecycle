@@ -32,7 +32,7 @@ pub const PROJECT_DIRS: &[&str] = &[
 ];
 
 /// Database object types tracked in the project inventory
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum ObjectType {
     Aggregate,
     Cast,

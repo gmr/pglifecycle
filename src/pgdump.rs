@@ -5,22 +5,35 @@ use std::process::Command;
 
 use crate::cli;
 
+/// DDL suppression flags passed through to pg_dump
+#[derive(Default)]
+pub struct DumpDdl {
+    pub no_owner: bool,
+    pub no_privileges: bool,
+    pub no_security_labels: bool,
+    pub no_tablespaces: bool,
+}
+
 /// Dump the database schema described by the connection options to
 /// `path` as a custom-format archive
-pub fn dump(args: &cli::Pull, path: &Path) -> Result<(), String> {
+pub fn dump(
+    conn: &cli::Connection,
+    ddl: &DumpDdl,
+    path: &Path,
+) -> Result<(), String> {
     let mut command = Command::new("pg_dump");
-    connection_args(&mut command, args);
-    if let Some(dbname) = &args.dbname {
+    connection_args(&mut command, conn);
+    if let Some(dbname) = &conn.dbname {
         command.arg("-d").arg(dbname);
     }
     command.arg("-f").arg(path);
     command.arg("-Fc");
     command.arg("--schema-only");
     for (flag, enabled) in [
-        ("--no-owner", args.no_owner),
-        ("--no-privileges", args.no_privileges),
-        ("--no-security-labels", args.no_security_labels),
-        ("--no-tablespaces", args.no_tablespaces),
+        ("--no-owner", ddl.no_owner),
+        ("--no-privileges", ddl.no_privileges),
+        ("--no-security-labels", ddl.no_security_labels),
+        ("--no-tablespaces", ddl.no_tablespaces),
     ] {
         if enabled {
             command.arg(flag);
@@ -30,27 +43,27 @@ pub fn dump(args: &cli::Pull, path: &Path) -> Result<(), String> {
 }
 
 /// Dump cluster roles to `path` as SQL via `pg_dumpall --roles-only`
-pub fn dump_roles(args: &cli::Pull, path: &Path) -> Result<(), String> {
+pub fn dump_roles(conn: &cli::Connection, path: &Path) -> Result<(), String> {
     let mut command = Command::new("pg_dumpall");
-    connection_args(&mut command, args);
+    connection_args(&mut command, conn);
     command.arg("-f").arg(path);
     command.arg("-r");
     execute(command)
 }
 
-fn connection_args(command: &mut Command, args: &cli::Pull) {
-    command.arg("-h").arg(&args.host);
-    command.arg("-p").arg(args.port.to_string());
-    if let Some(username) = &args.username {
+fn connection_args(command: &mut Command, conn: &cli::Connection) {
+    command.arg("-h").arg(&conn.host);
+    command.arg("-p").arg(conn.port.to_string());
+    if let Some(username) = &conn.username {
         command.arg("-U").arg(username);
     }
-    if args.no_password {
+    if conn.no_password {
         command.arg("-w");
     }
-    if args.password {
+    if conn.password {
         command.arg("-W");
     }
-    if let Some(role) = &args.role {
+    if let Some(role) = &conn.role {
         command.arg("--role").arg(role);
     }
 }
