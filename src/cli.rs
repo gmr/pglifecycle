@@ -34,6 +34,8 @@ pub enum Action {
     Build(Build),
     /// Create a skeleton project
     Create(Create),
+    /// Generate the DDL to make a database match the project
+    Deploy(Deploy),
     /// Create or update a project from a database or dump
     Pull(Pull),
 }
@@ -43,6 +45,7 @@ impl Action {
         match self {
             Action::Build(_) => "build",
             Action::Create(_) => "create",
+            Action::Deploy(_) => "deploy",
             Action::Pull(_) => "pull",
         }
     }
@@ -88,6 +91,39 @@ pub struct Create {
     /// The path to create the skeleton project in
     #[arg(value_name = "DEST")]
     pub destination: PathBuf,
+}
+
+#[derive(Args)]
+#[command(disable_help_flag = true)]
+pub struct Deploy {
+    /// Print help
+    #[arg(long, action = clap::ArgAction::Help)]
+    help: Option<bool>,
+
+    /// Compare against a pre-existing pg_dump file instead of
+    /// connecting to a database
+    #[arg(short = 'D', long)]
+    pub dump: Option<PathBuf>,
+
+    /// Write the DDL script to a file instead of STDOUT
+    #[arg(short = 'o', long)]
+    pub output: Option<PathBuf>,
+
+    /// Include destructive statements (DROP, drop+recreate fallbacks)
+    /// in the script
+    #[arg(long)]
+    pub allow_drop: bool,
+
+    /// do not include privileges (grant/revoke)
+    #[arg(short = 'x', long)]
+    pub no_privileges: bool,
+
+    #[command(flatten)]
+    pub connection: Connection,
+
+    /// The path to the pglifecycle project
+    #[arg(value_name = "PROJECT")]
+    pub project: PathBuf,
 }
 
 /// PostgreSQL connection options shared by commands that talk to a

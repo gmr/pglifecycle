@@ -31,6 +31,40 @@ topological sort.
 pglifecycle build PROJECT DEST
 ```
 
+## deploy
+
+Compare a live database (or an existing dump) against the project and
+emit the DDL needed to make the database match: `CREATE` for objects
+missing from the database, `DROP` for objects missing from the
+project, and a drop+recreate fallback for objects that exist in both
+but differ. The script goes to stdout (or `-o FILE`) with a summary on
+stderr; it is meant to be applied separately, for example as a CI
+step:
+
+```bash
+pglifecycle deploy -o deploy.sql PROJECT
+psql --single-transaction -v ON_ERROR_STOP=1 -f deploy.sql
+```
+
+| Option | Description |
+| --- | --- |
+| `-D, --dump FILE` | Compare against a `pg_dump -Fc` file instead of connecting |
+| `-o, --output FILE` | Write the DDL script to FILE instead of stdout |
+| `--allow-drop` | Include destructive statements in the script |
+| `-x, --no-privileges` | Do not include GRANT/REVOKE |
+
+The connection options match `pull` (see below).
+
+Destructive statements — `DROP` for database-only objects and the
+drop+recreate fallback for changed ones — are excluded from the script
+unless `--allow-drop` is given; each exclusion is reported on stderr
+and counted in the script header. Ownership is not managed (the script
+behaves like `pg_restore --no-owner`), and roles, users, groups, and
+tablespaces are skipped entirely: they are cluster-level objects a
+single-database dump cannot capture. Object types `pull` does not yet
+model (aggregates, casts, operators, …) are created when missing but
+otherwise only existence-checked and left untouched.
+
 ## pull
 
 Create a project from a live database or an existing dump. Entry DDL is

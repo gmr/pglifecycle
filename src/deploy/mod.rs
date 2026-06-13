@@ -1,0 +1,291 @@
+//! The `deploy` command: compare the repo project against a live
+//! database (or an existing dump) and emit the DDL needed to make the
+//! database match the project (PLAN.md Phase 6).
+//!
+//! Output first: the script goes to stdout or `--output` and is meant
+//! to be applied separately (e.g. `psql --single-transaction
+//! -v ON_ERROR_STOP=1 -f deploy.sql` in a CI step). Destructive
+//! statements — DROPs for objects missing from the repo and the
+//! drop+recreate fallback for in-place changes deploy cannot yet
+//! express — are excluded unless `--allow-drop` is given.
+
+mod diff;
+
+use std::io::IsTerminal;
+
+use crate::deploy::diff::{Change, Diff, ObjectKey};
+use crate::utils::quote_ident;
+use crate::{build, cli, constants, pgdump, project, pull};
+
+pub fn deploy(args: &cli::Deploy) -> Result<(), String> {
+    if args.connection.password && !std::io::stdin().is_terminal() {
+        return Err(String::from(
+            "--password requires an interactive terminal; set PGPASSWORD \
+             or use a pgpass file instead",
+        ));
+    }
+    let project = project::load(&args.project)?;
+    let source = source_label(args);
+    log::info!("Comparing {} against {source}", project.name);
+    let ddl = pgdump::DumpDdl {
+        no_privileges: args.no_privileges,
+        ..Default::default()
+    };
+    let (assembly, snapshot) =
+        pull::snapshot(args.dump.as_deref(), &args.connection, &ddl, false)?;
+    let diff = diff::diff(&project, &assembly);
+    let mut output = build::assemble(&project)?;
+    output.dump.sort_entries();
+    let plan = plan(&diff, &output, &snapshot, args)?;
+    report(&diff, &plan);
+    write_script(&plan, &project.name, &source, args)
+}
+
+/// One statement in the deploy plan
+struct Statement {
+    label: String,
+    sql: String,
+}
+
+/// The ordered script plus the destructive statements excluded from
+/// it when `--allow-drop` is not given
+struct Plan {
+    included: Vec<Statement>,
+    excluded: Vec<Statement>,
+}
+
+/// Assemble the ordered plan: DROPs for database-only objects first
+/// (reverse snapshot order), then the repo archive's entries in
+/// topological order — plain CREATEs for added objects, gated
+/// drop+recreate for changed ones
+fn plan(
+    diff: &Diff,
+    output: &build::BuildOutput,
+    snapshot: &libpgdump::Dump,
+    args: &cli::Deploy,
+) -> Result<Plan, String> {
+    let mut included = Vec::new();
+    let mut excluded = Vec::new();
+    let mut push = |destructive: bool, statement: Statement| {
+        if destructive && !args.allow_drop {
+            excluded.push(statement);
+        } else {
+            included.push(statement);
+        }
+    };
+    // pg_dump archives are stored in dependency order, so dropping in
+    // reverse entry order removes dependents before dependencies
+    let removed: Vec<&ObjectKey> = snapshot
+        .entries()
+        .iter()
+        .rev()
+        .filter_map(entry_key)
+        .filter_map(|key| diff.removed.iter().find(|r| **r == key))
+        .collect();
+    for key in &removed {
+        push(
+            true,
+            Statement {
+                label: key.to_string(),
+                sql: drop_sql(key),
+            },
+        );
+    }
+    // database-only objects whose snapshot entry could not be keyed
+    // (should not happen for modeled types) still need dropping;
+    // append them after the ordered ones
+    for key in &diff.removed {
+        if !removed.contains(&key) {
+            push(
+                true,
+                Statement {
+                    label: key.to_string(),
+                    sql: drop_sql(key),
+                },
+            );
+        }
+    }
+    for entry in output.dump.entries() {
+        if args.no_privileges && entry.desc == libpgdump::ObjectType::Acl {
+            continue;
+        }
+        let direct = output.item_ids.get(&entry.dump_id);
+        let owners: Vec<usize> = match direct {
+            Some(id) => vec![*id],
+            None => entry
+                .dependencies
+                .iter()
+                .filter_map(|dep| output.item_ids.get(dep).copied())
+                .collect(),
+        };
+        if owners.is_empty() {
+            continue;
+        }
+        let changes: Vec<Change> = owners
+            .iter()
+            .filter_map(|id| diff.items.get(id).copied())
+            .collect();
+        let label = entry_label(entry);
+        let Some(defn) = entry.defn.clone() else {
+            continue;
+        };
+        if changes.iter().all(|c| *c == Change::Added) {
+            push(false, Statement { label, sql: defn });
+        } else if changes.contains(&Change::Changed)
+            && changes
+                .iter()
+                .all(|c| matches!(c, Change::Added | Change::Changed))
+        {
+            // drop+recreate fallback: the object's own entry leads
+            // with its DROP; child entries (indexes, triggers,
+            // comments, ACLs) are recreated alongside it
+            let mut sql = String::new();
+            if direct.is_some()
+                && let Some(drop) = &entry.drop_stmt
+            {
+                sql.push_str(drop);
+            }
+            sql.push_str(&defn);
+            push(true, Statement { label, sql });
+        }
+    }
+    Ok(Plan { included, excluded })
+}
+
+/// Log what the plan skipped or excluded so the script is honest
+/// about what it does not cover
+fn report(diff: &Diff, plan: &Plan) {
+    let undiffable = diff
+        .items
+        .values()
+        .filter(|c| **c == Change::Undiffable)
+        .count();
+    if undiffable > 0 {
+        log::warn!(
+            "{undiffable} object(s) exist in both the project and the \
+             database but their types cannot be compared yet; they were \
+             left untouched"
+        );
+    }
+    for statement in &plan.excluded {
+        log::warn!(
+            "{}: change requires a destructive statement; re-run with \
+             --allow-drop to include it",
+            statement.label
+        );
+    }
+    log::info!(
+        "Plan: {} statement(s) included, {} excluded",
+        plan.included.len(),
+        plan.excluded.len()
+    );
+}
+
+/// Write the script to `--output` or stdout with a self-describing
+/// header
+fn write_script(
+    plan: &Plan,
+    project: &str,
+    source: &str,
+    args: &cli::Deploy,
+) -> Result<(), String> {
+    let mut script = format!(
+        "-- pglifecycle deploy\n-- project: {project}\n-- source: \
+         {source}\n"
+    );
+    if plan.excluded.is_empty() {
+        script.push_str("-- destructive statements: included\n");
+    } else {
+        script.push_str(&format!(
+            "-- destructive statements: {} excluded (re-run with \
+             --allow-drop)\n",
+            plan.excluded.len()
+        ));
+    }
+    if plan.included.is_empty() {
+        script.push_str("-- no changes: the database matches the project\n");
+    }
+    for statement in &plan.included {
+        script
+            .push_str(&format!("\n-- {}\n{}", statement.label, statement.sql));
+    }
+    match &args.output {
+        Some(path) => std::fs::write(path, script)
+            .map_err(|e| format!("failed to write {}: {e}", path.display())),
+        None => {
+            print!("{script}");
+            Ok(())
+        }
+    }
+}
+
+/// `DROP <type> IF EXISTS <name>` for a database-only object
+fn drop_sql(key: &ObjectKey) -> String {
+    // function keys are identity signatures and must not be quoted
+    // wholesale; everything else gets identifier quoting
+    let name = match key.desc {
+        constants::ObjectType::Function => key.name.clone(),
+        _ => quote_ident(&key.name),
+    };
+    let qualified = if key.schema.is_empty() {
+        name
+    } else {
+        format!("{}.{name}", quote_ident(&key.schema))
+    };
+    format!("DROP {} IF EXISTS {qualified};\n", key.desc.as_str())
+}
+
+/// Map a snapshot entry to the diff key space (modeled types only);
+/// the schema component mirrors [`ObjectKey::new`] — empty for
+/// schemaless types and extensions
+fn entry_key(entry: &libpgdump::Entry) -> Option<ObjectKey> {
+    use libpgdump::ObjectType as OT;
+    let desc = match entry.desc {
+        OT::Domain => constants::ObjectType::Domain,
+        OT::Extension => constants::ObjectType::Extension,
+        OT::Function => constants::ObjectType::Function,
+        OT::MaterializedView => constants::ObjectType::MaterializedView,
+        OT::ProceduralLanguage => constants::ObjectType::ProceduralLanguage,
+        OT::Schema => constants::ObjectType::Schema,
+        OT::Sequence => constants::ObjectType::Sequence,
+        OT::Table => constants::ObjectType::Table,
+        OT::Type => constants::ObjectType::Type,
+        OT::View => constants::ObjectType::View,
+        _ => return None,
+    };
+    let schema = match desc {
+        constants::ObjectType::Extension
+        | constants::ObjectType::ProceduralLanguage
+        | constants::ObjectType::Schema => String::new(),
+        _ => entry.namespace.clone().unwrap_or_default(),
+    };
+    Some(ObjectKey {
+        desc,
+        schema,
+        name: entry.tag.clone()?,
+    })
+}
+
+/// `DESC namespace.tag` for plan labels
+fn entry_label(entry: &libpgdump::Entry) -> String {
+    let tag = entry.tag.as_deref().unwrap_or_default();
+    match entry.namespace.as_deref() {
+        Some(namespace) if !namespace.is_empty() => {
+            format!("{} {namespace}.{tag}", entry.desc.as_str())
+        }
+        _ => format!("{} {tag}", entry.desc.as_str()),
+    }
+}
+
+/// Human-readable comparison source for the header and logs
+fn source_label(args: &cli::Deploy) -> String {
+    match &args.dump {
+        Some(path) => format!("dump {}", path.display()),
+        None => format!(
+            "{}:{}/{}",
+            args.connection.host,
+            args.connection.port,
+            args.connection.dbname.as_deref().unwrap_or_default()
+        ),
+    }
+}

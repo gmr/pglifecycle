@@ -3,7 +3,7 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use pglifecycle::{build, cli, project, pull, skeleton};
+use pglifecycle::{build, cli, deploy, project, pull, skeleton};
 
 fn main() -> ExitCode {
     let args = cli::Cli::parse();
@@ -17,6 +17,7 @@ fn main() -> ExitCode {
         cli::Action::Build(args) => project::load(&args.project)
             .and_then(|p| build::build(&p, &args.destination)),
         cli::Action::Create(create) => skeleton::create(create),
+        cli::Action::Deploy(args) => deploy::deploy(args),
         cli::Action::Pull(args) => pull::pull(args),
     };
     match result {
@@ -51,10 +52,12 @@ fn configure_logging(args: &cli::Cli) {
             eprintln!("warning: failed to create log file {}", path.display());
         }
     }
+    // log to stderr so command output (e.g. the deploy script on
+    // stdout) stays clean
     if let Err(err) = simplelog::TermLogger::init(
         level,
         simplelog::Config::default(),
-        simplelog::TerminalMode::Stdout,
+        simplelog::TerminalMode::Stderr,
         simplelog::ColorChoice::Auto,
     ) {
         eprintln!("warning: failed to initialize terminal logging: {err}");
