@@ -238,13 +238,30 @@ fn plan(
                         );
                     }
                 }
-                Some(Resolution::OrReplace) => push(
-                    false,
-                    Statement {
-                        label,
-                        sql: defn.replacen("CREATE ", "CREATE OR REPLACE ", 1),
-                    },
-                ),
+                Some(Resolution::OrReplace { comment }) => {
+                    push(
+                        false,
+                        Statement {
+                            label: label.clone(),
+                            sql: defn.replacen(
+                                "CREATE ",
+                                "CREATE OR REPLACE ",
+                                1,
+                            ),
+                        },
+                    );
+                    // CREATE OR REPLACE keeps the existing comment, so a
+                    // changed or removed one is reconciled separately
+                    if let Some(comment) = comment {
+                        push(
+                            false,
+                            Statement {
+                                label,
+                                sql: comment.clone(),
+                            },
+                        );
+                    }
+                }
                 _ => {
                     let mut sql = String::new();
                     if let Some(drop) = &entry.drop_stmt {
@@ -258,26 +275,15 @@ fn plan(
         }
         // child entries (indexes, triggers, comments, ACLs): a
         // drop+recreate parent recreates them all (gated with it); an
-        // OR REPLACE parent keeps the object, so only its COMMENT may
-        // need re-issuing (idempotent, ungated); in-place ALTERs
-        // reconcile their own children
-        let is_comment = entry.desc == libpgdump::ObjectType::Comment;
+        // OR REPLACE parent reconciles its own comment from its
+        // resolution (so removals clear, not just changes); in-place
+        // ALTERs reconcile their own children
         let replaced = owners.iter().any(|id| {
             diff.items.get(id) == Some(&Change::Changed)
                 && matches!(resolutions.get(id), Some(Resolution::Replace))
         });
-        let or_replaced_comment = is_comment
-            && owners.iter().any(|id| {
-                diff.items.get(id) == Some(&Change::Changed)
-                    && matches!(
-                        resolutions.get(id),
-                        Some(Resolution::OrReplace)
-                    )
-            });
         if replaced {
             push(true, Statement { label, sql: defn });
-        } else if or_replaced_comment {
-            push(false, Statement { label, sql: defn });
         }
     }
     Ok(Plan {

@@ -44,8 +44,11 @@ pub(crate) enum Resolution {
     Statements(Vec<Alter>),
     /// Re-issue the object's CREATE as `CREATE OR REPLACE` (functions
     /// and views); non-destructive, the caller rewrites the entry's
-    /// leading verb
-    OrReplace,
+    /// leading verb. `CREATE OR REPLACE` keeps the existing comment, so
+    /// `comment` carries the `COMMENT ON` statement to run afterward
+    /// when it changed (including the `IS NULL` form on removal); `None`
+    /// means the comment is unchanged.
+    OrReplace { comment: Option<String> },
     /// No in-place form exists (or is implemented yet): drop and
     /// recreate from the repo definition, gated behind --allow-drop
     Replace,
@@ -69,7 +72,18 @@ pub(crate) fn resolve(repo: &Definition, database: &Definition) -> Resolution {
         // replaced and must be dropped first
         (Definition::Function(repo), Definition::Function(db)) => {
             if repo.returns == db.returns {
-                Resolution::OrReplace
+                // function names carry their full identity signature,
+                // so COMMENT ON FUNCTION takes the name verbatim
+                let target =
+                    format!("{}.{}", quote_ident(&repo.schema), repo.name);
+                Resolution::OrReplace {
+                    comment: comment_delta(
+                        "FUNCTION",
+                        &target,
+                        &repo.comment,
+                        &db.comment,
+                    ),
+                }
             } else {
                 Resolution::Replace
             }
@@ -92,7 +106,14 @@ fn qualified(schema: &str, name: &str) -> String {
 /// here.
 fn view(repo: &View, db: &View) -> Resolution {
     if view_columns_compatible(repo, db) {
-        Resolution::OrReplace
+        Resolution::OrReplace {
+            comment: comment_delta(
+                "VIEW",
+                &qualified(&repo.schema, &repo.name),
+                &repo.comment,
+                &db.comment,
+            ),
+        }
     } else {
         Resolution::Replace
     }
@@ -620,6 +641,19 @@ fn schema(repo: &Schema, db: &Schema) -> Resolution {
     Resolution::Statements(alters)
 }
 
+/// The `COMMENT ON` statement to reconcile a comment that changed
+/// between the repo and database, or `None` when it is unchanged. Used
+/// for `CREATE OR REPLACE` objects, which preserve the existing comment
+/// and so need it re-stated (or cleared with `IS NULL`) separately.
+fn comment_delta(
+    desc: &str,
+    name: &str,
+    repo: &Option<String>,
+    db: &Option<String>,
+) -> Option<String> {
+    (repo != db).then(|| comment_on(desc, name, repo.as_deref()))
+}
+
 /// `COMMENT ON <desc> <name> IS ...` matching the build's comment
 /// entry text shape; a removed comment becomes `IS NULL`
 fn comment_on(desc: &str, name: &str, comment: Option<&str>) -> String {
@@ -982,7 +1016,7 @@ mod tests {
         };
         assert!(matches!(
             resolve(&f("SELECT 2"), &f("SELECT 1")),
-            Resolution::OrReplace
+            Resolution::OrReplace { .. }
         ));
     }
 
@@ -1017,8 +1051,62 @@ mod tests {
         };
         assert!(matches!(
             resolve(&v("SELECT 2"), &v("SELECT 1")),
-            Resolution::OrReplace
+            Resolution::OrReplace { .. }
         ));
+    }
+
+    fn or_replace_comment(resolution: Resolution) -> Option<String> {
+        match resolution {
+            Resolution::OrReplace { comment } => comment,
+            _ => panic!("expected OR REPLACE"),
+        }
+    }
+
+    #[test]
+    fn function_comment_removal_clears_it() {
+        let f = |comment: Option<&str>| -> Definition {
+            let mut value = serde_json::json!({
+                "name": "f(integer)", "schema": "test", "owner": "postgres",
+                "returns": "integer", "language": "sql",
+                "definition": "SELECT 1",
+            });
+            if let Some(comment) = comment {
+                value["comment"] = comment.into();
+            }
+            Definition::Function(serde_json::from_value(value).unwrap())
+        };
+        // removal emits IS NULL so a re-deploy converges
+        assert_eq!(
+            or_replace_comment(resolve(&f(None), &f(Some("old")))),
+            Some("COMMENT ON FUNCTION test.f(integer) IS NULL;\n".into())
+        );
+        // a set comment is re-stated, an unchanged one is left alone
+        assert_eq!(
+            or_replace_comment(resolve(&f(Some("new")), &f(Some("old")))),
+            Some("COMMENT ON FUNCTION test.f(integer) IS $$new$$;\n".into())
+        );
+        assert_eq!(
+            or_replace_comment(resolve(&f(Some("same")), &f(Some("same")))),
+            None
+        );
+    }
+
+    #[test]
+    fn view_comment_removal_clears_it() {
+        let v = |comment: Option<&str>| -> Definition {
+            let mut value = serde_json::json!({
+                "name": "v", "schema": "test", "owner": "postgres",
+                "query": "SELECT 1",
+            });
+            if let Some(comment) = comment {
+                value["comment"] = comment.into();
+            }
+            Definition::View(serde_json::from_value(value).unwrap())
+        };
+        assert_eq!(
+            or_replace_comment(resolve(&v(None), &v(Some("old")))),
+            Some("COMMENT ON VIEW test.v IS NULL;\n".into())
+        );
     }
 
     fn view_with_columns(columns: serde_json::Value) -> Definition {
@@ -1038,7 +1126,7 @@ mod tests {
                 &view_with_columns(serde_json::json!(["a", "b"])),
                 &view_with_columns(serde_json::json!(["a"])),
             ),
-            Resolution::OrReplace
+            Resolution::OrReplace { .. }
         ));
     }
 
