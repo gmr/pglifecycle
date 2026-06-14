@@ -42,7 +42,49 @@ pub fn deploy(args: &cli::Deploy) -> Result<(), String> {
     output.dump.sort_entries();
     let plan = plan(&diff, &resolutions, &output, &snapshot, args)?;
     report(&diff, &plan);
-    write_script(&plan, &project.name, &source, args)
+    let script = render_script(&plan, &project.name, &source);
+    if let Some(path) = &args.output {
+        std::fs::write(path, &script)
+            .map_err(|e| format!("failed to write {}: {e}", path.display()))?;
+    } else if !args.apply {
+        print!("{script}");
+    }
+    if args.apply {
+        apply(&plan, &script, args)?;
+    }
+    Ok(())
+}
+
+/// Execute the plan against the database via psql, refusing if
+/// destructive statements were excluded
+fn apply(plan: &Plan, script: &str, args: &cli::Deploy) -> Result<(), String> {
+    if !plan.excluded.is_empty() {
+        return Err(format!(
+            "{} destructive statement(s) are pending; re-run with \
+             --allow-drop to apply them, or resolve them first",
+            plan.excluded.len()
+        ));
+    }
+    if plan.included.is_empty() {
+        log::info!(
+            "The database already matches the project; nothing to apply"
+        );
+        return Ok(());
+    }
+    let file = tempfile::Builder::new()
+        .prefix("pglifecycle-deploy-")
+        .suffix(".sql")
+        .tempfile()
+        .map_err(|e| format!("failed to create temp file: {e}"))?;
+    std::fs::write(file.path(), script).map_err(|e| {
+        format!("failed to write {}: {e}", file.path().display())
+    })?;
+    log::info!("Applying {} statement(s)", plan.included.len());
+    pgdump::apply(&args.connection, file.path()).map_err(|stderr| {
+        format!("deploy failed (the transaction was rolled back):\n{stderr}")
+    })?;
+    log::info!("Deploy applied successfully");
+    Ok(())
 }
 
 /// Resolve each changed item into in-place statements or the
@@ -180,8 +222,9 @@ fn plan(
         {
             continue;
         }
-        // the object's own entry: emit its in-place statements, or
-        // lead with its DROP for the drop+recreate fallback
+        // the object's own entry: emit its in-place statements,
+        // re-issue it as CREATE OR REPLACE, or lead with its DROP for
+        // the drop+recreate fallback
         if let Some(id) = direct {
             match resolutions.get(id) {
                 Some(Resolution::Statements(alters)) => {
@@ -191,6 +234,30 @@ fn plan(
                             Statement {
                                 label: label.clone(),
                                 sql: alter.sql.clone(),
+                            },
+                        );
+                    }
+                }
+                Some(Resolution::OrReplace { comment }) => {
+                    push(
+                        false,
+                        Statement {
+                            label: label.clone(),
+                            sql: defn.replacen(
+                                "CREATE ",
+                                "CREATE OR REPLACE ",
+                                1,
+                            ),
+                        },
+                    );
+                    // CREATE OR REPLACE keeps the existing comment, so a
+                    // changed or removed one is reconciled separately
+                    if let Some(comment) = comment {
+                        push(
+                            false,
+                            Statement {
+                                label,
+                                sql: comment.clone(),
                             },
                         );
                     }
@@ -206,14 +273,16 @@ fn plan(
             }
             continue;
         }
-        // child entries (indexes, triggers, comments, ACLs): ride
-        // along only with a drop+recreate — in-place resolutions
-        // reconcile their children themselves
-        let replace = owners.iter().any(|id| {
+        // child entries (indexes, triggers, comments, ACLs): a
+        // drop+recreate parent recreates them all (gated with it); an
+        // OR REPLACE parent reconciles its own comment from its
+        // resolution (so removals clear, not just changes); in-place
+        // ALTERs reconcile their own children
+        let replaced = owners.iter().any(|id| {
             diff.items.get(id) == Some(&Change::Changed)
                 && matches!(resolutions.get(id), Some(Resolution::Replace))
         });
-        if replace {
+        if replaced {
             push(true, Statement { label, sql: defn });
         }
     }
@@ -253,14 +322,8 @@ fn report(diff: &Diff, plan: &Plan) {
     );
 }
 
-/// Write the script to `--output` or stdout with a self-describing
-/// header
-fn write_script(
-    plan: &Plan,
-    project: &str,
-    source: &str,
-    args: &cli::Deploy,
-) -> Result<(), String> {
+/// Render the script with a self-describing header
+fn render_script(plan: &Plan, project: &str, source: &str) -> String {
     let mut script = format!(
         "-- pglifecycle deploy\n-- project: {project}\n-- source: \
          {source}\n"
@@ -286,14 +349,7 @@ fn write_script(
         script
             .push_str(&format!("\n-- {}\n{}", statement.label, statement.sql));
     }
-    match &args.output {
-        Some(path) => std::fs::write(path, script)
-            .map_err(|e| format!("failed to write {}: {e}", path.display())),
-        None => {
-            print!("{script}");
-            Ok(())
-        }
-    }
+    script
 }
 
 /// `DROP <type> IF EXISTS <name>` for a database-only object

@@ -100,7 +100,7 @@ fn missing_objects_are_created() {
 }
 
 #[test]
-fn table_reconciles_in_place_function_replaces() {
+fn table_alters_in_place_function_or_replaces() {
     let dir = tempfile::tempdir().unwrap();
     let baseline = dir.path().join("fixtures.dump");
     fixture_archive(&baseline);
@@ -121,15 +121,19 @@ fn table_reconciles_in_place_function_replaces() {
         script.contains("ALTER TABLE test.users DROP COLUMN nickname;"),
         "missing in-place column drop in:\n{script}"
     );
-    // the function has no in-place renderer yet, so it drop+recreates
-    // from the repo body
+    // the function (same signature, changed body) is replaced in place
+    // with CREATE OR REPLACE, not dropped
     assert!(
-        script.contains("DROP FUNCTION IF EXISTS"),
-        "missing function replace in:\n{script}"
+        !script.contains("DROP FUNCTION"),
+        "function must use CREATE OR REPLACE, not drop:\n{script}"
+    );
+    assert!(
+        script.contains("CREATE OR REPLACE FUNCTION set_last_modified"),
+        "missing function OR REPLACE in:\n{script}"
     );
     assert!(
         script.contains("CURRENT_TIMESTAMP"),
-        "recreated function must use the repo body:\n{script}"
+        "replaced function must use the repo body:\n{script}"
     );
 }
 
