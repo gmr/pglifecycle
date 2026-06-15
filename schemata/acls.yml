@@ -12,7 +12,7 @@ properties:
       "^.*$":
         type: array
         items:
-          enum: [SELECT, INSERT, UPDATE, DELETE, ALL]
+          pattern: "^(SELECT|INSERT|UPDATE|DELETE|ALL)( WITH GRANT OPTION)?$"
   databases:
     type: object
     propertyNames:
@@ -21,7 +21,7 @@ properties:
       "^.*$":
         type: array
         items:
-          enum: [CREATE, CONNECT, TEMP, TEMPORARY, ALL]
+          pattern: "^(CREATE|CONNECT|TEMP|TEMPORARY|ALL)( WITH GRANT OPTION)?$"
   domains:
     type: object
     propertyNames:
@@ -30,7 +30,7 @@ properties:
       "^.*$":
         type: array
         items:
-          enum: [USAGE, ALL]
+          pattern: "^(USAGE|ALL)( WITH GRANT OPTION)?$"
   foreign_data_wrappers:
     type: object
     propertyNames:
@@ -39,7 +39,7 @@ properties:
       "^.*$":
         type: array
         items:
-          enum: [USAGE, ALL]
+          pattern: "^(USAGE|ALL)( WITH GRANT OPTION)?$"
   foreign_servers:
     type: object
     propertyNames:
@@ -48,7 +48,7 @@ properties:
       "^.*$":
         type: array
         items:
-          enum: [USAGE, ALL]
+          pattern: "^(USAGE|ALL)( WITH GRANT OPTION)?$"
   functions:
     type: object
     propertyNames:
@@ -57,7 +57,7 @@ properties:
       "^.*$":
         type: array
         items:
-          enum: [EXECUTE, ALL]
+          pattern: "^(EXECUTE|ALL)( WITH GRANT OPTION)?$"
   groups:
     type: array
     items:
@@ -71,7 +71,7 @@ properties:
       "^.*$":
         type: array
         items:
-          enum: [USAGE, ALL]
+          pattern: "^(USAGE|ALL)( WITH GRANT OPTION)?$"
   large_objects:
     type: object
     propertyNames:
@@ -80,7 +80,7 @@ properties:
       "^.*$":
         type: array
         items:
-          enum: [SELECT, UPDATE, ALL]
+          pattern: "^(SELECT|UPDATE|ALL)( WITH GRANT OPTION)?$"
   roles:
     type: array
     items:
@@ -94,7 +94,7 @@ properties:
       "^.*$":
         type: array
         items:
-          enum: [CREATE, USAGE, ALL]
+          pattern: "^(CREATE|USAGE|ALL)( WITH GRANT OPTION)?$"
   sequences:
     type: object
     propertyNames:
@@ -103,7 +103,7 @@ properties:
       "^.*$":
         type: array
         items:
-          enum: [SELECT, UPDATE, USAGE, ALL]
+          pattern: "^(SELECT|UPDATE|USAGE|ALL)( WITH GRANT OPTION)?$"
   tables:
     type: object
     propertyNames:
@@ -112,7 +112,7 @@ properties:
       "^.*$":
         type: array
         items:
-          enum: [SELECT, INSERT, UPDATE, DELETE, ALL]
+          pattern: "^(SELECT|INSERT|UPDATE|DELETE|ALL)( WITH GRANT OPTION)?$"
   tablespaces:
     type: object
     propertyNames:
@@ -121,7 +121,7 @@ properties:
       "^.*$":
         type: array
         items:
-          enum: [CREATE, USAGE, ALL]
+          pattern: "^(CREATE|USAGE|ALL)( WITH GRANT OPTION)?$"
   types:
     type: object
     propertyNames:
@@ -130,7 +130,7 @@ properties:
       "^.*$":
         type: array
         items:
-          enum: [USAGE, ALL]
+          pattern: "^(USAGE|ALL)( WITH GRANT OPTION)?$"
   views:
     type: object
     propertyNames:
@@ -139,5 +139,5 @@ properties:
       "^.*$":
         type: array
         items:
-          enum: [SELECT, ALL]
+          pattern: "^(SELECT|ALL)( WITH GRANT OPTION)?$"
 additionalProperties: false
