@@ -122,6 +122,14 @@ pglifecycle pull [OPTIONS] DEST
 | `--remove-empty-dirs` | Remove empty directories after generation |
 | `--save-remaining` | Save unprocessed dump entries to `remaining.yaml` |
 | `--error-file FILE` | Where to record failures and their DDL (default `pglifecycle-errors.log`) |
+| `-T, --exclude-table PATTERN` | Exclude tables/views/sequences matching `PATTERN` (repeatable; ignored with `--dump`) |
+| `-N, --exclude-schema PATTERN` | Exclude schemas matching `PATTERN` (repeatable; ignored with `--dump`) |
+| `--exclude-extension PATTERN` | Exclude extensions matching `PATTERN` (repeatable; ignored with `--dump`) |
+
+The exclude patterns are passed through to `pg_dump` (`--exclude-table`,
+`--exclude-schema`, `--exclude-extension`) and use the same pattern
+syntax. They apply only when connecting to a database; with `--dump` the
+archive is already built, so they are rejected as conflicting.
 
 ### Diagnosing parse and format failures
 

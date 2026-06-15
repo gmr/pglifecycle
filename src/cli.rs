@@ -236,6 +236,35 @@ pub struct Pull {
     #[arg(long, default_value = "pglifecycle-errors.log")]
     pub error_file: PathBuf,
 
+    /// Exclude tables matching PATTERN (also matches views,
+    /// materialized views, and sequences); repeatable. Conflicts with
+    /// --dump
+    #[arg(
+        short = 'T',
+        long = "exclude-table",
+        value_name = "PATTERN",
+        conflicts_with = "dump"
+    )]
+    pub exclude_table: Vec<String>,
+
+    /// Exclude schemas matching PATTERN; repeatable. Conflicts with --dump
+    #[arg(
+        short = 'N',
+        long = "exclude-schema",
+        value_name = "PATTERN",
+        conflicts_with = "dump"
+    )]
+    pub exclude_schema: Vec<String>,
+
+    /// Exclude extensions matching PATTERN; repeatable. Conflicts with
+    /// --dump
+    #[arg(
+        long = "exclude-extension",
+        value_name = "PATTERN",
+        conflicts_with = "dump"
+    )]
+    pub exclude_extension: Vec<String>,
+
     #[command(flatten)]
     pub connection: Connection,
 

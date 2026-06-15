@@ -49,6 +49,9 @@ pub fn pull(args: &cli::Pull) -> Result<(), String> {
         no_privileges: args.no_privileges,
         no_security_labels: args.no_security_labels,
         no_tablespaces: args.no_tablespaces,
+        exclude_tables: args.exclude_table.clone(),
+        exclude_schemas: args.exclude_schema.clone(),
+        exclude_extensions: args.exclude_extension.clone(),
     };
     let (assembly, _) = snapshot(
         args.dump.as_deref(),
