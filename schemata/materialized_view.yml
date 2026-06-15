@@ -85,9 +85,9 @@ oneOf:
     not: {required: [sql]}
   - required: [sql]
     not:
-      required:
-        - columns
-        - storage_paramters
-        - tablespace
-        - query
-        - indexes
+      anyOf:
+        - required: [columns]
+        - required: [storage_parameters]
+        - required: [tablespace]
+        - required: [query]
+        - required: [indexes]

@@ -118,7 +118,7 @@ pglifecycle pull [OPTIONS] DEST
 | Option | Description |
 | --- | --- |
 | `-D, --dump FILE` | Use an existing `pg_dump -Fc` file instead of connecting |
-| `--no-roles` | Skip cluster role/user extraction (on by default for live connections; always skipped with `--dump`) |
+| `--no-roles` | Skip cluster role/user extraction (role/user extraction is enabled by default for live connections; always skipped with `--dump`) |
 | `--include-password-hashes` | Include role password hashes in users (omitted by default via `pg_dumpall --no-role-passwords`) |
 | `-i, --ignore FILE` | File listing project paths to skip writing |
 | `--force` | Write to `DEST` even if it already exists |

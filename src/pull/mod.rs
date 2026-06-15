@@ -815,14 +815,32 @@ impl Assembly {
                 .map(|v| v.comment = Some(comment.clone()))
                 .is_some(),
             "FUNCTION" => self.apply_function_comment(&schema, name, &comment),
-            "INDEX" => self
-                .tables
-                .iter_mut()
-                .filter(|t| t.schema == schema)
-                .flat_map(|t| t.indexes.iter_mut().flatten())
-                .find(|i| i.name == *name)
-                .map(|i| i.comment = Some(comment.clone()))
-                .is_some(),
+            "INDEX" => {
+                self.tables
+                    .iter_mut()
+                    .filter(|t| t.schema == schema)
+                    .flat_map(|t| t.indexes.iter_mut().flatten())
+                    .find(|i| i.name == *name)
+                    .map(|i| i.comment = Some(comment.clone()))
+                    .is_some()
+                    || self
+                        .materialized_views
+                        .iter_mut()
+                        .filter(|v| v.schema == schema)
+                        .flat_map(|v| v.indexes.iter_mut().flatten())
+                        .find(|i| i.name == *name)
+                        .map(|i| i.comment = Some(comment.clone()))
+                        .is_some()
+                    || self
+                        .deferred_indexes
+                        .iter_mut()
+                        .find(|(rel, i)| {
+                            rel.schema.clone().unwrap_or_default() == schema
+                                && i.name == *name
+                        })
+                        .map(|(_, i)| i.comment = Some(comment.clone()))
+                        .is_some()
+            }
             _ => false,
         };
         if !found {
