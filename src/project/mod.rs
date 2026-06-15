@@ -21,5 +21,6 @@ pub struct Project {
 
 /// Load the project from the specified project directory
 pub fn load(path: &std::path::Path) -> Result<Project, String> {
+    let _task = crate::progress::spinner("Loading project");
     load::Loader::new(path).load()
 }

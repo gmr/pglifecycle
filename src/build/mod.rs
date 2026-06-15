@@ -38,6 +38,7 @@ use crate::models::{
     Column, ConstraintColumns, Definition, Index, Item, RoleOptions,
     TablePartitionColumn, Trigger, ViewColumn,
 };
+use crate::progress;
 use crate::project::Project;
 use crate::utils::{postgres_value, quote_ident, raw_value};
 
@@ -48,10 +49,12 @@ pub fn build(project: &Project, destination: &Path) -> Result<(), String> {
         project.name
     );
     let output = assemble(project)?;
+    let task = progress::spinner("Saving archive");
     output
         .dump
         .save(destination)
         .map_err(|e| format!("failed to save archive: {e}"))?;
+    task.finish();
     log::debug!(
         "Saved pg_dump -Fc compatible dump to {} with {} entries",
         destination.display(),
@@ -78,9 +81,18 @@ pub fn assemble(project: &Project) -> Result<BuildOutput, String> {
         dump_id_map: HashMap::new(),
         superuser: project.superuser.clone(),
     };
+    let task =
+        progress::bar(project.inventory.len() as u64, "Assembling archive");
     for item in &project.inventory {
+        task.set_message(format!(
+            "Assembling {} {}",
+            item.desc.as_str(),
+            item.definition.name()
+        ));
         builder.dump_item(item)?;
+        task.inc();
     }
+    task.finish();
     acls::dump_acls(&mut builder, project)?;
     // record inventory dependency edges on the entries so the weighted
     // pg_dump topological sort in libpgdump (run by save) can order
