@@ -15,7 +15,7 @@ indicatif = "0.18.4"
 indicatif-log-bridge = "0.2.3"
 jsonschema = { version = "0.46.5", default-features = false }
 libpgdump = "2.1"
-libpgfmt = "1.1.2"
+libpgfmt = "1.1.5"
 log = "0.4"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0.150", features = ["preserve_order"] }
