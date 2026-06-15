@@ -12,6 +12,7 @@ mod writer;
 use std::collections::BTreeMap;
 use std::io::IsTerminal;
 use std::path::Path;
+use std::time::Duration;
 
 use serde_json::{Map, Value};
 
@@ -728,9 +729,10 @@ impl Assembly {
     }
 
     /// Format view queries and function bodies with libpgfmt (AWeber
-    /// style); on a formatting error the original text is kept
+    /// style). On a formatting error — or if a single statement exceeds
+    /// [`FORMAT_TIMEOUT`] (a likely upstream hang) — the original text
+    /// is kept and the statement is recorded to the diagnostics report.
     pub fn format_sql(&mut self) {
-        use libpgfmt::style::Style;
         let total = self.views.len()
             + self.materialized_views.len()
             + self.functions.len();
@@ -738,7 +740,10 @@ impl Assembly {
         for view in &mut self.views {
             if let Some(query) = &view.query {
                 task.set_message(format!("Formatting view {}", view.name));
-                view.query = Some(format_query(query, "view", &view.name));
+                let label = format!("view {}", view.name);
+                if let Some(formatted) = format_one(query, false, &label) {
+                    view.query = Some(strip_trailing(&formatted));
+                }
             }
             task.inc();
         }
@@ -748,8 +753,10 @@ impl Assembly {
                     "Formatting materialized view {}",
                     view.name
                 ));
-                view.query =
-                    Some(format_query(query, "materialized view", &view.name));
+                let label = format!("materialized view {}", view.name);
+                if let Some(formatted) = format_one(query, false, &label) {
+                    view.query = Some(strip_trailing(&formatted));
+                }
             }
             task.inc();
         }
@@ -759,31 +766,17 @@ impl Assembly {
                 continue;
             };
             task.set_message(format!("Formatting function {}", function.name));
-            let label = format!("function {}", function.name);
-            diagnostics::enter(&label, definition);
-            let formatted = match function.language.as_deref() {
-                Some("plpgsql") => {
-                    libpgfmt::format_plpgsql(definition, Style::Aweber)
-                }
-                Some("sql") => libpgfmt::format(definition, Style::Aweber),
+            let plpgsql = match function.language.as_deref() {
+                Some("plpgsql") => true,
+                Some("sql") => false,
                 _ => {
-                    diagnostics::leave();
                     task.inc();
                     continue;
                 }
             };
-            diagnostics::leave();
-            match formatted {
-                Ok(formatted) => function.definition = Some(formatted),
-                Err(error) => {
-                    log::warn!("failed to format {label}: {error}");
-                    diagnostics::record_failure(
-                        "FAILED TO FORMAT",
-                        &label,
-                        &error.to_string(),
-                        definition,
-                    );
-                }
+            let label = format!("function {}", function.name);
+            if let Some(formatted) = format_one(definition, plpgsql, &label) {
+                function.definition = Some(formatted);
             }
             task.inc();
         }
@@ -800,26 +793,76 @@ impl Assembly {
     }
 }
 
-fn format_query(query: &str, kind: &str, name: &str) -> String {
-    let label = format!("{kind} {name}");
-    diagnostics::enter(&label, query);
-    let result = libpgfmt::format(query, libpgfmt::style::Style::Aweber);
+fn strip_trailing(formatted: &str) -> String {
+    formatted.trim_end_matches(';').trim_end().to_string()
+}
+
+/// Per-statement formatting budget. libpgfmt occasionally loops forever
+/// on a pathological statement; well-formed SQL formats far under this,
+/// so a statement that exceeds it is treated as a hang — kept
+/// unformatted and recorded to the diagnostics report for reproduction.
+const FORMAT_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// Format one statement with libpgfmt, tracking it as the in-flight
+/// statement so an interrupt or a timeout attributes to it. Returns the
+/// formatted SQL, or `None` to mean "keep the original" — on a
+/// formatting error or a [`FORMAT_TIMEOUT`] overrun, both recorded to
+/// the diagnostics report so the offending DDL can be reproduced.
+fn format_one(sql: &str, plpgsql: bool, label: &str) -> Option<String> {
+    use libpgfmt::style::Style;
+    diagnostics::enter(label, sql);
+    let owned = sql.to_string();
+    let result = run_with_timeout(FORMAT_TIMEOUT, move || {
+        let formatted = if plpgsql {
+            libpgfmt::format_plpgsql(&owned, Style::Aweber)
+        } else {
+            libpgfmt::format(&owned, Style::Aweber)
+        };
+        formatted.map_err(|e| e.to_string())
+    });
     diagnostics::leave();
     match result {
-        Ok(formatted) => {
-            formatted.trim_end_matches(';').trim_end().to_string()
-        }
-        Err(error) => {
+        Some(Ok(formatted)) => Some(formatted),
+        Some(Err(error)) => {
             log::warn!("failed to format {label}: {error}");
             diagnostics::record_failure(
                 "FAILED TO FORMAT",
-                &label,
-                &error.to_string(),
-                query,
+                label,
+                &error,
+                sql,
             );
-            query.to_string()
+            None
+        }
+        None => {
+            log::warn!(
+                "formatting {label} exceeded {FORMAT_TIMEOUT:?}; keeping it \
+                 unformatted"
+            );
+            diagnostics::record_failure(
+                "TIMED OUT FORMATTING",
+                label,
+                &format!("libpgfmt did not finish within {FORMAT_TIMEOUT:?}"),
+                sql,
+            );
+            None
         }
     }
+}
+
+/// Run `op` on a worker thread, returning its result, or `None` if it
+/// did not finish within `timeout`. A timed-out worker is abandoned —
+/// it keeps running until the process exits, which is the only way to
+/// walk away from an upstream infinite loop; for a one-shot CLI the
+/// leaked thread is acceptable.
+fn run_with_timeout<T: Send + 'static>(
+    timeout: Duration,
+    op: impl FnOnce() -> T + Send + 'static,
+) -> Option<T> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(op());
+    });
+    rx.recv_timeout(timeout).ok()
 }
 
 /// Merge ALTER ROLE options over CREATE ROLE options
@@ -1221,6 +1264,23 @@ mod tests {
         let query = assembly.views[0].query.as_deref().unwrap();
         assert!(query.contains('\n'), "expected formatted query: {query}");
         assert!(!query.ends_with(';'));
+    }
+
+    #[test]
+    fn run_with_timeout_returns_fast_results() {
+        let value = run_with_timeout(Duration::from_secs(5), || 21 * 2);
+        assert_eq!(value, Some(42));
+    }
+
+    #[test]
+    fn run_with_timeout_abandons_a_hang() {
+        // the worker outlives the timeout; the call must return None
+        // promptly rather than block on it
+        let value = run_with_timeout(Duration::from_millis(20), || {
+            std::thread::sleep(Duration::from_secs(30));
+            7
+        });
+        assert_eq!(value, None);
     }
 
     #[test]
