@@ -237,7 +237,7 @@ pub struct Pull {
     pub error_file: PathBuf,
 
     /// Exclude tables matching PATTERN (also matches views,
-    /// materialized views, and sequences); repeatable. Ignored with
+    /// materialized views, and sequences); repeatable. Conflicts with
     /// --dump
     #[arg(
         short = 'T',
@@ -247,7 +247,7 @@ pub struct Pull {
     )]
     pub exclude_table: Vec<String>,
 
-    /// Exclude schemas matching PATTERN; repeatable. Ignored with --dump
+    /// Exclude schemas matching PATTERN; repeatable. Conflicts with --dump
     #[arg(
         short = 'N',
         long = "exclude-schema",
@@ -256,7 +256,7 @@ pub struct Pull {
     )]
     pub exclude_schema: Vec<String>,
 
-    /// Exclude extensions matching PATTERN; repeatable. Ignored with
+    /// Exclude extensions matching PATTERN; repeatable. Conflicts with
     /// --dump
     #[arg(
         long = "exclude-extension",
