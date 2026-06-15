@@ -8,7 +8,7 @@ use serde_json::{Map, Value, json};
 
 use crate::constants::PROJECT_DIRS;
 use crate::pull::{Assembly, RoleState};
-use crate::{cli, models, yamlio};
+use crate::{cli, models, progress, yamlio};
 
 /// Render the project files for an assembly as `relative path →
 /// YAML text`, honoring the `--ignore` file
@@ -90,6 +90,7 @@ pub fn write_bootstrap(
 ) -> Result<(), String> {
     log::info!("Writing project to {}", args.destination.display());
     create_directories(&args.destination, args.gitkeep)?;
+    let task = progress::bar(files.len() as u64, "Writing files");
     for (relative, content) in files {
         let path = args.destination.join(relative);
         if let Some(parent) = path.parent() {
@@ -99,7 +100,9 @@ pub fn write_bootstrap(
         }
         std::fs::write(&path, content)
             .map_err(|e| format!("failed to write {}: {e}", path.display()))?;
+        task.inc();
     }
+    task.finish();
     if args.gitkeep {
         remove_unneeded_gitkeeps(&args.destination)?;
     }

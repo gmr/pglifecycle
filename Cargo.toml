@@ -9,7 +9,10 @@ rust-version = "1.88"
 
 [dependencies]
 clap = { version = "4", features = ["derive", "env"] }
+ctrlc = "3.5.2"
 include_dir = "0.7.4"
+indicatif = "0.18.4"
+indicatif-log-bridge = "0.2.3"
 jsonschema = { version = "0.46.5", default-features = false }
 libpgdump = "2.1"
 libpgfmt = "1.1.2"

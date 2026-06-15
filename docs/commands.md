@@ -121,6 +121,20 @@ pglifecycle pull [OPTIONS] DEST
 | `--gitkeep` | Create `.gitkeep` files in empty directories |
 | `--remove-empty-dirs` | Remove empty directories after generation |
 | `--save-remaining` | Save unprocessed dump entries to `remaining.yaml` |
+| `--error-file FILE` | Where to record failures and their DDL (default `pglifecycle-errors.log`) |
+
+### Diagnosing parse and format failures
+
+DDL that fails to parse, or SQL that fails to format, is logged and the
+offending statement is written to the error report (`--error-file`,
+default `pglifecycle-errors.log` in the working directory) alongside its
+full DDL, so a failure can be correlated with the exact statement that
+produced it. The file is created only when there is something to report.
+
+If `pull` is interrupted with Ctrl-C — for example because the formatter
+is stuck on a pathological statement — the statement in flight at that
+moment is written to the same report before exiting, turning a hang into
+a reproducer.
 
 Connection options mirror the PostgreSQL client tools and honor the
 standard `PGHOST`, `PGPORT`, `PGUSER`, and `PGDATABASE` environment
