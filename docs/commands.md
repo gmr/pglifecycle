@@ -122,7 +122,7 @@ pglifecycle pull [OPTIONS] DEST
 | `--remove-empty-dirs` | Remove empty directories after generation |
 | `--save-remaining` | Save unprocessed dump entries to `remaining.yaml` |
 | `--error-file FILE` | Where to record failures and their DDL (default `pglifecycle-errors.log`) |
-| `--style STYLE` | libpgfmt style for view queries and function bodies (default `aweber`) |
+| `--style STYLE` | libpgfmt style for view/materialized view queries and function bodies (default `aweber`) |
 | `-T, --exclude-table PATTERN` | Exclude tables/views/sequences matching `PATTERN` (repeatable; ignored with `--dump`) |
 | `-N, --exclude-schema PATTERN` | Exclude schemas matching `PATTERN` (repeatable; ignored with `--dump`) |
 | `--exclude-extension PATTERN` | Exclude extensions matching `PATTERN` (repeatable; ignored with `--dump`) |
@@ -134,8 +134,8 @@ archive is already built, so they are rejected as conflicting.
 
 The `--style` value is one of libpgfmt's styles — `river`, `mozilla`,
 `aweber`, `dbt`, `gitlab`, `kickstarter`, or `mattmc3` — and controls
-only how view queries and function bodies are formatted in the
-generated project. Note that `deploy` always re-formats the database
+only how view/materialized view queries and function bodies are
+formatted in the generated project. Note that `deploy` always re-formats the database
 side with the default (`aweber`) to compare it against the project, so
 pulling with a non-default style will make `deploy` report
 formatting-only differences for every view and function.
