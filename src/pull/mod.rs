@@ -10,6 +10,7 @@ mod update;
 mod writer;
 
 use std::collections::BTreeMap;
+use std::fmt::Write;
 use std::io::IsTerminal;
 use std::path::Path;
 use std::time::Duration;
@@ -64,6 +65,7 @@ pub fn pull(args: &cli::Pull) -> Result<(), String> {
     let task = progress::spinner("Rendering project");
     let files = writer::render(&assembly, args)?;
     task.finish();
+    let counts = assembly.counts_by_type();
     let objects = assembly.object_count();
     let verb = if args.update {
         update::merge(&files, args)?;
@@ -73,10 +75,14 @@ pub fn pull(args: &cli::Pull) -> Result<(), String> {
         "Created"
     };
     let plural = if objects == 1 { "object" } else { "objects" };
-    println!(
+    let mut summary = format!(
         "{verb} your schema project at {} with {objects} {plural}",
         args.destination.display()
     );
+    for (label, count) in counts {
+        let _ = write!(summary, "\n  {count:>5}  {label}");
+    }
+    println!("{summary}");
     Ok(())
 }
 
@@ -257,21 +263,32 @@ pub struct Assembly {
 }
 
 impl Assembly {
-    /// Count the modeled objects written to the project (the things a
-    /// user thinks of as schema objects); excludes unparsed `remaining`
-    /// entries and the database-level metadata
+    /// The modeled objects written to the project, by type, in a
+    /// readable order and excluding empty categories (the things a user
+    /// thinks of as schema objects; excludes unparsed `remaining`
+    /// entries and database-level metadata)
+    pub fn counts_by_type(&self) -> Vec<(&'static str, usize)> {
+        [
+            ("schemas", self.schemas.len()),
+            ("extensions", self.extensions.len()),
+            ("languages", self.languages.len()),
+            ("domains", self.domains.len()),
+            ("types", self.types.len()),
+            ("sequences", self.sequences.len()),
+            ("tables", self.tables.len()),
+            ("views", self.views.len()),
+            ("materialized views", self.materialized_views.len()),
+            ("functions", self.functions.len()),
+            ("roles", self.roles.len()),
+        ]
+        .into_iter()
+        .filter(|(_, count)| *count > 0)
+        .collect()
+    }
+
+    /// Total modeled object count across all types
     pub fn object_count(&self) -> usize {
-        self.extensions.len()
-            + self.languages.len()
-            + self.schemas.len()
-            + self.domains.len()
-            + self.types.len()
-            + self.sequences.len()
-            + self.tables.len()
-            + self.views.len()
-            + self.materialized_views.len()
-            + self.functions.len()
-            + self.roles.len()
+        self.counts_by_type().iter().map(|(_, count)| count).sum()
     }
 
     /// Parse every supported archive entry into the project models
