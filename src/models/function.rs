@@ -60,13 +60,15 @@ impl Function {
     /// The identity signature (`name(mode name type, ...)`) used to
     /// match `COMMENT ON FUNCTION` and ACL targets; mirrors
     /// `pg_get_function_identity_arguments` — defaults are omitted,
-    /// `IN` modes are implicit and OUT/TABLE parameters are excluded
+    /// `IN` modes are implicit, `OUT` parameters are kept (Postgres
+    /// includes them in the identity), and `RETURNS TABLE` columns are
+    /// excluded (they never reach `parameters`, but guard anyway)
     pub fn identity(&self) -> String {
         let args: Vec<String> = self
             .parameters
             .iter()
             .flatten()
-            .filter(|p| p.mode != "OUT" && p.mode != "TABLE")
+            .filter(|p| p.mode != "TABLE")
             .map(|p| {
                 let mut parts: Vec<&str> = Vec::new();
                 if p.mode != "IN" {

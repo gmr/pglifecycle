@@ -71,6 +71,7 @@ pub(crate) fn create_materialized_view(
             .and_then(|n| n.find("name"))
             .map(|n| unquote(n.text(src))),
         query,
+        indexes: None,
         comment: None,
     }))
 }

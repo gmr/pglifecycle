@@ -58,3 +58,9 @@ CREATE TABLE addresses (
     postal_code      TEXT                     NOT NULL,
     country          TEXT                     NOT NULL
 );
+
+-- Materialized view with an index, exercising matview index round-trip
+CREATE MATERIALIZED VIEW user_states AS
+    SELECT state, count(*) AS total FROM users GROUP BY state;
+
+CREATE UNIQUE INDEX user_states_state ON user_states (state);

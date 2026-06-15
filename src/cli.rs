@@ -88,6 +88,11 @@ pub struct Create {
     #[arg(long, default_value = "postgres")]
     pub superuser: String,
 
+    /// Prefix each generated file with editor mode headers
+    /// (`# -*- mode: pglifecycle -*-` and `# pglifecycle: <kind>`)
+    #[arg(long)]
+    pub include_mode_headers: bool,
+
     /// The path to create the skeleton project in
     #[arg(value_name = "DEST")]
     pub destination: PathBuf,
@@ -203,9 +208,22 @@ pub struct Pull {
     #[arg(short = 'D', long)]
     pub dump: Option<PathBuf>,
 
-    /// Extract roles (and users) from an existing cluster
-    #[arg(short = 'r', long)]
-    pub extract_roles: bool,
+    /// Do not extract cluster roles and users (pg_dumpall). Roles are
+    /// extracted by default when connecting to a live database; they
+    /// are always skipped with --dump (no live connection)
+    #[arg(long)]
+    pub no_roles: bool,
+
+    /// Include role password hashes in extracted users (pg_dumpall runs
+    /// with --no-role-passwords by default, omitting them). The hashes
+    /// are written to the project, so only enable for trusted repos
+    #[arg(long)]
+    pub include_password_hashes: bool,
+
+    /// Prefix each generated file with editor mode headers
+    /// (`# -*- mode: pglifecycle -*-` and `# pglifecycle: <kind>`)
+    #[arg(long)]
+    pub include_mode_headers: bool,
 
     /// Specify a file with files to skip writing
     #[arg(short, long)]

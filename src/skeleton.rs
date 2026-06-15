@@ -38,6 +38,7 @@ pub fn create(args: &cli::Create) -> Result<(), String> {
         "stdstrings": !args.no_stdstrings,
         "superuser": args.superuser,
     });
-    fs::write(dest.join("project.yaml"), yamlio::dump(&project))
-        .map_err(|e| e.to_string())
+    let header = args.include_mode_headers.then_some("project");
+    let content = yamlio::document(header, &yamlio::dump(&project));
+    fs::write(dest.join("project.yaml"), content).map_err(|e| e.to_string())
 }

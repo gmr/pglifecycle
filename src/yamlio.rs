@@ -38,11 +38,33 @@ pub fn dump(value: &Value) -> String {
         .expect("serializing a serde_json::Value to YAML cannot fail")
 }
 
+/// Assemble a project file from a serialized `body`: with `kind`
+/// `Some`, prepend editor-mode headers (an Emacs modeline plus the
+/// `# pglifecycle: <kind>` type comment a Zed extension keys off);
+/// either way emit the `---` document marker before the body
+pub fn document(kind: Option<&str>, body: &str) -> String {
+    match kind {
+        Some(kind) => format!(
+            "# -*- mode: pglifecycle -*-\n# pglifecycle: {kind}\n---\n{body}"
+        ),
+        None => format!("---\n{body}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn document_headers_are_optional() {
+        assert_eq!(document(None, "name: x\n"), "---\nname: x\n");
+        assert_eq!(
+            document(Some("table"), "name: x\n"),
+            "# -*- mode: pglifecycle -*-\n# pglifecycle: table\n---\nname: x\n"
+        );
+    }
 
     #[test]
     fn round_trips_nested_structures() {

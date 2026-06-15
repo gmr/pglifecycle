@@ -150,6 +150,22 @@ pub fn build_archive(path: &std::path::Path, mutated: bool) {
              test.users WHERE (locale = 'en-US'::text);",
         );
     }
+    add(
+        &mut dump,
+        OT::MaterializedView,
+        "test",
+        "user_states",
+        "CREATE MATERIALIZED VIEW test.user_states AS SELECT state, \
+         count(*) AS total FROM test.users GROUP BY state WITH DATA;",
+    );
+    add(
+        &mut dump,
+        OT::Index,
+        "test",
+        "user_states_state",
+        "CREATE UNIQUE INDEX user_states_state ON test.user_states \
+         USING btree (state);",
+    );
     let function = if mutated {
         "CREATE FUNCTION test.set_last_modified() RETURNS trigger \
          LANGUAGE plpgsql AS $$ BEGIN NEW.last_modified_at = \

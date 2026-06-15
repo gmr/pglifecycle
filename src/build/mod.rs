@@ -817,7 +817,11 @@ impl Builder {
             "DROP MATERIALIZED VIEW IF EXISTS".into(),
             self.item_name(item),
         ];
-        self.add_item(item, create, drop, false)
+        self.add_item(item, create, drop, false)?;
+        for index in d.indexes.as_deref().unwrap_or_default() {
+            self.dump_index(index, item, &d.schema, &d.owner)?;
+        }
+        Ok(())
     }
 
     fn dump_operator(&mut self, item: &Item) -> Result<(), String> {
@@ -1154,7 +1158,7 @@ impl Builder {
             self.add_item(item, create, drop, false)?;
         }
         for index in d.indexes.as_deref().unwrap_or_default() {
-            self.dump_index(index, item, d)?;
+            self.dump_index(index, item, &d.schema, &d.owner)?;
         }
         for trigger in d.triggers.as_deref().unwrap_or_default() {
             self.dump_trigger(trigger, item, d)?;
@@ -1166,24 +1170,22 @@ impl Builder {
         &mut self,
         index: &Index,
         parent: &Item,
-        table: &crate::models::Table,
+        schema: &str,
+        owner: &str,
     ) -> Result<(), String> {
         // index names cannot be schema-qualified in CREATE INDEX; the
-        // index lives in its table's schema (deviation 10 — Python
+        // index lives in its relation's schema (deviation 10 — Python
         // emitted `CREATE INDEX schema.name`, which does not parse)
-        let qualified = format!(
-            "{}.{}",
-            quote_ident(&table.schema),
-            quote_ident(&index.name)
-        );
+        let qualified =
+            format!("{}.{}", quote_ident(schema), quote_ident(&index.name));
         let create = render_index(index, &self.item_name(parent));
         let drop = vec!["DROP INDEX IF EXISTS".into(), qualified];
         let parent_dump_id = self.dump_id_map[&parent.id];
         let dump_id = self.add_entry(
             "INDEX",
-            &table.schema,
+            schema,
             &index.name,
-            &table.owner,
+            owner,
             &create,
             &drop,
             &[parent_dump_id],
@@ -1192,9 +1194,9 @@ impl Builder {
         if let Some(comment) = &index.comment {
             self.add_comment(
                 "INDEX",
-                &table.schema,
+                schema,
                 &index.name,
-                &table.owner,
+                owner,
                 dump_id,
                 comment,
             )?;

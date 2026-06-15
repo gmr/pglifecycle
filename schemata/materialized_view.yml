@@ -62,6 +62,12 @@ properties:
       A SELECT or VALUES command which will provide the columns and rows of the
       materialized view.
     type: string
+  indexes:
+    title: Indexes
+    description: An array of indexes on the materialized view
+    type: array
+    items:
+      $package_schema: index
   comment:
     title: Comment
     description: An optional comment about the materialized view.
@@ -79,8 +85,9 @@ oneOf:
     not: {required: [sql]}
   - required: [sql]
     not:
-      required:
-        - columns
-        - storage_paramters
-        - tablespace
-        - query
+      anyOf:
+        - required: [columns]
+        - required: [storage_parameters]
+        - required: [tablespace]
+        - required: [query]
+        - required: [indexes]

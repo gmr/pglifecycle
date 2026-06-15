@@ -19,6 +19,7 @@ pglifecycle create [OPTIONS] DEST
 | `--no-gitkeep` | Do not create `.gitkeep` files in empty directories |
 | `--no-stdstrings` | Turn off standard conforming strings |
 | `--superuser NAME` | Superuser name (default `postgres`) |
+| `--include-mode-headers` | Prefix generated files with editor mode headers |
 
 ## build
 
@@ -118,7 +119,9 @@ pglifecycle pull [OPTIONS] DEST
 | Option | Description |
 | --- | --- |
 | `-D, --dump FILE` | Use an existing `pg_dump -Fc` file instead of connecting |
-| `-r, --extract-roles` | Extract roles and users via `pg_dumpall --roles-only` |
+| `--no-roles` | Skip cluster role/user extraction (role/user extraction is enabled by default for live connections; always skipped with `--dump`) |
+| `--include-password-hashes` | Include role password hashes in users (omitted by default via `pg_dumpall --no-role-passwords`) |
+| `--include-mode-headers` | Prefix each generated file with editor mode headers (see below) |
 | `-i, --ignore FILE` | File listing project paths to skip writing |
 | `--force` | Write to `DEST` even if it already exists |
 | `--update` | Merge into an existing project, rewriting only changed files |
@@ -144,6 +147,23 @@ formatted in the generated project. Note that `deploy` always re-formats the dat
 side with the default (`aweber`) to compare it against the project, so
 pulling with a non-default style will make `deploy` report
 formatting-only differences for every view and function.
+
+With `--include-mode-headers`, each generated file is prefixed with two
+comment lines above the `---` document marker — an Emacs modeline and a
+`# pglifecycle: <kind>` type comment (`<kind>` is the object-type noun,
+e.g. `table`, `materialized_view`, `function`) that editor extensions
+can key off to detect pglifecycle files:
+
+```yaml
+# -*- mode: pglifecycle -*-
+# pglifecycle: materialized_view
+---
+name: autoresponder_service_package_info
+schema: public
+```
+
+Without the flag (the default), files begin directly at the `---`
+marker. The same flag is available on `create`.
 
 ### Diagnosing parse and format failures
 
@@ -192,8 +212,13 @@ that overloaded function files are numbered in dump order
 (`name.yaml`, `name_1.yaml`, …), so adding or removing an overload can
 renumber a sibling's file.
 
-Roles are classified when written: a role with a password or
-`VALID UNTIL` becomes a file in `users/`; everything else lands in
-`roles/`. Roles that appear only as ACL grantees (such as `PUBLIC`)
-are written with `create: false` so `build` defines but never creates
-them.
+Cluster roles and users are extracted via `pg_dumpall --roles-only`
+whenever `pull` connects to a live database (use `--no-roles` to skip,
+and note they cannot be extracted from a `--dump` file). They are
+classified when written: a role with the `LOGIN` attribute becomes a
+file in `users/`; everything else lands in `roles/`. Roles that appear
+only as ACL grantees (such as `PUBLIC`) are written with
+`create: false` so `build` defines but never creates them. The
+reserved `pg_*` roles are cluster-managed (and uncreatable), so they
+are excluded. Password hashes are omitted unless
+`--include-password-hashes` is given.
