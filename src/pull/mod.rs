@@ -59,6 +59,7 @@ pub fn pull(args: &cli::Pull) -> Result<(), String> {
         &args.connection,
         &ddl,
         args.extract_roles,
+        args.style,
     )?;
     let task = progress::spinner("Rendering project");
     let files = writer::render(&assembly, args)?;
@@ -78,6 +79,7 @@ pub fn snapshot(
     conn: &cli::Connection,
     ddl: &pgdump::DumpDdl,
     extract_roles: bool,
+    style: libpgfmt::style::Style,
 ) -> Result<(Assembly, libpgdump::Dump), String> {
     let mut temp_dump: Option<tempfile::NamedTempFile> = None;
     let dump_path = match dump_path {
@@ -117,7 +119,7 @@ pub fn snapshot(
         })?;
         assembly.ingest_roles(&text)?;
     }
-    assembly.format_sql();
+    assembly.format_sql(style);
     Ok((assembly, dump))
 }
 
@@ -735,7 +737,7 @@ impl Assembly {
     /// style). On a formatting error — or if a single statement exceeds
     /// [`FORMAT_TIMEOUT`] (a likely upstream hang) — the original text
     /// is kept and the statement is recorded to the diagnostics report.
-    pub fn format_sql(&mut self) {
+    pub fn format_sql(&mut self, style: libpgfmt::style::Style) {
         let total = self.views.len()
             + self.materialized_views.len()
             + self.functions.len();
@@ -744,7 +746,9 @@ impl Assembly {
             if let Some(query) = &view.query {
                 task.set_message(format!("Formatting view {}", view.name));
                 let label = format!("view {}", view.name);
-                if let Some(formatted) = format_one(query, false, &label) {
+                if let Some(formatted) =
+                    format_one(query, false, &label, style)
+                {
                     view.query = Some(strip_trailing(&formatted));
                 }
             }
@@ -757,7 +761,9 @@ impl Assembly {
                     view.name
                 ));
                 let label = format!("materialized view {}", view.name);
-                if let Some(formatted) = format_one(query, false, &label) {
+                if let Some(formatted) =
+                    format_one(query, false, &label, style)
+                {
                     view.query = Some(strip_trailing(&formatted));
                 }
             }
@@ -778,7 +784,9 @@ impl Assembly {
                 }
             };
             let label = format!("function {}", function.name);
-            if let Some(formatted) = format_one(definition, plpgsql, &label) {
+            if let Some(formatted) =
+                format_one(definition, plpgsql, &label, style)
+            {
                 function.definition = Some(formatted);
             }
             task.inc();
@@ -811,15 +819,19 @@ const FORMAT_TIMEOUT: Duration = Duration::from_millis(500);
 /// formatted SQL, or `None` to mean "keep the original" — on a
 /// formatting error or a [`FORMAT_TIMEOUT`] overrun, both recorded to
 /// the diagnostics report so the offending DDL can be reproduced.
-fn format_one(sql: &str, plpgsql: bool, label: &str) -> Option<String> {
-    use libpgfmt::style::Style;
+fn format_one(
+    sql: &str,
+    plpgsql: bool,
+    label: &str,
+    style: libpgfmt::style::Style,
+) -> Option<String> {
     diagnostics::enter(label, sql);
     let owned = sql.to_string();
     let result = run_with_timeout(FORMAT_TIMEOUT, move || {
         let formatted = if plpgsql {
-            libpgfmt::format_plpgsql(&owned, Style::Aweber)
+            libpgfmt::format_plpgsql(&owned, style)
         } else {
-            libpgfmt::format(&owned, Style::Aweber)
+            libpgfmt::format(&owned, style)
         };
         formatted.map_err(|e| e.to_string())
     });
@@ -1263,7 +1275,7 @@ mod tests {
     #[test]
     fn formats_view_queries() {
         let mut assembly = assembled();
-        assembly.format_sql();
+        assembly.format_sql(libpgfmt::style::Style::Aweber);
         let query = assembly.views[0].query.as_deref().unwrap();
         assert!(query.contains('\n'), "expected formatted query: {query}");
         assert!(!query.ends_with(';'));

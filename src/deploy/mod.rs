@@ -34,8 +34,15 @@ pub fn deploy(args: &cli::Deploy) -> Result<(), String> {
         no_privileges: args.no_privileges,
         ..Default::default()
     };
-    let (assembly, snapshot) =
-        pull::snapshot(args.dump.as_deref(), &args.connection, &ddl, false)?;
+    // deploy compares against the project's stored SQL, which pull
+    // formats with the default style unless overridden; match it here
+    let (assembly, snapshot) = pull::snapshot(
+        args.dump.as_deref(),
+        &args.connection,
+        &ddl,
+        false,
+        libpgfmt::style::Style::Aweber,
+    )?;
     let task = progress::spinner("Diffing project against database");
     let diff = diff::diff(&project, &assembly);
     let resolutions = resolutions(&project, &diff);
