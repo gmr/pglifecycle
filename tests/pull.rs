@@ -69,6 +69,29 @@ fn pulled_project_loads_and_validates() {
     assert!(dest.join("types/test.yaml").exists());
     assert!(dest.join("views/test/us_users.yaml").exists());
     assert!(dest.join("functions/test/set_last_modified.yaml").exists());
+    // a materialized view's index must attach to the matview, not be
+    // dropped as an "index on unknown table"
+    let matview = dest.join("materialized_views/test/user_states.yaml");
+    assert!(matview.exists());
+    let matview = std::fs::read_to_string(&matview).unwrap();
+    assert!(
+        matview.contains("user_states_state"),
+        "matview index was dropped: {matview}"
+    );
+    // every generated file leads with a Zed-detectable modeline whose
+    // kind matches the object type, above the --- document marker
+    assert!(
+        matview.starts_with("# pglifecycle: materialized_view\n---\n"),
+        "missing matview modeline: {matview}"
+    );
+    let project_yaml =
+        std::fs::read_to_string(dest.join("project.yaml")).unwrap();
+    assert!(project_yaml.starts_with("# pglifecycle: project\n---\n"));
+    let function = std::fs::read_to_string(
+        dest.join("functions/test/set_last_modified.yaml"),
+    )
+    .unwrap();
+    assert!(function.starts_with("# pglifecycle: function\n---\n"));
     assert!(dest.join("sequences/test/user_id_seq.yaml").exists());
     assert!(dest.join("domains/test/email_address.yaml").exists());
     assert!(dest.join("roles/PUBLIC.yaml").exists());

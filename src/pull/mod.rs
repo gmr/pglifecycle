@@ -45,6 +45,17 @@ pub fn pull(args: &cli::Pull) -> Result<(), String> {
              or use a pgpass file instead",
         ));
     }
+    let (verb, gerund) = if args.update {
+        ("Updated", "Updating")
+    } else {
+        ("Created", "Creating")
+    };
+    println!(
+        "pglifecycle v{} {gerund} {} → {}",
+        env!("CARGO_PKG_VERSION"),
+        source_label(args),
+        args.destination.display(),
+    );
     diagnostics::init(args.error_file.clone());
     let ddl = pgdump::DumpDdl {
         no_owner: args.no_owner,
@@ -55,11 +66,21 @@ pub fn pull(args: &cli::Pull) -> Result<(), String> {
         exclude_schemas: args.exclude_schema.clone(),
         exclude_extensions: args.exclude_extension.clone(),
     };
+    // roles/users come from pg_dumpall, which needs a live connection;
+    // skip them when replaying a --dump file (and on --no-roles)
+    let roles = if args.no_roles || args.dump.is_some() {
+        if args.dump.is_some() && !args.no_roles {
+            log::info!("Skipping role extraction: --dump has no live cluster");
+        }
+        None
+    } else {
+        Some(args.include_password_hashes)
+    };
     let (assembly, _) = snapshot(
         args.dump.as_deref(),
         &args.connection,
         &ddl,
-        args.extract_roles,
+        roles,
         args.style,
     )?;
     let task = progress::spinner("Rendering project");
@@ -67,33 +88,93 @@ pub fn pull(args: &cli::Pull) -> Result<(), String> {
     task.finish();
     let counts = assembly.counts_by_type();
     let objects = assembly.object_count();
-    let verb = if args.update {
+    if args.update {
         update::merge(&files, args)?;
-        "Updated"
     } else {
         writer::write_bootstrap(&files, args)?;
-        "Created"
-    };
-    let plural = if objects == 1 { "object" } else { "objects" };
-    let mut summary = format!(
-        "{verb} your schema project at {} with {objects} {plural}",
-        args.destination.display()
-    );
-    for (label, count) in counts {
-        let _ = write!(summary, "\n  {count:>5}  {label}");
     }
-    println!("{summary}");
+    let plural = if objects == 1 { "object" } else { "objects" };
+    println!(
+        "\n{verb} {} with {objects} {plural}:\n\n{}",
+        args.destination.display(),
+        count_grid(&counts),
+    );
     Ok(())
+}
+
+/// Render the per-type counts as a three-column, column-major grid with
+/// right-aligned counts, e.g.
+///
+/// ```text
+///      37  schemas          278  sequences          523  functions
+///      13  extensions      1734  tables             191  users
+/// ```
+fn count_grid(counts: &[(&'static str, usize)]) -> String {
+    const COLS: usize = 3;
+    let rows = counts.len().div_ceil(COLS);
+    // column c holds counts[c * rows .. c * rows + rows]; size each
+    // column to its own widest count and label
+    let column: Vec<&[(&str, usize)]> = (0..COLS)
+        .map(|c| {
+            let start = (c * rows).min(counts.len());
+            let end = (start + rows).min(counts.len());
+            &counts[start..end]
+        })
+        .collect();
+    let count_w: Vec<usize> = column
+        .iter()
+        .map(|cells| {
+            cells
+                .iter()
+                .map(|(_, n)| n.to_string().len())
+                .max()
+                .unwrap_or(0)
+        })
+        .collect();
+    let label_w: Vec<usize> = column
+        .iter()
+        .map(|cells| cells.iter().map(|(l, _)| l.len()).max().unwrap_or(0))
+        .collect();
+    let mut out = String::new();
+    for r in 0..rows {
+        let mut line = String::new();
+        for c in 0..COLS {
+            if let Some((label, count)) = column[c].get(r) {
+                let (cw, lw) = (count_w[c], label_w[c]);
+                let _ = write!(line, "  {count:>cw$}  {label:<lw$}");
+            }
+        }
+        out.push_str(line.trim_end());
+        out.push('\n');
+    }
+    out.trim_end().to_string()
+}
+
+/// The connection the dump is read from, for the startup banner: the
+/// dump file when replaying one, otherwise `dbname@host` (or just the
+/// host when no database name was given)
+fn source_label(args: &cli::Pull) -> String {
+    if let Some(dump) = &args.dump {
+        return dump.display().to_string();
+    }
+    match &args.connection.dbname {
+        Some(dbname) => format!("{dbname}@{}", args.connection.host),
+        None => args.connection.host.clone(),
+    }
 }
 
 /// Snapshot a database (or an existing dump file) into an [`Assembly`],
 /// returning the loaded dump alongside it for callers that need the
-/// archive's entry order
+/// archive's entry order.
+///
+/// `roles` controls cluster role/user extraction via pg_dumpall:
+/// `None` skips it; `Some(include_passwords)` extracts roles, including
+/// password hashes only when `true`.
 pub fn snapshot(
     dump_path: Option<&Path>,
     conn: &cli::Connection,
     ddl: &pgdump::DumpDdl,
-    extract_roles: bool,
+    roles: Option<bool>,
     style: libpgfmt::style::Style,
 ) -> Result<(Assembly, libpgdump::Dump), String> {
     let mut temp_dump: Option<tempfile::NamedTempFile> = None;
@@ -122,20 +203,39 @@ pub fn snapshot(
     drop(temp_dump);
     let mut assembly = Assembly::default();
     assembly.ingest(&dump)?;
-    if extract_roles {
-        let file = tempfile::Builder::new()
-            .prefix("pglifecycle-roles-")
-            .suffix(".sql")
-            .tempfile()
-            .map_err(|e| format!("failed to create temp file: {e}"))?;
-        pgdump::dump_roles(conn, file.path())?;
-        let text = std::fs::read_to_string(file.path()).map_err(|e| {
-            format!("failed to read roles dump {}: {e}", file.path().display())
-        })?;
-        assembly.ingest_roles(&text)?;
+    if let Some(include_passwords) = roles {
+        // role extraction is best-effort: a locked-down cluster (e.g.
+        // RDS restricts pg_authid) should not abort the whole schema
+        // export, so a failure is warned and skipped, not propagated
+        if let Err(error) =
+            extract_roles(conn, include_passwords, &mut assembly)
+        {
+            log::warn!(
+                "Skipping roles and users: {error}. Use --no-roles to \
+                 silence this, or connect with sufficient privileges."
+            );
+        }
     }
     assembly.format_sql(style);
     Ok((assembly, dump))
+}
+
+/// Dump cluster roles via pg_dumpall and merge them into `assembly`
+fn extract_roles(
+    conn: &cli::Connection,
+    include_passwords: bool,
+    assembly: &mut Assembly,
+) -> Result<(), String> {
+    let file = tempfile::Builder::new()
+        .prefix("pglifecycle-roles-")
+        .suffix(".sql")
+        .tempfile()
+        .map_err(|e| format!("failed to create temp file: {e}"))?;
+    pgdump::dump_roles(conn, file.path(), include_passwords)?;
+    let text = std::fs::read_to_string(file.path()).map_err(|e| {
+        format!("failed to read roles dump {}: {e}", file.path().display())
+    })?;
+    assembly.ingest_roles(&text)
 }
 
 /// A dump entry that was not assembled into the project models
@@ -145,6 +245,31 @@ pub struct Remaining {
     pub namespace: Option<String>,
     pub tag: Option<String>,
     pub defn: Option<String>,
+}
+
+/// How a cluster role is written to the project
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoleKind {
+    /// A role with the LOGIN attribute → `users/`
+    User,
+    /// A NOLOGIN role (or an ACL-only grantee like PUBLIC) → `roles/`
+    Role,
+}
+
+/// Classify a cluster role for the project, shared by the writer and
+/// the pull summary. Reserved `pg_*` roles are cluster-managed (and
+/// uncreatable), so they are excluded (`None`); a role with the LOGIN
+/// attribute is a [`RoleKind::User`], everything else a
+/// [`RoleKind::Role`] (pg_dumpall does not distinguish groups).
+pub fn classify_role(name: &str, state: &RoleState) -> Option<RoleKind> {
+    if name.starts_with("pg_") {
+        return None;
+    }
+    if state.options.login == Some(true) {
+        Some(RoleKind::User)
+    } else {
+        Some(RoleKind::Role)
+    }
 }
 
 /// Per-role state accumulated from ACL entries and the pg_dumpall
@@ -260,6 +385,10 @@ pub struct Assembly {
     pub functions: Vec<models::Function>,
     pub roles: BTreeMap<String, RoleState>,
     pub remaining: Vec<Remaining>,
+    /// Indexes whose target relation had not yet been ingested when the
+    /// index entry was seen (pg_dump sorts INDEX before MATERIALIZED
+    /// VIEW), replayed after the entry loop completes
+    deferred_indexes: Vec<(QualifiedName, models::Index)>,
 }
 
 impl Assembly {
@@ -268,6 +397,15 @@ impl Assembly {
     /// thinks of as schema objects; excludes unparsed `remaining`
     /// entries and database-level metadata)
     pub fn counts_by_type(&self) -> Vec<(&'static str, usize)> {
+        let mut users = 0;
+        let mut roles = 0;
+        for (name, state) in &self.roles {
+            match classify_role(name, state) {
+                Some(RoleKind::User) => users += 1,
+                Some(RoleKind::Role) => roles += 1,
+                None => {}
+            }
+        }
         [
             ("schemas", self.schemas.len()),
             ("extensions", self.extensions.len()),
@@ -279,7 +417,8 @@ impl Assembly {
             ("views", self.views.len()),
             ("materialized views", self.materialized_views.len()),
             ("functions", self.functions.len()),
-            ("roles", self.roles.len()),
+            ("users", users),
+            ("roles", roles),
         ]
         .into_iter()
         .filter(|(_, count)| *count > 0)
@@ -377,8 +516,23 @@ impl Assembly {
                 _ => self.push_remaining(entry),
             }
         }
+        self.apply_deferred_indexes();
         task.finish();
         Ok(())
+    }
+
+    /// Attach indexes whose target relation was not yet ingested when
+    /// the index entry was seen; warn for any that remain unresolved
+    fn apply_deferred_indexes(&mut self) {
+        for (table, index) in std::mem::take(&mut self.deferred_indexes) {
+            if let Some(table) = self.find_table(&table) {
+                table.indexes.get_or_insert_default().push(index);
+            } else if let Some(view) = self.find_materialized_view(&table) {
+                view.indexes.get_or_insert_default().push(index);
+            } else {
+                log::warn!("Index on unknown relation {table}");
+            }
+        }
     }
 
     /// Parse a `pg_dumpall --roles-only` SQL dump, skipping comments,
@@ -452,11 +606,16 @@ impl Assembly {
                 self.functions.push(*function);
             }
             Statement::CreateIndex { table, index } => {
-                match self.find_table(&table) {
-                    Some(table) => {
-                        table.indexes.get_or_insert_default().push(index);
-                    }
-                    None => log::warn!("Index on unknown table {table}"),
+                if let Some(table) = self.find_table(&table) {
+                    table.indexes.get_or_insert_default().push(index);
+                } else if let Some(view) = self.find_materialized_view(&table)
+                {
+                    view.indexes.get_or_insert_default().push(index);
+                } else {
+                    // the target relation may simply not be ingested
+                    // yet (matview indexes sort before their matview);
+                    // retry after the entry loop
+                    self.deferred_indexes.push((table, index));
                 }
             }
             Statement::AddConstraint {
@@ -743,6 +902,16 @@ impl Assembly {
         self.tables
             .iter_mut()
             .find(|t| t.schema == schema && t.name == name.name)
+    }
+
+    fn find_materialized_view(
+        &mut self,
+        name: &QualifiedName,
+    ) -> Option<&mut models::MaterializedView> {
+        let schema = name.schema.clone().unwrap_or_default();
+        self.materialized_views
+            .iter_mut()
+            .find(|v| v.schema == schema && v.name == name.name)
     }
 
     /// Merge ALTER SEQUENCE options (including OWNED BY) into the
@@ -1375,6 +1544,52 @@ mod tests {
         let readonly = &assembly.roles["readonly"];
         assert!(readonly.created);
         assert_eq!(readonly.options.login, Some(false));
+    }
+
+    /// LOGIN roles become users, NOLOGIN roles stay roles, and reserved
+    /// pg_* roles are dropped from the project (the bootstrap superuser
+    /// is kept)
+    #[test]
+    fn roles_split_by_login_and_filter_cluster_roles() {
+        use clap::Parser;
+        let mut assembly = Assembly::default();
+        assembly
+            .ingest_roles(
+                "CREATE ROLE app_login;\n\
+                 ALTER ROLE app_login WITH LOGIN;\n\
+                 CREATE ROLE app_group;\n\
+                 ALTER ROLE app_group WITH NOLOGIN;\n\
+                 CREATE ROLE postgres;\n\
+                 ALTER ROLE postgres WITH SUPERUSER LOGIN;\n\
+                 CREATE ROLE pg_read_all_data;\n\
+                 ALTER ROLE pg_read_all_data WITH NOLOGIN;\n",
+            )
+            .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("project");
+        let dump = dir.path().join("unused.dump");
+        let args = match cli::Cli::try_parse_from([
+            "pglifecycle",
+            "pull",
+            "--dump",
+            dump.to_str().unwrap(),
+            dest.to_str().unwrap(),
+        ])
+        .unwrap()
+        .action
+        {
+            cli::Action::Pull(args) => args,
+            _ => unreachable!(),
+        };
+        let files = writer::render(&assembly, &args).unwrap();
+
+        assert!(files.contains_key(Path::new("users/app_login.yaml")));
+        assert!(files.contains_key(Path::new("roles/app_group.yaml")));
+        // the bootstrap superuser is a LOGIN role, so it is kept as a
+        // user; only the uncreatable pg_* reserved roles are filtered
+        assert!(files.contains_key(Path::new("users/postgres.yaml")));
+        assert!(!files.contains_key(Path::new("roles/pg_read_all_data.yaml")));
     }
 
     /// Role settings survive the full pull → write → load → build

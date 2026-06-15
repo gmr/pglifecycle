@@ -209,13 +209,17 @@ impl Writer {
         Ok(())
     }
 
-    /// Classify accumulated role state into user and role files; a
-    /// password or expiry makes a user (pg_dumpall does not
-    /// distinguish groups)
+    /// Classify accumulated role state into user and role files via
+    /// [`crate::pull::classify_role`] (LOGIN → user, else role; `pg_*`
+    /// excluded)
     fn write_roles(&mut self, assembly: &Assembly) -> Result<(), String> {
         for (name, state) in &assembly.roles {
+            let kind = match crate::pull::classify_role(name, state) {
+                Some(kind) => kind,
+                None => continue,
+            };
             let settings = role_settings(state);
-            if state.password.is_some() || state.valid_until.is_some() {
+            if kind == crate::pull::RoleKind::User {
                 let user = models::User {
                     name: name.clone(),
                     comment: None,
@@ -271,8 +275,52 @@ impl Writer {
             log::debug!("Skipping ignored file {key}");
             return Ok(());
         }
-        self.files.insert(relative, yamlio::dump(value));
+        let body = yamlio::dump(value);
+        let content =
+            format!("# pglifecycle: {}\n---\n{body}", kind(&relative));
+        self.files.insert(relative, content);
         Ok(())
+    }
+}
+
+/// The object-type noun for the modeline comment, derived from the
+/// destination path (the same noun the directory/schema uses); a Zed
+/// extension keys off the `# pglifecycle` prefix to detect the file type
+fn kind(relative: &Path) -> &'static str {
+    if relative == Path::new("project.yaml") {
+        return "project";
+    }
+    match relative
+        .components()
+        .next()
+        .and_then(|c| c.as_os_str().to_str())
+    {
+        Some("schemata") => "schema",
+        Some("domains") => "domain",
+        Some("sequences") => "sequence",
+        Some("tables") => "table",
+        Some("views") => "view",
+        Some("materialized_views") => "materialized_view",
+        Some("functions") => "function",
+        Some("procedures") => "procedure",
+        Some("types") => "type",
+        Some("aggregates") => "aggregate",
+        Some("casts") => "cast",
+        Some("collations") => "collation",
+        Some("conversions") => "conversion",
+        Some("operators") => "operator",
+        Some("publications") => "publication",
+        Some("subscriptions") => "subscription",
+        Some("servers") => "server",
+        Some("tablespaces") => "tablespace",
+        Some("text_search") => "text_search",
+        Some("user_mappings") => "user_mapping",
+        Some("event_triggers") => "event_trigger",
+        Some("roles") => "role",
+        Some("users") => "user",
+        Some("groups") => "group",
+        // remaining.yaml and any future top-level file
+        _ => "object",
     }
 }
 

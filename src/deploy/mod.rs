@@ -43,7 +43,7 @@ pub fn deploy(args: &cli::Deploy) -> Result<(), String> {
         args.dump.as_deref(),
         &args.connection,
         &ddl,
-        false,
+        None,
         libpgfmt::style::Style::Aweber,
     )?;
     let task = progress::spinner("Diffing project against database");

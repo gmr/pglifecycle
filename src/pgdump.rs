@@ -41,12 +41,21 @@ pub fn dump(
     execute(command)
 }
 
-/// Dump cluster roles to `path` as SQL via `pg_dumpall --roles-only`
-pub fn dump_roles(conn: &cli::Connection, path: &Path) -> Result<(), String> {
+/// Dump cluster roles to `path` as SQL via `pg_dumpall --roles-only`.
+/// Password hashes are omitted (`--no-role-passwords`) unless
+/// `include_passwords` is set, to keep secrets out of the project
+pub fn dump_roles(
+    conn: &cli::Connection,
+    path: &Path,
+    include_passwords: bool,
+) -> Result<(), String> {
     let mut command = Command::new("pg_dumpall");
     connection_args(&mut command, conn);
     command.arg("-f").arg(path);
     command.arg("-r");
+    if !include_passwords {
+        command.arg("--no-role-passwords");
+    }
     execute(command)
 }
 

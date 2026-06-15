@@ -38,6 +38,7 @@ pub fn create(args: &cli::Create) -> Result<(), String> {
         "stdstrings": !args.no_stdstrings,
         "superuser": args.superuser,
     });
-    fs::write(dest.join("project.yaml"), yamlio::dump(&project))
-        .map_err(|e| e.to_string())
+    let content =
+        format!("# pglifecycle: project\n---\n{}", yamlio::dump(&project));
+    fs::write(dest.join("project.yaml"), content).map_err(|e| e.to_string())
 }

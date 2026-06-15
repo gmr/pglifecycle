@@ -59,5 +59,7 @@ pub struct MaterializedView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub query: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub indexes: Option<Vec<super::Index>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
 }

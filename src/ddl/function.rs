@@ -207,6 +207,25 @@ mod tests {
     }
 
     #[test]
+    fn identity_keeps_out_parameters() {
+        // pg_get_function_identity_arguments (PG17) includes OUT
+        // params, so COMMENT ON / GRANT ON FUNCTION signatures carry
+        // them; identity() must match or the comment goes unattached
+        let Statement::CreateFunction(function) = parse_one(
+            "CREATE FUNCTION public.get_count(in_a_id integer, \
+             in_from timestamp with time zone, OUT upload_count bigint) \
+             RETURNS bigint LANGUAGE sql AS $$ SELECT 1::bigint $$;",
+        ) else {
+            panic!("expected CreateFunction")
+        };
+        assert_eq!(
+            function.identity(),
+            "get_count(in_a_id integer, in_from timestamp with time \
+             zone, OUT upload_count bigint)"
+        );
+    }
+
+    #[test]
     fn parses_unqualified_function() {
         let Statement::CreateFunction(function) = parse_one(
             "CREATE FUNCTION uppercase(value text) RETURNS text \
