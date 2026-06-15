@@ -297,14 +297,13 @@ impl Assembly {
         let mut parser = ddl::Parser::new()?;
         self.dbname = dump.dbname().to_string();
         let entries = dump.entries();
-        let task = progress::bar(entries.len() as u64, "Ingesting entries");
+        let task = progress::spinner("Ingesting entries");
         for entry in entries {
             task.set_message(format!(
                 "Ingesting {} {}",
                 entry.desc.as_str(),
                 entry.tag.as_deref().unwrap_or_default()
             ));
-            task.inc();
             match &entry.desc {
                 OT::Database
                 | OT::SearchPath
@@ -781,10 +780,7 @@ impl Assembly {
     /// [`FORMAT_TIMEOUT`] (a likely upstream hang) — the original text
     /// is kept and the statement is recorded to the diagnostics report.
     pub fn format_sql(&mut self, style: libpgfmt::style::Style) {
-        let total = self.views.len()
-            + self.materialized_views.len()
-            + self.functions.len();
-        let task = progress::bar(total as u64, "Formatting SQL");
+        let task = progress::spinner("Formatting SQL");
         for view in &mut self.views {
             if let Some(query) = &view.query {
                 task.set_message(format!("Formatting view {}", view.name));
@@ -795,7 +791,6 @@ impl Assembly {
                     view.query = Some(strip_trailing(&formatted));
                 }
             }
-            task.inc();
         }
         for view in &mut self.materialized_views {
             if let Some(query) = &view.query {
@@ -810,21 +805,16 @@ impl Assembly {
                     view.query = Some(strip_trailing(&formatted));
                 }
             }
-            task.inc();
         }
         for function in &mut self.functions {
             let Some(definition) = &function.definition else {
-                task.inc();
                 continue;
             };
             task.set_message(format!("Formatting function {}", function.name));
             let plpgsql = match function.language.as_deref() {
                 Some("plpgsql") => true,
                 Some("sql") => false,
-                _ => {
-                    task.inc();
-                    continue;
-                }
+                _ => continue,
             };
             let label = format!("function {}", function.name);
             if let Some(formatted) =
@@ -832,7 +822,6 @@ impl Assembly {
             {
                 function.definition = Some(formatted);
             }
-            task.inc();
         }
         task.finish();
     }

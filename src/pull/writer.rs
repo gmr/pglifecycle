@@ -90,8 +90,9 @@ pub fn write_bootstrap(
 ) -> Result<(), String> {
     log::info!("Writing project to {}", args.destination.display());
     create_directories(&args.destination, args.gitkeep)?;
-    let task = progress::bar(files.len() as u64, "Writing files");
+    let task = progress::spinner("Writing files");
     for (relative, content) in files {
+        task.set_message(format!("Writing {}", relative.display()));
         let path = args.destination.join(relative);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
@@ -100,7 +101,6 @@ pub fn write_bootstrap(
         }
         std::fs::write(&path, content)
             .map_err(|e| format!("failed to write {}: {e}", path.display()))?;
-        task.inc();
     }
     task.finish();
     if args.gitkeep {
