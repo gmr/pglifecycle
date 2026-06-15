@@ -78,20 +78,16 @@ fn pulled_project_loads_and_validates() {
         matview.contains("user_states_state"),
         "matview index was dropped: {matview}"
     );
-    // every generated file leads with a Zed-detectable modeline whose
-    // kind matches the object type, above the --- document marker
+    // mode headers are opt-in: by default files lead with just the
+    // --- document marker, no modeline
     assert!(
-        matview.starts_with("# pglifecycle: materialized_view\n---\n"),
-        "missing matview modeline: {matview}"
+        matview.starts_with("---\n"),
+        "default pull should not emit a modeline: {matview}"
     );
     let project_yaml =
         std::fs::read_to_string(dest.join("project.yaml")).unwrap();
-    assert!(project_yaml.starts_with("# pglifecycle: project\n---\n"));
-    let function = std::fs::read_to_string(
-        dest.join("functions/test/set_last_modified.yaml"),
-    )
-    .unwrap();
-    assert!(function.starts_with("# pglifecycle: function\n---\n"));
+    assert!(project_yaml.starts_with("---\n"));
+    assert!(!project_yaml.contains("# pglifecycle:"));
     assert!(dest.join("sequences/test/user_id_seq.yaml").exists());
     assert!(dest.join("domains/test/email_address.yaml").exists());
     assert!(dest.join("roles/PUBLIC.yaml").exists());
@@ -117,6 +113,43 @@ fn pulled_project_loads_and_validates() {
     ] {
         assert!(kinds.contains(&expected), "missing {expected}: {kinds:?}");
     }
+}
+
+#[test]
+fn include_mode_headers_prefixes_generated_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let archive = dir.path().join("fixtures.dump");
+    fixture_archive(&archive);
+    let dest = dir.path().join("project");
+
+    pull::pull(&pull_args_with(
+        &archive,
+        &dest,
+        &["--gitkeep", "--include-mode-headers"],
+    ))
+    .expect("pull failed");
+
+    // both the Emacs modeline and the type comment lead each file,
+    // above the --- document marker, with a kind matching the object
+    let expectations = [
+        ("project.yaml", "project"),
+        ("tables/test/users.yaml", "table"),
+        (
+            "materialized_views/test/user_states.yaml",
+            "materialized_view",
+        ),
+        ("functions/test/set_last_modified.yaml", "function"),
+    ];
+    for (path, kind) in expectations {
+        let text = std::fs::read_to_string(dest.join(path)).unwrap();
+        let expected = format!(
+            "# -*- mode: pglifecycle -*-\n# pglifecycle: {kind}\n---\n"
+        );
+        assert!(text.starts_with(&expected), "{path} header:\n{text}");
+    }
+
+    // the project still loads with the headers present
+    project::load(&dest).expect("project with mode headers must load");
 }
 
 #[test]

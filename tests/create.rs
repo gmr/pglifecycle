@@ -24,8 +24,23 @@ fn creates_skeleton_project() {
     let yaml = fs::read_to_string(tmp.join("project.yaml")).unwrap();
     assert_eq!(
         yaml,
-        "# pglifecycle: project\n---\n\
+        "---\n\
          name: pglc-test-create\nencoding: UTF-8\n\
+         stdstrings: true\nsuperuser: postgres\n"
+    );
+}
+
+#[test]
+fn create_includes_mode_headers_when_requested() {
+    let parent = tempfile::tempdir().unwrap();
+    let tmp = parent.path().join("pglc-test-create-headers");
+    let output = run_create(&tmp, &["--include-mode-headers"]);
+    assert!(output.status.success());
+    let yaml = fs::read_to_string(tmp.join("project.yaml")).unwrap();
+    assert_eq!(
+        yaml,
+        "# -*- mode: pglifecycle -*-\n# pglifecycle: project\n---\n\
+         name: pglc-test-create-headers\nencoding: UTF-8\n\
          stdstrings: true\nsuperuser: postgres\n"
     );
 }
@@ -63,7 +78,7 @@ fn create_honors_options() {
     let yaml = fs::read_to_string(tmp.join("project.yaml")).unwrap();
     assert_eq!(
         yaml,
-        "# pglifecycle: project\n---\n\
+        "---\n\
          name: example\nencoding: LATIN1\n\
          stdstrings: false\nsuperuser: admin\n"
     );

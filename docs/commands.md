@@ -19,6 +19,7 @@ pglifecycle create [OPTIONS] DEST
 | `--no-gitkeep` | Do not create `.gitkeep` files in empty directories |
 | `--no-stdstrings` | Turn off standard conforming strings |
 | `--superuser NAME` | Superuser name (default `postgres`) |
+| `--include-mode-headers` | Prefix generated files with editor mode headers |
 
 ## build
 
@@ -120,6 +121,7 @@ pglifecycle pull [OPTIONS] DEST
 | `-D, --dump FILE` | Use an existing `pg_dump -Fc` file instead of connecting |
 | `--no-roles` | Skip cluster role/user extraction (role/user extraction is enabled by default for live connections; always skipped with `--dump`) |
 | `--include-password-hashes` | Include role password hashes in users (omitted by default via `pg_dumpall --no-role-passwords`) |
+| `--include-mode-headers` | Prefix each generated file with editor mode headers (see below) |
 | `-i, --ignore FILE` | File listing project paths to skip writing |
 | `--force` | Write to `DEST` even if it already exists |
 | `--update` | Merge into an existing project, rewriting only changed files |
@@ -145,6 +147,23 @@ formatted in the generated project. Note that `deploy` always re-formats the dat
 side with the default (`aweber`) to compare it against the project, so
 pulling with a non-default style will make `deploy` report
 formatting-only differences for every view and function.
+
+With `--include-mode-headers`, each generated file is prefixed with two
+comment lines above the `---` document marker — an Emacs modeline and a
+`# pglifecycle: <kind>` type comment (`<kind>` is the object-type noun,
+e.g. `table`, `materialized_view`, `function`) that editor extensions
+can key off to detect pglifecycle files:
+
+```yaml
+# -*- mode: pglifecycle -*-
+# pglifecycle: materialized_view
+---
+name: autoresponder_service_package_info
+schema: public
+```
+
+Without the flag (the default), files begin directly at the `---`
+marker. The same flag is available on `create`.
 
 ### Diagnosing parse and format failures
 

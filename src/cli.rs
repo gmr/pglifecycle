@@ -88,6 +88,11 @@ pub struct Create {
     #[arg(long, default_value = "postgres")]
     pub superuser: String,
 
+    /// Prefix each generated file with editor mode headers
+    /// (`# -*- mode: pglifecycle -*-` and `# pglifecycle: <kind>`)
+    #[arg(long)]
+    pub include_mode_headers: bool,
+
     /// The path to create the skeleton project in
     #[arg(value_name = "DEST")]
     pub destination: PathBuf,
@@ -214,6 +219,11 @@ pub struct Pull {
     /// are written to the project, so only enable for trusted repos
     #[arg(long)]
     pub include_password_hashes: bool,
+
+    /// Prefix each generated file with editor mode headers
+    /// (`# -*- mode: pglifecycle -*-` and `# pglifecycle: <kind>`)
+    #[arg(long)]
+    pub include_mode_headers: bool,
 
     /// Specify a file with files to skip writing
     #[arg(short, long)]

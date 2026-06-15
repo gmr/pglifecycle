@@ -19,6 +19,7 @@ pub fn render(
     let mut writer = Writer {
         ignore: read_ignore(args.ignore.as_deref())?,
         files: BTreeMap::new(),
+        mode_headers: args.include_mode_headers,
     };
     writer.write_project_file(assembly)?;
     for schema in &assembly.schemas {
@@ -115,6 +116,7 @@ pub fn write_bootstrap(
 struct Writer {
     ignore: BTreeSet<String>,
     files: BTreeMap<PathBuf, String>,
+    mode_headers: bool,
 }
 
 fn create_directories(root: &Path, gitkeep: bool) -> Result<(), String> {
@@ -276,16 +278,14 @@ impl Writer {
             return Ok(());
         }
         let body = yamlio::dump(value);
-        let content =
-            format!("# pglifecycle: {}\n---\n{body}", kind(&relative));
-        self.files.insert(relative, content);
+        let header = self.mode_headers.then(|| kind(&relative));
+        self.files.insert(relative, yamlio::document(header, &body));
         Ok(())
     }
 }
 
 /// The object-type noun for the modeline comment, derived from the
-/// destination path (the same noun the directory/schema uses); a Zed
-/// extension keys off the `# pglifecycle` prefix to detect the file type
+/// destination path (the same noun the directory/schema uses)
 fn kind(relative: &Path) -> &'static str {
     if relative == Path::new("project.yaml") {
         return "project";
