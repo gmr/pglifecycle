@@ -1123,7 +1123,8 @@ impl Builder {
                 create.push(")".into());
             }
             if let Some(parents) = &d.parents {
-                create.push(parents.join(", "));
+                create.push("INHERITS".into());
+                create.push(format!("({})", parents.join(", ")));
             }
             if let Some(partition) = &d.partition {
                 create.push("PARTITION BY".into());

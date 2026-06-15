@@ -21,9 +21,15 @@ pub(crate) fn create_function(
         owner: String::new(),
         sql: None,
         parameters: None,
+        // a plain RETURNS uses func_return; RETURNS TABLE(...) instead
+        // carries a table_func_column_list (no func_return node)
         returns: node
             .child_of_kind("func_return")
-            .map(|n| n.text(src).to_string()),
+            .map(|n| n.text(src).to_string())
+            .or_else(|| {
+                node.child_of_kind("table_func_column_list")
+                    .map(|cols| format!("TABLE({})", cols.text(src)))
+            }),
         language: None,
         transform_types: None,
         window: None,
@@ -164,6 +170,23 @@ mod tests {
         let mut statements = parser.parse(sql).unwrap();
         assert_eq!(statements.len(), 1, "expected one statement");
         statements.remove(0)
+    }
+
+    #[test]
+    fn returns_table_is_captured() {
+        // RETURNS TABLE(...) has no func_return node; the columns must
+        // still land in `returns` or the function fails schema validation
+        let Statement::CreateFunction(function) = parse_one(
+            "CREATE FUNCTION test.report(in_id integer) \
+             RETURNS TABLE(id integer, total bigint) LANGUAGE sql \
+             AS $$ SELECT 1 $$;",
+        ) else {
+            panic!("expected CreateFunction")
+        };
+        assert_eq!(
+            function.returns,
+            Some("TABLE(id integer, total bigint)".into())
+        );
     }
 
     #[test]

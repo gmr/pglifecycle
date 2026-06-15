@@ -57,6 +57,22 @@ pub(crate) fn create_table(
     if !columns.is_empty() {
         table.columns = Some(columns);
     }
+    // INHERITS (parent, ...) — the parents are qualified_names scoped to
+    // the OptInherit node (not the table name found above)
+    if let Some(inherit) = node.child_of_kind("OptInherit") {
+        let parents: Vec<String> = inherit
+            .find_all("qualified_name")
+            .iter()
+            .filter_map(|n| qualified_name(n, src).ok())
+            .map(|q| match q.schema {
+                Some(schema) => format!("{schema}.{}", q.name),
+                None => q.name,
+            })
+            .collect();
+        if !parents.is_empty() {
+            table.parents = Some(parents);
+        }
+    }
     Ok(Statement::CreateTable(Box::new(table)))
 }
 
@@ -406,6 +422,25 @@ mod tests {
         let mut statements = parser.parse(sql).unwrap();
         assert_eq!(statements.len(), 1, "expected one statement");
         statements.remove(0)
+    }
+
+    #[test]
+    fn inherits_parents_are_captured() {
+        // an inheritance child has its columns from the parent (so the
+        // column list may be empty); the INHERITS clause must populate
+        // `parents` or the table satisfies no oneOf branch
+        let statement = parse_one(
+            "CREATE TABLE test.child (\n\
+             CONSTRAINT c CHECK ((x % 2) = 0)\n\
+             ) INHERITS (test.parent, other.base);",
+        );
+        let Statement::CreateTable(table) = statement else {
+            panic!("expected CreateTable")
+        };
+        assert_eq!(
+            table.parents,
+            Some(vec!["test.parent".into(), "other.base".into()])
+        );
     }
 
     #[test]

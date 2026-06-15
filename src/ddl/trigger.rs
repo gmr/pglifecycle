@@ -19,16 +19,18 @@ pub(crate) fn create_trigger(
         .child_of_kind("name")
         .map(|n| unquote(n.text(src)))
         .ok_or_else(|| String::from("CREATE TRIGGER without a name"))?;
-    let when = node.child_of_kind("TriggerActionTime").map(|n| {
-        if n.has("kw_before") {
-            "BEFORE"
-        } else if n.has("kw_after") {
-            "AFTER"
-        } else {
-            "INSTEAD OF"
-        }
-        .to_string()
-    });
+    // a plain trigger nests the timing in TriggerActionTime, but a
+    // CONSTRAINT TRIGGER puts the keyword (always AFTER) directly under
+    // the statement, so match on the keyword anywhere in the node
+    let when = if node.has("kw_instead") {
+        Some("INSTEAD OF".to_string())
+    } else if node.has("kw_before") {
+        Some("BEFORE".to_string())
+    } else if node.has("kw_after") {
+        Some("AFTER".to_string())
+    } else {
+        None
+    };
     let events: Vec<String> = node
         .find_all("TriggerOneEvent")
         .iter()
@@ -46,9 +48,15 @@ pub(crate) fn create_trigger(
             }
         })
         .collect();
-    let for_each = node.child_of_kind("TriggerForSpec").map(|n| {
-        if n.has("kw_row") { "ROW" } else { "STATEMENT" }.to_string()
-    });
+    // likewise FOR EACH ROW/STATEMENT is nested for a plain trigger but
+    // bare for a CONSTRAINT TRIGGER (which is always FOR EACH ROW)
+    let for_each = if node.has("kw_row") {
+        Some("ROW".to_string())
+    } else if node.has("kw_statement") {
+        Some("STATEMENT".to_string())
+    } else {
+        None
+    };
     let condition = node
         .child_of_kind("TriggerWhen")
         .and_then(|n| n.child_of_kind("a_expr"))
@@ -116,6 +124,25 @@ mod tests {
         );
         assert_eq!(trigger.for_each, Some("ROW".into()));
         assert_eq!(trigger.function, Some("test.audit_row()".into()));
+    }
+
+    #[test]
+    fn constraint_trigger_captures_when_and_for_each() {
+        // a CONSTRAINT TRIGGER carries the timing/for-each keywords bare
+        // (no TriggerActionTime/TriggerForSpec); they must still be
+        // captured or the trigger fails schema validation
+        let Statement::CreateTrigger { trigger, .. } = parse_one(
+            "CREATE CONSTRAINT TRIGGER emit AFTER INSERT OR UPDATE \
+             ON test.accounts FOR EACH ROW EXECUTE FUNCTION test.emit();",
+        ) else {
+            panic!("expected CreateTrigger")
+        };
+        assert_eq!(trigger.when, Some("AFTER".into()));
+        assert_eq!(trigger.for_each, Some("ROW".into()));
+        assert_eq!(
+            trigger.events,
+            Some(vec!["INSERT".into(), "UPDATE".into()])
+        );
     }
 
     #[test]
