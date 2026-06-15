@@ -57,8 +57,13 @@ destructive statements are pending).
 | `--apply` | Execute the script in one transaction via psql (conflicts with `--dump`) |
 | `--allow-drop` | Include destructive statements in the script |
 | `-x, --no-privileges` | Do not include GRANT/REVOKE |
+| `--error-file FILE` | Where to record failures and their DDL (default `pglifecycle-errors.log`) |
 
-The connection options match `pull` (see below).
+The connection options match `pull` (see below). Like `pull`, `deploy`
+snapshots and formats the database with libpgfmt, so DDL that fails to
+parse or format — and the statement in flight if it is interrupted — is
+recorded to the error report (`--error-file`); see
+[Diagnosing parse and format failures](#diagnosing-parse-and-format-failures).
 
 ### Change reconciliation
 

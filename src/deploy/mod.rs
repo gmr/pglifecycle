@@ -18,7 +18,9 @@ use std::io::IsTerminal;
 use crate::deploy::alter::Resolution;
 use crate::deploy::diff::{Change, Diff, ObjectKey};
 use crate::utils::quote_ident;
-use crate::{build, cli, constants, pgdump, progress, project, pull};
+use crate::{
+    build, cli, constants, diagnostics, pgdump, progress, project, pull,
+};
 
 pub fn deploy(args: &cli::Deploy) -> Result<(), String> {
     if args.connection.password && !std::io::stdin().is_terminal() {
@@ -27,6 +29,7 @@ pub fn deploy(args: &cli::Deploy) -> Result<(), String> {
              or use a pgpass file instead",
         ));
     }
+    diagnostics::init(args.error_file.clone());
     let project = project::load(&args.project)?;
     let source = source_label(args);
     log::info!("Comparing {} against {source}", project.name);
