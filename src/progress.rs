@@ -79,7 +79,16 @@ impl Task {
     }
 
     /// Clear the bar; the phase's own log line is the lasting record.
+    /// Clearing also happens on drop, so an early `?` return on an error
+    /// path leaves no stale spinner or bar in the terminal.
     pub fn finish(self) {
+        // The Drop impl does the clearing; consuming `self` here just
+        // ends the phase deterministically at the call site.
+    }
+}
+
+impl Drop for Task {
+    fn drop(&mut self) {
         if let Some(bar) = &self.0 {
             bar.finish_and_clear();
         }
