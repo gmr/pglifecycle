@@ -1,10 +1,11 @@
 //! The `create` command: scaffold an empty project directory
 
-use std::fmt::Write as _;
 use std::fs;
 
+use serde_json::json;
+
 use crate::cli;
-use crate::constants;
+use crate::{constants, yamlio};
 
 pub fn create(args: &cli::Create) -> Result<(), String> {
     let dest = &args.destination;
@@ -31,10 +32,12 @@ pub fn create(args: &cli::Create) -> Result<(), String> {
             fs::write(path.join(".gitkeep"), "").map_err(|e| e.to_string())?;
         }
     }
-    let mut yaml = String::from("---\n");
-    let _ = writeln!(yaml, "name: {name}");
-    let _ = writeln!(yaml, "encoding: {}", args.encoding);
-    let _ = writeln!(yaml, "stdstrings: {}", !args.no_stdstrings);
-    let _ = writeln!(yaml, "superuser: {}", args.superuser);
-    fs::write(dest.join("project.yaml"), yaml).map_err(|e| e.to_string())
+    let project = json!({
+        "name": name,
+        "encoding": args.encoding,
+        "stdstrings": !args.no_stdstrings,
+        "superuser": args.superuser,
+    });
+    fs::write(dest.join("project.yaml"), yamlio::dump(&project))
+        .map_err(|e| e.to_string())
 }

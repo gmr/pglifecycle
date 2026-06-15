@@ -32,11 +32,10 @@ pub fn load_str(content: &str) -> Result<Value, serde_norway::Error> {
     Value::deserialize(serde_norway::Deserializer::from_str(content))
 }
 
-/// Render a value as a YAML document with a `---` header
+/// Render a value as a YAML document
 pub fn dump(value: &Value) -> String {
-    let body = serde_norway::to_string(value)
-        .expect("serializing a serde_json::Value to YAML cannot fail");
-    format!("---\n{body}")
+    serde_norway::to_string(value)
+        .expect("serializing a serde_json::Value to YAML cannot fail")
 }
 
 #[cfg(test)]
@@ -44,11 +43,6 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-
-    #[test]
-    fn starts_with_document_marker() {
-        assert!(dump(&json!({"name": "x"})).starts_with("---\n"));
-    }
 
     #[test]
     fn round_trips_nested_structures() {

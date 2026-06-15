@@ -24,7 +24,7 @@ fn creates_skeleton_project() {
     let yaml = fs::read_to_string(tmp.join("project.yaml")).unwrap();
     assert_eq!(
         yaml,
-        "---\nname: pglc-test-create\nencoding: UTF-8\n\
+        "name: pglc-test-create\nencoding: UTF-8\n\
          stdstrings: true\nsuperuser: postgres\n"
     );
 }
@@ -62,7 +62,7 @@ fn create_honors_options() {
     let yaml = fs::read_to_string(tmp.join("project.yaml")).unwrap();
     assert_eq!(
         yaml,
-        "---\nname: example\nencoding: LATIN1\n\
+        "name: example\nencoding: LATIN1\n\
          stdstrings: false\nsuperuser: admin\n"
     );
 }
