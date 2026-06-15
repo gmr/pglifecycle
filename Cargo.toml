@@ -9,6 +9,7 @@ rust-version = "1.88"
 
 [dependencies]
 clap = { version = "4", features = ["derive", "env"] }
+ctrlc = "3.5.2"
 include_dir = "0.7.4"
 indicatif = "0.18.4"
 indicatif-log-bridge = "0.2.3"

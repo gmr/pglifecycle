@@ -231,6 +231,11 @@ pub struct Pull {
     #[arg(long)]
     pub save_remaining: bool,
 
+    /// File to record DDL that fails to parse or format, and the
+    /// statement in flight if interrupted (for reproducing hangs)
+    #[arg(long, default_value = "pglifecycle-errors.log")]
+    pub error_file: PathBuf,
+
     #[command(flatten)]
     pub connection: Connection,
 

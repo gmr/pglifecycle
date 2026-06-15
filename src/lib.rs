@@ -5,6 +5,7 @@ pub mod cli;
 pub mod constants;
 pub mod ddl;
 pub mod deploy;
+pub mod diagnostics;
 pub mod models;
 pub mod pgdump;
 pub mod progress;
