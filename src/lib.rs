@@ -7,6 +7,7 @@ pub mod ddl;
 pub mod deploy;
 pub mod models;
 pub mod pgdump;
+pub mod progress;
 pub mod project;
 pub mod pull;
 pub mod skeleton;

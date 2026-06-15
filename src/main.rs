@@ -3,7 +3,9 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use pglifecycle::{build, cli, deploy, project, pull, skeleton};
+use indicatif_log_bridge::LogWrapper;
+use pglifecycle::{build, cli, deploy, progress, project, pull, skeleton};
+use simplelog::SharedLogger;
 
 fn main() -> ExitCode {
     let args = cli::Cli::parse();
@@ -54,12 +56,32 @@ fn configure_logging(args: &cli::Cli) {
     }
     // log to stderr so command output (e.g. the deploy script on
     // stdout) stays clean
-    if let Err(err) = simplelog::TermLogger::init(
+    let logger = simplelog::TermLogger::new(
         level,
         simplelog::Config::default(),
         simplelog::TerminalMode::Stderr,
         simplelog::ColorChoice::Auto,
-    ) {
-        eprintln!("warning: failed to initialize terminal logging: {err}");
+    );
+    match progress::init() {
+        // on a terminal, route log records through the progress bridge
+        // so they print above any live bars instead of corrupting them
+        Some(multi) => {
+            if let Err(err) = LogWrapper::new(multi, *logger).try_init() {
+                eprintln!(
+                    "warning: failed to initialize terminal logging: {err}"
+                );
+            } else {
+                log::set_max_level(level);
+            }
+        }
+        None => {
+            if let Err(err) = log::set_boxed_logger(logger.as_log()) {
+                eprintln!(
+                    "warning: failed to initialize terminal logging: {err}"
+                );
+            } else {
+                log::set_max_level(level);
+            }
+        }
     }
 }

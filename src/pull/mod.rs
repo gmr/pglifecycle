@@ -17,7 +17,7 @@ use serde_json::{Map, Value};
 
 use crate::ddl::{self, Acl, AclTarget, QualifiedName, RoleDef, Statement};
 use crate::models;
-use crate::{cli, pgdump};
+use crate::{cli, pgdump, progress};
 
 pub fn pull(args: &cli::Pull) -> Result<(), String> {
     if args.update {
@@ -55,7 +55,9 @@ pub fn pull(args: &cli::Pull) -> Result<(), String> {
         &ddl,
         args.extract_roles,
     )?;
+    let task = progress::spinner("Rendering project");
     let files = writer::render(&assembly, args)?;
+    task.finish();
     if args.update {
         update::merge(&files, args)
     } else {
@@ -81,16 +83,20 @@ pub fn snapshot(
                 .suffix(".dump")
                 .tempfile()
                 .map_err(|e| format!("failed to create temp file: {e}"))?;
+            let task = progress::spinner("Dumping database");
             pgdump::dump(conn, ddl, file.path())?;
+            task.finish();
             let path = file.path().to_path_buf();
             temp_dump = Some(file);
             path
         }
     };
     log::info!("Loading dump from {}", dump_path.display());
+    let task = progress::spinner("Loading dump");
     let dump = libpgdump::load(&dump_path).map_err(|e| {
         format!("failed to load dump {}: {e}", dump_path.display())
     })?;
+    task.finish();
     drop(temp_dump);
     let mut assembly = Assembly::default();
     assembly.ingest(&dump)?;
@@ -240,7 +246,15 @@ impl Assembly {
         use libpgdump::ObjectType as OT;
         let mut parser = ddl::Parser::new()?;
         self.dbname = dump.dbname().to_string();
-        for entry in dump.entries() {
+        let entries = dump.entries();
+        let task = progress::bar(entries.len() as u64, "Ingesting entries");
+        for entry in entries {
+            task.set_message(format!(
+                "Ingesting {} {}",
+                entry.desc.as_str(),
+                entry.tag.as_deref().unwrap_or_default()
+            ));
+            task.inc();
             match &entry.desc {
                 OT::Database
                 | OT::SearchPath
@@ -304,6 +318,7 @@ impl Assembly {
                 _ => self.push_remaining(entry),
             }
         }
+        task.finish();
         Ok(())
     }
 
@@ -705,27 +720,43 @@ impl Assembly {
     /// style); on a formatting error the original text is kept
     pub fn format_sql(&mut self) {
         use libpgfmt::style::Style;
+        let total = self.views.len()
+            + self.materialized_views.len()
+            + self.functions.len();
+        let task = progress::bar(total as u64, "Formatting SQL");
         for view in &mut self.views {
             if let Some(query) = &view.query {
+                task.set_message(format!("Formatting view {}", view.name));
                 view.query = Some(format_query(query, "view", &view.name));
             }
+            task.inc();
         }
         for view in &mut self.materialized_views {
             if let Some(query) = &view.query {
+                task.set_message(format!(
+                    "Formatting materialized view {}",
+                    view.name
+                ));
                 view.query =
                     Some(format_query(query, "materialized view", &view.name));
             }
+            task.inc();
         }
         for function in &mut self.functions {
             let Some(definition) = &function.definition else {
+                task.inc();
                 continue;
             };
+            task.set_message(format!("Formatting function {}", function.name));
             let formatted = match function.language.as_deref() {
                 Some("plpgsql") => {
                     libpgfmt::format_plpgsql(definition, Style::Aweber)
                 }
                 Some("sql") => libpgfmt::format(definition, Style::Aweber),
-                _ => continue,
+                _ => {
+                    task.inc();
+                    continue;
+                }
             };
             match formatted {
                 Ok(formatted) => function.definition = Some(formatted),
@@ -734,7 +765,9 @@ impl Assembly {
                     function.name
                 ),
             }
+            task.inc();
         }
+        task.finish();
     }
 
     fn push_remaining(&mut self, entry: &libpgdump::Entry) {
