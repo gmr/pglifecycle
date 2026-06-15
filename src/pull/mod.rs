@@ -549,13 +549,6 @@ impl Assembly {
     }
 
     fn apply_acl(&mut self, acl: &Acl) {
-        if acl.with_grant_option {
-            log::warn!(
-                "WITH GRANT OPTION is not representable in acls.yml; \
-                 dropping it for {:?}",
-                acl.objects
-            );
-        }
         let section = section_key(acl.target);
         for role in &acl.roles {
             let state = self.role(role);
@@ -566,17 +559,24 @@ impl Assembly {
             };
             for object in &acl.objects {
                 for privilege in &acl.privileges {
+                    // grant option is carried on the privilege string
+                    // (acls.yml), e.g. `SELECT WITH GRANT OPTION`
+                    let name = if acl.with_grant_option {
+                        format!("{} WITH GRANT OPTION", privilege.name)
+                    } else {
+                        privilege.name.clone()
+                    };
                     match &privilege.columns {
                         Some(columns) => {
                             for column in columns {
                                 maps.add(
                                     "columns",
                                     &format!("{object}.{column}"),
-                                    &privilege.name,
+                                    &name,
                                 );
                             }
                         }
-                        None => maps.add(section, object, &privilege.name),
+                        None => maps.add(section, object, &name),
                     }
                 }
             }

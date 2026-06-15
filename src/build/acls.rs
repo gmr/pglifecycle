@@ -19,6 +19,10 @@ use crate::utils::quote_ident;
 
 use super::Builder;
 
+/// Marker appended to a privilege in acls.yml when it was granted with
+/// grant option (e.g. `SELECT WITH GRANT OPTION`)
+const GRANT_OPTION_SUFFIX: &str = " WITH GRANT OPTION";
+
 /// PostgreSQL grants on views and materialized views use the same
 /// TABLE/COLUMN syntax as tables, so relation ACLs may target any of
 /// the three
@@ -154,19 +158,44 @@ fn collect(
             if privileges.is_empty() {
                 continue;
             }
+            // privileges carrying ` WITH GRANT OPTION` need their own
+            // statement (the option applies to every privilege in it)
+            let (grantable, plain): (Vec<String>, Vec<String>) = privileges
+                .into_iter()
+                .partition(|p| p.ends_with(GRANT_OPTION_SUFFIX));
+            let grantable: Vec<String> = grantable
+                .iter()
+                .map(|p| p.trim_end_matches(GRANT_OPTION_SUFFIX).to_string())
+                .collect();
             let entry = objects.entry((index, object.clone())).or_default();
-            let statement =
-                statement(revoke, keyword, key, object, &privileges, role);
-            if revoke {
-                entry.revokes.push(statement);
-            } else {
-                entry.grants.push(statement);
+            for (privileges, grant_option) in
+                [(plain, false), (grantable, true)]
+            {
+                if privileges.is_empty() {
+                    continue;
+                }
+                let statement = statement(
+                    revoke,
+                    keyword,
+                    key,
+                    object,
+                    &privileges,
+                    role,
+                    grant_option,
+                );
+                if revoke {
+                    entry.revokes.push(statement);
+                } else {
+                    entry.grants.push(statement);
+                }
             }
         }
     }
 }
 
-/// One GRANT or REVOKE statement for a role on an object
+/// One GRANT or REVOKE statement for a role on an object. With
+/// `grant_option`, a GRANT gains a trailing `WITH GRANT OPTION` and a
+/// REVOKE a leading `GRANT OPTION FOR`.
 pub(crate) fn statement(
     revoke: bool,
     keyword: &str,
@@ -174,6 +203,7 @@ pub(crate) fn statement(
     object: &str,
     privileges: &[String],
     role: &str,
+    grant_option: bool,
 ) -> String {
     let (privileges, object) = match section {
         // `schema.table.column` → `SELECT(column) ON TABLE schema.table`
@@ -193,13 +223,23 @@ pub(crate) fn statement(
         _ => (privileges.join(", "), quote_object(object)),
     };
     if revoke {
+        let option = if grant_option {
+            "GRANT OPTION FOR "
+        } else {
+            ""
+        };
         format!(
-            "REVOKE {privileges} ON {keyword} {object} FROM {};",
+            "REVOKE {option}{privileges} ON {keyword} {object} FROM {};",
             quote_role(role)
         )
     } else {
+        let option = if grant_option {
+            " WITH GRANT OPTION"
+        } else {
+            ""
+        };
         format!(
-            "GRANT {privileges} ON {keyword} {object} TO {};",
+            "GRANT {privileges} ON {keyword} {object} TO {}{option};",
             quote_role(role)
         )
     }
@@ -363,5 +403,74 @@ mod tests {
             .find(|e| e.desc == libpgdump::ObjectType::Schema)
             .expect("schema entry");
         assert_eq!(acl.dependencies, vec![schema.dump_id]);
+    }
+
+    #[test]
+    fn statement_renders_grant_option() {
+        let privileges = [String::from("SELECT")];
+        assert_eq!(
+            statement(false, "TABLE", "tables", "t.x", &privileges, "r", true),
+            "GRANT SELECT ON TABLE t.x TO r WITH GRANT OPTION;"
+        );
+        assert_eq!(
+            statement(true, "TABLE", "tables", "t.x", &privileges, "r", true),
+            "REVOKE GRANT OPTION FOR SELECT ON TABLE t.x FROM r;"
+        );
+    }
+
+    #[test]
+    fn grantable_privileges_get_their_own_grant() {
+        // `INSERT WITH GRANT OPTION` splits off from the plain grant
+        let role: models::Role = serde_json::from_value(json!({
+            "name": "app",
+            "create": false,
+            "grants": {"tables": {"test.users":
+                ["SELECT", "INSERT WITH GRANT OPTION"]}},
+        }))
+        .unwrap();
+        let table: models::Table = serde_json::from_value(json!({
+            "name": "users", "schema": "test", "owner": "postgres",
+            "columns": [{"name": "id", "data_type": "uuid"}],
+        }))
+        .unwrap();
+        let project = Project {
+            name: String::from("acls"),
+            encoding: String::from("UTF8"),
+            stdstrings: true,
+            superuser: String::from("postgres"),
+            default_schema: String::from("public"),
+            path: std::path::PathBuf::new(),
+            inventory: vec![
+                Item {
+                    id: 0,
+                    desc: ObjectType::Table,
+                    definition: Definition::Table(table),
+                    dependencies: BTreeSet::new(),
+                },
+                Item {
+                    id: 1,
+                    desc: ObjectType::Role,
+                    definition: Definition::Role(role),
+                    dependencies: BTreeSet::new(),
+                },
+            ],
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("acls.dump");
+        crate::build::build(&project, &path).unwrap();
+        let dump = libpgdump::load(&path).unwrap();
+        let acl = dump
+            .entries()
+            .iter()
+            .find(|e| e.desc == libpgdump::ObjectType::Acl)
+            .expect("ACL entry");
+        assert_eq!(
+            acl.defn.as_deref(),
+            Some(
+                "GRANT SELECT ON TABLE test.users TO app;\n\
+                 GRANT INSERT ON TABLE test.users TO app \
+                 WITH GRANT OPTION;\n"
+            )
+        );
     }
 }
