@@ -18,7 +18,7 @@ use std::io::IsTerminal;
 use crate::deploy::alter::Resolution;
 use crate::deploy::diff::{Change, Diff, ObjectKey};
 use crate::utils::quote_ident;
-use crate::{build, cli, constants, pgdump, project, pull};
+use crate::{build, cli, constants, pgdump, progress, project, pull};
 
 pub fn deploy(args: &cli::Deploy) -> Result<(), String> {
     if args.connection.password && !std::io::stdin().is_terminal() {
@@ -36,11 +36,15 @@ pub fn deploy(args: &cli::Deploy) -> Result<(), String> {
     };
     let (assembly, snapshot) =
         pull::snapshot(args.dump.as_deref(), &args.connection, &ddl, false)?;
+    let task = progress::spinner("Diffing project against database");
     let diff = diff::diff(&project, &assembly);
     let resolutions = resolutions(&project, &diff);
+    task.finish();
     let mut output = build::assemble(&project)?;
+    let task = progress::spinner("Planning changes");
     output.dump.sort_entries();
     let plan = plan(&diff, &resolutions, &output, &snapshot, args)?;
+    task.finish();
     report(&diff, &plan);
     let script = render_script(&plan, &project.name, &source);
     if let Some(path) = &args.output {
@@ -80,9 +84,11 @@ fn apply(plan: &Plan, script: &str, args: &cli::Deploy) -> Result<(), String> {
         format!("failed to write {}: {e}", file.path().display())
     })?;
     log::info!("Applying {} statement(s)", plan.included.len());
+    let task = progress::spinner("Applying to database");
     pgdump::apply(&args.connection, file.path()).map_err(|stderr| {
         format!("deploy failed (the transaction was rolled back):\n{stderr}")
     })?;
+    task.finish();
     log::info!("Deploy applied successfully");
     Ok(())
 }

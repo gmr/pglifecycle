@@ -7,3 +7,4 @@
 site/
 /target/
 !/src/build/
+pglifecycle-errors.log
