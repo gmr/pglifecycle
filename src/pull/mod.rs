@@ -17,7 +17,7 @@ use serde_json::{Map, Value};
 
 use crate::ddl::{self, Acl, AclTarget, QualifiedName, RoleDef, Statement};
 use crate::models;
-use crate::{cli, pgdump, progress};
+use crate::{cli, diagnostics, pgdump, progress};
 
 pub fn pull(args: &cli::Pull) -> Result<(), String> {
     if args.update {
@@ -43,6 +43,7 @@ pub fn pull(args: &cli::Pull) -> Result<(), String> {
              or use a pgpass file instead",
         ));
     }
+    diagnostics::init(args.error_file.clone());
     let ddl = pgdump::DumpDdl {
         no_owner: args.no_owner,
         no_privileges: args.no_privileges,
@@ -299,17 +300,27 @@ impl Assembly {
                 | OT::Comment
                 | OT::Acl => {
                     let Some(defn) = &entry.defn else { continue };
-                    match parser.parse(defn) {
+                    let label = format!(
+                        "{} {}",
+                        entry.desc.as_str(),
+                        entry.tag.as_deref().unwrap_or_default()
+                    );
+                    diagnostics::enter(&label, defn);
+                    let parsed = parser.parse(defn);
+                    diagnostics::leave();
+                    match parsed {
                         Ok(statements) => {
                             for statement in cancel_revokes(statements) {
                                 self.apply(statement, entry);
                             }
                         }
                         Err(error) => {
-                            log::warn!(
-                                "Failed to parse {} {:?}: {error}",
-                                entry.desc.as_str(),
-                                entry.tag
+                            log::warn!("Failed to parse {label}: {error}");
+                            diagnostics::record_failure(
+                                "FAILED TO PARSE",
+                                &label,
+                                &error,
+                                defn,
                             );
                             self.push_remaining(entry);
                         }
@@ -748,22 +759,31 @@ impl Assembly {
                 continue;
             };
             task.set_message(format!("Formatting function {}", function.name));
+            let label = format!("function {}", function.name);
+            diagnostics::enter(&label, definition);
             let formatted = match function.language.as_deref() {
                 Some("plpgsql") => {
                     libpgfmt::format_plpgsql(definition, Style::Aweber)
                 }
                 Some("sql") => libpgfmt::format(definition, Style::Aweber),
                 _ => {
+                    diagnostics::leave();
                     task.inc();
                     continue;
                 }
             };
+            diagnostics::leave();
             match formatted {
                 Ok(formatted) => function.definition = Some(formatted),
-                Err(error) => log::warn!(
-                    "failed to format function {}: {error}",
-                    function.name
-                ),
+                Err(error) => {
+                    log::warn!("failed to format {label}: {error}");
+                    diagnostics::record_failure(
+                        "FAILED TO FORMAT",
+                        &label,
+                        &error.to_string(),
+                        definition,
+                    );
+                }
             }
             task.inc();
         }
@@ -781,12 +801,22 @@ impl Assembly {
 }
 
 fn format_query(query: &str, kind: &str, name: &str) -> String {
-    match libpgfmt::format(query, libpgfmt::style::Style::Aweber) {
+    let label = format!("{kind} {name}");
+    diagnostics::enter(&label, query);
+    let result = libpgfmt::format(query, libpgfmt::style::Style::Aweber);
+    diagnostics::leave();
+    match result {
         Ok(formatted) => {
             formatted.trim_end_matches(';').trim_end().to_string()
         }
         Err(error) => {
-            log::warn!("failed to format {kind} {name}: {error}");
+            log::warn!("failed to format {label}: {error}");
+            diagnostics::record_failure(
+                "FAILED TO FORMAT",
+                &label,
+                &error.to_string(),
+                query,
+            );
             query.to_string()
         }
     }
