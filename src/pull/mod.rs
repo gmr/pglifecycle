@@ -64,11 +64,20 @@ pub fn pull(args: &cli::Pull) -> Result<(), String> {
     let task = progress::spinner("Rendering project");
     let files = writer::render(&assembly, args)?;
     task.finish();
-    if args.update {
-        update::merge(&files, args)
+    let objects = assembly.object_count();
+    let verb = if args.update {
+        update::merge(&files, args)?;
+        "Updated"
     } else {
-        writer::write_bootstrap(&files, args)
-    }
+        writer::write_bootstrap(&files, args)?;
+        "Created"
+    };
+    let plural = if objects == 1 { "object" } else { "objects" };
+    println!(
+        "{verb} your schema project at {} with {objects} {plural}",
+        args.destination.display()
+    );
+    Ok(())
 }
 
 /// Snapshot a database (or an existing dump file) into an [`Assembly`],
@@ -248,6 +257,23 @@ pub struct Assembly {
 }
 
 impl Assembly {
+    /// Count the modeled objects written to the project (the things a
+    /// user thinks of as schema objects); excludes unparsed `remaining`
+    /// entries and the database-level metadata
+    pub fn object_count(&self) -> usize {
+        self.extensions.len()
+            + self.languages.len()
+            + self.schemas.len()
+            + self.domains.len()
+            + self.types.len()
+            + self.sequences.len()
+            + self.tables.len()
+            + self.views.len()
+            + self.materialized_views.len()
+            + self.functions.len()
+            + self.roles.len()
+    }
+
     /// Parse every supported archive entry into the project models
     pub fn ingest(&mut self, dump: &libpgdump::Dump) -> Result<(), String> {
         use libpgdump::ObjectType as OT;
