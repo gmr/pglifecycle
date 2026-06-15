@@ -265,6 +265,15 @@ pub struct Pull {
     )]
     pub exclude_extension: Vec<String>,
 
+    /// libpgfmt style for view queries and function bodies: river,
+    /// mozilla, aweber, dbt, gitlab, kickstarter, or mattmc3. Note that
+    /// `deploy` always compares using the default (aweber), so a
+    /// non-default style here makes `deploy` report formatting-only
+    /// differences
+    #[arg(long, value_name = "STYLE", default_value = "aweber",
+          value_parser = parse_style)]
+    pub style: libpgfmt::style::Style,
+
     #[command(flatten)]
     pub connection: Connection,
 
@@ -287,4 +296,10 @@ pub struct Pull {
     /// Destination directory for the project
     #[arg(value_name = "DEST")]
     pub destination: PathBuf,
+}
+
+/// Parse a libpgfmt style name for `--style`, surfacing the supported
+/// names on error.
+fn parse_style(value: &str) -> Result<libpgfmt::style::Style, String> {
+    value.parse()
 }
