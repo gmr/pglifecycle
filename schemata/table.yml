@@ -402,19 +402,12 @@ properties:
     type: string
   options:
     title: Foreign Table Options
-    description: Used to specify the details of the foreign table
+    description: >
+      Foreign table OPTIONS as an open key/value map; the available keys
+      depend on the foreign data wrapper (e.g. postgres_fdw uses
+      schema_name and table_name, file_fdw uses filename and format).
     type: object
-    properties:
-      schema:
-        title: Foreign Schema Name
-        type: string
-      name:
-        title: Foreign Table Name
-        type: string
-    required:
-      - schema
-      - name
-    additionalProperties: false
+    additionalProperties: true
   comment:
     title: Comment
     description: An optional comment about the table
@@ -428,12 +421,32 @@ additionalProperties: false
 required:
   - schema
   - name
+# a table is defined exactly one way, keyed on sql / server / parents:
+#   - a raw SQL snippet (exclusive of everything structural)
+#   - a foreign table (columns + server, optional options)
+#   - an inheritance child (parents, optionally overriding columns)
+#   - a plain table (columns, none of the above)
 oneOf:
-  - required: [parents]
-    not: {required: [columns, sql, server, options]}
   - required: [sql]
-    not: {required: [columns, parents, server, options]}
+    not:
+      anyOf:
+        - required: [columns]
+        - required: [parents]
+        - required: [server]
+        - required: [options]
+  - required: [columns, server]
+    not:
+      anyOf:
+        - required: [sql]
+        - required: [parents]
+  - required: [parents]
+    not:
+      anyOf:
+        - required: [sql]
+        - required: [server]
   - required: [columns]
-    not: {required: [ parents, sql]}
-  - required: [columns, server, options]
-    not: {required: [ parents, sql]}
+    not:
+      anyOf:
+        - required: [sql]
+        - required: [parents]
+        - required: [server]

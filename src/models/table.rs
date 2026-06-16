@@ -47,6 +47,14 @@ pub struct Table {
     pub tablespace: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub index_tablespace: Option<String>,
+    /// Foreign server backing a foreign table (CREATE FOREIGN TABLE ...
+    /// SERVER); its presence marks the table as foreign
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server: Option<String>,
+    /// Foreign table OPTIONS (key 'value', ...); an open map, as the
+    /// keys depend on the foreign data wrapper
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub options: Option<Map<String, Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
 }

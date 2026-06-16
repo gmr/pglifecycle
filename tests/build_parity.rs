@@ -29,6 +29,9 @@ const DEVIATIONS: &[(&str, &str, &str)] = &[
     // Python emitted CREATE ROLE for create: false roles (and
     // rendered BYPASSRLS from create_db); the Rust build skips them
     ("ROLE", "", "postgres"),
+    // Python emitted OPTIONS without the required parentheses, which
+    // does not parse
+    ("SERVER", "", "localhost"),
     // Python interpolated a Python list repr into WHEN TAG IN
     ("EVENT TRIGGER", "", "disable_alter_domain"),
     // Python emitted CREATE INDEX schema.name, which does not parse
@@ -71,6 +74,12 @@ const CORRECTED: &[(&str, &str, &str, &str)] = &[
         "SET standard_conforming_strings = 'on';\n",
     ),
     ("SEARCHPATH", "", "", "SELECT pg_catalog.set_config"),
+    (
+        "SERVER",
+        "",
+        "localhost",
+        "OPTIONS (host 'localhost', port 5432, user 'fdw_user', dbname 'postgres')",
+    ),
     (
         "EVENT TRIGGER",
         "",
