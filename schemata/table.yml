@@ -444,9 +444,11 @@ oneOf:
       anyOf:
         - required: [sql]
         - required: [server]
+        - required: [options]
   - required: [columns]
     not:
       anyOf:
         - required: [sql]
         - required: [parents]
         - required: [server]
+        - required: [options]
