@@ -265,6 +265,13 @@ pub struct Trigger {
     pub events: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub for_each: Option<String>,
+    /// A CONSTRAINT TRIGGER (always AFTER ROW; may be deferrable)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub constraint: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deferrable: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub initially_deferred: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub condition: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

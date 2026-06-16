@@ -428,12 +428,19 @@ additionalProperties: false
 required:
   - schema
   - name
+# a table is defined either by a raw SQL snippet (exclusive) or
+# structurally by columns and/or inheritance parents (an inheritance
+# child may also override inherited columns, so the two can coexist)
 oneOf:
-  - required: [parents]
-    not: {required: [columns, sql, server, options]}
   - required: [sql]
-    not: {required: [columns, parents, server, options]}
-  - required: [columns]
-    not: {required: [ parents, sql]}
-  - required: [columns, server, options]
-    not: {required: [ parents, sql]}
+    not:
+      anyOf:
+        - required: [columns]
+        - required: [parents]
+        - required: [server]
+        - required: [options]
+  - not: {required: [sql]}
+    anyOf:
+      - required: [columns]
+      - required: [parents]
+      - required: [from_type]

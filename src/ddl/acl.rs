@@ -114,9 +114,11 @@ pub(crate) fn role_setting(
             truncate(node.text(src), 80)
         )
     })?;
+    // mixed-case / dotted GUC names are quoted by pg_dump
+    // (e.g. "TimeZone"); store the bare identifier
     let name = set
         .find("var_name")
-        .map(|n| n.text(src).to_string())
+        .map(|n| unquote(n.text(src)))
         .ok_or_else(|| String::from("ALTER ROLE SET without a setting"))?;
     let values: Vec<String> = set
         .find_all("var_value")
@@ -506,6 +508,19 @@ mod tests {
         assert_eq!(role, "app_user");
         assert_eq!(name, "search_path");
         assert_eq!(value, vec!["test", "public"]);
+    }
+
+    #[test]
+    fn role_setting_unquotes_mixed_case_name() {
+        // pg_dump quotes mixed-case GUC names; the project stores the
+        // bare identifier so it matches the settings name pattern
+        let Statement::AlterRoleSetting { name, value, .. } =
+            parse_one("ALTER ROLE app SET \"TimeZone\" TO 'UTC';")
+        else {
+            panic!("expected AlterRoleSetting")
+        };
+        assert_eq!(name, "TimeZone");
+        assert_eq!(value, vec!["UTC"]);
     }
 
     #[test]
