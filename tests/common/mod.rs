@@ -232,3 +232,61 @@ pub fn foreign_archive(path: &std::path::Path) {
     );
     dump.save(path).expect("failed to save archive");
 }
+
+/// The foreign archive as a diverged database: the FDW, server, and
+/// foreign-table options differ from [`foreign_archive`], and an extra
+/// database-only server has no project counterpart. Used to exercise
+/// deploy's in-place foreign-object ALTERs and the gated DROP.
+pub fn mutated_foreign_archive(path: &std::path::Path) {
+    let mut dump = libpgdump::new("foreign", "UTF8", "18.0").unwrap();
+    add(&mut dump, OT::Schema, "", "test", "CREATE SCHEMA test;");
+    add(
+        &mut dump,
+        OT::ForeignDataWrapper,
+        "",
+        "local_files",
+        "CREATE FOREIGN DATA WRAPPER local_files OPTIONS (debug 'false');",
+    );
+    add(
+        &mut dump,
+        OT::Server,
+        "",
+        "wh",
+        "CREATE SERVER wh FOREIGN DATA WRAPPER postgres_fdw OPTIONS \
+         (host 'old.example', dbname 'warehouse');",
+    );
+    // a server only in the database → DROP (gated)
+    add(
+        &mut dump,
+        OT::Server,
+        "",
+        "orphan",
+        "CREATE SERVER orphan FOREIGN DATA WRAPPER postgres_fdw OPTIONS \
+         (host 'gone');",
+    );
+    add(
+        &mut dump,
+        OT::UserMapping,
+        "",
+        "postgres",
+        "CREATE USER MAPPING FOR postgres SERVER wh OPTIONS \
+         (user 'remote_app', password 'sup3rsecret');",
+    );
+    add(
+        &mut dump,
+        OT::ForeignTable,
+        "test",
+        "remote_orders",
+        "CREATE FOREIGN TABLE test.remote_orders (id integer NOT NULL, \
+         total numeric) SERVER wh OPTIONS (schema_name 'public', \
+         table_name 'legacy_orders');",
+    );
+    add(
+        &mut dump,
+        OT::Comment,
+        "test",
+        "remote_orders",
+        "COMMENT ON FOREIGN TABLE test.remote_orders IS 'Remote orders';",
+    );
+    dump.save(path).expect("failed to save archive");
+}

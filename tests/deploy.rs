@@ -6,7 +6,9 @@
 mod common;
 
 use clap::Parser;
-use common::{fixture_archive, mutated_archive};
+use common::{
+    fixture_archive, foreign_archive, mutated_archive, mutated_foreign_archive,
+};
 use pglifecycle::{cli, deploy, pull};
 
 fn pull_project(archive: &std::path::Path, dest: &std::path::Path) {
@@ -202,6 +204,75 @@ fn script_header_is_self_describing() {
     assert!(script.contains("-- project: fixtures\n"));
     assert!(script.contains("-- source: dump "));
     assert!(script.contains("-- destructive statements: none\n"));
+}
+
+#[test]
+fn foreign_objects_alter_in_place_and_drop_when_gated() {
+    let dir = tempfile::tempdir().unwrap();
+    let baseline = dir.path().join("foreign.dump");
+    foreign_archive(&baseline);
+    let mutated = dir.path().join("mutated.dump");
+    mutated_foreign_archive(&mutated);
+    // the project is the baseline; the "database" has diverged options
+    // and an extra server
+    let project = dir.path().join("project");
+    pull_project(&baseline, &project);
+
+    let gated = deploy_script(&project, &mutated, &[]);
+
+    // the FDW, server, and foreign-table option drift reconciles in
+    // place — no rebuilds
+    assert!(
+        gated.contains(
+            "ALTER FOREIGN DATA WRAPPER local_files OPTIONS (SET debug \
+             'true');"
+        ),
+        "missing FDW options alter in:\n{gated}"
+    );
+    assert!(
+        gated.contains("ALTER SERVER wh OPTIONS (SET host 'db.example');"),
+        "missing server options alter in:\n{gated}"
+    );
+    assert!(
+        gated.contains(
+            "ALTER FOREIGN TABLE test.remote_orders OPTIONS (SET table_name \
+             'orders');"
+        ),
+        "missing foreign-table options alter in:\n{gated}"
+    );
+    // the redacted user-mapping password must not be dropped
+    assert!(
+        !gated.contains("DROP password"),
+        "deploy must not drop a redacted password:\n{gated}"
+    );
+    // the database-only server is a gated drop
+    assert!(
+        !gated.contains("DROP SERVER"),
+        "server drop must be gated:\n{gated}"
+    );
+    assert!(gated.contains("excluded"), "header must note exclusions");
+
+    let script = deploy_script(&project, &mutated, &["--allow-drop"]);
+    assert!(
+        script.contains("DROP SERVER IF EXISTS orphan;"),
+        "missing database-only server drop in:\n{script}"
+    );
+}
+
+#[test]
+fn matching_foreign_objects_are_an_empty_plan() {
+    let dir = tempfile::tempdir().unwrap();
+    let archive = dir.path().join("foreign.dump");
+    foreign_archive(&archive);
+    let project = dir.path().join("project");
+    pull_project(&archive, &project);
+
+    let script = deploy_script(&project, &archive, &[]);
+
+    assert!(
+        script.contains("-- no changes"),
+        "expected an empty plan, got:\n{script}"
+    );
 }
 
 #[test]

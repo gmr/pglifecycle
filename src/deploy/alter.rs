@@ -8,13 +8,16 @@
 //! data and the repo is authoritative. Only data-destructive
 //! statements (DROP COLUMN, ALTER COLUMN TYPE) are.
 
+use serde_json::{Map, Value};
+
 use crate::build;
 use crate::deploy::diff::canonical_type;
 use crate::models::{
-    CheckConstraint, Column, Definition, Domain, Extension, ForeignKey, Index,
-    Schema, Sequence, Table, Trigger, Type, View, ViewColumn,
+    CheckConstraint, Column, Definition, Domain, Extension,
+    ForeignDataWrapper, ForeignKey, Index, Schema, Sequence, Server, Table,
+    Trigger, Type, UserMapping, View, ViewColumn,
 };
-use crate::utils::quote_ident;
+use crate::utils::{postgres_value, quote_ident};
 
 /// One reconciliation statement
 pub(crate) struct Alter {
@@ -89,6 +92,14 @@ pub(crate) fn resolve(repo: &Definition, database: &Definition) -> Resolution {
             }
         }
         (Definition::View(repo), Definition::View(db)) => view(repo, db),
+        (
+            Definition::ForeignDataWrapper(repo),
+            Definition::ForeignDataWrapper(db),
+        ) => fdw(repo, db),
+        (Definition::Server(repo), Definition::Server(db)) => server(repo, db),
+        (Definition::UserMapping(repo), Definition::UserMapping(db)) => {
+            user_mapping(repo, db)
+        }
         _ => Resolution::Replace,
     }
 }
@@ -145,6 +156,12 @@ fn view_columns_compatible(repo: &View, db: &View) -> bool {
 }
 
 fn table(repo: &Table, db: &Table) -> Resolution {
+    // foreign tables (a `server` on either side) reconcile through a
+    // dedicated path: only OPTIONS and the comment are alterable in
+    // place, everything else rebuilds
+    if repo.server.is_some() || db.server.is_some() {
+        return foreign_table(repo, db);
+    }
     // properties only expressible by rebuilding the table
     if repo.sql != db.sql
         || repo.unlogged != db.unlogged
@@ -641,6 +658,221 @@ fn schema(repo: &Schema, db: &Schema) -> Resolution {
         )));
     }
     Resolution::Statements(alters)
+}
+
+/// Foreign-table reconciliation: only OPTIONS and the comment are
+/// alterable in place. A different server or any column/structural
+/// change rebuilds (gated behind --allow-drop). Foreign-table comments
+/// use the FOREIGN TABLE object type, matching the build.
+fn foreign_table(repo: &Table, db: &Table) -> Resolution {
+    if repo.server != db.server
+        || repo.columns != db.columns
+        || repo.sql != db.sql
+        || repo.check_constraints != db.check_constraints
+    {
+        return Resolution::Replace;
+    }
+    let name = qualified(&repo.schema, &repo.name);
+    let mut alters = Vec::new();
+    if let Some(clause) = options_delta(&repo.options, &db.options) {
+        alters.push(Alter::new(format!(
+            "ALTER FOREIGN TABLE {name} OPTIONS ({clause});\n"
+        )));
+    }
+    if repo.comment != db.comment {
+        alters.push(Alter::new(comment_on(
+            "FOREIGN TABLE",
+            &name,
+            repo.comment.as_deref(),
+        )));
+    }
+    Resolution::Statements(alters)
+}
+
+/// Foreign-data-wrapper reconciliation: handler, validator, OPTIONS,
+/// and comment are all alterable in place.
+fn fdw(repo: &ForeignDataWrapper, db: &ForeignDataWrapper) -> Resolution {
+    let name = quote_ident(&repo.name);
+    let mut alters = Vec::new();
+    if repo.handler != db.handler {
+        alters.push(Alter::new(match &repo.handler {
+            Some(handler) => format!(
+                "ALTER FOREIGN DATA WRAPPER {name} HANDLER {handler};\n"
+            ),
+            None => {
+                format!("ALTER FOREIGN DATA WRAPPER {name} NO HANDLER;\n")
+            }
+        }));
+    }
+    if repo.validator != db.validator {
+        alters.push(Alter::new(match &repo.validator {
+            Some(validator) => format!(
+                "ALTER FOREIGN DATA WRAPPER {name} VALIDATOR {validator};\n"
+            ),
+            None => {
+                format!("ALTER FOREIGN DATA WRAPPER {name} NO VALIDATOR;\n")
+            }
+        }));
+    }
+    if let Some(clause) = options_delta(&repo.options, &db.options) {
+        alters.push(Alter::new(format!(
+            "ALTER FOREIGN DATA WRAPPER {name} OPTIONS ({clause});\n"
+        )));
+    }
+    if repo.comment != db.comment {
+        alters.push(Alter::new(comment_on(
+            "FOREIGN DATA WRAPPER",
+            &name,
+            repo.comment.as_deref(),
+        )));
+    }
+    Resolution::Statements(alters)
+}
+
+/// Server reconciliation: VERSION, OPTIONS, and comment alter in place.
+/// The owning foreign-data wrapper and the server TYPE cannot be
+/// altered, and VERSION cannot be cleared, so those changes rebuild.
+fn server(repo: &Server, db: &Server) -> Resolution {
+    if repo.foreign_data_wrapper != db.foreign_data_wrapper
+        || repo.server_type != db.server_type
+        || (repo.version.is_none() && db.version.is_some())
+    {
+        return Resolution::Replace;
+    }
+    let name = quote_ident(&repo.name);
+    let mut alters = Vec::new();
+    if repo.version != db.version
+        && let Some(version) = &repo.version
+    {
+        alters.push(Alter::new(format!(
+            "ALTER SERVER {name} VERSION {};\n",
+            string_literal(version)
+        )));
+    }
+    if let Some(clause) = options_delta(&repo.options, &db.options) {
+        alters.push(Alter::new(format!(
+            "ALTER SERVER {name} OPTIONS ({clause});\n"
+        )));
+    }
+    if repo.comment != db.comment {
+        alters.push(Alter::new(comment_on(
+            "SERVER",
+            &name,
+            repo.comment.as_deref(),
+        )));
+    }
+    Resolution::Statements(alters)
+}
+
+/// User-mapping reconciliation: each (user, server) mapping is a
+/// distinct database object, so a mapping the repo adds is created, one
+/// it drops is dropped, and a shared one's OPTIONS are altered in place.
+fn user_mapping(repo: &UserMapping, db: &UserMapping) -> Resolution {
+    let user = quote_ident(&repo.name);
+    let mut alters = Vec::new();
+    for server in &repo.servers {
+        let name = quote_ident(&server.name);
+        match db.servers.iter().find(|s| s.name == server.name) {
+            None => {
+                let mut sql =
+                    format!("CREATE USER MAPPING FOR {user} SERVER {name}");
+                if let Some(clause) = options_clause(&server.options) {
+                    sql.push_str(&format!(" OPTIONS ({clause})"));
+                }
+                sql.push_str(";\n");
+                alters.push(Alter::new(sql));
+            }
+            Some(existing) => {
+                // a redacted pull omits the password, so a project that
+                // does not carry one must not drop the live credential
+                let db_options =
+                    keep_redacted_password(&server.options, &existing.options);
+                if let Some(clause) =
+                    options_delta(&server.options, &db_options)
+                {
+                    alters.push(Alter::new(format!(
+                        "ALTER USER MAPPING FOR {user} SERVER {name} \
+                         OPTIONS ({clause});\n"
+                    )));
+                }
+            }
+        }
+    }
+    for server in &db.servers {
+        if !repo.servers.iter().any(|s| s.name == server.name) {
+            alters.push(Alter::new(format!(
+                "DROP USER MAPPING IF EXISTS FOR {user} SERVER {};\n",
+                quote_ident(&server.name)
+            )));
+        }
+    }
+    Resolution::Statements(alters)
+}
+
+/// An `OPTIONS (...)` body reconciling `repo` against `db`: `ADD` for
+/// keys only in the repo, `SET` for changed values, `DROP` for keys
+/// only in the database. `None` when the option sets are equal. The
+/// option set is not data, so a removed option is not gated.
+fn options_delta(
+    repo: &Option<Map<String, Value>>,
+    db: &Option<Map<String, Value>>,
+) -> Option<String> {
+    let empty = Map::new();
+    let repo = repo.as_ref().unwrap_or(&empty);
+    let db = db.as_ref().unwrap_or(&empty);
+    if repo == db {
+        return None;
+    }
+    let mut parts = Vec::new();
+    for (key, value) in repo {
+        match db.get(key) {
+            None => parts.push(format!("ADD {key} {}", postgres_value(value))),
+            Some(existing) if existing != value => {
+                parts.push(format!("SET {key} {}", postgres_value(value)))
+            }
+            _ => {}
+        }
+    }
+    for key in db.keys() {
+        if !repo.contains_key(key) {
+            parts.push(format!("DROP {key}"));
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join(", "))
+}
+
+/// The database options with a `password` removed when the project does
+/// not carry one (a redacted pull omits it), so the delta neither drops
+/// nor changes a credential the project cannot see.
+fn keep_redacted_password(
+    repo: &Option<Map<String, Value>>,
+    db: &Option<Map<String, Value>>,
+) -> Option<Map<String, Value>> {
+    let repo_has_password =
+        repo.as_ref().is_some_and(|m| m.contains_key("password"));
+    if repo_has_password {
+        return db.clone();
+    }
+    let mut db = db.clone().unwrap_or_default();
+    db.remove("password");
+    (!db.is_empty()).then_some(db)
+}
+
+/// A `key 'value'` option list for a freshly created object (no diff)
+fn options_clause(options: &Option<Map<String, Value>>) -> Option<String> {
+    let options = options.as_ref().filter(|o| !o.is_empty())?;
+    Some(
+        options
+            .iter()
+            .map(|(key, value)| format!("{key} {}", postgres_value(value)))
+            .collect::<Vec<_>>()
+            .join(", "),
+    )
+}
+
+/// A single-quoted SQL string literal with embedded quotes doubled
+fn string_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
 }
 
 /// The `COMMENT ON` statement to reconcile a comment that changed
@@ -1279,5 +1511,199 @@ mod tests {
             sql(&alters),
             vec!["COMMENT ON SCHEMA test IS $$App schema$$;\n"]
         );
+    }
+
+    fn parse_fdw(value: serde_json::Value) -> ForeignDataWrapper {
+        serde_json::from_value(value).expect("fdw deserializes")
+    }
+
+    #[test]
+    fn fdw_handler_options_and_comment_alter_in_place() {
+        let db = parse_fdw(serde_json::json!({
+            "name": "wh", "owner": "postgres",
+            "options": {"debug": "false"},
+        }));
+        let mut repo = db.clone();
+        repo.handler = Some("postgres_fdw_handler".into());
+        repo.options = Some(
+            serde_json::from_value(serde_json::json!({"debug": "true"}))
+                .unwrap(),
+        );
+        repo.comment = Some("warehouse".into());
+        let alters = statements(fdw(&repo, &db));
+        assert_eq!(
+            sql(&alters),
+            vec![
+                "ALTER FOREIGN DATA WRAPPER wh HANDLER \
+                 postgres_fdw_handler;\n",
+                "ALTER FOREIGN DATA WRAPPER wh OPTIONS (SET debug 'true');\n",
+                "COMMENT ON FOREIGN DATA WRAPPER wh IS $$warehouse$$;\n",
+            ]
+        );
+        assert!(alters.iter().all(|a| !a.destructive));
+    }
+
+    #[test]
+    fn fdw_handler_removal_emits_no_handler() {
+        let db = parse_fdw(serde_json::json!({
+            "name": "wh", "owner": "postgres",
+            "handler": "h", "validator": "v",
+        }));
+        let mut repo = db.clone();
+        repo.handler = None;
+        repo.validator = None;
+        let alters = statements(fdw(&repo, &db));
+        assert_eq!(
+            sql(&alters),
+            vec![
+                "ALTER FOREIGN DATA WRAPPER wh NO HANDLER;\n",
+                "ALTER FOREIGN DATA WRAPPER wh NO VALIDATOR;\n",
+            ]
+        );
+    }
+
+    fn parse_server(value: serde_json::Value) -> Server {
+        serde_json::from_value(value).expect("server deserializes")
+    }
+
+    #[test]
+    fn server_version_and_options_alter_in_place() {
+        let db = parse_server(serde_json::json!({
+            "name": "wh", "foreign_data_wrapper": "postgres_fdw",
+            "version": "14", "options": {"host": "old", "port": "5432"},
+        }));
+        let mut repo = db.clone();
+        repo.version = Some("17".into());
+        repo.options = Some(
+            serde_json::from_value(
+                serde_json::json!({"host": "new", "dbname": "w"}),
+            )
+            .unwrap(),
+        );
+        let alters = statements(server(&repo, &db));
+        assert_eq!(
+            sql(&alters),
+            vec![
+                "ALTER SERVER wh VERSION '17';\n",
+                "ALTER SERVER wh OPTIONS (SET host 'new', ADD dbname 'w', \
+                 DROP port);\n",
+            ]
+        );
+    }
+
+    #[test]
+    fn server_type_change_replaces() {
+        let db = parse_server(serde_json::json!({
+            "name": "wh", "foreign_data_wrapper": "postgres_fdw",
+            "type": "oracle",
+        }));
+        let mut repo = db.clone();
+        repo.server_type = Some("mysql".into());
+        assert!(matches!(server(&repo, &db), Resolution::Replace));
+    }
+
+    fn parse_user_mapping(value: serde_json::Value) -> UserMapping {
+        serde_json::from_value(value).expect("user mapping deserializes")
+    }
+
+    #[test]
+    fn user_mapping_adds_alters_and_drops_per_server() {
+        let db = parse_user_mapping(serde_json::json!({
+            "name": "app",
+            "servers": [
+                {"name": "keep", "options": {"user": "old"}},
+                {"name": "gone", "options": {"user": "x"}},
+            ],
+        }));
+        let repo = parse_user_mapping(serde_json::json!({
+            "name": "app",
+            "servers": [
+                {"name": "keep", "options": {"user": "new"}},
+                {"name": "fresh", "options": {"user": "y"}},
+            ],
+        }));
+        let alters = statements(user_mapping(&repo, &db));
+        assert_eq!(
+            sql(&alters),
+            vec![
+                "ALTER USER MAPPING FOR app SERVER keep OPTIONS \
+                 (SET user 'new');\n",
+                "CREATE USER MAPPING FOR app SERVER fresh OPTIONS \
+                 (user 'y');\n",
+                "DROP USER MAPPING IF EXISTS FOR app SERVER gone;\n",
+            ]
+        );
+        assert!(alters.iter().all(|a| !a.destructive));
+    }
+
+    #[test]
+    fn user_mapping_keeps_redacted_password() {
+        // the project (redacted pull) carries only `user`; the database
+        // mapping also has a password — deploy must not drop it
+        let db = parse_user_mapping(serde_json::json!({
+            "name": "app",
+            "servers": [{
+                "name": "wh",
+                "options": {"user": "remote", "password": "secret"},
+            }],
+        }));
+        let repo = parse_user_mapping(serde_json::json!({
+            "name": "app",
+            "servers": [{"name": "wh", "options": {"user": "remote"}}],
+        }));
+        let alters = statements(user_mapping(&repo, &db));
+        assert!(
+            alters.is_empty(),
+            "a redacted password must not diff: {:?}",
+            sql(&alters)
+        );
+    }
+
+    fn foreign_table_value(
+        options: serde_json::Value,
+        comment: Option<&str>,
+    ) -> serde_json::Value {
+        let mut value = serde_json::json!({
+            "name": "remote", "schema": "test", "owner": "postgres",
+            "columns": [{"name": "id", "data_type": "integer"}],
+            "server": "wh", "options": options,
+        });
+        if let Some(comment) = comment {
+            value["comment"] = comment.into();
+        }
+        value
+    }
+
+    #[test]
+    fn foreign_table_options_alter_in_place() {
+        let repo = parse_table(foreign_table_value(
+            serde_json::json!({"schema_name": "public", "table_name": "t"}),
+            Some("remote orders"),
+        ));
+        let db = parse_table(foreign_table_value(
+            serde_json::json!({"schema_name": "public", "table_name": "old"}),
+            None,
+        ));
+        let alters = statements(table(&repo, &db));
+        assert_eq!(
+            sql(&alters),
+            vec![
+                "ALTER FOREIGN TABLE test.remote OPTIONS (SET table_name \
+                 't');\n",
+                "COMMENT ON FOREIGN TABLE test.remote IS $$remote orders$$;\n",
+            ]
+        );
+        assert!(alters.iter().all(|a| !a.destructive));
+    }
+
+    #[test]
+    fn foreign_table_server_change_replaces() {
+        let repo = parse_table(foreign_table_value(
+            serde_json::json!({"table_name": "t"}),
+            None,
+        ));
+        let mut db = repo.clone();
+        db.server = Some("other".into());
+        assert!(matches!(table(&repo, &db), Resolution::Replace));
     }
 }

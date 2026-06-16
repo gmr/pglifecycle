@@ -49,6 +49,16 @@ psql -d "${SOURCE_DB}" -q -v ON_ERROR_STOP=1 -f fixtures/schema.sql
 # cleared during convergence (gate 2)
 psql -d "${SOURCE_DB}" -q -v ON_ERROR_STOP=1 \
     -c "CREATE VIEW test.deploy_probe AS SELECT 1 AS n;"
+# foreign objects (a handler-less wrapper needs no remote to exist):
+# their options are reconciled in place during convergence (gate 2)
+psql -d "${SOURCE_DB}" -q -v ON_ERROR_STOP=1 <<'SQL'
+CREATE FOREIGN DATA WRAPPER gate_fdw OPTIONS (debug 'true');
+CREATE SERVER gate_srv FOREIGN DATA WRAPPER gate_fdw
+    OPTIONS (host 'h', dbname 'w');
+CREATE USER MAPPING FOR postgres SERVER gate_srv OPTIONS (usr 'u');
+CREATE FOREIGN TABLE test.gate_ft (id integer)
+    SERVER gate_srv OPTIONS (schema_name 'public', table_name 't');
+SQL
 
 echo "==> pull a project from ${SOURCE_DB}"
 pg_dump -d "${SOURCE_DB}" -Fc --schema-only -f "${WORKDIR}/source.dump"
@@ -74,11 +84,16 @@ echo "==> Gate 2: convergence (mutate, deploy --apply, re-deploy is empty)"
 # a domain default (in-place ALTER DOMAIN), and a database-only comment
 # on an OR REPLACE object (must be cleared with COMMENT ... IS NULL so
 # the re-deploy converges)
+# the foreign-object drift (wrapper, server, and foreign-table options)
+# must reconcile in place via the deploy ALTER renderers
 psql -d "${TARGET_DB}" -q -v ON_ERROR_STOP=1 <<'SQL'
 ALTER TABLE test.users ADD COLUMN scratch text;
 ALTER TABLE test.users ALTER COLUMN display_name SET NOT NULL;
 ALTER DOMAIN test.bcp47_locale SET DEFAULT 'en-US';
 COMMENT ON VIEW test.deploy_probe IS 'stale, not in repo';
+ALTER FOREIGN DATA WRAPPER gate_fdw OPTIONS (SET debug 'false');
+ALTER SERVER gate_srv OPTIONS (SET host 'changed', DROP dbname);
+ALTER FOREIGN TABLE test.gate_ft OPTIONS (SET table_name 'changed');
 SQL
 ./target/debug/pglifecycle deploy --apply --allow-drop -d "${TARGET_DB}" \
     "${WORKDIR}/project"
