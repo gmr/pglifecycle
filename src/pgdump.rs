@@ -43,8 +43,32 @@ pub fn dump(
 
 /// Dump cluster roles to `path` as SQL via `pg_dumpall --roles-only`.
 /// Password hashes are omitted (`--no-role-passwords`) unless
-/// `include_passwords` is set, to keep secrets out of the project
+/// `include_passwords` is set, to keep secrets out of the project.
+///
+/// Reading hashes requires `pg_authid`, which managed platforms (e.g.
+/// RDS) deny to non-superusers. When passwords were requested and the
+/// dump fails on that restriction, retry without passwords so role and
+/// user extraction still succeeds (minus hashes) rather than aborting.
 pub fn dump_roles(
+    conn: &cli::Connection,
+    path: &Path,
+    include_passwords: bool,
+) -> Result<(), String> {
+    match run_dump_roles(conn, path, include_passwords) {
+        Err(error)
+            if should_retry_without_passwords(include_passwords, &error) =>
+        {
+            log::warn!(
+                "Cannot read password hashes ({error}); retrying roles \
+                 without passwords"
+            );
+            run_dump_roles(conn, path, false)
+        }
+        result => result,
+    }
+}
+
+fn run_dump_roles(
     conn: &cli::Connection,
     path: &Path,
     include_passwords: bool,
@@ -57,6 +81,15 @@ pub fn dump_roles(
         command.arg("--no-role-passwords");
     }
     execute(command)
+}
+
+/// Whether a failed password-included roles dump should be retried
+/// without passwords: the failure is a `pg_authid` access restriction
+fn should_retry_without_passwords(
+    include_passwords: bool,
+    error: &str,
+) -> bool {
+    include_passwords && error.contains("pg_authid")
 }
 
 /// Apply a SQL script to the database in a single transaction via
@@ -183,5 +216,24 @@ mod tests {
     #[test]
     fn ddl_args_empty_by_default() {
         assert!(ddl_args(&DumpDdl::default()).is_empty());
+    }
+
+    #[test]
+    fn retries_without_passwords_on_pg_authid_denial() {
+        let error = "Failed to dump (1): pg_dumpall: error: query failed: \
+                     ERROR: permission denied for table pg_authid";
+        assert!(should_retry_without_passwords(true, error));
+    }
+
+    #[test]
+    fn does_not_retry_when_passwords_not_requested() {
+        let error = "permission denied for table pg_authid";
+        assert!(!should_retry_without_passwords(false, error));
+    }
+
+    #[test]
+    fn does_not_retry_on_unrelated_failure() {
+        let error = "Failed to dump (2): connection refused";
+        assert!(!should_retry_without_passwords(true, error));
     }
 }
