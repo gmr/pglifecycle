@@ -57,6 +57,23 @@ pub(crate) fn create_trigger(
     } else {
         None
     };
+    // CONSTRAINT TRIGGER, with optional deferral. Only the non-default
+    // attributes are recorded (NOT DEFERRABLE / INITIALLY IMMEDIATE are
+    // the defaults and pg_dump omits them)
+    let constraint = node.has("kw_constraint").then_some(true);
+    let spec = node.child_of_kind("ConstraintAttributeSpec");
+    let deferrable = spec.and_then(|s| {
+        s.find_all("ConstraintAttributeElem")
+            .iter()
+            .find(|e| e.has("kw_deferrable"))
+            .map(|e| !e.has("kw_not"))
+    });
+    let initially_deferred = spec.and_then(|s| {
+        s.find_all("ConstraintAttributeElem")
+            .iter()
+            .find(|e| e.has("kw_initially"))
+            .map(|e| e.has("kw_deferred"))
+    });
     let condition = node
         .child_of_kind("TriggerWhen")
         .and_then(|n| n.child_of_kind("a_expr"))
@@ -85,6 +102,10 @@ pub(crate) fn create_trigger(
             when,
             events: (!events.is_empty()).then_some(events),
             for_each,
+            constraint,
+            // omit the defaults (NOT DEFERRABLE / INITIALLY IMMEDIATE)
+            deferrable: deferrable.filter(|&d| d),
+            initially_deferred: initially_deferred.filter(|&d| d),
             condition,
             function: function.map(|f| format!("{f}()")),
             arguments: (!arguments.is_empty()).then_some(arguments),
@@ -143,6 +164,24 @@ mod tests {
             trigger.events,
             Some(vec!["INSERT".into(), "UPDATE".into()])
         );
+        assert_eq!(trigger.constraint, Some(true));
+        // non-deferrable by default → omitted
+        assert_eq!(trigger.deferrable, None);
+        assert_eq!(trigger.initially_deferred, None);
+    }
+
+    #[test]
+    fn constraint_trigger_captures_deferral() {
+        let Statement::CreateTrigger { trigger, .. } = parse_one(
+            "CREATE CONSTRAINT TRIGGER emit AFTER INSERT ON test.t \
+             DEFERRABLE INITIALLY DEFERRED FOR EACH ROW \
+             EXECUTE FUNCTION test.emit();",
+        ) else {
+            panic!("expected CreateTrigger")
+        };
+        assert_eq!(trigger.constraint, Some(true));
+        assert_eq!(trigger.deferrable, Some(true));
+        assert_eq!(trigger.initially_deferred, Some(true));
     }
 
     #[test]

@@ -1884,15 +1884,26 @@ pub(crate) fn render_trigger(
         return (vec![sql.clone()], vec![]);
     }
     let name = trigger.name.clone().unwrap_or_default();
-    let mut create = vec![
-        "CREATE".into(),
+    let mut create = vec!["CREATE".into()];
+    if trigger.constraint == Some(true) {
+        create.push("CONSTRAINT".into());
+    }
+    create.extend([
         "TRIGGER".into(),
         name.clone(),
         trigger.when.clone().unwrap_or_default(),
         trigger.events.clone().unwrap_or_default().join(" OR "),
         "ON".into(),
         table_name.to_string(),
-    ];
+    ]);
+    // deferral clause (constraint triggers only) goes after ON table,
+    // before FOR EACH
+    if trigger.deferrable == Some(true) {
+        create.push("DEFERRABLE".into());
+    }
+    if trigger.initially_deferred == Some(true) {
+        create.push("INITIALLY DEFERRED".into());
+    }
     if let Some(for_each) = &trigger.for_each {
         create.push("FOR EACH".into());
         create.push(for_each.clone());
@@ -2021,4 +2032,48 @@ fn render_parameters(parameters: &Map<String, Value>) -> String {
         .map(|(k, v)| format!("{k} = {}", postgres_value(v)))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::render_trigger;
+    use crate::models::Trigger;
+
+    fn constraint_trigger(deferred: bool) -> Trigger {
+        Trigger {
+            sql: None,
+            name: Some("emit".into()),
+            when: Some("AFTER".into()),
+            events: Some(vec!["INSERT".into()]),
+            for_each: Some("ROW".into()),
+            constraint: Some(true),
+            deferrable: deferred.then_some(true),
+            initially_deferred: deferred.then_some(true),
+            condition: None,
+            function: Some("test.emit()".into()),
+            arguments: None,
+            comment: None,
+        }
+    }
+
+    #[test]
+    fn renders_constraint_trigger() {
+        let (create, _) = render_trigger(&constraint_trigger(false), "test.t");
+        assert_eq!(
+            create.join(" "),
+            "CREATE CONSTRAINT TRIGGER emit AFTER INSERT ON test.t \
+             FOR EACH ROW EXECUTE FUNCTION test.emit()"
+        );
+    }
+
+    #[test]
+    fn renders_deferred_constraint_trigger() {
+        let (create, _) = render_trigger(&constraint_trigger(true), "test.t");
+        assert_eq!(
+            create.join(" "),
+            "CREATE CONSTRAINT TRIGGER emit AFTER INSERT ON test.t \
+             DEFERRABLE INITIALLY DEFERRED FOR EACH ROW \
+             EXECUTE FUNCTION test.emit()"
+        );
+    }
 }

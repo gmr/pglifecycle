@@ -25,6 +25,20 @@ properties:
     title: For Each Row or Statement
     enum: [ROW, STATEMENT]
     default: STATEMENT
+  constraint:
+    title: Constraint Trigger
+    description: >
+      Create the trigger as a CONSTRAINT TRIGGER (always AFTER and FOR
+      EACH ROW); it may be deferred to the end of the transaction.
+    type: boolean
+  deferrable:
+    title: Deferrable
+    description: Whether a constraint trigger's firing can be deferred.
+    type: boolean
+  initially_deferred:
+    title: Initially Deferred
+    description: Whether a deferrable constraint trigger defers by default.
+    type: boolean
   condition:
     title: Trigger Condition
     description: >
@@ -66,6 +80,9 @@ oneOf:
         - table_name
         - when
         - for_each
+        - constraint
+        - deferrable
+        - initially_deferred
         - condition
         - function
         - arguments
