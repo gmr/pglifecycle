@@ -15,6 +15,18 @@ pub fn quote_ident(value: &str) -> String {
     }
 }
 
+/// Quote a USER MAPPING subject, leaving `PUBLIC` as an unquoted
+/// keyword. PostgreSQL's CREATE/ALTER/DROP USER MAPPING grammar treats
+/// `PUBLIC` as a keyword, so quoting it (`"PUBLIC"`) produces invalid
+/// SQL; every other user name is a normal identifier.
+pub fn user_mapping_subject(name: &str) -> String {
+    if name.eq_ignore_ascii_case("PUBLIC") {
+        String::from("PUBLIC")
+    } else {
+        quote_ident(name)
+    }
+}
+
 /// Return a Postgres value as a string, quoted if required. Mirrors
 /// utils.postgres_value including Python's `str()` rendering of bools
 /// (`True`/`False`), which the Phase 3 round-trip work will revisit.
@@ -65,6 +77,14 @@ mod tests {
         assert_eq!(quote_ident("uuid-ossp"), "\"uuid-ossp\"");
         assert_eq!(quote_ident("==="), "\"===\"");
         assert_eq!(quote_ident("Has\"Quote"), "\"Has\"\"Quote\"");
+    }
+
+    #[test]
+    fn user_mapping_subjects_keep_public_unquoted() {
+        assert_eq!(user_mapping_subject("PUBLIC"), "PUBLIC");
+        assert_eq!(user_mapping_subject("public"), "PUBLIC");
+        assert_eq!(user_mapping_subject("app_user"), "app_user");
+        assert_eq!(user_mapping_subject("Mixed"), "\"Mixed\"");
     }
 
     #[test]
