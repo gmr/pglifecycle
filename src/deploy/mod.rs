@@ -44,7 +44,7 @@ pub fn deploy(args: &cli::Deploy) -> Result<(), String> {
         &args.connection,
         &ddl,
         None,
-        libpgfmt::style::Style::Aweber,
+        libpgfmt::style::Style::PgDump,
     )?;
     let task = progress::spinner("Diffing project against database");
     let diff = diff::diff(&project, &assembly);
