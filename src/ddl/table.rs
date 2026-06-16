@@ -42,6 +42,8 @@ pub(crate) fn create_table(
         storage_parameters: None,
         tablespace: None,
         index_tablespace: None,
+        server: None,
+        options: None,
         comment: None,
     };
     let mut columns = Vec::new();

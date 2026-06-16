@@ -1038,8 +1038,8 @@ impl Builder {
         }
         create.push("FOREIGN DATA WRAPPER".into());
         create.push(d.foreign_data_wrapper.clone());
-        if let Some(options) = &d.options {
-            create.push(format!("OPTIONS {}", render_options(options)));
+        if let Some(options) = d.options.as_ref().filter(|o| !o.is_empty()) {
+            create.push(format!("OPTIONS ({})", render_options(options)));
         }
         let drop = vec!["DROP SERVER IF EXISTS".into(), self.item_name(item)];
         self.add_item(item, create, drop, false)
@@ -1073,6 +1073,8 @@ impl Builder {
         };
         if let Some(sql) = &d.sql {
             self.add_item(item, vec![sql.clone()], vec![], false)?;
+        } else if let Some(server) = &d.server {
+            self.dump_foreign_table(item, d, server)?;
         } else {
             let mut create = vec!["CREATE".into()];
             if d.unlogged == Some(true) {
@@ -1163,6 +1165,62 @@ impl Builder {
         }
         for trigger in d.triggers.as_deref().unwrap_or_default() {
             self.dump_trigger(trigger, item, d)?;
+        }
+        Ok(())
+    }
+
+    /// CREATE FOREIGN TABLE — emitted with the `FOREIGN TABLE` archive
+    /// desc (and its own DROP), registered in dump_id_map so the table's
+    /// triggers/comments attach. Foreign servers sort before foreign
+    /// tables in the archive, so no explicit dependency edge is needed.
+    fn dump_foreign_table(
+        &mut self,
+        item: &Item,
+        table: &crate::models::Table,
+        server: &str,
+    ) -> Result<(), String> {
+        let mut create = vec![
+            "CREATE FOREIGN TABLE".into(),
+            self.item_name(item),
+            "(".into(),
+        ];
+        let columns: Vec<String> = table
+            .columns
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .map(render_table_column)
+            .collect();
+        create.push(columns.join(", "));
+        create.push(")".into());
+        create.push("SERVER".into());
+        create.push(quote_ident(server));
+        if let Some(options) = table.options.as_ref().filter(|o| !o.is_empty())
+        {
+            create.push(format!("OPTIONS ({})", render_options(options)));
+        }
+        let drop =
+            vec!["DROP FOREIGN TABLE IF EXISTS".into(), self.item_name(item)];
+        let dump_id = self.add_entry(
+            "FOREIGN TABLE",
+            &table.schema,
+            &table.name,
+            &table.owner,
+            &create,
+            &drop,
+            &[],
+            None,
+        )?;
+        self.dump_id_map.insert(item.id, dump_id);
+        if let Some(comment) = &table.comment {
+            self.add_comment(
+                "FOREIGN TABLE",
+                &table.schema,
+                &table.name,
+                &table.owner,
+                dump_id,
+                comment,
+            )?;
         }
         Ok(())
     }
@@ -2036,8 +2094,26 @@ fn render_parameters(parameters: &Map<String, Value>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::render_trigger;
-    use crate::models::Trigger;
+    use std::collections::BTreeSet;
+
+    use serde_json::{Map, json};
+
+    use super::*;
+    use crate::constants::ObjectType;
+    use crate::models::{Table, Trigger};
+
+    fn column(name: &str, data_type: &str, not_null: bool) -> Column {
+        Column {
+            name: name.into(),
+            data_type: data_type.into(),
+            nullable: not_null.then_some(false),
+            default: None,
+            collation: None,
+            check_constraint: None,
+            generated: None,
+            comment: None,
+        }
+    }
 
     fn constraint_trigger(deferred: bool) -> Trigger {
         Trigger {
@@ -2054,6 +2130,84 @@ mod tests {
             arguments: None,
             comment: None,
         }
+    }
+
+    fn foreign_table(options: Option<Map<String, Value>>) -> Item {
+        Item {
+            id: 1,
+            desc: ObjectType::Table,
+            definition: Definition::Table(Table {
+                name: "orders".into(),
+                schema: "fdw_warehouse".into(),
+                owner: "app".into(),
+                sql: None,
+                unlogged: None,
+                from_type: None,
+                parents: None,
+                like_table: None,
+                columns: Some(vec![
+                    column("id", "integer", true),
+                    column("total", "numeric", false),
+                ]),
+                indexes: None,
+                primary_key: None,
+                check_constraints: None,
+                unique_constraints: None,
+                foreign_keys: None,
+                triggers: None,
+                partition: None,
+                partitions: None,
+                access_method: None,
+                storage_parameters: None,
+                tablespace: None,
+                index_tablespace: None,
+                server: Some("warehouse".into()),
+                options,
+                comment: None,
+            }),
+            dependencies: BTreeSet::new(),
+        }
+    }
+
+    /// Render `item` and return the FOREIGN TABLE entry's definition SQL
+    fn foreign_table_defn(item: &Item) -> String {
+        let dump = libpgdump::new("t", "UTF-8", "18.0").unwrap();
+        let mut builder = Builder {
+            dump,
+            dump_id_map: HashMap::new(),
+            superuser: "postgres".into(),
+        };
+        builder.dump_item(item).unwrap();
+        builder
+            .dump
+            .entries()
+            .iter()
+            .find(|e| e.desc == libpgdump::ObjectType::ForeignTable)
+            .and_then(|e| e.defn.clone())
+            .expect("a FOREIGN TABLE entry")
+    }
+
+    #[test]
+    fn renders_foreign_table_with_options() {
+        let mut options = Map::new();
+        options.insert("schema_name".into(), json!("public"));
+        options.insert("table_name".into(), json!("orders"));
+        assert_eq!(
+            foreign_table_defn(&foreign_table(Some(options))),
+            "CREATE FOREIGN TABLE fdw_warehouse.orders ( id integer NOT \
+             NULL, total numeric ) SERVER warehouse OPTIONS (schema_name \
+             'public', table_name 'orders');\n"
+        );
+    }
+
+    #[test]
+    fn renders_foreign_table_without_options() {
+        let defn = foreign_table_defn(&foreign_table(None));
+        assert_eq!(
+            defn,
+            "CREATE FOREIGN TABLE fdw_warehouse.orders ( id integer NOT \
+             NULL, total numeric ) SERVER warehouse;\n"
+        );
     }
 
     #[test]
