@@ -112,7 +112,7 @@ properties:
       "^.*$":
         type: array
         items:
-          pattern: "^(SELECT|INSERT|UPDATE|DELETE|TRUNCATE|REFERENCES|TRIGGER|ALL)( WITH GRANT OPTION)?$"
+          pattern: "^(SELECT|INSERT|UPDATE|DELETE|TRUNCATE|REFERENCES|TRIGGER|MAINTAIN|ALL)( WITH GRANT OPTION)?$"
   tablespaces:
     type: object
     propertyNames:

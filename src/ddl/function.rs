@@ -137,7 +137,8 @@ fn split_set(text: &str) -> Option<(String, String)> {
         .split_once(" TO ")
         .or_else(|| text.split_once(" to "))
         .or_else(|| text.split_once('='))?;
-    Some((name.trim().to_string(), unstring(value.trim())))
+    // mixed-case GUC names (e.g. "IntervalStyle") are quoted by pg_dump
+    Some((unquote(name.trim()), unstring(value.trim())))
 }
 
 fn parameter(node: &Node, src: &str) -> FunctionParameter {
@@ -170,6 +171,21 @@ mod tests {
         let mut statements = parser.parse(sql).unwrap();
         assert_eq!(statements.len(), 1, "expected one statement");
         statements.remove(0)
+    }
+
+    #[test]
+    fn config_unquotes_mixed_case_guc() {
+        let Statement::CreateFunction(function) = parse_one(
+            "CREATE FUNCTION test.f() RETURNS integer LANGUAGE sql \
+             SET \"IntervalStyle\" TO 'postgres' AS $$ SELECT 1 $$;",
+        ) else {
+            panic!("expected CreateFunction")
+        };
+        let config = function.configuration.unwrap();
+        assert_eq!(
+            config.get("IntervalStyle"),
+            Some(&serde_json::Value::String("postgres".into()))
+        );
     }
 
     #[test]
