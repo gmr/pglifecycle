@@ -31,7 +31,6 @@ mod acls;
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::time::Instant;
 
 use serde_json::{Map, Value};
 
@@ -44,13 +43,6 @@ use crate::project::Project;
 use crate::utils::{postgres_value, quote_ident, raw_value};
 
 pub fn build(project: &Project, destination: &Path) -> Result<(), String> {
-    let started = Instant::now();
-    println!(
-        "pglifecycle v{} Building {} → {}",
-        env!("CARGO_PKG_VERSION"),
-        project.name,
-        destination.display(),
-    );
     let output = assemble(project)?;
     let task = progress::spinner("Saving archive");
     output
@@ -62,11 +54,6 @@ pub fn build(project: &Project, destination: &Path) -> Result<(), String> {
         "Saved pg_dump -Fc compatible dump to {} with {} entries",
         destination.display(),
         output.dump.entries().len(),
-    );
-    println!(
-        "\nBuilt {} in {:.2?}",
-        destination.display(),
-        started.elapsed(),
     );
     Ok(())
 }
