@@ -99,8 +99,10 @@ pub struct Diff {
     /// classified [`Change::Changed`] (the ALTER renderers need both
     /// sides)
     pub changed: BTreeMap<usize, Definition>,
-    /// Objects in the database with no repo counterpart → DROP
-    pub removed: Vec<ObjectKey>,
+    /// Objects in the database with no repo counterpart → DROP, keyed
+    /// to their database-side definition (some drops, e.g. user
+    /// mappings, need more than the key to render)
+    pub removed: BTreeMap<ObjectKey, Definition>,
 }
 
 /// Object types deploy does not manage: roles, users, and groups
@@ -151,11 +153,10 @@ pub fn diff(project: &Project, assembly: &Assembly) -> Diff {
         };
         items.insert(item.id, change);
     }
-    let removed = database.into_keys().collect();
     Diff {
         items,
         changed,
-        removed,
+        removed: database,
     }
 }
 
@@ -166,13 +167,16 @@ fn modeled(desc: ObjectType) -> bool {
         desc,
         ObjectType::Domain
             | ObjectType::Extension
+            | ObjectType::ForeignDataWrapper
             | ObjectType::Function
             | ObjectType::MaterializedView
             | ObjectType::ProceduralLanguage
             | ObjectType::Schema
             | ObjectType::Sequence
+            | ObjectType::Server
             | ObjectType::Table
             | ObjectType::Type
+            | ObjectType::UserMapping
             | ObjectType::View
     )
 }
@@ -218,6 +222,18 @@ fn database_index(assembly: &Assembly) -> BTreeMap<ObjectKey, Definition> {
     }
     for d in &assembly.functions {
         insert(ObjectType::Function, Definition::Function(d.clone()));
+    }
+    for d in &assembly.foreign_data_wrappers {
+        insert(
+            ObjectType::ForeignDataWrapper,
+            Definition::ForeignDataWrapper(d.clone()),
+        );
+    }
+    for d in &assembly.servers {
+        insert(ObjectType::Server, Definition::Server(d.clone()));
+    }
+    for d in &assembly.user_mappings {
+        insert(ObjectType::UserMapping, Definition::UserMapping(d.clone()));
     }
     index
 }

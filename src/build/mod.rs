@@ -40,7 +40,9 @@ use crate::models::{
 };
 use crate::progress;
 use crate::project::Project;
-use crate::utils::{postgres_value, quote_ident, raw_value};
+use crate::utils::{
+    postgres_value, quote_ident, raw_value, user_mapping_subject,
+};
 
 pub fn build(project: &Project, destination: &Path) -> Result<(), String> {
     let output = assemble(project)?;
@@ -1686,7 +1688,7 @@ impl Builder {
                 "CREATE".into(),
                 "USER MAPPING".into(),
                 "FOR".into(),
-                quote_ident(&d.name),
+                user_mapping_subject(&d.name),
                 "SERVER".into(),
                 quote_ident(&server.name),
             ];
@@ -1700,7 +1702,7 @@ impl Builder {
             let drop = vec![
                 "DROP USER MAPPING IF EXISTS".into(),
                 "FOR".into(),
-                quote_ident(&d.name),
+                user_mapping_subject(&d.name),
                 "SERVER".into(),
                 quote_ident(&server.name),
             ];

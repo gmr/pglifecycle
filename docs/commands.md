@@ -84,6 +84,17 @@ reconciled in place where PostgreSQL can express it:
 - **Enum types** — `ALTER TYPE ... ADD VALUE` for appended values;
   reordering or removing values falls back.
 - **Extensions** — `ALTER EXTENSION ... UPDATE` / `SET SCHEMA`.
+- **Foreign data wrappers** — handler, validator, and `OPTIONS`
+  (`ADD`/`SET`/`DROP`) changes, plus comments.
+- **Foreign servers** — `VERSION` and `OPTIONS` changes, plus comments;
+  a wrapper or `TYPE` change (neither is alterable) falls back, as does
+  clearing an existing `VERSION` (it cannot be removed in place).
+- **User mappings** — per-server `OPTIONS` changes; a mapping the
+  project adds or drops is created or dropped. A `password` the project
+  does not carry is left untouched, so a redacted pull (the default)
+  never strips a live credential.
+- **Foreign tables** — `OPTIONS` changes and comments in place; a server
+  or column change falls back to drop+recreate.
 - Everything else falls back to drop+recreate.
 
 ### Destructive statements and limits

@@ -17,6 +17,7 @@ use std::io::IsTerminal;
 
 use crate::deploy::alter::Resolution;
 use crate::deploy::diff::{Change, Diff, ObjectKey};
+use crate::models::Definition;
 use crate::utils::quote_ident;
 use crate::{
     build, cli, constants, diagnostics, pgdump, progress, project, pull,
@@ -168,7 +169,7 @@ fn plan(
     // pg_dump archives are stored in dependency order, so dropping in
     // reverse entry order removes dependents before dependencies
     let wanted: std::collections::BTreeSet<&ObjectKey> =
-        diff.removed.iter().collect();
+        diff.removed.keys().collect();
     let mut emitted: std::collections::BTreeSet<&ObjectKey> =
         std::collections::BTreeSet::new();
     let ordered: Vec<&ObjectKey> = snapshot
@@ -184,7 +185,7 @@ fn plan(
                 true,
                 Statement {
                     label: key.to_string(),
-                    sql: drop_sql(key),
+                    sql: drop_sql(key, diff.removed.get(key)),
                 },
             );
         }
@@ -192,13 +193,13 @@ fn plan(
     // database-only objects whose snapshot entry could not be keyed
     // (should not happen for modeled types) still need dropping;
     // append them after the ordered ones
-    for key in &diff.removed {
+    for (key, definition) in &diff.removed {
         if !emitted.contains(key) {
             push(
                 true,
                 Statement {
                     label: key.to_string(),
-                    sql: drop_sql(key),
+                    sql: drop_sql(key, Some(definition)),
                 },
             );
         }
@@ -368,8 +369,23 @@ fn render_script(plan: &Plan, project: &str, source: &str) -> String {
     script
 }
 
-/// `DROP <type> IF EXISTS <name>` for a database-only object
-fn drop_sql(key: &ObjectKey) -> String {
+/// `DROP <type> IF EXISTS <name>` for a database-only object. User
+/// mappings are keyed by their user but dropped per server, so they
+/// render from the definition; everything else needs only the key.
+fn drop_sql(key: &ObjectKey, definition: Option<&Definition>) -> String {
+    if let Some(Definition::UserMapping(mapping)) = definition {
+        return mapping
+            .servers
+            .iter()
+            .map(|server| {
+                format!(
+                    "DROP USER MAPPING IF EXISTS FOR {} SERVER {};\n",
+                    quote_ident(&mapping.name),
+                    quote_ident(&server.name),
+                )
+            })
+            .collect();
+    }
     // function keys are identity signatures and must not be quoted
     // wholesale; everything else gets identifier quoting
     let name = match key.desc {
@@ -392,20 +408,30 @@ fn entry_key(entry: &libpgdump::Entry) -> Option<ObjectKey> {
     let desc = match entry.desc {
         OT::Domain => constants::ObjectType::Domain,
         OT::Extension => constants::ObjectType::Extension,
+        OT::ForeignDataWrapper => constants::ObjectType::ForeignDataWrapper,
+        // foreign tables key as tables (the project models them as
+        // tables with a `server`), so a removed one orders and drops
+        // alongside ordinary tables
+        OT::ForeignTable => constants::ObjectType::Table,
         OT::Function => constants::ObjectType::Function,
         OT::MaterializedView => constants::ObjectType::MaterializedView,
         OT::ProceduralLanguage => constants::ObjectType::ProceduralLanguage,
         OT::Schema => constants::ObjectType::Schema,
         OT::Sequence => constants::ObjectType::Sequence,
+        OT::ForeignServer | OT::Server => constants::ObjectType::Server,
         OT::Table => constants::ObjectType::Table,
         OT::Type => constants::ObjectType::Type,
+        OT::UserMapping => constants::ObjectType::UserMapping,
         OT::View => constants::ObjectType::View,
         _ => return None,
     };
     let schema = match desc {
         constants::ObjectType::Extension
+        | constants::ObjectType::ForeignDataWrapper
         | constants::ObjectType::ProceduralLanguage
-        | constants::ObjectType::Schema => String::new(),
+        | constants::ObjectType::Schema
+        | constants::ObjectType::Server
+        | constants::ObjectType::UserMapping => String::new(),
         _ => entry.namespace.clone().unwrap_or_default(),
     };
     Some(ObjectKey {
