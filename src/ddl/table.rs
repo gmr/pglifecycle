@@ -83,7 +83,7 @@ pub(crate) fn create_table(
     Ok(Statement::CreateTable(Box::new(table)))
 }
 
-fn column(node: &Node, src: &str) -> Column {
+pub(crate) fn column(node: &Node, src: &str) -> Column {
     let name = node
         .child_of_kind("ColId")
         .map(|n| unquote(n.text(src)))

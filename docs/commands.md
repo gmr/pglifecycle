@@ -130,7 +130,7 @@ pglifecycle pull [OPTIONS] DEST
 | `--remove-empty-dirs` | Remove empty directories after generation |
 | `--save-remaining` | Save unprocessed dump entries to `remaining.yaml` |
 | `--error-file FILE` | Where to record failures and their DDL (default `pglifecycle-errors.log`) |
-| `--style STYLE` | libpgfmt style for view/materialized view queries and function bodies (default `aweber`) |
+| `--style STYLE` | libpgfmt style for view/materialized view queries and function bodies (default `pg_dump`) |
 | `-T, --exclude-table PATTERN` | Exclude tables/views/sequences matching `PATTERN` (repeatable; ignored with `--dump`) |
 | `-N, --exclude-schema PATTERN` | Exclude schemas matching `PATTERN` (repeatable; ignored with `--dump`) |
 | `--exclude-extension PATTERN` | Exclude extensions matching `PATTERN` (repeatable; ignored with `--dump`) |
@@ -141,10 +141,10 @@ syntax. They apply only when connecting to a database; with `--dump` the
 archive is already built, so they are rejected as conflicting.
 
 The `--style` value is one of libpgfmt's styles — `river`, `mozilla`,
-`aweber`, `dbt`, `gitlab`, `kickstarter`, or `mattmc3` — and controls
-only how view/materialized view queries and function bodies are
+`aweber`, `dbt`, `gitlab`, `kickstarter`, `mattmc3`, or `pg_dump` — and
+controls only how view/materialized view queries and function bodies are
 formatted in the generated project. Note that `deploy` always re-formats the database
-side with the default (`aweber`) to compare it against the project, so
+side with the default (`pg_dump`) to compare it against the project, so
 pulling with a non-default style will make `deploy` report
 formatting-only differences for every view and function.
 
@@ -221,4 +221,27 @@ only as ACL grantees (such as `PUBLIC`) are written with
 `create: false` so `build` defines but never creates them. The
 reserved `pg_*` roles are cluster-managed (and uncreatable), so they
 are excluded. Password hashes are omitted unless
-`--include-password-hashes` is given.
+`--include-password-hashes` is given. Reading hashes requires
+`pg_authid`, which managed platforms (e.g. RDS) restrict; when it is
+denied, `pull` falls back to a passwordless roles dump (warning that
+hashes were unavailable) rather than dropping all roles.
+
+### Foreign data wrappers, servers, and foreign tables
+
+Foreign objects round-trip through `pull` and `build`:
+
+- **Foreign data wrappers** are written into `project.yaml` under
+  `foreign_data_wrappers` (alongside extensions and languages), with
+  their handler, validator, and options. Extension-owned wrappers (e.g.
+  `postgres_fdw`'s own wrapper) are created by their extension and are
+  not emitted here.
+- **Foreign servers** get one file each in `servers/`, carrying the
+  wrapper name, optional `type`/`version`, and connection `options`.
+- **User mappings** get one file each in `user_mappings/`, grouping all
+  of a user's server mappings. A mapping's `password` option is a
+  secret and is **redacted by default**; pass `--include-password-hashes`
+  to write it (the same flag that controls role password hashes).
+- **Foreign tables** live in `tables/` like ordinary tables, with a
+  `server` field and an open `options` map (keys depend on the wrapper —
+  e.g. `schema_name`/`table_name` for `postgres_fdw`, `filename`/`format`
+  for `file_fdw`). `build` renders them as `CREATE FOREIGN TABLE`.
