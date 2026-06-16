@@ -383,6 +383,9 @@ pub struct Assembly {
     pub views: Vec<models::View>,
     pub materialized_views: Vec<models::MaterializedView>,
     pub functions: Vec<models::Function>,
+    pub foreign_data_wrappers: Vec<models::ForeignDataWrapper>,
+    pub servers: Vec<models::Server>,
+    pub user_mappings: Vec<models::UserMapping>,
     pub roles: BTreeMap<String, RoleState>,
     pub remaining: Vec<Remaining>,
     /// Indexes whose target relation had not yet been ingested when the
@@ -417,6 +420,9 @@ impl Assembly {
             ("views", self.views.len()),
             ("materialized views", self.materialized_views.len()),
             ("functions", self.functions.len()),
+            ("foreign data wrappers", self.foreign_data_wrappers.len()),
+            ("servers", self.servers.len()),
+            ("user mappings", self.user_mappings.len()),
             ("users", users),
             ("roles", roles),
         ]
@@ -484,6 +490,11 @@ impl Assembly {
                 | OT::FkConstraint
                 | OT::CheckConstraint
                 | OT::Trigger
+                | OT::ForeignTable
+                | OT::ForeignDataWrapper
+                | OT::ForeignServer
+                | OT::Server
+                | OT::UserMapping
                 | OT::Comment
                 | OT::Acl => {
                     let Some(defn) = &entry.defn else { continue };
@@ -604,6 +615,23 @@ impl Assembly {
             Statement::CreateFunction(mut function) => {
                 function.owner = owner;
                 self.functions.push(*function);
+            }
+            Statement::CreateForeignDataWrapper(mut fdw) => {
+                fdw.owner = owner;
+                self.foreign_data_wrappers.push(fdw);
+            }
+            Statement::CreateServer(server) => self.servers.push(server),
+            Statement::CreateUserMapping(mapping) => {
+                // group mappings by user so one UserMapping carries all
+                // its servers (matching the project model)
+                match self
+                    .user_mappings
+                    .iter_mut()
+                    .find(|m| m.name == mapping.name)
+                {
+                    Some(existing) => existing.servers.extend(mapping.servers),
+                    None => self.user_mappings.push(mapping),
+                }
             }
             Statement::CreateIndex { table, index } => {
                 if let Some(table) = self.find_table(&table) {
@@ -779,7 +807,7 @@ impl Assembly {
                 .find(|e| e.name == *name)
                 .map(|e| e.comment = Some(comment.clone()))
                 .is_some(),
-            "TABLE" => self
+            "TABLE" | "FOREIGN TABLE" => self
                 .find_table(target)
                 .map(|t| t.comment = Some(comment.clone()))
                 .is_some(),

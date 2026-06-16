@@ -184,3 +184,51 @@ pub fn build_archive(path: &std::path::Path, mutated: bool) {
     );
     dump.save(path).expect("failed to save archive");
 }
+
+/// A small archive exercising all four foreign-object types (FDW,
+/// server, user mapping with a secret, and a foreign table), used by
+/// the pull tests
+pub fn foreign_archive(path: &std::path::Path) {
+    let mut dump = libpgdump::new("foreign", "UTF8", "18.0").unwrap();
+    add(&mut dump, OT::Schema, "", "test", "CREATE SCHEMA test;");
+    add(
+        &mut dump,
+        OT::ForeignDataWrapper,
+        "",
+        "local_files",
+        "CREATE FOREIGN DATA WRAPPER local_files OPTIONS (debug 'true');",
+    );
+    add(
+        &mut dump,
+        OT::Server,
+        "",
+        "wh",
+        "CREATE SERVER wh FOREIGN DATA WRAPPER postgres_fdw OPTIONS \
+         (host 'db.example', dbname 'warehouse');",
+    );
+    add(
+        &mut dump,
+        OT::UserMapping,
+        "",
+        "postgres",
+        "CREATE USER MAPPING FOR postgres SERVER wh OPTIONS \
+         (user 'remote_app', password 'sup3rsecret');",
+    );
+    add(
+        &mut dump,
+        OT::ForeignTable,
+        "test",
+        "remote_orders",
+        "CREATE FOREIGN TABLE test.remote_orders (id integer NOT NULL, \
+         total numeric) SERVER wh OPTIONS (schema_name 'public', \
+         table_name 'orders');",
+    );
+    add(
+        &mut dump,
+        OT::Comment,
+        "test",
+        "remote_orders",
+        "COMMENT ON FOREIGN TABLE test.remote_orders IS 'Remote orders';",
+    );
+    dump.save(path).expect("failed to save archive");
+}

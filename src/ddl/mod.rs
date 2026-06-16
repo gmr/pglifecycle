@@ -7,6 +7,7 @@
 //! the tree by kind via the [`NodeExt`] helpers.
 
 mod acl;
+mod foreign;
 mod function;
 mod object;
 mod table;
@@ -44,6 +45,9 @@ pub enum Statement {
     CreateView(models::View),
     CreateMaterializedView(models::MaterializedView),
     CreateFunction(Box<models::Function>),
+    CreateForeignDataWrapper(models::ForeignDataWrapper),
+    CreateServer(models::Server),
+    CreateUserMapping(models::UserMapping),
     CreateTrigger {
         table: QualifiedName,
         trigger: models::Trigger,
@@ -208,6 +212,16 @@ fn dispatch(node: &Node, src: &str) -> Result<Vec<Statement>, String> {
         }
         "CreateFunctionStmt" => {
             Ok(vec![function::create_function(node, src)?])
+        }
+        "CreateForeignTableStmt" => {
+            Ok(vec![foreign::create_foreign_table(node, src)?])
+        }
+        "CreateFdwStmt" => Ok(vec![foreign::create_fdw(node, src)?]),
+        "CreateForeignServerStmt" => {
+            Ok(vec![foreign::create_server(node, src)?])
+        }
+        "CreateUserMappingStmt" => {
+            Ok(vec![foreign::create_user_mapping(node, src)?])
         }
         "CreateTrigStmt" => Ok(vec![trigger::create_trigger(node, src)?]),
         "CommentStmt" => Ok(vec![object::comment(node, src)?]),

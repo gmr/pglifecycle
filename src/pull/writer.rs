@@ -20,6 +20,7 @@ pub fn render(
         ignore: read_ignore(args.ignore.as_deref())?,
         files: BTreeMap::new(),
         mode_headers: args.include_mode_headers,
+        include_password_hashes: args.include_password_hashes,
     };
     writer.write_project_file(assembly)?;
     for schema in &assembly.schemas {
@@ -61,6 +62,13 @@ pub fn render(
     }
     writer.write_functions(assembly)?;
     writer.write_types(assembly)?;
+    for server in &assembly.servers {
+        writer.save(
+            Path::new("servers").join(format!("{}.yaml", server.name)),
+            server,
+        )?;
+    }
+    writer.write_user_mappings(assembly)?;
     writer.write_roles(assembly)?;
     if args.save_remaining && !assembly.remaining.is_empty() {
         let entries: Vec<Value> = assembly
@@ -117,6 +125,7 @@ struct Writer {
     ignore: BTreeSet<String>,
     files: BTreeMap<PathBuf, String>,
     mode_headers: bool,
+    include_password_hashes: bool,
 }
 
 fn create_directories(root: &Path, gitkeep: bool) -> Result<(), String> {
@@ -165,6 +174,12 @@ impl Writer {
             project.insert(
                 String::from("languages"),
                 serialize(&assembly.languages)?,
+            );
+        }
+        if !assembly.foreign_data_wrappers.is_empty() {
+            project.insert(
+                String::from("foreign_data_wrappers"),
+                serialize(&assembly.foreign_data_wrappers)?,
             );
         }
         self.save_value(PathBuf::from("project.yaml"), &Value::Object(project))
@@ -254,6 +269,33 @@ impl Writer {
                     &role,
                 )?;
             }
+        }
+        Ok(())
+    }
+
+    /// Write user mappings, dropping the `password` option unless
+    /// password hashes were explicitly requested (it is a secret)
+    fn write_user_mappings(
+        &mut self,
+        assembly: &Assembly,
+    ) -> Result<(), String> {
+        for mapping in &assembly.user_mappings {
+            let mut mapping = mapping.clone();
+            if !self.include_password_hashes {
+                for server in &mut mapping.servers {
+                    if let Some(options) = &mut server.options {
+                        options.remove("password");
+                        if options.is_empty() {
+                            server.options = None;
+                        }
+                    }
+                }
+            }
+            self.save(
+                Path::new("user_mappings")
+                    .join(format!("{}.yaml", mapping.name)),
+                &mapping,
+            )?;
         }
         Ok(())
     }

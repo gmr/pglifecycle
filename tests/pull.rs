@@ -116,6 +116,74 @@ fn pulled_project_loads_and_validates() {
 }
 
 #[test]
+fn pulls_foreign_objects() {
+    let dir = tempfile::tempdir().unwrap();
+    let archive = dir.path().join("foreign.dump");
+    common::foreign_archive(&archive);
+    let dest = dir.path().join("project");
+
+    pull::pull(&pull_args(&archive, &dest)).expect("pull failed");
+
+    // a FDW lands in project.yaml; the server and user mapping get their
+    // own files; the foreign table joins tables/ with server + options
+    let project_yaml =
+        std::fs::read_to_string(dest.join("project.yaml")).unwrap();
+    assert!(project_yaml.contains("foreign_data_wrappers:"));
+    assert!(project_yaml.contains("local_files"));
+    let server =
+        std::fs::read_to_string(dest.join("servers/wh.yaml")).unwrap();
+    assert!(server.contains("foreign_data_wrapper: postgres_fdw"));
+    assert!(server.contains("dbname: warehouse"));
+    let foreign_table =
+        std::fs::read_to_string(dest.join("tables/test/remote_orders.yaml"))
+            .unwrap();
+    assert!(foreign_table.contains("server: wh"));
+    assert!(foreign_table.contains("schema_name: public"));
+    assert!(foreign_table.contains("comment: Remote orders"));
+    // the user mapping's password option is a secret, redacted by
+    // default (no --include-password-hashes)
+    let mapping =
+        std::fs::read_to_string(dest.join("user_mappings/postgres.yaml"))
+            .unwrap();
+    assert!(mapping.contains("user: remote_app"));
+    assert!(
+        !mapping.contains("password"),
+        "user-mapping password must be redacted by default: {mapping}"
+    );
+
+    let project = project::load(&dest).expect("pulled project must load");
+    let kinds: Vec<&str> =
+        project.inventory.iter().map(|i| i.desc.as_str()).collect();
+    for expected in ["FOREIGN DATA WRAPPER", "SERVER", "USER MAPPING", "TABLE"]
+    {
+        assert!(kinds.contains(&expected), "missing {expected}: {kinds:?}");
+    }
+}
+
+#[test]
+fn include_password_hashes_keeps_user_mapping_password() {
+    let dir = tempfile::tempdir().unwrap();
+    let archive = dir.path().join("foreign.dump");
+    common::foreign_archive(&archive);
+    let dest = dir.path().join("project");
+
+    pull::pull(&pull_args_with(
+        &archive,
+        &dest,
+        &["--gitkeep", "--include-password-hashes"],
+    ))
+    .expect("pull failed");
+
+    let mapping =
+        std::fs::read_to_string(dest.join("user_mappings/postgres.yaml"))
+            .unwrap();
+    assert!(
+        mapping.contains("password: sup3rsecret"),
+        "--include-password-hashes must retain the password: {mapping}"
+    );
+}
+
+#[test]
 fn include_mode_headers_prefixes_generated_files() {
     let dir = tempfile::tempdir().unwrap();
     let archive = dir.path().join("fixtures.dump");
