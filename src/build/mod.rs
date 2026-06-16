@@ -1038,7 +1038,7 @@ impl Builder {
         }
         create.push("FOREIGN DATA WRAPPER".into());
         create.push(d.foreign_data_wrapper.clone());
-        if let Some(options) = &d.options {
+        if let Some(options) = d.options.as_ref().filter(|o| !o.is_empty()) {
             create.push(format!("OPTIONS ({})", render_options(options)));
         }
         let drop = vec!["DROP SERVER IF EXISTS".into(), self.item_name(item)];
@@ -1194,7 +1194,8 @@ impl Builder {
         create.push(")".into());
         create.push("SERVER".into());
         create.push(quote_ident(server));
-        if let Some(options) = &table.options {
+        if let Some(options) = table.options.as_ref().filter(|o| !o.is_empty())
+        {
             create.push(format!("OPTIONS ({})", render_options(options)));
         }
         let drop =
