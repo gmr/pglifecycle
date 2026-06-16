@@ -55,10 +55,10 @@ pub(crate) fn create_server(
         .first()
         .map(|n| unquote(n.text(src)))
         .ok_or_else(|| String::from("CREATE SERVER without a name"))?;
-    let foreign_data_wrapper = names
-        .get(1)
-        .map(|n| unquote(n.text(src)))
-        .unwrap_or_default();
+    let foreign_data_wrapper =
+        names.get(1).map(|n| unquote(n.text(src))).ok_or_else(|| {
+            String::from("CREATE SERVER without a foreign data wrapper")
+        })?;
     Ok(Statement::CreateServer(Server {
         name,
         foreign_data_wrapper,
@@ -136,7 +136,13 @@ pub(crate) fn create_foreign_table(
         tablespace: None,
         index_tablespace: None,
         // the `name` after SERVER (the only bare `name` child)
-        server: node.child_of_kind("name").map(|n| unquote(n.text(src))),
+        server: Some(
+            node.child_of_kind("name")
+                .map(|n| unquote(n.text(src)))
+                .ok_or_else(|| {
+                    String::from("CREATE FOREIGN TABLE without SERVER")
+                })?,
+        ),
         options: generic_options(node, src),
         comment: None,
     })))
