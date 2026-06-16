@@ -12,7 +12,7 @@ properties:
       "^.*$":
         type: array
         items:
-          pattern: "^(SELECT|INSERT|UPDATE|DELETE|ALL)( WITH GRANT OPTION)?$"
+          pattern: "^(SELECT|INSERT|UPDATE|REFERENCES|ALL)( WITH GRANT OPTION)?$"
   databases:
     type: object
     propertyNames:
@@ -112,7 +112,7 @@ properties:
       "^.*$":
         type: array
         items:
-          pattern: "^(SELECT|INSERT|UPDATE|DELETE|ALL)( WITH GRANT OPTION)?$"
+          pattern: "^(SELECT|INSERT|UPDATE|DELETE|TRUNCATE|REFERENCES|TRIGGER|MAINTAIN|ALL)( WITH GRANT OPTION)?$"
   tablespaces:
     type: object
     propertyNames:

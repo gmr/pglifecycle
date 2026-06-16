@@ -288,12 +288,12 @@ pub struct Pull {
     )]
     pub exclude_extension: Vec<String>,
 
-    /// libpgfmt style for view queries and function bodies: river,
-    /// mozilla, aweber, dbt, gitlab, kickstarter, or mattmc3. Note that
-    /// `deploy` always compares using the default (aweber), so a
+    /// libpgfmt style for view queries and function bodies: pg_dump,
+    /// river, mozilla, aweber, dbt, gitlab, kickstarter, or mattmc3. Note
+    /// that `deploy` always compares using the default (pg_dump), so a
     /// non-default style here makes `deploy` report formatting-only
     /// differences
-    #[arg(long, value_name = "STYLE", default_value = "aweber",
+    #[arg(long, value_name = "STYLE", default_value = "pg_dump",
           value_parser = parse_style)]
     pub style: libpgfmt::style::Style,
 

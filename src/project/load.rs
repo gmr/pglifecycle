@@ -259,40 +259,43 @@ impl Loader {
 
     fn apply_cached_dependencies(&mut self) -> Result<(), String> {
         for dep in &self.cached_dependencies {
-            let item = lookup_item(
+            let Some(item) = lookup_item(
                 &self.project.inventory,
                 dep.desc,
                 dep.namespace.as_deref(),
                 &dep.tag,
-            )
-            .ok_or_else(|| {
-                format!(
-                    "Failed to find {} {}.{} for {} {}.{}",
+            ) else {
+                log::warn!(
+                    "Skipping dependency from {} {}.{} on missing {} {}.{}",
                     dep.desc.as_str(),
                     dep.namespace.as_deref().unwrap_or_default(),
                     dep.tag,
                     dep.parent_desc.as_str(),
                     dep.parent_namespace,
                     dep.parent_tag,
-                )
-            })?;
-            let parent = lookup_item(
+                );
+                continue;
+            };
+            // a dependency may point at an object the project does not
+            // manage (e.g. a foreign key or inheritance parent owned by
+            // an extension); skip the edge rather than failing the load
+            let Some(parent) = lookup_item(
                 &self.project.inventory,
                 dep.parent_desc,
                 Some(&dep.parent_namespace),
                 &dep.parent_tag,
-            )
-            .ok_or_else(|| {
-                format!(
-                    "Failed to find parent {} {}.{} for {} {}.{}",
-                    dep.parent_desc.as_str(),
-                    dep.parent_namespace,
-                    dep.parent_tag,
+            ) else {
+                log::warn!(
+                    "Skipping dependency from {} {}.{} on unmanaged {} {}.{}",
                     dep.desc.as_str(),
                     dep.namespace.as_deref().unwrap_or_default(),
                     dep.tag,
-                )
-            })?;
+                    dep.parent_desc.as_str(),
+                    dep.parent_namespace,
+                    dep.parent_tag,
+                );
+                continue;
+            };
             self.project.inventory[item].dependencies.insert(parent);
         }
         Ok(())

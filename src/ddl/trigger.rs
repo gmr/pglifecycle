@@ -19,16 +19,18 @@ pub(crate) fn create_trigger(
         .child_of_kind("name")
         .map(|n| unquote(n.text(src)))
         .ok_or_else(|| String::from("CREATE TRIGGER without a name"))?;
-    let when = node.child_of_kind("TriggerActionTime").map(|n| {
-        if n.has("kw_before") {
-            "BEFORE"
-        } else if n.has("kw_after") {
-            "AFTER"
-        } else {
-            "INSTEAD OF"
-        }
-        .to_string()
-    });
+    // a plain trigger nests the timing in TriggerActionTime, but a
+    // CONSTRAINT TRIGGER puts the keyword (always AFTER) directly under
+    // the statement, so match on the keyword anywhere in the node
+    let when = if node.has("kw_instead") {
+        Some("INSTEAD OF".to_string())
+    } else if node.has("kw_before") {
+        Some("BEFORE".to_string())
+    } else if node.has("kw_after") {
+        Some("AFTER".to_string())
+    } else {
+        None
+    };
     let events: Vec<String> = node
         .find_all("TriggerOneEvent")
         .iter()
@@ -46,8 +48,31 @@ pub(crate) fn create_trigger(
             }
         })
         .collect();
-    let for_each = node.child_of_kind("TriggerForSpec").map(|n| {
-        if n.has("kw_row") { "ROW" } else { "STATEMENT" }.to_string()
+    // likewise FOR EACH ROW/STATEMENT is nested for a plain trigger but
+    // bare for a CONSTRAINT TRIGGER (which is always FOR EACH ROW)
+    let for_each = if node.has("kw_row") {
+        Some("ROW".to_string())
+    } else if node.has("kw_statement") {
+        Some("STATEMENT".to_string())
+    } else {
+        None
+    };
+    // CONSTRAINT TRIGGER, with optional deferral. Only the non-default
+    // attributes are recorded (NOT DEFERRABLE / INITIALLY IMMEDIATE are
+    // the defaults and pg_dump omits them)
+    let constraint = node.has("kw_constraint").then_some(true);
+    let spec = node.child_of_kind("ConstraintAttributeSpec");
+    let deferrable = spec.and_then(|s| {
+        s.find_all("ConstraintAttributeElem")
+            .iter()
+            .find(|e| e.has("kw_deferrable"))
+            .map(|e| !e.has("kw_not"))
+    });
+    let initially_deferred = spec.and_then(|s| {
+        s.find_all("ConstraintAttributeElem")
+            .iter()
+            .find(|e| e.has("kw_initially"))
+            .map(|e| e.has("kw_deferred"))
     });
     let condition = node
         .child_of_kind("TriggerWhen")
@@ -77,6 +102,10 @@ pub(crate) fn create_trigger(
             when,
             events: (!events.is_empty()).then_some(events),
             for_each,
+            constraint,
+            // omit the defaults (NOT DEFERRABLE / INITIALLY IMMEDIATE)
+            deferrable: deferrable.filter(|&d| d),
+            initially_deferred: initially_deferred.filter(|&d| d),
             condition,
             function: function.map(|f| format!("{f}()")),
             arguments: (!arguments.is_empty()).then_some(arguments),
@@ -116,6 +145,43 @@ mod tests {
         );
         assert_eq!(trigger.for_each, Some("ROW".into()));
         assert_eq!(trigger.function, Some("test.audit_row()".into()));
+    }
+
+    #[test]
+    fn constraint_trigger_captures_when_and_for_each() {
+        // a CONSTRAINT TRIGGER carries the timing/for-each keywords bare
+        // (no TriggerActionTime/TriggerForSpec); they must still be
+        // captured or the trigger fails schema validation
+        let Statement::CreateTrigger { trigger, .. } = parse_one(
+            "CREATE CONSTRAINT TRIGGER emit AFTER INSERT OR UPDATE \
+             ON test.accounts FOR EACH ROW EXECUTE FUNCTION test.emit();",
+        ) else {
+            panic!("expected CreateTrigger")
+        };
+        assert_eq!(trigger.when, Some("AFTER".into()));
+        assert_eq!(trigger.for_each, Some("ROW".into()));
+        assert_eq!(
+            trigger.events,
+            Some(vec!["INSERT".into(), "UPDATE".into()])
+        );
+        assert_eq!(trigger.constraint, Some(true));
+        // non-deferrable by default → omitted
+        assert_eq!(trigger.deferrable, None);
+        assert_eq!(trigger.initially_deferred, None);
+    }
+
+    #[test]
+    fn constraint_trigger_captures_deferral() {
+        let Statement::CreateTrigger { trigger, .. } = parse_one(
+            "CREATE CONSTRAINT TRIGGER emit AFTER INSERT ON test.t \
+             DEFERRABLE INITIALLY DEFERRED FOR EACH ROW \
+             EXECUTE FUNCTION test.emit();",
+        ) else {
+            panic!("expected CreateTrigger")
+        };
+        assert_eq!(trigger.constraint, Some(true));
+        assert_eq!(trigger.deferrable, Some(true));
+        assert_eq!(trigger.initially_deferred, Some(true));
     }
 
     #[test]

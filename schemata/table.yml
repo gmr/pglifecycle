@@ -421,11 +421,12 @@ additionalProperties: false
 required:
   - schema
   - name
-# a table is defined exactly one way, keyed on sql / server / parents:
+# a table is defined exactly one way, keyed on sql / server:
 #   - a raw SQL snippet (exclusive of everything structural)
 #   - a foreign table (columns + server, optional options)
-#   - an inheritance child (parents, optionally overriding columns)
-#   - a plain table (columns, none of the above)
+#   - structurally by columns, inheritance parents, and/or a composite
+#     type (an inheritance child may also override inherited columns, so
+#     columns and parents can coexist); options is foreign-table-only
 oneOf:
   - required: [sql]
     not:
@@ -439,16 +440,12 @@ oneOf:
       anyOf:
         - required: [sql]
         - required: [parents]
-  - required: [parents]
-    not:
+  - not:
       anyOf:
         - required: [sql]
         - required: [server]
         - required: [options]
-  - required: [columns]
-    not:
-      anyOf:
-        - required: [sql]
-        - required: [parents]
-        - required: [server]
-        - required: [options]
+    anyOf:
+      - required: [columns]
+      - required: [parents]
+      - required: [from_type]

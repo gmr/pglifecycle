@@ -25,6 +25,20 @@ properties:
     title: For Each Row or Statement
     enum: [ROW, STATEMENT]
     default: STATEMENT
+  constraint:
+    title: Constraint Trigger
+    description: >
+      Create the trigger as a CONSTRAINT TRIGGER (always AFTER and FOR
+      EACH ROW); it may be deferred to the end of the transaction.
+    type: boolean
+  deferrable:
+    title: Deferrable
+    description: Whether a constraint trigger's firing can be deferred.
+    type: boolean
+  initially_deferred:
+    title: Initially Deferred
+    description: Whether a deferrable constraint trigger defers by default.
+    type: boolean
   condition:
     title: Trigger Condition
     description: >
@@ -60,14 +74,38 @@ additionalProperties: false
 oneOf:
   - required: [sql]
     not:
-      required:
-        - columns
-        - name
-        - table_name
-        - when
-        - for_each
-        - condition
-        - function
-        - arguments
+      anyOf:
+        - required: [name]
+        - required: [when]
+        - required: [events]
+        - required: [for_each]
+        - required: [constraint]
+        - required: [deferrable]
+        - required: [initially_deferred]
+        - required: [condition]
+        - required: [function]
+        - required: [arguments]
   - required: [name, when, events, function]
     not: {required: [sql]}
+allOf:
+  - if:
+      properties: {deferrable: {const: true}}
+      required: [deferrable]
+    then:
+      properties: {constraint: {const: true}}
+      required: [constraint]
+  - if:
+      properties: {initially_deferred: {const: true}}
+      required: [initially_deferred]
+    then:
+      properties:
+        constraint: {const: true}
+        deferrable: {const: true}
+      required: [constraint, deferrable]
+  - if:
+      properties: {constraint: {const: true}}
+      required: [constraint]
+    then:
+      properties:
+        when: {const: AFTER}
+        for_each: {const: ROW}

@@ -21,9 +21,15 @@ pub(crate) fn create_function(
         owner: String::new(),
         sql: None,
         parameters: None,
+        // a plain RETURNS uses func_return; RETURNS TABLE(...) instead
+        // carries a table_func_column_list (no func_return node)
         returns: node
             .child_of_kind("func_return")
-            .map(|n| n.text(src).to_string()),
+            .map(|n| n.text(src).to_string())
+            .or_else(|| {
+                node.child_of_kind("table_func_column_list")
+                    .map(|cols| format!("TABLE({})", cols.text(src)))
+            }),
         language: None,
         transform_types: None,
         window: None,
@@ -131,7 +137,8 @@ fn split_set(text: &str) -> Option<(String, String)> {
         .split_once(" TO ")
         .or_else(|| text.split_once(" to "))
         .or_else(|| text.split_once('='))?;
-    Some((name.trim().to_string(), unstring(value.trim())))
+    // mixed-case GUC names (e.g. "IntervalStyle") are quoted by pg_dump
+    Some((unquote(name.trim()), unstring(value.trim())))
 }
 
 fn parameter(node: &Node, src: &str) -> FunctionParameter {
@@ -164,6 +171,38 @@ mod tests {
         let mut statements = parser.parse(sql).unwrap();
         assert_eq!(statements.len(), 1, "expected one statement");
         statements.remove(0)
+    }
+
+    #[test]
+    fn config_unquotes_mixed_case_guc() {
+        let Statement::CreateFunction(function) = parse_one(
+            "CREATE FUNCTION test.f() RETURNS integer LANGUAGE sql \
+             SET \"IntervalStyle\" TO 'postgres' AS $$ SELECT 1 $$;",
+        ) else {
+            panic!("expected CreateFunction")
+        };
+        let config = function.configuration.unwrap();
+        assert_eq!(
+            config.get("IntervalStyle"),
+            Some(&serde_json::Value::String("postgres".into()))
+        );
+    }
+
+    #[test]
+    fn returns_table_is_captured() {
+        // RETURNS TABLE(...) has no func_return node; the columns must
+        // still land in `returns` or the function fails schema validation
+        let Statement::CreateFunction(function) = parse_one(
+            "CREATE FUNCTION test.report(in_id integer) \
+             RETURNS TABLE(id integer, total bigint) LANGUAGE sql \
+             AS $$ SELECT 1 $$;",
+        ) else {
+            panic!("expected CreateFunction")
+        };
+        assert_eq!(
+            function.returns,
+            Some("TABLE(id integer, total bigint)".into())
+        );
     }
 
     #[test]
