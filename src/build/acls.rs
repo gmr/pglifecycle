@@ -112,7 +112,10 @@ pub(super) fn dump_acls(
                         owner = item_owner;
                     }
                 }
-                None => log::warn!(
+                // common and benign: grants on extension-owned,
+                // foreign, or platform-managed (RDS) objects the project
+                // does not track; the grant is still emitted
+                None => log::debug!(
                     "ACL target {keyword} {target} not found in the project"
                 ),
             }
