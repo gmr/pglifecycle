@@ -407,6 +407,8 @@ properties:
       depend on the foreign data wrapper (e.g. postgres_fdw uses
       schema_name and table_name, file_fdw uses filename and format).
     type: object
+    propertyNames:
+      pattern: ^[A-Za-z_][A-Za-z0-9_]*$
     additionalProperties: true
   comment:
     title: Comment
@@ -433,6 +435,7 @@ oneOf:
       anyOf:
         - required: [columns]
         - required: [parents]
+        - required: [like_table]
         - required: [server]
         - required: [options]
   - required: [columns, server]
@@ -440,6 +443,7 @@ oneOf:
       anyOf:
         - required: [sql]
         - required: [parents]
+        - required: [like_table]
   - not:
       anyOf:
         - required: [sql]
@@ -449,3 +453,4 @@ oneOf:
       - required: [columns]
       - required: [parents]
       - required: [from_type]
+      - required: [like_table]
