@@ -16,8 +16,7 @@ fn main() -> ExitCode {
         args.action.name()
     );
     let result = match &args.action {
-        cli::Action::Build(args) => project::load(&args.project)
-            .and_then(|p| build::build(&p, &args.destination)),
+        cli::Action::Build(args) => run_build(args),
         cli::Action::Create(create) => skeleton::create(create),
         cli::Action::Deploy(args) => deploy::deploy(args),
         cli::Action::Pull(args) => pull::pull(args),
@@ -29,6 +28,29 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Load the project and write the archive, framing the work with an
+/// up-front banner and a closing summary on stdout (matching `pull`).
+/// The banner prints before the load so it precedes any warnings the
+/// load emits; it names the project path rather than the project's
+/// declared name, which is not known until the load completes.
+fn run_build(args: &cli::Build) -> Result<(), String> {
+    let started = std::time::Instant::now();
+    println!(
+        "pglifecycle v{} Building {} → {}",
+        env!("CARGO_PKG_VERSION"),
+        args.project.display(),
+        args.destination.display(),
+    );
+    let project = project::load(&args.project)?;
+    build::build(&project, &args.destination)?;
+    println!(
+        "\nBuilt {} in {:.2?}",
+        args.destination.display(),
+        started.elapsed(),
+    );
+    Ok(())
 }
 
 fn configure_logging(args: &cli::Cli) {
