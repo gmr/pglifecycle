@@ -157,6 +157,8 @@ fn table(repo: &Table, db: &Table) -> Resolution {
         || repo.storage_parameters != db.storage_parameters
         || repo.tablespace != db.tablespace
         || repo.index_tablespace != db.index_tablespace
+        || repo.server != db.server
+        || repo.options != db.options
     {
         return Resolution::Replace;
     }
