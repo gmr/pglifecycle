@@ -17,7 +17,7 @@ use crate::models::{
     ForeignDataWrapper, ForeignKey, Index, Schema, Sequence, Server, Table,
     Trigger, Type, UserMapping, View, ViewColumn,
 };
-use crate::utils::{postgres_value, quote_ident};
+use crate::utils::{postgres_value, quote_ident, user_mapping_subject};
 
 /// One reconciliation statement
 pub(crate) struct Alter {
@@ -768,7 +768,7 @@ fn server(repo: &Server, db: &Server) -> Resolution {
 /// distinct database object, so a mapping the repo adds is created, one
 /// it drops is dropped, and a shared one's OPTIONS are altered in place.
 fn user_mapping(repo: &UserMapping, db: &UserMapping) -> Resolution {
-    let user = quote_ident(&repo.name);
+    let user = user_mapping_subject(&repo.name);
     let mut alters = Vec::new();
     for server in &repo.servers {
         let name = quote_ident(&server.name);
@@ -1634,6 +1634,27 @@ mod tests {
             ]
         );
         assert!(alters.iter().all(|a| !a.destructive));
+    }
+
+    #[test]
+    fn user_mapping_public_subject_is_unquoted() {
+        let db = parse_user_mapping(serde_json::json!({
+            "name": "PUBLIC",
+            "servers": [{"name": "gone", "options": {"user": "x"}}],
+        }));
+        let repo = parse_user_mapping(serde_json::json!({
+            "name": "PUBLIC",
+            "servers": [{"name": "fresh", "options": {"user": "y"}}],
+        }));
+        let alters = statements(user_mapping(&repo, &db));
+        assert_eq!(
+            sql(&alters),
+            vec![
+                "CREATE USER MAPPING FOR PUBLIC SERVER fresh OPTIONS \
+                 (user 'y');\n",
+                "DROP USER MAPPING IF EXISTS FOR PUBLIC SERVER gone;\n",
+            ]
+        );
     }
 
     #[test]
