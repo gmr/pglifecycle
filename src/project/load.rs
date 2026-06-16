@@ -266,7 +266,7 @@ impl Loader {
                 &dep.tag,
             ) else {
                 log::warn!(
-                    "Skipping dependency on missing {} {}.{} from {} {}.{}",
+                    "Skipping dependency from {} {}.{} on missing {} {}.{}",
                     dep.desc.as_str(),
                     dep.namespace.as_deref().unwrap_or_default(),
                     dep.tag,

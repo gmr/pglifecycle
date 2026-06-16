@@ -9,6 +9,7 @@ use crate::models::{
     CheckConstraint, Column, ColumnGenerated, ConstraintColumns, ForeignKey,
     ForeignKeyReference, Index, IndexColumn, Table,
 };
+use crate::utils::quote_ident;
 
 /// CREATE TABLE → Table (columns + inline constraints)
 pub(crate) fn create_table(
@@ -65,8 +66,12 @@ pub(crate) fn create_table(
             .iter()
             .filter_map(|n| qualified_name(n, src).ok())
             .map(|q| match q.schema {
-                Some(schema) => format!("{schema}.{}", q.name),
-                None => q.name,
+                Some(schema) => format!(
+                    "{}.{}",
+                    quote_ident(&schema),
+                    quote_ident(&q.name)
+                ),
+                None => quote_ident(&q.name),
             })
             .collect();
         if !parents.is_empty() {

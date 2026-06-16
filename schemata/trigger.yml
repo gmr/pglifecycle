@@ -74,17 +74,38 @@ additionalProperties: false
 oneOf:
   - required: [sql]
     not:
-      required:
-        - columns
-        - name
-        - table_name
-        - when
-        - for_each
-        - constraint
-        - deferrable
-        - initially_deferred
-        - condition
-        - function
-        - arguments
+      anyOf:
+        - required: [name]
+        - required: [when]
+        - required: [events]
+        - required: [for_each]
+        - required: [constraint]
+        - required: [deferrable]
+        - required: [initially_deferred]
+        - required: [condition]
+        - required: [function]
+        - required: [arguments]
   - required: [name, when, events, function]
     not: {required: [sql]}
+allOf:
+  - if:
+      properties: {deferrable: {const: true}}
+      required: [deferrable]
+    then:
+      properties: {constraint: {const: true}}
+      required: [constraint]
+  - if:
+      properties: {initially_deferred: {const: true}}
+      required: [initially_deferred]
+    then:
+      properties:
+        constraint: {const: true}
+        deferrable: {const: true}
+      required: [constraint, deferrable]
+  - if:
+      properties: {constraint: {const: true}}
+      required: [constraint]
+    then:
+      properties:
+        when: {const: AFTER}
+        for_each: {const: ROW}

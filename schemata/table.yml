@@ -443,3 +443,4 @@ oneOf:
     anyOf:
       - required: [columns]
       - required: [parents]
+      - required: [from_type]
