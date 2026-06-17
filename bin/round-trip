@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Phase 3 round-trip gate (PLAN.md):
+# Round-trip gate:
 #
 #   fixtures/schema.sql -> PostgreSQL -> pg_dump -Fc -> pull ->
 #   load + validate -> build -> pg_restore -> pg_dump --schema-only

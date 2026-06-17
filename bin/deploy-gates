@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Phase 6 deploy gates (PLAN.md):
+# Deploy gates:
 #
 #   1. Equivalence — deploy --apply against an empty database yields the
 #      same schema as build + pg_restore (schema-only dumps match).
