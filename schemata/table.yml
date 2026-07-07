@@ -359,7 +359,7 @@ properties:
               - for_values_when
         - required:
             - for_values_from
-            - for_vlaues_to
+            - for_values_to
           not:
             required:
               - default
