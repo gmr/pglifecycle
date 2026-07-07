@@ -42,6 +42,15 @@ pub enum Statement {
         name: Option<String>,
         constraint: TableConstraint,
     },
+    /// ALTER TABLE ... ALTER COLUMN ... SET DEFAULT — pg_dump emits
+    /// column defaults this way (e.g. `nextval(...)` for SERIAL) rather
+    /// than inline on the CREATE TABLE column; folded onto the matching
+    /// column of the already-ingested table during pull assembly
+    SetColumnDefault {
+        table: QualifiedName,
+        column: String,
+        default: serde_json::Value,
+    },
     CreateSchema(models::Schema),
     CreateDomain(models::Domain),
     CreateType(Box<models::Type>),

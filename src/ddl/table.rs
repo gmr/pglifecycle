@@ -336,18 +336,29 @@ pub(crate) fn alter_table(
     let table = qualified_name(&table, src)?;
     let mut statements = Vec::new();
     for cmd in node.find_all("alter_table_cmd") {
-        if !cmd.has("kw_add") {
-            continue;
+        if cmd.has("kw_add") {
+            let Some(constraint) = cmd.find("TableConstraint") else {
+                continue;
+            };
+            let (name, parsed) = table_constraint(&constraint, src)?;
+            statements.push(Statement::AddConstraint {
+                table: table.clone(),
+                name,
+                constraint: parsed,
+            });
+        } else if let Some(default) = cmd.child_of_kind("alter_column_default")
+            && let Some(expr) = default.child_of_kind("a_expr")
+        {
+            let column = cmd
+                .child_of_kind("ColId")
+                .map(|n| unquote(n.text(src)))
+                .unwrap_or_default();
+            statements.push(Statement::SetColumnDefault {
+                table: table.clone(),
+                column,
+                default: Value::String(expr.text(src).to_string()),
+            });
         }
-        let Some(constraint) = cmd.find("TableConstraint") else {
-            continue;
-        };
-        let (name, parsed) = table_constraint(&constraint, src)?;
-        statements.push(Statement::AddConstraint {
-            table: table.clone(),
-            name,
-            constraint: parsed,
-        });
     }
     if statements.is_empty() {
         statements.push(Statement::Unsupported(format!(
@@ -952,6 +963,25 @@ mod tests {
         };
         assert_eq!(name, Some("positive".into()));
         assert_eq!(constraint, TableConstraint::Check("value > 0".into()));
+    }
+
+    #[test]
+    fn parses_alter_table_set_column_default() {
+        let statement = parse_one(
+            "ALTER TABLE ONLY test.t ALTER COLUMN id SET DEFAULT \
+             nextval('test.t_id_seq'::regclass);",
+        );
+        let Statement::SetColumnDefault {
+            table,
+            column,
+            default,
+        } = statement
+        else {
+            panic!("expected SetColumnDefault, got {statement:?}")
+        };
+        assert_eq!(table.to_string(), "test.t");
+        assert_eq!(column, "id");
+        assert_eq!(default, json!("nextval('test.t_id_seq'::regclass)"));
     }
 
     #[test]

@@ -396,6 +396,10 @@ pub struct Assembly {
     /// PARTITION OF children whose parent table had not yet been
     /// ingested, replayed after the entry loop completes
     deferred_partitions: Vec<(QualifiedName, models::TablePartition)>,
+    /// ALTER TABLE ... ALTER COLUMN ... SET DEFAULT statements whose
+    /// table had not yet been ingested, replayed after the entry loop
+    /// completes
+    deferred_defaults: Vec<(QualifiedName, String, Value)>,
     /// (schema, name) -> index into `tables`, kept in sync as tables
     /// are ingested so index/constraint/trigger/comment merges are
     /// O(1) instead of a linear scan per lookup
@@ -513,6 +517,7 @@ impl Assembly {
                 | OT::Constraint
                 | OT::FkConstraint
                 | OT::CheckConstraint
+                | OT::Default
                 | OT::Trigger
                 | OT::ForeignTable
                 | OT::ForeignDataWrapper
@@ -553,6 +558,7 @@ impl Assembly {
         }
         self.apply_deferred_indexes();
         self.apply_deferred_partitions();
+        self.apply_deferred_defaults();
         task.finish();
         Ok(())
     }
@@ -583,6 +589,22 @@ impl Assembly {
                     table.partitions.get_or_insert_default().push(partition);
                 }
                 None => log::warn!("Partition of unknown table {parent}"),
+            }
+        }
+    }
+
+    /// Attach column defaults (`ALTER TABLE ... ALTER COLUMN ... SET
+    /// DEFAULT`) whose table was not yet ingested when the statement
+    /// was seen; warn for any that remain unresolved
+    fn apply_deferred_defaults(&mut self) {
+        for (table, column, default) in
+            std::mem::take(&mut self.deferred_defaults)
+        {
+            match self.find_table(&table) {
+                Some(t) => set_column_default(t, &column, default),
+                None => {
+                    log::warn!("Column default on unknown table {table}");
+                }
             }
         }
     }
@@ -736,6 +758,16 @@ impl Assembly {
             } => match self.find_table(&table) {
                 Some(table) => ddl::apply_constraint(table, name, constraint),
                 None => log::warn!("Constraint on unknown table {table}"),
+            },
+            Statement::SetColumnDefault {
+                table,
+                column,
+                default,
+            } => match self.find_table(&table) {
+                Some(t) => set_column_default(t, &column, default),
+                None => {
+                    self.deferred_defaults.push((table, column, default));
+                }
             },
             Statement::CreateTrigger { table, trigger } => {
                 match self.find_table(&table) {
@@ -1297,6 +1329,29 @@ fn cancel_revokes(statements: Vec<Statement>) -> Vec<Statement> {
 }
 
 /// The quoted value from a `SET name = 'value';` entry definition
+/// Set a table column's default expression, warning if the column
+/// itself is not found (the table exists but not the column — should
+/// not happen for well-formed pg_dump output, but is not fatal)
+fn set_column_default(
+    table: &mut models::Table,
+    column: &str,
+    default: Value,
+) {
+    match table
+        .columns
+        .iter_mut()
+        .flatten()
+        .find(|c| c.name == column)
+    {
+        Some(c) => c.default = Some(default),
+        None => log::warn!(
+            "Default on unknown column {column} of table {}.{}",
+            table.schema,
+            table.name
+        ),
+    }
+}
+
 fn set_value(defn: &str) -> Option<String> {
     let start = defn.find('\'')? + 1;
     let end = defn.rfind('\'')?;
@@ -1331,6 +1386,7 @@ fn extension(entry: &libpgdump::Entry) -> models::Extension {
 #[cfg(test)]
 mod tests {
     use libpgdump::ObjectType as OT;
+    use serde_json::json;
 
     use super::*;
 
@@ -1606,6 +1662,109 @@ mod tests {
         assert_eq!(
             trigger.comment.as_deref(),
             Some("keeps last_modified_at fresh")
+        );
+    }
+
+    #[test]
+    fn set_default_attaches_to_existing_column() {
+        let mut dump = libpgdump::new("fixtures", "UTF8", "18.0").unwrap();
+        add(&mut dump, OT::Schema, "", "test", "CREATE SCHEMA test;");
+        add(
+            &mut dump,
+            OT::Sequence,
+            "test",
+            "t_id_seq",
+            "CREATE SEQUENCE test.t_id_seq START WITH 1 INCREMENT BY 1 \
+             CACHE 1;",
+        );
+        add(
+            &mut dump,
+            OT::Table,
+            "test",
+            "t",
+            "CREATE TABLE test.t (id bigint NOT NULL);",
+        );
+        add(
+            &mut dump,
+            OT::Default,
+            "test",
+            "t id",
+            "ALTER TABLE ONLY test.t ALTER COLUMN id SET DEFAULT \
+             nextval('test.t_id_seq'::regclass);",
+        );
+        let mut assembly = Assembly::default();
+        assembly.ingest(&dump).unwrap();
+        let table = assembly
+            .tables
+            .iter()
+            .find(|t| t.name == "t")
+            .expect("t table");
+        let column = table
+            .columns
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|c| c.name == "id")
+            .expect("id column");
+        assert_eq!(
+            column.default,
+            Some(json!("nextval('test.t_id_seq'::regclass)"))
+        );
+    }
+
+    #[test]
+    fn deferred_default_attaches_after_table_is_ingested() {
+        // exercise the deferred-default retry path directly: the SET
+        // DEFAULT statement arrives before its table has been ingested
+        let mut assembly = Assembly::default();
+        assembly.deferred_defaults.push((
+            QualifiedName {
+                schema: Some("test".into()),
+                name: "t".into(),
+            },
+            "id".into(),
+            json!("nextval('test.t_id_seq'::regclass)"),
+        ));
+        assembly.tables.push(models::Table {
+            name: "t".into(),
+            schema: "test".into(),
+            owner: String::new(),
+            sql: None,
+            unlogged: None,
+            from_type: None,
+            parents: None,
+            like_table: None,
+            columns: Some(vec![models::Column {
+                name: "id".into(),
+                data_type: "bigint".into(),
+                nullable: Some(false),
+                default: None,
+                collation: None,
+                check_constraint: None,
+                generated: None,
+                comment: None,
+            }]),
+            indexes: None,
+            primary_key: None,
+            check_constraints: None,
+            unique_constraints: None,
+            foreign_keys: None,
+            triggers: None,
+            partition: None,
+            partitions: None,
+            access_method: None,
+            storage_parameters: None,
+            tablespace: None,
+            index_tablespace: None,
+            server: None,
+            options: None,
+            comment: None,
+        });
+        assembly.table_index.insert(("test".into(), "t".into()), 0);
+        assembly.apply_deferred_defaults();
+        assert_eq!(
+            assembly.tables[0].columns.as_ref().unwrap()[0].default,
+            Some(json!("nextval('test.t_id_seq'::regclass)"))
         );
     }
 
