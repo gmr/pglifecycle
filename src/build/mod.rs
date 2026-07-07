@@ -204,6 +204,23 @@ impl Builder {
         drop_stmt: Vec<String>,
         no_owner: bool,
     ) -> Result<(), String> {
+        self.add_item_with_comment_target(
+            item, defn, drop_stmt, no_owner, None,
+        )
+    }
+
+    /// Like [`add_item`], but lets the caller supply the exact object
+    /// reference (e.g. with an `(argtypes)` signature) used in the
+    /// item's `COMMENT ON` statement, for object types whose comment
+    /// target isn't just `namespace.tag`.
+    fn add_item_with_comment_target(
+        &mut self,
+        item: &Item,
+        defn: Vec<String>,
+        drop_stmt: Vec<String>,
+        no_owner: bool,
+        comment_target: Option<String>,
+    ) -> Result<(), String> {
         let namespace =
             item.definition.schema().unwrap_or_default().to_string();
         let tag = item.definition.name();
@@ -232,12 +249,17 @@ impl Builder {
                 &owner,
                 dump_id,
                 comment,
+                comment_target,
             )?;
         }
         Ok(())
     }
 
-    /// Add a COMMENT ON entry tied to its parent (ports _add_comment)
+    /// Add a COMMENT ON entry tied to its parent (ports _add_comment).
+    /// `target`, when given, is used verbatim as the object reference
+    /// (already fully quoted/qualified); otherwise it is built from
+    /// `namespace` and `tag`.
+    #[allow(clippy::too_many_arguments)]
     fn add_comment(
         &mut self,
         desc: &str,
@@ -246,16 +268,27 @@ impl Builder {
         owner: &str,
         parent_dump_id: i32,
         comment: &str,
+        target: Option<String>,
     ) -> Result<(), String> {
         // extensions record the schema they install into as their
-        // namespace, but COMMENT ON EXTENSION takes an unqualified name
-        let name = if desc == "EXTENSION" {
-            quote_ident(tag)
-        } else if namespace.is_empty() {
-            tag.to_string()
-        } else {
-            format!("{namespace}.{tag}")
-        };
+        // namespace, but COMMENT ON EXTENSION takes an unqualified name.
+        // FUNCTION tags already carry their own (argtypes) signature,
+        // so they pass through unquoted rather than as a plain ident.
+        let name = target.unwrap_or_else(|| {
+            if desc == "EXTENSION" {
+                quote_ident(tag)
+            } else if desc == "FUNCTION" {
+                if namespace.is_empty() {
+                    tag.to_string()
+                } else {
+                    format!("{}.{}", quote_ident(namespace), tag)
+                }
+            } else if namespace.is_empty() {
+                quote_ident(tag)
+            } else {
+                format!("{}.{}", quote_ident(namespace), quote_ident(tag))
+            }
+        });
         let defn = vec![
             String::from("COMMENT"),
             String::from("ON"),
@@ -372,12 +405,21 @@ impl Builder {
             options.push("HYPOTHETICAL".into());
         }
         create.push(format!("({})", options.join(", ")));
+        let signature = format!("({})", args.join(", "));
         let drop = vec![
             "DROP AGGREGATE IF EXISTS".into(),
             self.item_name(item),
-            format!("({})", args.join(", ")),
+            signature.clone(),
         ];
-        self.add_item(item, create, drop, false)
+        // COMMENT ON AGGREGATE needs the argument signature appended
+        let comment_target = format!("{} {signature}", self.item_name(item));
+        self.add_item_with_comment_target(
+            item,
+            create,
+            drop,
+            false,
+            Some(comment_target),
+        )
     }
 
     fn dump_cast(&mut self, item: &Item) -> Result<(), String> {
@@ -407,8 +449,14 @@ impl Builder {
         if d.implicit == Some(true) {
             create.push("AS IMPLICIT".into());
         }
-        let drop = vec!["DROP CAST IF EXISTS".into(), name];
-        self.add_item(item, create, drop, false)
+        let drop = vec!["DROP CAST IF EXISTS".into(), name.clone()];
+        self.add_item_with_comment_target(
+            item,
+            create,
+            drop,
+            false,
+            Some(name),
+        )
     }
 
     fn dump_collation(&mut self, item: &Item) -> Result<(), String> {
@@ -857,16 +905,25 @@ impl Builder {
             options.push("MERGES".into());
         }
         create.push(format!("({})", options.join(", ")));
+        let signature = format!(
+            "({}, {})",
+            d.left_arg.as_deref().unwrap_or("NONE"),
+            d.right_arg.as_deref().unwrap_or("NONE")
+        );
         let drop = vec![
             "DROP OPERATOR IF EXISTS".into(),
-            name,
-            format!(
-                "({}, {})",
-                d.left_arg.as_deref().unwrap_or("NONE"),
-                d.right_arg.as_deref().unwrap_or("NONE")
-            ),
+            name.clone(),
+            signature.clone(),
         ];
-        self.add_item(item, create, drop, false)
+        // COMMENT ON OPERATOR needs the argument signature appended
+        let comment_target = format!("{name} {signature}");
+        self.add_item_with_comment_target(
+            item,
+            create,
+            drop,
+            false,
+            Some(comment_target),
+        )
     }
 
     fn dump_publication(&mut self, item: &Item) -> Result<(), String> {
@@ -1164,6 +1221,26 @@ impl Builder {
                 vec!["DROP TABLE IF EXISTS".into(), self.item_name(item)];
             self.add_item(item, create, drop, false)?;
         }
+        let dump_id = self.dump_id_map[&item.id];
+        for column in d.columns.as_deref().unwrap_or_default() {
+            if let Some(comment) = &column.comment {
+                let target = format!(
+                    "{}.{}.{}",
+                    quote_ident(&d.schema),
+                    quote_ident(&d.name),
+                    quote_ident(&column.name)
+                );
+                self.add_comment(
+                    "COLUMN",
+                    &d.schema,
+                    &format!("{}.{}", d.name, column.name),
+                    &d.owner,
+                    dump_id,
+                    comment,
+                    Some(target),
+                )?;
+            }
+        }
         for index in d.indexes.as_deref().unwrap_or_default() {
             self.dump_index(index, item, &d.schema, &d.owner)?;
         }
@@ -1224,6 +1301,7 @@ impl Builder {
                 &table.owner,
                 dump_id,
                 comment,
+                None,
             )?;
         }
         Ok(())
@@ -1262,6 +1340,7 @@ impl Builder {
                 owner,
                 dump_id,
                 comment,
+                None,
             )?;
         }
         Ok(())
@@ -1287,6 +1366,13 @@ impl Builder {
             None,
         )?;
         if let Some(comment) = &trigger.comment {
+            // a trigger name isn't schema-qualifiable; COMMENT ON
+            // TRIGGER requires the owning table instead
+            let target = format!(
+                "{} ON {}",
+                quote_ident(&name),
+                self.item_name(parent)
+            );
             self.add_comment(
                 "TRIGGER",
                 &table.schema,
@@ -1294,6 +1380,7 @@ impl Builder {
                 &table.owner,
                 dump_id,
                 comment,
+                Some(target),
             )?;
         }
         Ok(())
@@ -1511,6 +1598,7 @@ impl Builder {
                 &self.superuser.clone(),
                 dump_id,
                 comment,
+                None,
             )?;
         }
         Ok(())
@@ -1736,11 +1824,15 @@ impl Builder {
                 columns.iter().map(view_column_name).collect();
             create.push(format!("({})", names.join(", ")));
         }
+        let mut with_options = Vec::new();
         if let Some(check_option) = &d.check_option {
-            create.push(format!("WITH (check_option = {check_option})"));
+            with_options.push(format!("check_option = {check_option}"));
         }
         if d.security_barrier == Some(true) {
-            create.push("WITH (security_barrier = true)".into());
+            with_options.push("security_barrier = true".into());
+        }
+        if !with_options.is_empty() {
+            create.push(format!("WITH ({})", with_options.join(", ")));
         }
         create.push("AS".into());
         create.push(d.query.clone().unwrap_or_default());
@@ -2104,7 +2196,7 @@ mod tests {
 
     use super::*;
     use crate::constants::ObjectType;
-    use crate::models::{CheckConstraint, LikeTable, Table, Trigger};
+    use crate::models::{CheckConstraint, LikeTable, Table, Trigger, View};
 
     fn column(name: &str, data_type: &str, not_null: bool) -> Column {
         Column {
@@ -2322,6 +2414,107 @@ mod tests {
             table_defn(table),
             "CREATE TABLE public.orders ( qty integer NOT NULL, \
              CONSTRAINT ck_positive CHECK (qty > 0) );\n"
+        );
+    }
+
+    /// Render `item` and return every COMMENT entry's definition SQL
+    fn comment_defns(item: &Item) -> Vec<String> {
+        let dump = libpgdump::new("t", "UTF-8", "18.0").unwrap();
+        let mut builder = Builder {
+            dump,
+            dump_id_map: HashMap::new(),
+            superuser: "postgres".into(),
+        };
+        builder.dump_item(item).unwrap();
+        builder
+            .dump
+            .entries()
+            .iter()
+            .filter(|e| e.desc == libpgdump::ObjectType::Comment)
+            .filter_map(|e| e.defn.clone())
+            .collect()
+    }
+
+    #[test]
+    fn renders_trigger_comment_on_owning_table() {
+        let mut table = base_table();
+        table.columns = Some(vec![column("id", "integer", true)]);
+        let mut trigger = constraint_trigger(false);
+        trigger.comment = Some("audits inserts".into());
+        table.triggers = Some(vec![trigger]);
+        let item = Item {
+            id: 1,
+            desc: ObjectType::Table,
+            definition: Definition::Table(table),
+            dependencies: BTreeSet::new(),
+        };
+        assert_eq!(
+            comment_defns(&item),
+            vec![
+                "COMMENT ON TRIGGER emit ON public.orders IS $$audits \
+                 inserts$$;\n;\n"
+            ]
+        );
+    }
+
+    #[test]
+    fn renders_column_comment() {
+        let mut table = base_table();
+        let mut qty = column("qty", "integer", true);
+        qty.comment = Some("quantity ordered".into());
+        table.columns = Some(vec![qty]);
+        let item = Item {
+            id: 1,
+            desc: ObjectType::Table,
+            definition: Definition::Table(table),
+            dependencies: BTreeSet::new(),
+        };
+        assert_eq!(
+            comment_defns(&item),
+            vec![
+                "COMMENT ON COLUMN public.orders.qty IS $$quantity \
+                 ordered$$;\n;\n"
+            ]
+        );
+    }
+
+    #[test]
+    fn renders_view_with_check_option_and_security_barrier() {
+        let item = Item {
+            id: 1,
+            desc: ObjectType::View,
+            definition: Definition::View(View {
+                name: "active_orders".into(),
+                schema: "public".into(),
+                owner: "app".into(),
+                sql: None,
+                recursive: None,
+                columns: None,
+                check_option: Some("local".into()),
+                security_barrier: Some(true),
+                query: Some("SELECT 1".into()),
+                comment: None,
+            }),
+            dependencies: BTreeSet::new(),
+        };
+        let dump = libpgdump::new("t", "UTF-8", "18.0").unwrap();
+        let mut builder = Builder {
+            dump,
+            dump_id_map: HashMap::new(),
+            superuser: "postgres".into(),
+        };
+        builder.dump_item(&item).unwrap();
+        let defn = builder
+            .dump
+            .entries()
+            .iter()
+            .find(|e| e.desc == libpgdump::ObjectType::View)
+            .and_then(|e| e.defn.clone())
+            .expect("a VIEW entry");
+        assert_eq!(
+            defn,
+            "CREATE VIEW public.active_orders WITH (check_option = \
+             local, security_barrier = true) AS SELECT 1;\n"
         );
     }
 }
