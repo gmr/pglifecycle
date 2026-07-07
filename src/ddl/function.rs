@@ -100,46 +100,59 @@ pub(crate) fn create_function(
 }
 
 fn apply_common_option(function: &mut Function, node: &Node, src: &str) {
-    if node.has("kw_immutable") {
+    // every branch but the SET clause is keyed on a keyword that's a
+    // *direct* child of `common_func_opt_item` (one alternative per
+    // grammar production), so a single pass over the direct children
+    // replaces what were repeated recursive `has()` walks of the same
+    // small subtree
+    let mut cursor = node.walk();
+    let kinds: Vec<&str> =
+        node.children(&mut cursor).map(|c| c.kind()).collect();
+    let has = |kind: &str| kinds.contains(&kind);
+
+    if has("kw_immutable") {
         function.immutable = Some(true);
-    } else if node.has("kw_stable") {
+    } else if has("kw_stable") {
         function.stable = Some(true);
-    } else if node.has("kw_volatile") {
+    } else if has("kw_volatile") {
         function.volatile = Some(true);
-    } else if node.has("kw_leakproof") {
-        function.leak_proof = Some(!node.has("kw_not"));
-    } else if node.has("kw_strict") {
+    } else if has("kw_leakproof") {
+        function.leak_proof = Some(!has("kw_not"));
+    } else if has("kw_strict") {
         function.strict = Some(true);
-    } else if node.has("kw_called") {
+    } else if has("kw_called") {
         function.called_on_null_input = Some(true);
-    } else if node.has("kw_null") && node.has("kw_returns") {
+    } else if has("kw_null") && has("kw_returns") {
         function.called_on_null_input = Some(false);
-    } else if node.has("kw_security") {
+    } else if has("kw_security") {
         function.security = Some(
-            if node.has("kw_definer") {
+            if has("kw_definer") {
                 "DEFINER"
             } else {
                 "INVOKER"
             }
             .to_string(),
         );
-    } else if node.has("kw_parallel") {
+    } else if has("kw_parallel") {
         function.parallel = node
             .child_of_kind("ColId")
             .map(|n| n.text(src).to_uppercase());
-    } else if node.has("kw_cost") {
+    } else if has("kw_cost") {
         function.cost = node
-            .find("NumericOnly")
+            .child_of_kind("NumericOnly")
             .and_then(|n| n.text(src).parse().ok());
-    } else if node.has("kw_rows") {
+    } else if has("kw_rows") {
         function.rows = node
-            .find("NumericOnly")
+            .child_of_kind("NumericOnly")
             .and_then(|n| n.text(src).parse().ok());
-    } else if node.has("kw_support") {
+    } else if has("kw_support") {
         function.support = node
             .child_of_kind("any_name")
             .map(|n| n.text(src).to_string());
     } else if node.has("kw_set")
+        // `kw_set`/`set_rest_more` live inside a nested
+        // `FunctionSetResetClause` child, not directly under this
+        // node, so this one genuinely needs the recursive search
         && let Some(config) = node.find("set_rest_more")
     {
         let text = config.text(src);

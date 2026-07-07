@@ -41,7 +41,7 @@ use crate::models::{
 use crate::progress;
 use crate::project::Project;
 use crate::utils::{
-    postgres_value, quote_ident, raw_value, user_mapping_subject,
+    dollar_quote, postgres_value, quote_ident, raw_value, user_mapping_subject,
 };
 
 pub fn build(project: &Project, destination: &Path) -> Result<(), String> {
@@ -295,7 +295,7 @@ impl Builder {
             desc.to_string(),
             name,
             String::from("IS"),
-            format!("$${comment}$$;\n"),
+            format!("{};\n", dollar_quote(comment)),
         ];
         self.add_entry(
             "COMMENT",

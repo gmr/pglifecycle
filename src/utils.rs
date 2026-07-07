@@ -150,7 +150,7 @@ pub fn postgres_value(value: &Value) -> String {
 
 fn render_value(value: &Value, nested: bool) -> String {
     match value {
-        Value::String(s) if s.contains('\'') => format!("$${s}$$"),
+        Value::String(s) if s.contains('\'') => dollar_quote(s),
         Value::String(s) => format!("'{s}'"),
         Value::Array(items) => {
             let inner: Vec<String> =
@@ -164,6 +164,29 @@ fn render_value(value: &Value, nested: bool) -> String {
         Value::Bool(true) => String::from("True"),
         Value::Bool(false) => String::from("False"),
         other => other.to_string(),
+    }
+}
+
+/// Wrap `body` in a dollar-quoted string literal, choosing a tag that
+/// does not occur in `body` (pg_dump style: `$$` when possible,
+/// otherwise `$c1$`, `$c2$`, ... until the tag is collision-free).
+///
+/// Matches pg_dump's `appendStringLiteralDQ`: a delimiter is safe when
+/// its form *without* the trailing `$` is absent from `body`. Checking
+/// only the full delimiter would miss a body ending in the delimiter
+/// prefix (e.g. `foo$`), which merges with the closing `$` and yields
+/// invalid SQL.
+pub(crate) fn dollar_quote(body: &str) -> String {
+    if !body.contains('$') {
+        return format!("$${body}$$");
+    }
+    let mut n = 1;
+    loop {
+        let prefix = format!("$c{n}");
+        if !body.contains(&prefix) {
+            return format!("{prefix}${body}{prefix}$");
+        }
+        n += 1;
     }
 }
 
@@ -223,5 +246,34 @@ mod tests {
         assert_eq!(postgres_value(&json!(5)), "5");
         assert_eq!(postgres_value(&json!(true)), "True");
         assert_eq!(postgres_value(&json!(["a", ["b"]])), "ARRAY['a', ['b']]");
+    }
+
+    #[test]
+    fn dollar_quote_uses_bare_delimiter_when_safe() {
+        assert_eq!(dollar_quote("it's fine"), "$$it's fine$$");
+    }
+
+    #[test]
+    fn dollar_quote_avoids_embedded_dollar_pair() {
+        let body = "has a $$ inside";
+        let quoted = dollar_quote(body);
+        assert_eq!(quoted, format!("$c1${body}$c1$"));
+        assert!(!body.contains("$c1$"));
+    }
+
+    #[test]
+    fn dollar_quote_escalates_past_a_taken_tag() {
+        let body = "has $$ and $c1$ both";
+        let quoted = dollar_quote(body);
+        assert_eq!(quoted, format!("$c2${body}$c2$"));
+    }
+
+    #[test]
+    fn dollar_quote_handles_trailing_dollar_prefix() {
+        // A body ending in `$` would merge with a bare `$$` closing
+        // delimiter, so a tagged delimiter must be chosen instead.
+        let body = "ends with a $";
+        let quoted = dollar_quote(body);
+        assert_eq!(quoted, format!("$c1${body}$c1$"));
     }
 }

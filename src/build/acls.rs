@@ -8,7 +8,7 @@
 //! object's namespace and owner, and a dependency edge on the object's
 //! entry so the topological sort restores ACLs after their objects.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use serde_json::{Map, Value};
 
@@ -81,6 +81,9 @@ pub(super) fn dump_acls(
             collect(&mut objects, acls, &role, false);
         }
     }
+    // build the lookup index once rather than rescanning the whole
+    // inventory for every ACL group below
+    let index = ObjectIndex::build(project);
     for ((section, object), acl) in &objects {
         let (key, keyword, dep_types) = SECTIONS[*section];
         // column grants attach to their table's entry
@@ -105,7 +108,7 @@ pub(super) fn dump_acls(
         let mut owner = builder.superuser.clone();
         let mut dependencies = Vec::new();
         if !dep_types.is_empty() {
-            match find_object(builder, project, dep_types, &target) {
+            match find_object(builder, &index, dep_types, &target) {
                 Some((dump_id, item_owner)) => {
                     dependencies.push(dump_id);
                     if let Some(item_owner) = item_owner {
@@ -248,10 +251,59 @@ pub(crate) fn statement(
     }
 }
 
+/// Lookup indexes over the project inventory, built once per build so
+/// each ACL group's object lookup is O(1) instead of a full inventory
+/// scan (previously repeated per group, and twice over for functions)
+struct ObjectIndex<'a> {
+    /// (desc, schema — `None` for schemaless descs, name) → item; a
+    /// name collision across desc/schema is not possible for valid
+    /// PostgreSQL objects, so keeping the first item seen is equivalent
+    /// to the original full-scan `find`
+    objects: HashMap<(ObjectType, Option<&'a str>, String), &'a Item>,
+    /// (schema, identity signature) → item, for exact function matches
+    functions_by_identity: HashMap<(Option<&'a str>, String), &'a Item>,
+    /// (schema, bare name) → matching items, for the unambiguous
+    /// bare-name fallback
+    functions_by_name: HashMap<(Option<&'a str>, String), Vec<&'a Item>>,
+}
+
+impl<'a> ObjectIndex<'a> {
+    fn build(project: &'a Project) -> Self {
+        let mut objects = HashMap::new();
+        let mut functions_by_identity = HashMap::new();
+        let mut functions_by_name: HashMap<_, Vec<&Item>> = HashMap::new();
+        for item in &project.inventory {
+            let schema = item.definition.schema();
+            let key_schema = if item.desc.is_schemaless() {
+                None
+            } else {
+                schema
+            };
+            objects
+                .entry((item.desc, key_schema, item.definition.name()))
+                .or_insert(item);
+            if let Definition::Function(f) = &item.definition {
+                functions_by_identity
+                    .entry((schema, f.identity()))
+                    .or_insert(item);
+                functions_by_name
+                    .entry((schema, item.definition.name()))
+                    .or_default()
+                    .push(item);
+            }
+        }
+        ObjectIndex {
+            objects,
+            functions_by_identity,
+            functions_by_name,
+        }
+    }
+}
+
 /// Find the granted-on object's entry id and owner
 fn find_object(
     builder: &Builder,
-    project: &Project,
+    index: &ObjectIndex,
     descs: &[ObjectType],
     object: &str,
 ) -> Option<(i32, Option<String>)> {
@@ -260,13 +312,14 @@ fn find_object(
         None => (None, object),
     };
     let item = if descs == [ObjectType::Function] {
-        find_function(project, schema, name)
+        find_function(index, schema, name)
     } else {
-        project.inventory.iter().find(|item| {
-            descs.contains(&item.desc)
-                && item.definition.name() == name
-                && (item.desc.is_schemaless()
-                    || item.definition.schema() == schema)
+        descs.iter().find_map(|desc| {
+            let key_schema = if desc.is_schemaless() { None } else { schema };
+            index
+                .objects
+                .get(&(*desc, key_schema, name.to_string()))
+                .copied()
         })
     }?;
     let dump_id = builder.dump_id_map.get(&item.id)?;
@@ -277,23 +330,18 @@ fn find_object(
 /// signature exactly, falling back to the bare name only when it is
 /// unambiguous, so overloads never bind to the wrong entry
 fn find_function<'a>(
-    project: &'a Project,
+    index: &ObjectIndex<'a>,
     schema: Option<&str>,
     name: &str,
 ) -> Option<&'a Item> {
-    let functions = project.inventory.iter().filter(|item| {
-        item.desc == ObjectType::Function && item.definition.schema() == schema
-    });
-    if let Some(item) = functions.clone().find(|item| {
-        matches!(&item.definition, Definition::Function(f)
-            if f.identity() == name)
-    }) {
-        return Some(item);
+    if let Some(item) =
+        index.functions_by_identity.get(&(schema, name.to_string()))
+    {
+        return Some(*item);
     }
     let base = name.split('(').next().unwrap_or(name);
-    let mut matches = functions.filter(|item| item.definition.name() == base);
-    let item = matches.next()?;
-    matches.next().is_none().then_some(item)
+    let matches = index.functions_by_name.get(&(schema, base.to_string()))?;
+    (matches.len() == 1).then(|| matches[0])
 }
 
 fn section<'a>(acls: &'a Acls, key: &str) -> Option<&'a Map<String, Value>> {

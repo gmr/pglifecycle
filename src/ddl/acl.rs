@@ -6,7 +6,7 @@ use tree_sitter::Node;
 use crate::ddl::object::{string_value, unstring};
 use crate::ddl::{
     Acl, AclTarget, NodeExt, Privilege, RoleDef, Statement, any_name,
-    qualified_name, truncate, unquote, unquote_role,
+    column_elems, qualified_name, truncate, unquote, unquote_role,
 };
 use crate::models::RoleOptions;
 
@@ -185,11 +185,7 @@ fn privileges(node: &Node, src: &str) -> Vec<Privilege> {
         .find_all("privilege")
         .iter()
         .map(|p| {
-            let columns: Vec<String> = p
-                .find_all("columnElem")
-                .iter()
-                .map(|c| unquote(c.text(src)))
-                .collect();
+            let columns: Vec<String> = column_elems(p, src);
             let name = match p.child_of_kind("opt_column_list") {
                 Some(list) => p.text(src)
                     [..list.start_byte() - p.start_byte()]

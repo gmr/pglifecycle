@@ -31,15 +31,19 @@ pub(crate) fn create_trigger(
     } else {
         None
     };
+    // kw_insert/kw_delete/kw_truncate/kw_update (+ optional columnList)
+    // are all direct children of TriggerOneEvent (one per grammar
+    // alternative), so child_of_kind (single-level) replaces the
+    // recursive has() walks
     let events: Vec<String> = node
         .find_all("TriggerOneEvent")
         .iter()
         .map(|event| {
-            if event.has("kw_insert") {
+            if event.child_of_kind("kw_insert").is_some() {
                 "INSERT".to_string()
-            } else if event.has("kw_delete") {
+            } else if event.child_of_kind("kw_delete").is_some() {
                 "DELETE".to_string()
-            } else if event.has("kw_truncate") {
+            } else if event.child_of_kind("kw_truncate").is_some() {
                 "TRUNCATE".to_string()
             } else if let Some(columns) = event.child_of_kind("columnList") {
                 format!("UPDATE OF {}", columns.text(src))
@@ -60,19 +64,27 @@ pub(crate) fn create_trigger(
     // CONSTRAINT TRIGGER, with optional deferral. Only the non-default
     // attributes are recorded (NOT DEFERRABLE / INITIALLY IMMEDIATE are
     // the defaults and pg_dump omits them)
-    let constraint = node.has("kw_constraint").then_some(true);
+    // kw_constraint is always a direct child of CreateTrigStmt (only
+    // the CONSTRAINT TRIGGER production carries it)
+    let constraint = node
+        .child_of_kind("kw_constraint")
+        .is_some()
+        .then_some(true);
     let spec = node.child_of_kind("ConstraintAttributeSpec");
+    // ConstraintAttributeSpec is a left-recursive list, so find_all is
+    // still needed to flatten it; but each ConstraintAttributeElem is a
+    // flat production, so its keywords are direct children
     let deferrable = spec.and_then(|s| {
         s.find_all("ConstraintAttributeElem")
             .iter()
-            .find(|e| e.has("kw_deferrable"))
-            .map(|e| !e.has("kw_not"))
+            .find(|e| e.child_of_kind("kw_deferrable").is_some())
+            .map(|e| e.child_of_kind("kw_not").is_none())
     });
     let initially_deferred = spec.and_then(|s| {
         s.find_all("ConstraintAttributeElem")
             .iter()
-            .find(|e| e.has("kw_initially"))
-            .map(|e| e.has("kw_deferred"))
+            .find(|e| e.child_of_kind("kw_initially").is_some())
+            .map(|e| e.child_of_kind("kw_deferred").is_some())
     });
     let condition = node
         .child_of_kind("TriggerWhen")
@@ -85,7 +97,7 @@ pub(crate) fn create_trigger(
         .find_all("TriggerFuncArg")
         .iter()
         .map(|arg| {
-            if let Some(string) = arg.find("Sconst") {
+            if let Some(string) = arg.child_of_kind("Sconst") {
                 serde_json::Value::String(string_value(&string, src))
             } else if let Ok(number) = arg.text(src).parse::<i64>() {
                 serde_json::Value::Number(number.into())
