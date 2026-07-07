@@ -400,6 +400,11 @@ pub struct Assembly {
     /// table had not yet been ingested, replayed after the entry loop
     /// completes
     deferred_defaults: Vec<(QualifiedName, String, Value)>,
+    /// ALTER TABLE ... ATTACH PARTITION children, replayed after the
+    /// entry loop so both parent and child tables are fully ingested;
+    /// each child is folded into its parent's `partitions` and its
+    /// standalone table is removed
+    attached_partitions: Vec<(QualifiedName, models::TablePartition)>,
     /// (schema, name) -> index into `tables`, kept in sync as tables
     /// are ingested so index/constraint/trigger/comment merges are
     /// O(1) instead of a linear scan per lookup
@@ -518,6 +523,7 @@ impl Assembly {
                 | OT::FkConstraint
                 | OT::CheckConstraint
                 | OT::Default
+                | OT::TableAttach
                 | OT::Trigger
                 | OT::ForeignTable
                 | OT::ForeignDataWrapper
@@ -559,6 +565,7 @@ impl Assembly {
         self.apply_deferred_indexes();
         self.apply_deferred_partitions();
         self.apply_deferred_defaults();
+        self.apply_attached_partitions();
         task.finish();
         Ok(())
     }
@@ -607,6 +614,62 @@ impl Assembly {
                 }
             }
         }
+    }
+
+    /// Fold `ATTACH PARTITION` children into their parent tables: move
+    /// each child's bounds (and any table comment picked up during the
+    /// entry loop) into the parent's `partitions`, then drop the child's
+    /// standalone table so partitions are modeled only under the parent
+    fn apply_attached_partitions(&mut self) {
+        let attaches = std::mem::take(&mut self.attached_partitions);
+        if attaches.is_empty() {
+            return;
+        }
+        let mut removed = std::collections::HashSet::new();
+        let mut folds = Vec::with_capacity(attaches.len());
+        for (parent, mut partition) in attaches {
+            let key = (partition.schema.clone(), partition.name.clone());
+            match self.table_index.get(&key).and_then(|&i| self.tables.get(i))
+            {
+                Some(child) => {
+                    if partition.comment.is_none() {
+                        partition.comment = child.comment.clone();
+                    }
+                    removed.insert(key);
+                }
+                None => log::warn!(
+                    "ATTACH PARTITION of unknown child {}.{}",
+                    partition.schema,
+                    partition.name
+                ),
+            }
+            folds.push((parent, partition));
+        }
+        self.tables.retain(|t| {
+            !removed.contains(&(t.schema.clone(), t.name.clone()))
+        });
+        self.rebuild_table_index();
+        for (parent, partition) in folds {
+            match self.find_table(&parent) {
+                Some(table) => {
+                    table.partitions.get_or_insert_default().push(partition);
+                }
+                None => {
+                    log::warn!("ATTACH PARTITION to unknown table {parent}")
+                }
+            }
+        }
+    }
+
+    /// Rebuild `table_index` from the current `tables` order after a
+    /// removal has shifted positions
+    fn rebuild_table_index(&mut self) {
+        self.table_index = self
+            .tables
+            .iter()
+            .enumerate()
+            .map(|(i, t)| ((t.schema.clone(), t.name.clone()), i))
+            .collect();
     }
 
     /// Parse a `pg_dumpall --roles-only` SQL dump, skipping comments,
@@ -676,6 +739,9 @@ impl Assembly {
                         self.deferred_partitions.push((parent, partition));
                     }
                 }
+            }
+            Statement::AttachPartition { parent, partition } => {
+                self.attached_partitions.push((parent, partition));
             }
             Statement::CreateSequence(mut sequence) => {
                 sequence.owner = owner;
@@ -1868,6 +1934,63 @@ mod tests {
             partitions[0].for_values_from,
             Some(serde_json::json!("2024-01-01"))
         );
+    }
+
+    #[test]
+    fn folds_attached_partition_children() {
+        // pg_dump's real form: the child is a standalone CREATE TABLE
+        // and a separate `TABLE ATTACH` entry carries the bounds. The
+        // child must be folded into the parent and dropped as a
+        // top-level table.
+        let mut dump = libpgdump::new("fixtures", "UTF8", "18.0").unwrap();
+        add(&mut dump, OT::Schema, "", "test", "CREATE SCHEMA test;");
+        add(
+            &mut dump,
+            OT::Table,
+            "test",
+            "events",
+            "CREATE TABLE test.events (id bigint, ts timestamp) \
+             PARTITION BY RANGE (ts);",
+        );
+        add(
+            &mut dump,
+            OT::Table,
+            "test",
+            "events_2024",
+            "CREATE TABLE test.events_2024 (id bigint, ts timestamp);",
+        );
+        add(
+            &mut dump,
+            OT::Comment,
+            "test",
+            "TABLE events_2024",
+            "COMMENT ON TABLE test.events_2024 IS 'The 2024 slice';",
+        );
+        add(
+            &mut dump,
+            OT::TableAttach,
+            "test",
+            "events_2024",
+            "ALTER TABLE ONLY test.events ATTACH PARTITION \
+             test.events_2024 FOR VALUES FROM ('2024-01-01') \
+             TO ('2025-01-01');",
+        );
+        let mut assembly = Assembly::default();
+        assembly.ingest(&dump).unwrap();
+        // the child no longer stands alone; only the parent remains
+        assert_eq!(assembly.tables.len(), 1);
+        let events = &assembly.tables[0];
+        assert_eq!(events.name, "events");
+        let partitions = events.partitions.as_ref().expect("partitions");
+        assert_eq!(partitions.len(), 1);
+        assert_eq!(partitions[0].name, "events_2024");
+        assert_eq!(
+            partitions[0].for_values_from,
+            Some(serde_json::json!("2024-01-01"))
+        );
+        assert_eq!(partitions[0].for_values_to, Some(json!("2025-01-01")));
+        // a comment on the child carries onto the partition
+        assert_eq!(partitions[0].comment.as_deref(), Some("The 2024 slice"));
     }
 
     #[test]

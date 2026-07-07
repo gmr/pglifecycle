@@ -360,6 +360,35 @@ pub(crate) fn alter_table(
             });
         }
     }
+    // ATTACH PARTITION lives in a `partition_cmd` child (sibling of the
+    // `alter_table_cmd`s), carrying the child relation and its bounds
+    for cmd in node.find_all("partition_cmd") {
+        if !cmd.has("kw_attach") {
+            continue;
+        }
+        let child = cmd
+            .child_of_kind("qualified_name")
+            .ok_or_else(|| String::from("ATTACH PARTITION without a child"))?;
+        let child = qualified_name(&child, src)?;
+        let bound =
+            cmd.child_of_kind("PartitionBoundSpec").ok_or_else(|| {
+                String::from("ATTACH PARTITION without a FOR VALUES clause")
+            })?;
+        let bound = partition_bound(&bound, src);
+        statements.push(Statement::AttachPartition {
+            parent: table.clone(),
+            partition: TablePartition {
+                name: child.name,
+                schema: child.schema.unwrap_or_default(),
+                default: bound.default,
+                for_values_in: bound.for_values_in,
+                for_values_from: bound.for_values_from,
+                for_values_to: bound.for_values_to,
+                for_values_with: bound.for_values_with,
+                comment: None,
+            },
+        });
+    }
     if statements.is_empty() {
         statements.push(Statement::Unsupported(format!(
             "ALTER TABLE {table}: {}",
@@ -1033,6 +1062,47 @@ mod tests {
         assert_eq!(partition.name, "events_2024");
         assert_eq!(partition.for_values_from, Some(json!("2024-01-01")));
         assert_eq!(partition.for_values_to, Some(json!("2025-01-01")));
+    }
+
+    #[test]
+    fn parses_attach_partition() {
+        // pg_dump's real form: child is a plain CREATE TABLE, attached
+        // later via ALTER TABLE ONLY parent ATTACH PARTITION ...
+        let statement = parse_one(
+            "ALTER TABLE ONLY test.events ATTACH PARTITION \
+             test.events_2024 FOR VALUES FROM ('2024-01-01') \
+             TO ('2025-01-01');",
+        );
+        let Statement::AttachPartition { parent, partition } = statement
+        else {
+            panic!("expected AttachPartition")
+        };
+        assert_eq!(parent.to_string(), "test.events");
+        assert_eq!(partition.schema, "test");
+        assert_eq!(partition.name, "events_2024");
+        assert_eq!(partition.for_values_from, Some(json!("2024-01-01")));
+        assert_eq!(partition.for_values_to, Some(json!("2025-01-01")));
+    }
+
+    #[test]
+    fn parses_attach_partition_list_and_default() {
+        let Statement::AttachPartition { partition, .. } = parse_one(
+            "ALTER TABLE ONLY test.t ATTACH PARTITION test.p \
+             FOR VALUES IN ('a', 'b');",
+        ) else {
+            panic!("expected AttachPartition")
+        };
+        assert_eq!(
+            partition.for_values_in,
+            Some(vec![json!("a"), json!("b")])
+        );
+
+        let Statement::AttachPartition { partition, .. } = parse_one(
+            "ALTER TABLE ONLY test.t ATTACH PARTITION test.pd DEFAULT;",
+        ) else {
+            panic!("expected AttachPartition")
+        };
+        assert_eq!(partition.default, Some(true));
     }
 
     #[test]

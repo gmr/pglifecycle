@@ -42,6 +42,15 @@ pub enum Statement {
         name: Option<String>,
         constraint: TableConstraint,
     },
+    /// ALTER TABLE ONLY `parent` ATTACH PARTITION `child` FOR VALUES ...
+    /// — pg_dump emits partition children as a plain CREATE TABLE plus
+    /// this separate ATTACH rather than inline `PARTITION OF`; the pull
+    /// assembly folds the already-ingested child into the parent's
+    /// `partitions` and drops the standalone child table
+    AttachPartition {
+        parent: QualifiedName,
+        partition: models::TablePartition,
+    },
     /// ALTER TABLE ... ALTER COLUMN ... SET DEFAULT — pg_dump emits
     /// column defaults this way (e.g. `nextval(...)` for SERIAL) rather
     /// than inline on the CREATE TABLE column; folded onto the matching
