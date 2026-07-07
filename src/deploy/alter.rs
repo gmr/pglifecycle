@@ -17,7 +17,9 @@ use crate::models::{
     ForeignDataWrapper, ForeignKey, Function, Index, Schema, Sequence, Server,
     Table, Trigger, Type, UserMapping, View, ViewColumn,
 };
-use crate::utils::{postgres_value, quote_ident, user_mapping_subject};
+use crate::utils::{
+    dollar_quote, postgres_value, quote_ident, user_mapping_subject,
+};
 
 /// One reconciliation statement
 pub(crate) struct Alter {
@@ -220,13 +222,7 @@ fn table(repo: &Table, db: &Table) -> Resolution {
         return Resolution::Replace;
     }
     indexes(&name, repo, db, &mut alters);
-    if repo.comment != db.comment {
-        alters.push(Alter::new(comment_on(
-            "TABLE",
-            &name,
-            repo.comment.as_deref(),
-        )));
-    }
+    push_comment(&mut alters, "TABLE", &name, &repo.comment, &db.comment);
     Resolution::Statements(alters)
 }
 
@@ -327,13 +323,13 @@ fn alter_column(
             )
         }));
     }
-    if repo.comment != db.comment {
-        alters.push(Alter::new(comment_on(
-            "COLUMN",
-            &format!("{table}.{column}"),
-            repo.comment.as_deref(),
-        )));
-    }
+    push_comment(
+        alters,
+        "COLUMN",
+        &format!("{table}.{column}"),
+        &repo.comment,
+        &db.comment,
+    );
     true
 }
 
@@ -573,13 +569,7 @@ fn sequence(repo: &Sequence, db: &Sequence) -> Resolution {
             clauses.join(" ")
         )));
     }
-    if repo.comment != db.comment {
-        alters.push(Alter::new(comment_on(
-            "SEQUENCE",
-            &name,
-            repo.comment.as_deref(),
-        )));
-    }
+    push_comment(&mut alters, "SEQUENCE", &name, &repo.comment, &db.comment);
     Resolution::Statements(alters)
 }
 
@@ -608,13 +598,7 @@ fn domain(repo: &Domain, db: &Domain) -> Resolution {
             None => format!("ALTER DOMAIN {name} DROP DEFAULT;\n"),
         }));
     }
-    if repo.comment != db.comment {
-        alters.push(Alter::new(comment_on(
-            "DOMAIN",
-            &name,
-            repo.comment.as_deref(),
-        )));
-    }
+    push_comment(&mut alters, "DOMAIN", &name, &repo.comment, &db.comment);
     Resolution::Statements(alters)
 }
 
@@ -642,13 +626,7 @@ fn enum_type(repo: &Type, db: &Type) -> Resolution {
             ))
         })
         .collect();
-    if repo.comment != db.comment {
-        alters.push(Alter::new(comment_on(
-            "TYPE",
-            &name,
-            repo.comment.as_deref(),
-        )));
-    }
+    push_comment(&mut alters, "TYPE", &name, &repo.comment, &db.comment);
     Resolution::Statements(alters)
 }
 
@@ -672,13 +650,7 @@ fn extension(repo: &Extension, db: &Extension) -> Resolution {
             quote_ident(schema)
         )));
     }
-    if repo.comment != db.comment {
-        alters.push(Alter::new(comment_on(
-            "EXTENSION",
-            &name,
-            repo.comment.as_deref(),
-        )));
-    }
+    push_comment(&mut alters, "EXTENSION", &name, &repo.comment, &db.comment);
     Resolution::Statements(alters)
 }
 
@@ -689,13 +661,13 @@ fn schema(repo: &Schema, db: &Schema) -> Resolution {
         return Resolution::Replace;
     }
     let mut alters = Vec::new();
-    if repo.comment != db.comment {
-        alters.push(Alter::new(comment_on(
-            "SCHEMA",
-            &quote_ident(&repo.name),
-            repo.comment.as_deref(),
-        )));
-    }
+    push_comment(
+        &mut alters,
+        "SCHEMA",
+        &quote_ident(&repo.name),
+        &repo.comment,
+        &db.comment,
+    );
     Resolution::Statements(alters)
 }
 
@@ -714,18 +686,19 @@ fn foreign_table(repo: &Table, db: &Table) -> Resolution {
     }
     let name = qualified(&repo.schema, &repo.name);
     let mut alters = Vec::new();
-    if let Some(clause) = options_delta(&repo.options, &db.options) {
-        alters.push(Alter::new(format!(
-            "ALTER FOREIGN TABLE {name} OPTIONS ({clause});\n"
-        )));
-    }
-    if repo.comment != db.comment {
-        alters.push(Alter::new(comment_on(
-            "FOREIGN TABLE",
-            &name,
-            repo.comment.as_deref(),
-        )));
-    }
+    push_options(
+        &mut alters,
+        &format!("ALTER FOREIGN TABLE {name}"),
+        &repo.options,
+        &db.options,
+    );
+    push_comment(
+        &mut alters,
+        "FOREIGN TABLE",
+        &name,
+        &repo.comment,
+        &db.comment,
+    );
     Resolution::Statements(alters)
 }
 
@@ -768,18 +741,19 @@ fn fdw(repo: &ForeignDataWrapper, db: &ForeignDataWrapper) -> Resolution {
             }
         }));
     }
-    if let Some(clause) = options_delta(&repo.options, &db.options) {
-        alters.push(Alter::new(format!(
-            "ALTER FOREIGN DATA WRAPPER {name} OPTIONS ({clause});\n"
-        )));
-    }
-    if repo.comment != db.comment {
-        alters.push(Alter::new(comment_on(
-            "FOREIGN DATA WRAPPER",
-            &name,
-            repo.comment.as_deref(),
-        )));
-    }
+    push_options(
+        &mut alters,
+        &format!("ALTER FOREIGN DATA WRAPPER {name}"),
+        &repo.options,
+        &db.options,
+    );
+    push_comment(
+        &mut alters,
+        "FOREIGN DATA WRAPPER",
+        &name,
+        &repo.comment,
+        &db.comment,
+    );
     Resolution::Statements(alters)
 }
 
@@ -803,18 +777,13 @@ fn server(repo: &Server, db: &Server) -> Resolution {
             string_literal(version)
         )));
     }
-    if let Some(clause) = options_delta(&repo.options, &db.options) {
-        alters.push(Alter::new(format!(
-            "ALTER SERVER {name} OPTIONS ({clause});\n"
-        )));
-    }
-    if repo.comment != db.comment {
-        alters.push(Alter::new(comment_on(
-            "SERVER",
-            &name,
-            repo.comment.as_deref(),
-        )));
-    }
+    push_options(
+        &mut alters,
+        &format!("ALTER SERVER {name}"),
+        &repo.options,
+        &db.options,
+    );
+    push_comment(&mut alters, "SERVER", &name, &repo.comment, &db.comment);
     Resolution::Statements(alters)
 }
 
@@ -841,14 +810,12 @@ fn user_mapping(repo: &UserMapping, db: &UserMapping) -> Resolution {
                 // does not carry one must not drop the live credential
                 let db_options =
                     keep_redacted_password(&server.options, &existing.options);
-                if let Some(clause) =
-                    options_delta(&server.options, &db_options)
-                {
-                    alters.push(Alter::new(format!(
-                        "ALTER USER MAPPING FOR {user} SERVER {name} \
-                         OPTIONS ({clause});\n"
-                    )));
-                }
+                push_options(
+                    &mut alters,
+                    &format!("ALTER USER MAPPING FOR {user} SERVER {name}"),
+                    &server.options,
+                    &db_options,
+                );
             }
         }
     }
@@ -947,9 +914,38 @@ fn comment_delta(
 fn comment_on(desc: &str, name: &str, comment: Option<&str>) -> String {
     match comment {
         Some(comment) => {
-            format!("COMMENT ON {desc} {name} IS $${comment}$$;\n")
+            format!("COMMENT ON {desc} {name} IS {};\n", dollar_quote(comment))
         }
         None => format!("COMMENT ON {desc} {name} IS NULL;\n"),
+    }
+}
+
+/// Push a `COMMENT ON` alter for `desc`/`name` when `repo` and `db`
+/// comments differ. Shared by every resolver whose only comment
+/// handling is this exact comparison.
+fn push_comment(
+    alters: &mut Vec<Alter>,
+    desc: &str,
+    name: &str,
+    repo: &Option<String>,
+    db: &Option<String>,
+) {
+    if repo != db {
+        alters.push(Alter::new(comment_on(desc, name, repo.as_deref())));
+    }
+}
+
+/// Push an `ALTER ... OPTIONS (...)` alter when `repo` and `db`
+/// options differ. `prefix` is the full `ALTER <TYPE> <target>` clause
+/// preceding `OPTIONS`.
+fn push_options(
+    alters: &mut Vec<Alter>,
+    prefix: &str,
+    repo: &Option<Map<String, Value>>,
+    db: &Option<Map<String, Value>>,
+) {
+    if let Some(clause) = options_delta(repo, db) {
+        alters.push(Alter::new(format!("{prefix} OPTIONS ({clause});\n")));
     }
 }
 
