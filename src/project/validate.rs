@@ -126,4 +126,35 @@ mod tests {
         assert!(items.get("properties").is_some());
         assert!(items.get("$package_schema").is_none());
     }
+
+    #[test]
+    fn dependencies_schema_accepts_every_object_type() {
+        // the dependencies schema previously listed only nine plural
+        // keys with additionalProperties: false, so a dependency on an
+        // aggregate/collation/event_trigger/materialized_view/etc. failed
+        // validation even though the loader recognized the key
+        let schema = load_schema("dependencies").unwrap();
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        let widened = json!({
+            "aggregates": ["test.agg"],
+            "collations": ["test.c"],
+            "event_triggers": ["et"],
+            "materialized_views": ["test.mv"],
+            "publications": ["p"],
+            "servers": ["s"],
+            "subscriptions": ["sub"],
+            "user_mappings": ["um"],
+            "users": ["u"],
+        });
+        assert!(
+            validator.iter_errors(&widened).next().is_none(),
+            "widened dependency keys should validate"
+        );
+        // additionalProperties: false must still reject unknown keys
+        let unknown = json!({"bogus_type": ["x"]});
+        assert!(
+            validator.iter_errors(&unknown).next().is_some(),
+            "unknown dependency keys must still be rejected"
+        );
+    }
 }

@@ -4,10 +4,22 @@ $id: https://pglifecycle.readthedocs.io/en/stable/schemata/dependencies.html
 title: Dependencies
 type: object
 properties:
+  aggregates:
+    type: array
+    propertyNames:
+      pattern: ^([A-Za-z0-9_\-]+)\.([A-Za-z0-9_\-]+)$
+  collations:
+    type: array
+    propertyNames:
+      pattern: ^([A-Za-z0-9_\-]+)\.([A-Za-z0-9_\-]+)$
   domains:
     type: array
     propertyNames:
       pattern: ^([A-Za-z0-9_\-]+)\.([A-Za-z0-9_\-]+)$
+  event_triggers:
+    type: array
+    propertyNames:
+      pattern: ^([A-Za-z0-9_\-]+)$
   extensions:
     type: array
     propertyNames:
@@ -24,10 +36,26 @@ properties:
     type: array
     propertyNames:
       pattern: ^([A-Za-z0-9_\-]+)$
+  materialized_views:
+    type: array
+    propertyNames:
+      pattern: ^([A-Za-z0-9_\-]+)\.([A-Za-z0-9_\-]+)$
+  publications:
+    type: array
+    propertyNames:
+      pattern: ^([A-Za-z0-9_\-]+)$
   sequences:
     type: array
     propertyNames:
       pattern: ^([A-Za-z0-9_\-]+)\.([A-Za-z0-9_\-]+)$
+  servers:
+    type: array
+    propertyNames:
+      pattern: ^([A-Za-z0-9_\-]+)$
+  subscriptions:
+    type: array
+    propertyNames:
+      pattern: ^([A-Za-z0-9_\-]+)$
   tables:
     type: array
     propertyNames:
@@ -36,6 +64,14 @@ properties:
     type: array
     propertyNames:
       pattern: ^([A-Za-z0-9_\-]+)\.([A-Za-z0-9_\-]+)$
+  user_mappings:
+    type: array
+    propertyNames:
+      pattern: ^([A-Za-z0-9_\-]+)$
+  users:
+    type: array
+    propertyNames:
+      pattern: ^([A-Za-z0-9_\-]+)$
   views:
     type: array
     propertyNames:
