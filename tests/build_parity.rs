@@ -66,6 +66,17 @@ const DEVIATIONS: &[(&str, &str, &str)] = &[
     // argument signature required to disambiguate it
     ("COMMENT", "test", "(int4 AS timestamp)"),
     ("COMMENT", "test", "==="),
+    // Python emitted CREATE/DROP FUNCTION with a bare, unqualified
+    // name; pg_restore runs with search_path reset to '' and rejects it
+    // ("no schema has been selected to create in"), so the Rust build
+    // schema-qualifies the function reference
+    ("FUNCTION", "test", "disable_alter_domain()"),
+    ("FUNCTION", "test", "test_aggregate(integer, integer)"),
+    (
+        "FUNCTION",
+        "test",
+        "utf8_to_latin1(integer, integer, cstring, internal, integer)",
+    ),
 ];
 
 /// (desc, namespace, tag, required defn fragment) for the corrected
@@ -161,6 +172,24 @@ const CORRECTED: &[(&str, &str, &str, &str)] = &[
         "test",
         "===",
         "COMMENT ON OPERATOR test.=== (box, box) IS",
+    ),
+    (
+        "FUNCTION",
+        "test",
+        "disable_alter_domain()",
+        "CREATE FUNCTION test.disable_alter_domain()",
+    ),
+    (
+        "FUNCTION",
+        "test",
+        "test_aggregate(integer, integer)",
+        "CREATE FUNCTION test.test_aggregate(integer, integer)",
+    ),
+    (
+        "FUNCTION",
+        "test",
+        "utf8_to_latin1(integer, integer, cstring, internal, integer)",
+        "CREATE FUNCTION test.utf8_to_latin1(IN source_encoding_id INTEGER,",
     ),
 ];
 

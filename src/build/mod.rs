@@ -26,6 +26,9 @@
 //!     `CREATE INDEX schema.name`, which PostgreSQL rejects)
 //! 11. Roles with `create: false` (e.g. PUBLIC) emit no entry (Python
 //!     emitted CREATE ROLE anyway)
+//! 12. CREATE/DROP FUNCTION references render schema-qualified (Python
+//!     emitted a bare name, which pg_restore rejects under its reset
+//!     `search_path` with "no schema has been selected to create in")
 
 mod acls;
 
@@ -110,6 +113,7 @@ pub fn assemble(project: &Project) -> Result<BuildOutput, String> {
             entry.dependencies.extend(deps);
         }
     }
+    builder.split_sequence_defaults(project)?;
     let item_ids = builder
         .dump_id_map
         .iter()
@@ -307,6 +311,78 @@ impl Builder {
             &[parent_dump_id],
             None,
         )?;
+        Ok(())
+    }
+
+    /// Emit the `ALTER TABLE ... SET DEFAULT nextval(...)` entries held
+    /// out of their `CREATE TABLE` by [`sequence_backed_default`]. Each
+    /// depends on both its table and the referenced sequence so
+    /// pg_restore orders it after both, breaking the SERIAL dependency
+    /// cycle the way pg_dump's separate `DEFAULT` TOC entries do.
+    fn split_sequence_defaults(
+        &mut self,
+        project: &Project,
+    ) -> Result<(), String> {
+        let mut sequence_ids: HashMap<(String, String), i32> = HashMap::new();
+        for item in &project.inventory {
+            if let Definition::Sequence(s) = &item.definition
+                && let Some(&id) = self.dump_id_map.get(&item.id)
+            {
+                sequence_ids.insert((s.schema.clone(), s.name.clone()), id);
+            }
+        }
+        for item in &project.inventory {
+            let Definition::Table(d) = &item.definition else {
+                continue;
+            };
+            // only the plain-column CREATE TABLE path renders defaults
+            // inline; sql-override, foreign, typed and LIKE tables do not
+            if d.sql.is_some()
+                || d.server.is_some()
+                || d.from_type.is_some()
+                || d.like_table.is_some()
+            {
+                continue;
+            }
+            let Some(&table_id) = self.dump_id_map.get(&item.id) else {
+                continue;
+            };
+            for column in d.columns.as_deref().unwrap_or_default() {
+                let Some(default) = sequence_backed_default(column) else {
+                    continue;
+                };
+                let mut deps = vec![table_id];
+                if let Some(key) = nextval_target(default)
+                    && let Some(&seq_id) = sequence_ids.get(&key)
+                {
+                    deps.push(seq_id);
+                }
+                let table = format!(
+                    "{}.{}",
+                    quote_ident(&d.schema),
+                    quote_ident(&d.name)
+                );
+                let col = quote_ident(&column.name);
+                let defn = vec![format!(
+                    "ALTER TABLE ONLY {table} ALTER COLUMN {col} \
+                     SET DEFAULT {default}"
+                )];
+                let drop = vec![format!(
+                    "ALTER TABLE ONLY {table} ALTER COLUMN {col} \
+                     DROP DEFAULT"
+                )];
+                self.add_entry(
+                    "DEFAULT",
+                    &d.schema,
+                    &format!("{} {}", d.name, column.name),
+                    &d.owner,
+                    &defn,
+                    &drop,
+                    &deps,
+                    None,
+                )?;
+            }
+        }
         Ok(())
     }
 
@@ -710,16 +786,27 @@ impl Builder {
                 (func_name, Some(comment_target))
             }
         };
+        // pg_dump restores with an empty search_path and schema-qualifies
+        // every object name; a bare `CREATE FUNCTION name(...)` fails at
+        // restore with "no schema has been selected to create in". The
+        // COMMENT target is already qualified (via `namespace.tag`, or
+        // `comment_target` for the bare zero-arg case), so only the
+        // CREATE/DROP references need it here.
+        let qualified = if d.schema.is_empty() {
+            func_name.clone()
+        } else {
+            format!("{}.{}", quote_ident(&d.schema), func_name)
+        };
         let mut create = vec![
             "CREATE".into(),
             "FUNCTION".into(),
-            func_name.clone(),
+            qualified.clone(),
             "RETURNS".into(),
             d.returns.clone().unwrap_or_default(),
             "LANGUAGE".into(),
             d.language.clone().unwrap_or_default(),
         ];
-        let drop = vec!["DROP FUNCTION IF EXISTS".into(), func_name.clone()];
+        let drop = vec!["DROP FUNCTION IF EXISTS".into(), qualified.clone()];
         if let Some(transform_types) = &d.transform_types {
             let tts: Vec<String> = transform_types
                 .iter()
@@ -1211,7 +1298,16 @@ impl Builder {
                 create.push("(".into());
                 let mut inner = Vec::new();
                 for column in d.columns.as_deref().unwrap_or_default() {
-                    inner.push(render_table_column(column));
+                    // sequence-backed defaults are split into a separate
+                    // SET DEFAULT entry (see split_sequence_defaults), so
+                    // render the column without its default here
+                    if sequence_backed_default(column).is_some() {
+                        let mut stripped = column.clone();
+                        stripped.default = None;
+                        inner.push(render_table_column(&stripped));
+                    } else {
+                        inner.push(render_table_column(column));
+                    }
                 }
                 push_table_constraints(d, &mut inner);
                 create.push(inner.join(", "));
@@ -2006,6 +2102,31 @@ pub(crate) fn render_default(value: &Value) -> String {
         }
     }
     postgres_value(value)
+}
+
+/// A column default that references a sequence (`nextval(...)`, the
+/// SERIAL form). pg_dump emits these as a separate `ALTER TABLE ... SET
+/// DEFAULT` entry rather than inline on the column, because the sequence
+/// is `OWNED BY` the column: inlining the default would make the table
+/// depend on the sequence while the sequence depends on the table, an
+/// unrestorable cycle.
+fn sequence_backed_default(column: &Column) -> Option<&str> {
+    let default = column.default.as_ref()?.as_str()?;
+    default.contains("nextval(").then_some(default)
+}
+
+/// Parse the `schema.name` a `nextval('schema.name'::regclass)` default
+/// points at, so the split-out DEFAULT entry can depend on that sequence
+fn nextval_target(default: &str) -> Option<(String, String)> {
+    let start = default.find('\'')? + 1;
+    let rest = &default[start..];
+    let end = rest.find('\'')?;
+    let qualified = &rest[..end];
+    let strip = |s: &str| s.trim_matches('"').to_string();
+    match qualified.rsplit_once('.') {
+        Some((schema, name)) => Some((strip(schema), strip(name))),
+        None => Some((String::new(), strip(qualified))),
+    }
 }
 
 pub(crate) fn render_table_column(column: &Column) -> String {
@@ -2910,12 +3031,104 @@ mod tests {
         let (create, drop) = function_entry(&item);
         assert!(
             create.starts_with(
-                "CREATE FUNCTION bare_zero() RETURNS trigger LANGUAGE \
+                "CREATE FUNCTION test.bare_zero() RETURNS trigger LANGUAGE \
                  plpgsql AS $$"
             ),
             "unexpected CREATE: {create}"
         );
-        assert_eq!(drop, "DROP FUNCTION IF EXISTS bare_zero();\n");
+        assert_eq!(drop, "DROP FUNCTION IF EXISTS test.bare_zero();\n");
+    }
+
+    #[test]
+    fn parses_nextval_target() {
+        assert_eq!(
+            nextval_target("nextval('test.widgets_id_seq'::regclass)"),
+            Some(("test".into(), "widgets_id_seq".into()))
+        );
+        assert_eq!(
+            nextval_target("nextval('bare_seq'::regclass)"),
+            Some((String::new(), "bare_seq".into()))
+        );
+        assert_eq!(
+            nextval_target("nextval('\"S\".\"Q\"'::regclass)"),
+            Some(("S".into(), "Q".into()))
+        );
+    }
+
+    #[test]
+    fn splits_sequence_backed_default_into_separate_entry() {
+        use std::path::PathBuf;
+
+        use crate::models::Sequence;
+
+        let mut col = column("id", "integer", true);
+        col.default = Some(json!("nextval('test.widgets_id_seq'::regclass)"));
+        let mut table = base_table("widgets");
+        table.columns = Some(vec![col]);
+        let seq = Sequence {
+            name: "widgets_id_seq".into(),
+            schema: "test".into(),
+            owner: "app".into(),
+            sql: None,
+            data_type: None,
+            increment_by: None,
+            min_value: None,
+            max_value: None,
+            start_with: None,
+            cache: None,
+            cycle: None,
+            owned_by: Some("test.widgets.id".into()),
+            comment: None,
+        };
+        let seq_item = Item {
+            id: 2,
+            desc: ObjectType::Sequence,
+            definition: Definition::Sequence(seq),
+            dependencies: BTreeSet::new(),
+        };
+        let project = Project {
+            name: "t".into(),
+            encoding: "UTF-8".into(),
+            stdstrings: true,
+            superuser: "postgres".into(),
+            default_schema: "public".into(),
+            path: PathBuf::new(),
+            inventory: vec![table_item(1, table), seq_item],
+        };
+        let output = assemble(&project).unwrap();
+        let entries = output.dump.entries();
+        // the CREATE TABLE must not inline the sequence default
+        let table_defn = entries
+            .iter()
+            .find(|e| e.desc == libpgdump::ObjectType::Table)
+            .and_then(|e| e.defn.clone())
+            .expect("a TABLE entry");
+        assert!(
+            !table_defn.contains("DEFAULT"),
+            "table inlined the sequence default: {table_defn}"
+        );
+        // a separate DEFAULT entry carries it, depending on the sequence
+        let default_entry = entries
+            .iter()
+            .find(|e| e.desc == libpgdump::ObjectType::Default)
+            .expect("a DEFAULT entry");
+        let defn = default_entry.defn.clone().unwrap();
+        assert!(
+            defn.contains(
+                "ALTER TABLE ONLY test.widgets ALTER COLUMN id \
+                 SET DEFAULT nextval('test.widgets_id_seq'::regclass)"
+            ),
+            "unexpected DEFAULT defn: {defn}"
+        );
+        let seq_dump_id = entries
+            .iter()
+            .find(|e| e.desc == libpgdump::ObjectType::Sequence)
+            .unwrap()
+            .dump_id;
+        assert!(
+            default_entry.dependencies.contains(&seq_dump_id),
+            "DEFAULT entry should depend on the sequence"
+        );
     }
 
     #[test]
