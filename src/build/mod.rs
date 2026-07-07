@@ -35,8 +35,8 @@ use std::path::Path;
 use serde_json::{Map, Value};
 
 use crate::models::{
-    Column, ConstraintColumns, Definition, Index, Item, RoleOptions,
-    TablePartitionColumn, Trigger, ViewColumn,
+    Column, ConstraintColumns, Definition, Index, Item, RoleOptions, Table,
+    TablePartition, TablePartitionColumn, Trigger, ViewColumn,
 };
 use crate::progress;
 use crate::project::Project;
@@ -1079,47 +1079,55 @@ impl Builder {
             }
             create.push("TABLE".into());
             create.push(self.item_name(item));
-            create.push("(".into());
-            if let Some(like_table) = &d.like_table {
-                create.push("LIKE".into());
-                create.push(like_table.name.clone());
-                for (field, value) in [
-                    ("comments", like_table.include_comments),
-                    ("constraints", like_table.include_constraints),
-                    ("defaults", like_table.include_defaults),
-                    ("generated", like_table.include_generated),
-                    ("identity", like_table.include_identity),
-                    ("indexes", like_table.include_indexes),
-                    ("statistics", like_table.include_statistics),
-                    ("storage", like_table.include_storage),
-                    ("all", like_table.include_all),
-                ] {
-                    if let Some(value) = value {
-                        create.push(
-                            if value { "INCLUDING" } else { "EXCLUDING" }
-                                .into(),
-                        );
-                        create.push(format!("include_{field}"));
-                    }
-                }
-            } else {
+            if let Some(from_type) = &d.from_type {
+                // typed table: columns come from the composite type, so
+                // only per-column constraints (via WITH OPTIONS) and
+                // table constraints are legal here
+                create.push("OF".into());
+                create.push(from_type.clone());
                 let mut inner = Vec::new();
                 for column in d.columns.as_deref().unwrap_or_default() {
-                    inner.push(render_table_column(column));
+                    if let Some(sql) = render_typed_table_column(column) {
+                        inner.push(sql);
+                    }
                 }
-                for constraint in
-                    d.unique_constraints.as_deref().unwrap_or_default()
-                {
-                    inner.push(render_constraint("UNIQUE", constraint));
+                push_table_constraints(d, &mut inner);
+                if !inner.is_empty() {
+                    create.push(format!("({})", inner.join(", ")));
                 }
-                if let Some(primary_key) = &d.primary_key {
-                    inner.push(render_constraint("PRIMARY KEY", primary_key));
+            } else {
+                create.push("(".into());
+                if let Some(like_table) = &d.like_table {
+                    create.push("LIKE".into());
+                    create.push(like_table.name.clone());
+                    for (field, value) in [
+                        ("comments", like_table.include_comments),
+                        ("constraints", like_table.include_constraints),
+                        ("defaults", like_table.include_defaults),
+                        ("generated", like_table.include_generated),
+                        ("identity", like_table.include_identity),
+                        ("indexes", like_table.include_indexes),
+                        ("statistics", like_table.include_statistics),
+                        ("storage", like_table.include_storage),
+                        ("all", like_table.include_all),
+                    ] {
+                        if let Some(value) = value {
+                            create.push(
+                                if value { "INCLUDING" } else { "EXCLUDING" }
+                                    .into(),
+                            );
+                            create.push(format!("include_{field}"));
+                        }
+                    }
+                } else {
+                    let mut inner = Vec::new();
+                    for column in d.columns.as_deref().unwrap_or_default() {
+                        inner.push(render_table_column(column));
+                    }
+                    push_table_constraints(d, &mut inner);
+                    create.push(inner.join(", "));
+                    create.push(")".into());
                 }
-                for fk in d.foreign_keys.as_deref().unwrap_or_default() {
-                    inner.push(render_foreign_key(fk));
-                }
-                create.push(inner.join(", "));
-                create.push(")".into());
             }
             if let Some(parents) = &d.parents {
                 create.push("INHERITS".into());
@@ -1162,6 +1170,56 @@ impl Builder {
         }
         for trigger in d.triggers.as_deref().unwrap_or_default() {
             self.dump_trigger(trigger, item, d)?;
+        }
+        for partition in d.partitions.as_deref().unwrap_or_default() {
+            self.dump_partition(item, d, partition)?;
+        }
+        Ok(())
+    }
+
+    /// A child partition folded into its parent's `partitions` list —
+    /// the child has no columns of its own (they come from the
+    /// parent), so it is emitted as its own archive entry rather than
+    /// through `dump_table`
+    fn dump_partition(
+        &mut self,
+        parent: &Item,
+        table: &Table,
+        partition: &TablePartition,
+    ) -> Result<(), String> {
+        let qualified = format!(
+            "{}.{}",
+            quote_ident(&partition.schema),
+            quote_ident(&partition.name)
+        );
+        let mut create = vec![
+            "CREATE TABLE".into(),
+            qualified.clone(),
+            "PARTITION OF".into(),
+            self.item_name(parent),
+        ];
+        create.push(render_partition_for_values(partition));
+        let drop = vec!["DROP TABLE IF EXISTS".into(), qualified];
+        let parent_dump_id = self.dump_id_map[&parent.id];
+        let dump_id = self.add_entry(
+            "TABLE",
+            &partition.schema,
+            &partition.name,
+            &table.owner,
+            &create,
+            &drop,
+            &[parent_dump_id],
+            None,
+        )?;
+        if let Some(comment) = &partition.comment {
+            self.add_comment(
+                "TABLE",
+                &partition.schema,
+                &partition.name,
+                &table.owner,
+                dump_id,
+                comment,
+            )?;
         }
         Ok(())
     }
@@ -2038,6 +2096,106 @@ pub(crate) fn render_constraint(
     sql.join(" ")
 }
 
+/// UNIQUE / PRIMARY KEY / FOREIGN KEY constraints shared by the plain
+/// and typed (`OF type`) forms of `CREATE TABLE`. `index_tablespace`
+/// selects the tablespace for the index backing a UNIQUE or PRIMARY
+/// KEY constraint; the model holds one table-wide value, so it is
+/// attached to the primary key when there is one, else to every
+/// unique constraint
+fn push_table_constraints(table: &Table, inner: &mut Vec<String>) {
+    for constraint in table.unique_constraints.as_deref().unwrap_or_default() {
+        let mut sql = render_constraint("UNIQUE", constraint);
+        if table.primary_key.is_none()
+            && let Some(tablespace) = &table.index_tablespace
+        {
+            sql.push_str(&format!(" USING INDEX TABLESPACE {tablespace}"));
+        }
+        inner.push(sql);
+    }
+    if let Some(primary_key) = &table.primary_key {
+        let mut sql = render_constraint("PRIMARY KEY", primary_key);
+        if let Some(tablespace) = &table.index_tablespace {
+            sql.push_str(&format!(" USING INDEX TABLESPACE {tablespace}"));
+        }
+        inner.push(sql);
+    }
+    for fk in table.foreign_keys.as_deref().unwrap_or_default() {
+        inner.push(render_foreign_key(fk));
+    }
+}
+
+/// A typed table (`CREATE TABLE ... OF type`) column: the data type
+/// comes from the composite type, so only constraints render, gated
+/// behind `WITH OPTIONS` per the grammar; `None` when the column adds
+/// no constraint (nothing to render)
+fn render_typed_table_column(column: &Column) -> Option<String> {
+    let mut constraints = Vec::new();
+    if let Some(collation) = &column.collation {
+        constraints.push("COLLATE".into());
+        constraints.push(collation.clone());
+    }
+    if column.nullable == Some(false) {
+        constraints.push("NOT NULL".into());
+    }
+    if let Some(check_constraint) = &column.check_constraint {
+        constraints.push("CHECK".into());
+        constraints.push(check_constraint.clone());
+    }
+    if let Some(default) = &column.default {
+        constraints.push("DEFAULT".into());
+        constraints.push(render_default(default));
+    }
+    if constraints.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "{} WITH OPTIONS {}",
+            column.name,
+            constraints.join(" ")
+        ))
+    }
+}
+
+/// The `FOR VALUES ...` (or `DEFAULT`) clause attaching a child
+/// partition to its parent
+fn render_partition_for_values(partition: &TablePartition) -> String {
+    if partition.default == Some(true) {
+        return "DEFAULT".into();
+    }
+    if let Some(values) = &partition.for_values_in {
+        let values: Vec<String> = values.iter().map(postgres_value).collect();
+        return format!("FOR VALUES IN ({})", values.join(", "));
+    }
+    if partition.for_values_from.is_some() || partition.for_values_to.is_some()
+    {
+        let from = partition
+            .for_values_from
+            .as_ref()
+            .map(render_partition_bound)
+            .unwrap_or_else(|| "MINVALUE".into());
+        let to = partition
+            .for_values_to
+            .as_ref()
+            .map(render_partition_bound)
+            .unwrap_or_else(|| "MAXVALUE".into());
+        return format!("FOR VALUES FROM ({from}) TO ({to})");
+    }
+    if let Some(with) = &partition.for_values_with {
+        return format!("FOR VALUES WITH ({with})");
+    }
+    String::new()
+}
+
+/// A single RANGE partition bound: `MINVALUE`/`MAXVALUE` render as
+/// bare keywords, everything else through the normal value quoting
+fn render_partition_bound(value: &Value) -> String {
+    match value.as_str() {
+        Some(s) if s.eq_ignore_ascii_case("MINVALUE") => "MINVALUE".into(),
+        Some(s) if s.eq_ignore_ascii_case("MAXVALUE") => "MAXVALUE".into(),
+        _ => postgres_value(value),
+    }
+}
+
 fn render_partition_column(column: &TablePartitionColumn) -> String {
     match column {
         TablePartitionColumn::Name(name) => name.clone(),
@@ -2225,6 +2383,189 @@ mod tests {
             "CREATE CONSTRAINT TRIGGER emit AFTER INSERT ON test.t \
              DEFERRABLE INITIALLY DEFERRED FOR EACH ROW \
              EXECUTE FUNCTION test.emit()"
+        );
+    }
+
+    fn base_table(name: &str) -> Table {
+        Table {
+            name: name.into(),
+            schema: "test".into(),
+            owner: "app".into(),
+            sql: None,
+            unlogged: None,
+            from_type: None,
+            parents: None,
+            like_table: None,
+            columns: None,
+            indexes: None,
+            primary_key: None,
+            check_constraints: None,
+            unique_constraints: None,
+            foreign_keys: None,
+            triggers: None,
+            partition: None,
+            partitions: None,
+            access_method: None,
+            storage_parameters: None,
+            tablespace: None,
+            index_tablespace: None,
+            server: None,
+            options: None,
+            comment: None,
+        }
+    }
+
+    fn table_item(id: usize, table: Table) -> Item {
+        Item {
+            id,
+            desc: ObjectType::Table,
+            definition: Definition::Table(table),
+            dependencies: BTreeSet::new(),
+        }
+    }
+
+    /// Render `item` through the full builder and return the definition
+    /// SQL of the entry tagged `tag` with the given `desc`
+    fn table_defn(
+        item: &Item,
+        desc: libpgdump::ObjectType,
+        tag: &str,
+    ) -> String {
+        let dump = libpgdump::new("t", "UTF-8", "18.0").unwrap();
+        let mut builder = Builder {
+            dump,
+            dump_id_map: HashMap::new(),
+            superuser: "postgres".into(),
+        };
+        builder.dump_item(item).unwrap();
+        builder
+            .dump
+            .entries()
+            .iter()
+            .find(|e| e.desc == desc && e.tag.as_deref() == Some(tag))
+            .and_then(|e| e.defn.clone())
+            .unwrap_or_else(|| panic!("no {desc:?} entry tagged {tag}"))
+    }
+
+    #[test]
+    fn renders_typed_table() {
+        let mut table = base_table("events");
+        table.from_type = Some("test.event_type".into());
+        let item = table_item(1, table);
+        assert_eq!(
+            table_defn(&item, libpgdump::ObjectType::Table, "events"),
+            "CREATE TABLE test.events OF test.event_type;\n"
+        );
+    }
+
+    #[test]
+    fn renders_typed_table_with_column_constraint_and_primary_key() {
+        let mut table = base_table("events");
+        table.from_type = Some("test.event_type".into());
+        table.columns = Some(vec![column("id", "bigint", true)]);
+        table.primary_key =
+            Some(ConstraintColumns::Columns(vec!["id".into()]));
+        let item = table_item(1, table);
+        assert_eq!(
+            table_defn(&item, libpgdump::ObjectType::Table, "events"),
+            "CREATE TABLE test.events OF test.event_type (id WITH OPTIONS \
+             NOT NULL, PRIMARY KEY (id));\n"
+        );
+    }
+
+    #[test]
+    fn renders_primary_key_index_tablespace() {
+        let mut table = base_table("widgets");
+        table.columns = Some(vec![column("id", "bigint", true)]);
+        table.primary_key =
+            Some(ConstraintColumns::Columns(vec!["id".into()]));
+        table.index_tablespace = Some("fastdisk".into());
+        let item = table_item(1, table);
+        assert_eq!(
+            table_defn(&item, libpgdump::ObjectType::Table, "widgets"),
+            "CREATE TABLE test.widgets ( id bigint NOT NULL, PRIMARY KEY \
+             (id) USING INDEX TABLESPACE fastdisk );\n"
+        );
+    }
+
+    #[test]
+    fn renders_unique_constraint_index_tablespace_without_primary_key() {
+        let mut table = base_table("widgets");
+        table.columns = Some(vec![column("code", "text", false)]);
+        table.unique_constraints =
+            Some(vec![ConstraintColumns::Columns(vec!["code".into()])]);
+        table.index_tablespace = Some("fastdisk".into());
+        let item = table_item(1, table);
+        assert_eq!(
+            table_defn(&item, libpgdump::ObjectType::Table, "widgets"),
+            "CREATE TABLE test.widgets ( code text, UNIQUE (code) USING \
+             INDEX TABLESPACE fastdisk );\n"
+        );
+    }
+
+    #[test]
+    fn renders_list_partition() {
+        let mut table = base_table("events");
+        table.columns = Some(vec![column("region", "text", true)]);
+        table.partitions = Some(vec![TablePartition {
+            name: "events_us".into(),
+            schema: "test".into(),
+            default: None,
+            for_values_in: Some(vec![json!("us"), json!("ca")]),
+            for_values_from: None,
+            for_values_to: None,
+            for_values_with: None,
+            comment: None,
+        }]);
+        let item = table_item(1, table);
+        assert_eq!(
+            table_defn(&item, libpgdump::ObjectType::Table, "events_us"),
+            "CREATE TABLE test.events_us PARTITION OF test.events FOR \
+             VALUES IN ('us', 'ca');\n"
+        );
+    }
+
+    #[test]
+    fn renders_range_partition_with_open_upper_bound() {
+        let mut table = base_table("metrics");
+        table.columns = Some(vec![column("recorded_at", "timestamptz", true)]);
+        table.partitions = Some(vec![TablePartition {
+            name: "metrics_2024".into(),
+            schema: "test".into(),
+            default: None,
+            for_values_in: None,
+            for_values_from: Some(json!("2024-01-01")),
+            for_values_to: Some(json!("MAXVALUE")),
+            for_values_with: None,
+            comment: None,
+        }]);
+        let item = table_item(1, table);
+        assert_eq!(
+            table_defn(&item, libpgdump::ObjectType::Table, "metrics_2024"),
+            "CREATE TABLE test.metrics_2024 PARTITION OF test.metrics FOR \
+             VALUES FROM ('2024-01-01') TO (MAXVALUE);\n"
+        );
+    }
+
+    #[test]
+    fn renders_default_partition() {
+        let mut table = base_table("events");
+        table.columns = Some(vec![column("region", "text", true)]);
+        table.partitions = Some(vec![TablePartition {
+            name: "events_default".into(),
+            schema: "test".into(),
+            default: Some(true),
+            for_values_in: None,
+            for_values_from: None,
+            for_values_to: None,
+            for_values_with: None,
+            comment: None,
+        }]);
+        let item = table_item(1, table);
+        assert_eq!(
+            table_defn(&item, libpgdump::ObjectType::Table, "events_default"),
+            "CREATE TABLE test.events_default PARTITION OF test.events \
+             DEFAULT;\n"
         );
     }
 }
