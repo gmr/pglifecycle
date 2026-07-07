@@ -101,13 +101,13 @@ fn view_columns(node: &Node, src: &str) -> Option<Vec<ViewColumn>> {
 }
 
 /// Parse a PostgreSQL boolean reloption value. PostgreSQL accepts
-/// `on/off/yes/no/1/0/true/false` (case-insensitively) for boolean
-/// reloptions; a bare option key round-trips through `reloptions` as
-/// `"true"`.
+/// `true/t/on/yes/y/1` and `false/f/off/no/n/0` (case-insensitively)
+/// for boolean reloptions; a bare option key round-trips through
+/// `reloptions` as `"true"`.
 fn pg_bool(value: &str) -> Option<bool> {
     match value.trim().to_ascii_lowercase().as_str() {
-        "true" | "on" | "yes" | "1" => Some(true),
-        "false" | "off" | "no" | "0" => Some(false),
+        "true" | "t" | "on" | "yes" | "y" | "1" => Some(true),
+        "false" | "f" | "off" | "no" | "n" | "0" => Some(false),
         _ => None,
     }
 }
@@ -195,6 +195,10 @@ mod tests {
             ("WITH (security_barrier=on)", Some(true)),
             ("WITH (security_barrier=off)", Some(false)),
             ("WITH (security_barrier='no')", Some(false)),
+            ("WITH (security_barrier='t')", Some(true)),
+            ("WITH (security_barrier='f')", Some(false)),
+            ("WITH (security_barrier='y')", Some(true)),
+            ("WITH (security_barrier='n')", Some(false)),
         ] {
             let stmt =
                 parse_one(&format!("CREATE VIEW test.v {sql} AS SELECT 1;"));
