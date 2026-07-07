@@ -150,6 +150,15 @@ pub(crate) fn create_table(
         } else if let Some(constraint) =
             element.child_of_kind("TableConstraint")
         {
+            // USING INDEX TABLESPACE, on PRIMARY KEY/UNIQUE/EXCLUDE —
+            // same single table-level index_tablespace as the
+            // TableElement loop above; first constraint carrying one wins
+            if table.index_tablespace.is_none() {
+                table.index_tablespace = constraint
+                    .find("OptConsTableSpace")
+                    .and_then(|n| n.find("name"))
+                    .map(|n| unquote(n.text(src)));
+            }
             let (name, parsed) = table_constraint(&constraint, src)?;
             apply_constraint(&mut table, name, parsed);
         }
