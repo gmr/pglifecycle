@@ -61,6 +61,11 @@ const DEVIATIONS: &[(&str, &str, &str)] = &[
         "test",
         "Copied from the snowball template",
     ),
+    // Python rendered COMMENT ON CAST with an erroneous schema prefix
+    // (a cast has no namespace) and COMMENT ON OPERATOR without the
+    // argument signature required to disambiguate it
+    ("COMMENT", "test", "(int4 AS timestamp)"),
+    ("COMMENT", "test", "==="),
 ];
 
 /// (desc, namespace, tag, required defn fragment) for the corrected
@@ -145,6 +150,44 @@ const CORRECTED: &[(&str, &str, &str, &str)] = &[
         "custom_snowball",
         "(INIT = dsnowball_init, LEXIZE = dsnowball_lexize)",
     ),
+    (
+        "COMMENT",
+        "test",
+        "(int4 AS timestamp)",
+        "COMMENT ON CAST (int4 AS timestamp) IS",
+    ),
+    (
+        "COMMENT",
+        "test",
+        "===",
+        "COMMENT ON OPERATOR test.=== (box, box) IS",
+    ),
+];
+
+/// (tag, comment) for COMMENT ON COLUMN entries: build now emits these
+/// (data loss fix — Python's build.py never rendered column comments)
+const NEW_COLUMN_COMMENTS: &[(&str, &str)] = &[
+    ("addresses.created_at", "When the record was created"),
+    ("addresses.id", "The user ID"),
+    (
+        "addresses.last_modified_at",
+        "When the record was last modified",
+    ),
+    ("addresses.user_id", "Foreign Key to test.users"),
+    ("empty_table.created_at", "When the record was created"),
+    ("empty_table.id", "The auto-incrementing row ID value"),
+    (
+        "empty_table.last_modified_at",
+        "When the record was last modified",
+    ),
+    ("empty_table.value", "Some random value"),
+    ("users.created_at", "When the record was created"),
+    ("users.id", "The user ID"),
+    (
+        "users.last_modified_at,",
+        "When the record was last modified,",
+    ),
+    ("users.state", "The current state of the user"),
 ];
 
 /// Comment entries Python lost entirely to the text search name bug
@@ -231,6 +274,9 @@ fn matches_python_build_output() {
                 && !RECOVERED_COMMENTS
                     .iter()
                     .any(|(tag, _)| key == &entry_key("COMMENT", "test", tag))
+                && !NEW_COLUMN_COMMENTS
+                    .iter()
+                    .any(|(tag, _)| key == &entry_key("COMMENT", "test", tag))
         })
         .cloned()
         .collect();
@@ -264,6 +310,17 @@ fn matches_python_build_output() {
         assert!(defn.contains(comment), "{key:?} missing comment text");
     }
 
+    // column comments Python's build.py dropped entirely (data loss)
+    for (tag, comment) in NEW_COLUMN_COMMENTS {
+        let key = entry_key("COMMENT", "test", tag);
+        let defn = rust_tuples
+            .iter()
+            .find(|(k, ..)| k == &key)
+            .map(|(_, _, defn, ..)| defn.as_str())
+            .unwrap_or_else(|| panic!("missing column comment {key:?}"));
+        assert!(defn.contains(comment), "{key:?} missing comment text");
+    }
+
     // the developers group's grant emits an ACL entry, which the
     // Python build never did
     let acl = rust_tuples
@@ -277,9 +334,9 @@ fn matches_python_build_output() {
          public.empty_table TO developers;\n"
     );
 
-    // 60 Python entries + 4 recovered text search comments + 1 ACL
-    // - 1 create: false role
-    assert_eq!(dump.entries().len(), 64);
+    // 60 Python entries + 4 recovered text search comments + 12 new
+    // column comments + 1 ACL - 1 create: false role
+    assert_eq!(dump.entries().len(), 76);
 }
 
 #[test]
