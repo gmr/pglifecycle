@@ -2,13 +2,127 @@
 
 use serde_json::Value;
 
+/// PostgreSQL keywords that pg_dump's `fmtId` quotes even when they
+/// otherwise look like a safe unquoted identifier. This covers the
+/// `RESERVED_KEYWORD` and `TYPE_FUNC_NAME_KEYWORD` sets. The
+/// `COL_NAME_KEYWORD` set (e.g. `int`, `timestamp`, `values`) is
+/// deliberately excluded: those double as type names and
+/// `quote_ident` is also applied to type names in some render paths
+/// (e.g. CAST target types), where quoting them would diverge from
+/// pg_dump. Must stay sorted for `binary_search`.
+const RESERVED_KEYWORDS: &[&str] = &[
+    "all",
+    "analyse",
+    "analyze",
+    "and",
+    "any",
+    "array",
+    "as",
+    "asc",
+    "asymmetric",
+    "authorization",
+    "binary",
+    "both",
+    "case",
+    "cast",
+    "check",
+    "collate",
+    "collation",
+    "column",
+    "concurrently",
+    "constraint",
+    "create",
+    "cross",
+    "current_catalog",
+    "current_date",
+    "current_role",
+    "current_schema",
+    "current_time",
+    "current_timestamp",
+    "current_user",
+    "default",
+    "deferrable",
+    "desc",
+    "distinct",
+    "do",
+    "else",
+    "end",
+    "except",
+    "false",
+    "fetch",
+    "for",
+    "foreign",
+    "freeze",
+    "from",
+    "full",
+    "grant",
+    "group",
+    "having",
+    "ilike",
+    "in",
+    "initially",
+    "inner",
+    "intersect",
+    "into",
+    "is",
+    "isnull",
+    "join",
+    "lateral",
+    "leading",
+    "left",
+    "like",
+    "limit",
+    "localtime",
+    "localtimestamp",
+    "natural",
+    "not",
+    "notnull",
+    "null",
+    "offset",
+    "on",
+    "only",
+    "or",
+    "order",
+    "outer",
+    "overlaps",
+    "placing",
+    "primary",
+    "references",
+    "returning",
+    "right",
+    "select",
+    "session_user",
+    "similar",
+    "some",
+    "symmetric",
+    "table",
+    "tablesample",
+    "then",
+    "to",
+    "trailing",
+    "true",
+    "union",
+    "unique",
+    "user",
+    "using",
+    "variadic",
+    "verbose",
+    "when",
+    "where",
+    "window",
+    "with",
+];
+
 /// Quote a PostgreSQL identifier (object name, etc)
 pub fn quote_ident(value: &str) -> String {
-    if !value.is_empty()
+    let is_safe_shape = !value.is_empty()
         && value
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
-    {
+        && !value.as_bytes()[0].is_ascii_digit();
+    let is_reserved =
+        is_safe_shape && RESERVED_KEYWORDS.binary_search(&value).is_ok();
+    if is_safe_shape && !is_reserved {
         value.to_string()
     } else {
         format!("\"{}\"", value.replace('"', "\"\""))
@@ -77,6 +191,21 @@ mod tests {
         assert_eq!(quote_ident("uuid-ossp"), "\"uuid-ossp\"");
         assert_eq!(quote_ident("==="), "\"===\"");
         assert_eq!(quote_ident("Has\"Quote"), "\"Has\"\"Quote\"");
+        assert_eq!(quote_ident("orders"), "orders");
+        assert_eq!(quote_ident("my_table"), "my_table");
+        assert_eq!(quote_ident("order"), "\"order\"");
+        assert_eq!(quote_ident("user"), "\"user\"");
+        assert_eq!(quote_ident("2fa"), "\"2fa\"");
+        // `all` is a RESERVED keyword pg_dump also quotes
+        assert_eq!(quote_ident("all"), "\"all\"");
+    }
+
+    #[test]
+    fn reserved_keywords_stay_sorted() {
+        assert!(
+            RESERVED_KEYWORDS.windows(2).all(|w| w[0] < w[1]),
+            "RESERVED_KEYWORDS must be sorted and unique for binary_search"
+        );
     }
 
     #[test]

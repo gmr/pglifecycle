@@ -2,6 +2,7 @@
 
 use tree_sitter::Node;
 
+use crate::ddl::object::reloptions;
 use crate::ddl::{NodeExt, Statement, qualified_name, unquote};
 use crate::models::{MaterializedView, View, ViewColumn};
 
@@ -33,7 +34,14 @@ pub(crate) fn create_view(
             }
             .to_string()
         }),
-        security_barrier: None,
+        security_barrier: node
+            .child_of_kind("opt_reloptions")
+            .and_then(|n| reloptions(&n, src))
+            .and_then(|m| m.get("security_barrier").cloned())
+            .and_then(|v| match v {
+                serde_json::Value::String(s) => pg_bool(&s),
+                _ => None,
+            }),
         query,
         comment: None,
     }))
@@ -65,7 +73,9 @@ pub(crate) fn create_materialized_view(
             .find("table_access_method_clause")
             .and_then(|n| n.find("name"))
             .map(|n| unquote(n.text(src))),
-        storage_parameters: None,
+        storage_parameters: node
+            .find("opt_reloptions")
+            .and_then(|n| reloptions(&n, src)),
         tablespace: node
             .find("OptTableSpace")
             .and_then(|n| n.find("name"))
@@ -88,6 +98,18 @@ fn view_columns(node: &Node, src: &str) -> Option<Vec<ViewColumn>> {
         .map(|c| ViewColumn::Name(unquote(c.text(src))))
         .collect();
     (!columns.is_empty()).then_some(columns)
+}
+
+/// Parse a PostgreSQL boolean reloption value. PostgreSQL accepts
+/// `true/t/on/yes/y/1` and `false/f/off/no/n/0` (case-insensitively)
+/// for boolean reloptions; a bare option key round-trips through
+/// `reloptions` as `"true"`.
+fn pg_bool(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "t" | "on" | "yes" | "y" | "1" => Some(true),
+        "false" | "f" | "off" | "no" | "n" | "0" => Some(false),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -144,5 +166,60 @@ mod tests {
         assert_eq!(view.schema, "test");
         assert_eq!(view.name, "mv");
         assert_eq!(view.query, Some("SELECT id FROM test.users".into()));
+    }
+
+    #[test]
+    fn parses_view_security_barrier() {
+        let Statement::CreateView(view) = parse_one(
+            "CREATE VIEW test.v WITH (security_barrier=true) AS \
+             SELECT 1;",
+        ) else {
+            panic!("expected CreateView")
+        };
+        assert_eq!(view.security_barrier, Some(true));
+    }
+
+    #[test]
+    fn parses_view_bare_security_barrier() {
+        let Statement::CreateView(view) = parse_one(
+            "CREATE VIEW test.v WITH (security_barrier) AS SELECT 1;",
+        ) else {
+            panic!("expected CreateView")
+        };
+        assert_eq!(view.security_barrier, Some(true));
+    }
+
+    #[test]
+    fn parses_view_security_barrier_boolean_forms() {
+        for (sql, expected) in [
+            ("WITH (security_barrier=on)", Some(true)),
+            ("WITH (security_barrier=off)", Some(false)),
+            ("WITH (security_barrier='no')", Some(false)),
+            ("WITH (security_barrier='t')", Some(true)),
+            ("WITH (security_barrier='f')", Some(false)),
+            ("WITH (security_barrier='y')", Some(true)),
+            ("WITH (security_barrier='n')", Some(false)),
+        ] {
+            let stmt =
+                parse_one(&format!("CREATE VIEW test.v {sql} AS SELECT 1;"));
+            let Statement::CreateView(view) = stmt else {
+                panic!("expected CreateView")
+            };
+            assert_eq!(view.security_barrier, expected, "for {sql}");
+        }
+    }
+
+    #[test]
+    fn parses_materialized_view_storage_parameters() {
+        let Statement::CreateMaterializedView(view) = parse_one(
+            "CREATE MATERIALIZED VIEW test.mv WITH (fillfactor=90) AS \
+             SELECT id FROM test.users;",
+        ) else {
+            panic!("expected CreateMaterializedView")
+        };
+        assert_eq!(
+            view.storage_parameters.unwrap().get("fillfactor"),
+            Some(&serde_json::Value::String("90".into()))
+        );
     }
 }

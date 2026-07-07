@@ -14,8 +14,8 @@ use crate::build;
 use crate::deploy::diff::canonical_type;
 use crate::models::{
     CheckConstraint, Column, Definition, Domain, Extension,
-    ForeignDataWrapper, ForeignKey, Index, Schema, Sequence, Server, Table,
-    Trigger, Type, UserMapping, View, ViewColumn,
+    ForeignDataWrapper, ForeignKey, Function, Index, Schema, Sequence, Server,
+    Table, Trigger, Type, UserMapping, View, ViewColumn,
 };
 use crate::utils::{postgres_value, quote_ident, user_mapping_subject};
 
@@ -70,11 +70,14 @@ pub(crate) fn resolve(repo: &Definition, database: &Definition) -> Resolution {
             extension(repo, db)
         }
         (Definition::Schema(repo), Definition::Schema(db)) => schema(repo, db),
-        // CREATE OR REPLACE handles function bodies and view queries
-        // in place; a function whose return type changed cannot be
-        // replaced and must be dropped first
+        // CREATE OR REPLACE handles function bodies and view queries in
+        // place; a function whose return type or output-parameter
+        // signature changed cannot be replaced (Postgres rejects an
+        // OR REPLACE that alters the output) and must be dropped first
         (Definition::Function(repo), Definition::Function(db)) => {
-            if repo.returns == db.returns {
+            if returns_equal(repo, db)
+                && out_parameters(repo) == out_parameters(db)
+            {
                 // function names carry their full identity signature,
                 // so COMMENT ON FUNCTION takes the name verbatim
                 let target =
@@ -106,6 +109,35 @@ pub(crate) fn resolve(repo: &Definition, database: &Definition) -> Resolution {
 
 fn qualified(schema: &str, name: &str) -> String {
     format!("{}.{}", quote_ident(schema), quote_ident(name))
+}
+
+/// True when two functions' return types are the same modulo type
+/// aliasing (`int4` vs `integer`)
+fn returns_equal(repo: &Function, db: &Function) -> bool {
+    match (&repo.returns, &db.returns) {
+        (Some(r), Some(d)) => canonical_type(r) == canonical_type(d),
+        (r, d) => r == d,
+    }
+}
+
+/// The `OUT`/`TABLE`-mode parameters that make up a function's output
+/// signature, with types canonicalized so an alias does not spuriously
+/// diff. `CREATE OR REPLACE FUNCTION` cannot change this signature, so
+/// callers must fall back to a drop+recreate when it differs.
+fn out_parameters(function: &Function) -> Vec<(String, String, String)> {
+    function
+        .parameters
+        .iter()
+        .flatten()
+        .filter(|p| p.mode == "OUT" || p.mode == "TABLE")
+        .map(|p| {
+            (
+                p.mode.clone(),
+                p.name.clone().unwrap_or_default(),
+                canonical_type(&p.data_type),
+            )
+        })
+        .collect()
 }
 
 /// CREATE OR REPLACE VIEW only succeeds when the new query's output
@@ -555,8 +587,12 @@ fn sequence(repo: &Sequence, db: &Sequence) -> Resolution {
 /// place. A base-type, collation, or constraint change rebuilds (the
 /// domain's constraints are not all individually named).
 fn domain(repo: &Domain, db: &Domain) -> Resolution {
+    let data_type_changed = match (&repo.data_type, &db.data_type) {
+        (Some(r), Some(d)) => canonical_type(r) != canonical_type(d),
+        (r, d) => r != d,
+    };
     if repo.sql != db.sql
-        || repo.data_type != db.data_type
+        || data_type_changed
         || repo.collation != db.collation
         || repo.check_constraints != db.check_constraints
     {
@@ -600,8 +636,10 @@ fn enum_type(repo: &Type, db: &Type) -> Resolution {
     let mut alters: Vec<Alter> = repo_values[db_values.len()..]
         .iter()
         .map(|value| {
-            let escaped = value.replace('\'', "''");
-            Alter::new(format!("ALTER TYPE {name} ADD VALUE '{escaped}';\n"))
+            Alter::new(format!(
+                "ALTER TYPE {name} ADD VALUE {};\n",
+                string_literal(value)
+            ))
         })
         .collect();
     if repo.comment != db.comment {
@@ -622,7 +660,8 @@ fn extension(repo: &Extension, db: &Extension) -> Resolution {
         && let Some(version) = &repo.version
     {
         alters.push(Alter::new(format!(
-            "ALTER EXTENSION {name} UPDATE TO '{version}';\n"
+            "ALTER EXTENSION {name} UPDATE TO {};\n",
+            string_literal(version)
         )));
     }
     if repo.schema != db.schema
@@ -666,7 +705,8 @@ fn schema(repo: &Schema, db: &Schema) -> Resolution {
 /// use the FOREIGN TABLE object type, matching the build.
 fn foreign_table(repo: &Table, db: &Table) -> Resolution {
     if repo.server != db.server
-        || repo.columns != db.columns
+        || canonicalize_columns(&repo.columns)
+            != canonicalize_columns(&db.columns)
         || repo.sql != db.sql
         || repo.check_constraints != db.check_constraints
     {
@@ -687,6 +727,20 @@ fn foreign_table(repo: &Table, db: &Table) -> Resolution {
         )));
     }
     Resolution::Statements(alters)
+}
+
+/// A copy of `columns` with each data type canonicalized, so an alias
+/// (`int4` vs `integer`) does not force an unnecessary rebuild
+fn canonicalize_columns(columns: &Option<Vec<Column>>) -> Vec<Column> {
+    columns
+        .iter()
+        .flatten()
+        .cloned()
+        .map(|mut column| {
+            column.data_type = canonical_type(&column.data_type);
+            column
+        })
+        .collect()
 }
 
 /// Foreign-data-wrapper reconciliation: handler, validator, OPTIONS,
@@ -1273,6 +1327,72 @@ mod tests {
     }
 
     #[test]
+    fn function_returns_alias_uses_or_replace() {
+        let f = |returns: &str| -> Definition {
+            Definition::Function(
+                serde_json::from_value(serde_json::json!({
+                    "name": "f", "schema": "test", "owner": "postgres",
+                    "returns": returns, "language": "sql",
+                    "definition": "SELECT 1",
+                }))
+                .unwrap(),
+            )
+        };
+        // a repo `returns: int4` against the server's `integer` must
+        // not force a drop+recreate
+        assert!(matches!(
+            resolve(&f("int4"), &f("integer")),
+            Resolution::OrReplace { .. }
+        ));
+    }
+
+    #[test]
+    fn function_out_parameter_change_replaces() {
+        let f = |data_type: &str| -> Definition {
+            Definition::Function(
+                serde_json::from_value(serde_json::json!({
+                    "name": "f", "schema": "test", "owner": "postgres",
+                    "returns": "record", "language": "sql",
+                    "definition": "SELECT 1",
+                    "parameters": [
+                        {"mode": "OUT", "name": "x", "data_type": data_type},
+                    ],
+                }))
+                .unwrap(),
+            )
+        };
+        // CREATE OR REPLACE FUNCTION cannot change the output
+        // signature, so a changed OUT parameter must fall back to a
+        // gated drop+recreate rather than OrReplace
+        assert!(matches!(
+            resolve(&f("bigint"), &f("integer")),
+            Resolution::Replace
+        ));
+    }
+
+    #[test]
+    fn function_out_parameter_alias_uses_or_replace() {
+        let f = |data_type: &str| -> Definition {
+            Definition::Function(
+                serde_json::from_value(serde_json::json!({
+                    "name": "f", "schema": "test", "owner": "postgres",
+                    "returns": "record", "language": "sql",
+                    "definition": "SELECT 1",
+                    "parameters": [
+                        {"mode": "OUT", "name": "x", "data_type": data_type},
+                    ],
+                }))
+                .unwrap(),
+            )
+        };
+        // an aliased OUT parameter type must not force a rebuild
+        assert!(matches!(
+            resolve(&f("int4"), &f("integer")),
+            Resolution::OrReplace { .. }
+        ));
+    }
+
+    #[test]
     fn view_change_uses_or_replace() {
         let v = |query: &str| -> Definition {
             Definition::View(
@@ -1499,6 +1619,21 @@ mod tests {
     }
 
     #[test]
+    fn domain_type_alias_is_not_replace() {
+        let db: Domain = serde_json::from_value(serde_json::json!({
+            "name": "d", "schema": "test", "owner": "postgres",
+            "data_type": "integer",
+        }))
+        .unwrap();
+        let mut repo = db.clone();
+        repo.data_type = Some("int4".into());
+        assert!(matches!(
+            domain(&repo, &db),
+            Resolution::Statements(ref alters) if alters.is_empty()
+        ));
+    }
+
+    #[test]
     fn schema_comment_changes_in_place() {
         let db: Schema = serde_json::from_value(serde_json::json!({
             "name": "test", "owner": "postgres",
@@ -1715,6 +1850,26 @@ mod tests {
             ]
         );
         assert!(alters.iter().all(|a| !a.destructive));
+    }
+
+    #[test]
+    fn foreign_table_column_type_alias_is_not_replace() {
+        let repo = parse_table(foreign_table_value(
+            serde_json::json!({"table_name": "t"}),
+            None,
+        ));
+        let mut db = repo.clone();
+        db.columns = Some(vec![Column {
+            name: "id".into(),
+            data_type: "int4".into(),
+            nullable: None,
+            default: None,
+            collation: None,
+            check_constraint: None,
+            generated: None,
+            comment: None,
+        }]);
+        assert!(matches!(table(&repo, &db), Resolution::Statements(_)));
     }
 
     #[test]

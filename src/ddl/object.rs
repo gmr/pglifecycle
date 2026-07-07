@@ -415,6 +415,48 @@ pub(crate) fn unstring(text: &str) -> String {
     text.to_string()
 }
 
+/// Parse a `reloptions` node (`key = value, ...` inside `WITH (...)`)
+/// into a string map; values keep their raw text (dequoted if a
+/// string literal) so they round-trip unchanged through
+/// `utils::raw_value`
+pub(crate) fn reloptions(
+    node: &Node,
+    src: &str,
+) -> Option<serde_json::Map<String, serde_json::Value>> {
+    let elems = node.find_all("reloption_elem");
+    if elems.is_empty() {
+        return None;
+    }
+    let mut map = serde_json::Map::new();
+    for elem in elems {
+        let labels = elem.find_all("ColLabel");
+        let Some(first) = labels.first() else {
+            continue;
+        };
+        let key = match labels.get(1) {
+            Some(second) => {
+                format!(
+                    "{}.{}",
+                    unquote(first.text(src)),
+                    unquote(second.text(src))
+                )
+            }
+            None => unquote(first.text(src)),
+        };
+        // A bare option (`WITH (security_barrier)`) has no def_arg;
+        // PostgreSQL treats it as shorthand for `= true`.
+        let value = match elem.child_of_kind("def_arg") {
+            Some(value) => value
+                .child_of_kind("Sconst")
+                .map(|s| string_value(&s, src))
+                .unwrap_or_else(|| value.text(src).to_string()),
+            None => "true".to_string(),
+        };
+        map.insert(key, serde_json::Value::String(value));
+    }
+    (!map.is_empty()).then_some(map)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

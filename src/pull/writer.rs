@@ -24,18 +24,15 @@ pub fn render(
     };
     writer.write_project_file(assembly)?;
     for schema in &assembly.schemas {
-        writer.save(
-            Path::new("schemata").join(format!("{}.yaml", schema.name)),
-            schema,
-        )?;
+        writer.save(top_level("schemata", &schema.name)?, schema)?;
     }
     for domain in &assembly.domains {
         writer
-            .save(nested("domains", &domain.schema, &domain.name), domain)?;
+            .save(nested("domains", &domain.schema, &domain.name)?, domain)?;
     }
     for sequence in &assembly.sequences {
         writer.save(
-            nested("sequences", &sequence.schema, &sequence.name),
+            nested("sequences", &sequence.schema, &sequence.name)?,
             sequence,
         )?;
     }
@@ -47,26 +44,23 @@ pub fn render(
             map.insert(String::from("dependencies"), dependencies);
         }
         writer.save_value(
-            nested("tables", &table.schema, &table.name),
+            nested("tables", &table.schema, &table.name)?,
             &value,
         )?;
     }
     for view in &assembly.views {
-        writer.save(nested("views", &view.schema, &view.name), view)?;
+        writer.save(nested("views", &view.schema, &view.name)?, view)?;
     }
     for view in &assembly.materialized_views {
         writer.save(
-            nested("materialized_views", &view.schema, &view.name),
+            nested("materialized_views", &view.schema, &view.name)?,
             view,
         )?;
     }
     writer.write_functions(assembly)?;
     writer.write_types(assembly)?;
     for server in &assembly.servers {
-        writer.save(
-            Path::new("servers").join(format!("{}.yaml", server.name)),
-            server,
-        )?;
+        writer.save(top_level("servers", &server.name)?, server)?;
     }
     writer.write_user_mappings(assembly)?;
     writer.write_roles(assembly)?;
@@ -198,7 +192,7 @@ impl Writer {
             }
             used.insert((function.schema.clone(), filename.clone()));
             self.save(
-                nested("functions", &function.schema, &filename),
+                nested("functions", &function.schema, &filename)?,
                 function,
             )?;
         }
@@ -218,10 +212,7 @@ impl Writer {
                 .filter(|t| t.schema == schema)
                 .collect();
             let container = json!({"schema": schema, "types": types});
-            self.save_value(
-                Path::new("types").join(format!("{schema}.yaml")),
-                &container,
-            )?;
+            self.save_value(top_level("types", schema)?, &container)?;
         }
         Ok(())
     }
@@ -248,10 +239,7 @@ impl Writer {
                     options: user_options(state),
                     settings,
                 };
-                self.save(
-                    Path::new("users").join(format!("{name}.yaml")),
-                    &user,
-                )?;
+                self.save(top_level("users", name)?, &user)?;
             } else {
                 let role = models::Role {
                     name: name.clone(),
@@ -264,10 +252,7 @@ impl Writer {
                         .then(|| state.options.clone()),
                     settings,
                 };
-                self.save(
-                    Path::new("roles").join(format!("{name}.yaml")),
-                    &role,
-                )?;
+                self.save(top_level("roles", name)?, &role)?;
             }
         }
         Ok(())
@@ -291,11 +276,7 @@ impl Writer {
                     }
                 }
             }
-            self.save(
-                Path::new("user_mappings")
-                    .join(format!("{}.yaml", mapping.name)),
-                &mapping,
-            )?;
+            self.save(top_level("user_mappings", &mapping.name)?, &mapping)?;
         }
         Ok(())
     }
@@ -415,10 +396,39 @@ fn serialize<T: serde::Serialize>(value: &T) -> Result<Value, String> {
         .map_err(|e| format!("failed to serialize: {e}"))
 }
 
-fn nested(directory: &str, schema: &str, name: &str) -> PathBuf {
-    Path::new(directory)
-        .join(schema)
-        .join(format!("{name}.yaml"))
+fn nested(
+    directory: &str,
+    schema: &str,
+    name: &str,
+) -> Result<PathBuf, String> {
+    Ok(Path::new(directory)
+        .join(safe_component(schema)?)
+        .join(format!("{}.yaml", safe_component(name)?)))
+}
+
+/// A `directory/name.yaml` path with the name validated as a safe path
+/// component
+fn top_level(directory: &str, name: &str) -> Result<PathBuf, String> {
+    Ok(Path::new(directory).join(format!("{}.yaml", safe_component(name)?)))
+}
+
+/// Reject a database identifier that would escape or redirect the
+/// destination when used as a filesystem path segment. PostgreSQL
+/// quoted identifiers may contain `/`, `\`, or `.` sequences, and
+/// `Path::join` treats an absolute or `..` component as a traversal.
+fn safe_component(component: &str) -> Result<&str, String> {
+    if component.is_empty()
+        || component == "."
+        || component == ".."
+        || component.contains('/')
+        || component.contains('\\')
+    {
+        return Err(format!(
+            "refusing to write to a path derived from the unsafe database \
+             identifier {component:?}"
+        ));
+    }
+    Ok(component)
 }
 
 pub(crate) fn read_ignore(
@@ -493,4 +503,46 @@ fn walk_directories(root: &Path) -> Result<Vec<PathBuf>, String> {
         }
     }
     Ok(results)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn safe_component_accepts_normal_identifiers() {
+        assert_eq!(safe_component("public").unwrap(), "public");
+        assert_eq!(safe_component("My Table").unwrap(), "My Table");
+        assert_eq!(safe_component("weird.name").unwrap(), "weird.name");
+    }
+
+    #[test]
+    fn safe_component_rejects_traversal() {
+        for hostile in ["", ".", "..", "/etc", "../../tmp/x", "a/b", "a\\b"] {
+            assert!(
+                safe_component(hostile).is_err(),
+                "expected {hostile:?} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn nested_rejects_hostile_schema_or_name() {
+        assert!(nested("tables", "../../../tmp", "x").is_err());
+        assert!(nested("tables", "public", "..").is_err());
+        assert!(nested("tables", "/etc", "x").is_err());
+        assert_eq!(
+            nested("tables", "public", "orders").unwrap(),
+            Path::new("tables").join("public").join("orders.yaml")
+        );
+    }
+
+    #[test]
+    fn top_level_rejects_hostile_name() {
+        assert!(top_level("roles", "../../etc/passwd").is_err());
+        assert_eq!(
+            top_level("roles", "admin").unwrap(),
+            Path::new("roles").join("admin.yaml")
+        );
+    }
 }

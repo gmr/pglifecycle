@@ -14,9 +14,9 @@ columns:
     data_type: TIMESTAMP WITH TIME ZONE
     default: CURRENT_TIMESTAMP
     nullable: false
-  - name: last_modified_at,
-    comment: When the record was last modified,
-    data_type: TIMESTAMP WITH TIME ZONE,
+  - name: last_modified_at
+    comment: When the record was last modified
+    data_type: TIMESTAMP WITH TIME ZONE
     nullable: true
   - name: state
     comment: The current state of the user

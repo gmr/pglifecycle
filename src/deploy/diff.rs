@@ -282,7 +282,7 @@ fn normalize(value: &mut Value) {
             // cannot apply pg_restore-style ownership anyway)
             map.remove("owner");
             for (key, child) in map.iter_mut() {
-                if key == "data_type"
+                if (key == "data_type" || key == "returns")
                     && let Some(data_type) = child.as_str()
                 {
                     *child = Value::String(canonical_type(data_type));
@@ -408,6 +408,26 @@ mod tests {
             existence_key("AGGREGATE", "test", "sum(integer)"),
             existence_key("AGGREGATE", "test", "max(integer)")
         );
+    }
+
+    #[test]
+    fn function_returns_alias_is_not_a_change() {
+        let f = |returns: &str| -> Definition {
+            Definition::Function(
+                serde_json::from_value(serde_json::json!({
+                    "name": "f",
+                    "schema": "test",
+                    "owner": "postgres",
+                    "returns": returns,
+                    "language": "sql",
+                    "definition": "SELECT 1",
+                }))
+                .unwrap(),
+            )
+        };
+        // a repo `returns: int4` must not diff against the server's
+        // `integer` on every deploy
+        assert_eq!(normalized(&f("int4")), normalized(&f("integer")));
     }
 
     #[test]
