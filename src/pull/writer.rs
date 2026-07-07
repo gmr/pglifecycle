@@ -490,7 +490,23 @@ pub(crate) fn remove_empty_directories(
     tops: &[PathBuf],
 ) -> Result<(), String> {
     for top in tops {
-        if !top.is_dir() {
+        // `symlink_metadata` does not follow symlinks: a top that is a
+        // symlink to a directory outside the project must be skipped so
+        // `--update --prune` cannot reap empty directories under its
+        // target.
+        let metadata = match std::fs::symlink_metadata(top) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                continue;
+            }
+            Err(error) => {
+                return Err(format!(
+                    "failed to read type for {}: {error}",
+                    top.display()
+                ));
+            }
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
             continue;
         }
         let mut directories = walk_directories(top)?;

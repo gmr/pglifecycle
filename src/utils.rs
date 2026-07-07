@@ -170,15 +170,21 @@ fn render_value(value: &Value, nested: bool) -> String {
 /// Wrap `body` in a dollar-quoted string literal, choosing a tag that
 /// does not occur in `body` (pg_dump style: `$$` when possible,
 /// otherwise `$c1$`, `$c2$`, ... until the tag is collision-free).
+///
+/// Matches pg_dump's `appendStringLiteralDQ`: a delimiter is safe when
+/// its form *without* the trailing `$` is absent from `body`. Checking
+/// only the full delimiter would miss a body ending in the delimiter
+/// prefix (e.g. `foo$`), which merges with the closing `$` and yields
+/// invalid SQL.
 pub(crate) fn dollar_quote(body: &str) -> String {
-    if !body.contains("$$") {
+    if !body.contains('$') {
         return format!("$${body}$$");
     }
     let mut n = 1;
     loop {
-        let tag = format!("$c{n}$");
-        if !body.contains(&tag) {
-            return format!("{tag}{body}{tag}");
+        let prefix = format!("$c{n}");
+        if !body.contains(&prefix) {
+            return format!("{prefix}${body}{prefix}$");
         }
         n += 1;
     }
@@ -260,5 +266,14 @@ mod tests {
         let body = "has $$ and $c1$ both";
         let quoted = dollar_quote(body);
         assert_eq!(quoted, format!("$c2${body}$c2$"));
+    }
+
+    #[test]
+    fn dollar_quote_handles_trailing_dollar_prefix() {
+        // A body ending in `$` would merge with a bare `$$` closing
+        // delimiter, so a tagged delimiter must be chosen instead.
+        let body = "ends with a $";
+        let quoted = dollar_quote(body);
+        assert_eq!(quoted, format!("$c1${body}$c1$"));
     }
 }
