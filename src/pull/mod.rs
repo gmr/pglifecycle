@@ -933,6 +933,7 @@ impl Assembly {
                 .map(|v| v.comment = Some(comment.clone()))
                 .is_some(),
             "FUNCTION" => self.apply_function_comment(&schema, name, &comment),
+            "TRIGGER" => self.apply_trigger_comment(target, &comment),
             "INDEX" => {
                 match self.index_location.get(&(schema, name.clone())) {
                     Some(&IndexLocation::Table(idx)) => self.tables[idx]
@@ -1026,6 +1027,40 @@ impl Assembly {
             return false;
         };
         column.comment = Some(comment.to_string());
+        true
+    }
+
+    /// `COMMENT ON TRIGGER trg ON schema.table` — the ddl layer puts
+    /// the owning table's qualified name into `target.schema` (mirrors
+    /// `apply_column_comment`'s two-name COMMENT shape)
+    fn apply_trigger_comment(
+        &mut self,
+        target: &QualifiedName,
+        comment: &str,
+    ) -> bool {
+        let Some(relation) = &target.schema else {
+            return false;
+        };
+        let (schema, table) = match relation.split_once('.') {
+            Some((schema, table)) => (Some(schema.to_string()), table),
+            None => (None, relation.as_str()),
+        };
+        let relation = QualifiedName {
+            schema,
+            name: table.to_string(),
+        };
+        let Some(table) = self.find_table(&relation) else {
+            return false;
+        };
+        let Some(trigger) = table
+            .triggers
+            .iter_mut()
+            .flatten()
+            .find(|t| t.name.as_deref() == Some(target.name.as_str()))
+        else {
+            return false;
+        };
+        trigger.comment = Some(comment.to_string());
         true
     }
 
@@ -1517,6 +1552,61 @@ mod tests {
                 other => panic!("unexpected parameter type {other}"),
             }
         }
+    }
+
+    #[test]
+    fn trigger_comments_attach_to_owning_table() {
+        let mut dump = libpgdump::new("fixtures", "UTF8", "18.0").unwrap();
+        add(&mut dump, OT::Schema, "", "test", "CREATE SCHEMA test;");
+        add(
+            &mut dump,
+            OT::Table,
+            "test",
+            "users",
+            "CREATE TABLE test.users (id uuid NOT NULL);",
+        );
+        add(
+            &mut dump,
+            OT::Function,
+            "test",
+            "set_last_modified()",
+            "CREATE FUNCTION test.set_last_modified() RETURNS trigger \
+             LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END; $$;",
+        );
+        add(
+            &mut dump,
+            OT::Trigger,
+            "test",
+            "users trg_last_modified",
+            "CREATE TRIGGER trg_last_modified BEFORE UPDATE ON test.users \
+             FOR EACH ROW EXECUTE FUNCTION test.set_last_modified();",
+        );
+        add(
+            &mut dump,
+            OT::Comment,
+            "test",
+            "TRIGGER trg_last_modified ON users",
+            "COMMENT ON TRIGGER trg_last_modified ON test.users IS \
+             'keeps last_modified_at fresh';",
+        );
+        let mut assembly = Assembly::default();
+        assembly.ingest(&dump).unwrap();
+        let table = assembly
+            .tables
+            .iter()
+            .find(|t| t.name == "users")
+            .expect("users table");
+        let trigger = table
+            .triggers
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|t| t.name.as_deref() == Some("trg_last_modified"))
+            .expect("trigger");
+        assert_eq!(
+            trigger.comment.as_deref(),
+            Some("keeps last_modified_at fresh")
+        );
     }
 
     #[test]
