@@ -1099,7 +1099,7 @@ impl Builder {
                             if value { "INCLUDING" } else { "EXCLUDING" }
                                 .into(),
                         );
-                        create.push(format!("include_{field}"));
+                        create.push(field.to_uppercase());
                     }
                 }
             } else {
@@ -1118,9 +1118,16 @@ impl Builder {
                 for fk in d.foreign_keys.as_deref().unwrap_or_default() {
                     inner.push(render_foreign_key(fk));
                 }
+                for check in d.check_constraints.as_deref().unwrap_or_default()
+                {
+                    inner.push(format!(
+                        "CONSTRAINT {} CHECK ({})",
+                        check.name, check.expression
+                    ));
+                }
                 create.push(inner.join(", "));
-                create.push(")".into());
             }
+            create.push(")".into());
             if let Some(parents) = &d.parents {
                 create.push("INHERITS".into());
                 create.push(format!("({})", parents.join(", ")));
@@ -2097,7 +2104,7 @@ mod tests {
 
     use super::*;
     use crate::constants::ObjectType;
-    use crate::models::{Table, Trigger};
+    use crate::models::{CheckConstraint, LikeTable, Table, Trigger};
 
     fn column(name: &str, data_type: &str, not_null: bool) -> Column {
         Column {
@@ -2225,6 +2232,96 @@ mod tests {
             "CREATE CONSTRAINT TRIGGER emit AFTER INSERT ON test.t \
              DEFERRABLE INITIALLY DEFERRED FOR EACH ROW \
              EXECUTE FUNCTION test.emit()"
+        );
+    }
+
+    fn base_table() -> Table {
+        Table {
+            name: "orders".into(),
+            schema: "public".into(),
+            owner: "app".into(),
+            sql: None,
+            unlogged: None,
+            from_type: None,
+            parents: None,
+            like_table: None,
+            columns: None,
+            indexes: None,
+            primary_key: None,
+            check_constraints: None,
+            unique_constraints: None,
+            foreign_keys: None,
+            triggers: None,
+            partition: None,
+            partitions: None,
+            access_method: None,
+            storage_parameters: None,
+            tablespace: None,
+            index_tablespace: None,
+            server: None,
+            options: None,
+            comment: None,
+        }
+    }
+
+    /// Render `table` and return the TABLE entry's definition SQL
+    fn table_defn(table: Table) -> String {
+        let item = Item {
+            id: 1,
+            desc: ObjectType::Table,
+            definition: Definition::Table(table),
+            dependencies: BTreeSet::new(),
+        };
+        let dump = libpgdump::new("t", "UTF-8", "18.0").unwrap();
+        let mut builder = Builder {
+            dump,
+            dump_id_map: HashMap::new(),
+            superuser: "postgres".into(),
+        };
+        builder.dump_item(&item).unwrap();
+        builder
+            .dump
+            .entries()
+            .iter()
+            .find(|e| e.desc == libpgdump::ObjectType::Table)
+            .and_then(|e| e.defn.clone())
+            .expect("a TABLE entry")
+    }
+
+    #[test]
+    fn renders_like_table_include_options() {
+        let mut table = base_table();
+        table.like_table = Some(LikeTable {
+            name: "public.template".into(),
+            include_comments: Some(true),
+            include_constraints: None,
+            include_defaults: None,
+            include_generated: None,
+            include_identity: None,
+            include_indexes: Some(false),
+            include_statistics: None,
+            include_storage: None,
+            include_all: None,
+        });
+        assert_eq!(
+            table_defn(table),
+            "CREATE TABLE public.orders ( LIKE public.template \
+             INCLUDING COMMENTS EXCLUDING INDEXES );\n"
+        );
+    }
+
+    #[test]
+    fn renders_table_check_constraint() {
+        let mut table = base_table();
+        table.columns = Some(vec![column("qty", "integer", true)]);
+        table.check_constraints = Some(vec![CheckConstraint {
+            name: "ck_positive".into(),
+            expression: "qty > 0".into(),
+        }]);
+        assert_eq!(
+            table_defn(table),
+            "CREATE TABLE public.orders ( qty integer NOT NULL, \
+             CONSTRAINT ck_positive CHECK (qty > 0) );\n"
         );
     }
 }
