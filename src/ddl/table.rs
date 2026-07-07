@@ -139,6 +139,30 @@ pub(crate) fn create_table(
             table.like_table = Some(like_table(&like_clause, src));
         }
     }
+    // `CREATE TABLE x OF type (col WITH OPTIONS ..., ...)` — a typed
+    // table's element list is a different production (no columnDef,
+    // since the columns themselves come from the composite type; only
+    // per-column constraints via `columnOptions`, plus ordinary table
+    // constraints, are legal here)
+    for element in node.find_all("TypedTableElement") {
+        if let Some(column_options) = element.child_of_kind("columnOptions") {
+            columns.push(column(&column_options, src));
+        } else if let Some(constraint) =
+            element.child_of_kind("TableConstraint")
+        {
+            // USING INDEX TABLESPACE, on PRIMARY KEY/UNIQUE/EXCLUDE —
+            // same single table-level index_tablespace as the
+            // TableElement loop above; first constraint carrying one wins
+            if table.index_tablespace.is_none() {
+                table.index_tablespace = constraint
+                    .find("OptConsTableSpace")
+                    .and_then(|n| n.find("name"))
+                    .map(|n| unquote(n.text(src)));
+            }
+            let (name, parsed) = table_constraint(&constraint, src)?;
+            apply_constraint(&mut table, name, parsed);
+        }
+    }
     if !columns.is_empty() {
         table.columns = Some(columns);
     }
@@ -321,17 +345,57 @@ pub(crate) fn alter_table(
     let table = qualified_name(&table, src)?;
     let mut statements = Vec::new();
     for cmd in node.find_all("alter_table_cmd") {
-        if !cmd.has("kw_add") {
+        if cmd.has("kw_add") {
+            let Some(constraint) = cmd.find("TableConstraint") else {
+                continue;
+            };
+            let (name, parsed) = table_constraint(&constraint, src)?;
+            statements.push(Statement::AddConstraint {
+                table: table.clone(),
+                name,
+                constraint: parsed,
+            });
+        } else if let Some(default) = cmd.child_of_kind("alter_column_default")
+            && let Some(expr) = default.child_of_kind("a_expr")
+        {
+            let column = cmd
+                .child_of_kind("ColId")
+                .map(|n| unquote(n.text(src)))
+                .unwrap_or_default();
+            statements.push(Statement::SetColumnDefault {
+                table: table.clone(),
+                column,
+                default: Value::String(expr.text(src).to_string()),
+            });
+        }
+    }
+    // ATTACH PARTITION lives in a `partition_cmd` child (sibling of the
+    // `alter_table_cmd`s), carrying the child relation and its bounds
+    for cmd in node.find_all("partition_cmd") {
+        if !cmd.has("kw_attach") {
             continue;
         }
-        let Some(constraint) = cmd.find("TableConstraint") else {
-            continue;
-        };
-        let (name, parsed) = table_constraint(&constraint, src)?;
-        statements.push(Statement::AddConstraint {
-            table: table.clone(),
-            name,
-            constraint: parsed,
+        let child = cmd
+            .child_of_kind("qualified_name")
+            .ok_or_else(|| String::from("ATTACH PARTITION without a child"))?;
+        let child = qualified_name(&child, src)?;
+        let bound =
+            cmd.child_of_kind("PartitionBoundSpec").ok_or_else(|| {
+                String::from("ATTACH PARTITION without a FOR VALUES clause")
+            })?;
+        let bound = partition_bound(&bound, src);
+        statements.push(Statement::AttachPartition {
+            parent: table.clone(),
+            partition: TablePartition {
+                name: child.name,
+                schema: child.schema.unwrap_or_default(),
+                default: bound.default,
+                for_values_in: bound.for_values_in,
+                for_values_from: bound.for_values_from,
+                for_values_to: bound.for_values_to,
+                for_values_with: bound.for_values_with,
+                comment: None,
+            },
         });
     }
     if statements.is_empty() {
@@ -940,6 +1004,25 @@ mod tests {
     }
 
     #[test]
+    fn parses_alter_table_set_column_default() {
+        let statement = parse_one(
+            "ALTER TABLE ONLY test.t ALTER COLUMN id SET DEFAULT \
+             nextval('test.t_id_seq'::regclass);",
+        );
+        let Statement::SetColumnDefault {
+            table,
+            column,
+            default,
+        } = statement
+        else {
+            panic!("expected SetColumnDefault, got {statement:?}")
+        };
+        assert_eq!(table.to_string(), "test.t");
+        assert_eq!(column, "id");
+        assert_eq!(default, json!("nextval('test.t_id_seq'::regclass)"));
+    }
+
+    #[test]
     fn quoted_identifiers_unquote() {
         let statement =
             parse_one("CREATE TABLE \"Sch\"\"ema\".\"Tab le\" (id int);");
@@ -991,6 +1074,47 @@ mod tests {
     }
 
     #[test]
+    fn parses_attach_partition() {
+        // pg_dump's real form: child is a plain CREATE TABLE, attached
+        // later via ALTER TABLE ONLY parent ATTACH PARTITION ...
+        let statement = parse_one(
+            "ALTER TABLE ONLY test.events ATTACH PARTITION \
+             test.events_2024 FOR VALUES FROM ('2024-01-01') \
+             TO ('2025-01-01');",
+        );
+        let Statement::AttachPartition { parent, partition } = statement
+        else {
+            panic!("expected AttachPartition")
+        };
+        assert_eq!(parent.to_string(), "test.events");
+        assert_eq!(partition.schema, "test");
+        assert_eq!(partition.name, "events_2024");
+        assert_eq!(partition.for_values_from, Some(json!("2024-01-01")));
+        assert_eq!(partition.for_values_to, Some(json!("2025-01-01")));
+    }
+
+    #[test]
+    fn parses_attach_partition_list_and_default() {
+        let Statement::AttachPartition { partition, .. } = parse_one(
+            "ALTER TABLE ONLY test.t ATTACH PARTITION test.p \
+             FOR VALUES IN ('a', 'b');",
+        ) else {
+            panic!("expected AttachPartition")
+        };
+        assert_eq!(
+            partition.for_values_in,
+            Some(vec![json!("a"), json!("b")])
+        );
+
+        let Statement::AttachPartition { partition, .. } = parse_one(
+            "ALTER TABLE ONLY test.t ATTACH PARTITION test.pd DEFAULT;",
+        ) else {
+            panic!("expected AttachPartition")
+        };
+        assert_eq!(partition.default, Some(true));
+    }
+
+    #[test]
     fn parses_partition_of_multicolumn_bounds() {
         let statement = parse_one(
             "CREATE TABLE test.events_2024 PARTITION OF test.events \
@@ -1025,6 +1149,43 @@ mod tests {
             panic!("expected CreateTable")
         };
         assert_eq!(table.from_type, Some("test.person_type".into()));
+    }
+
+    #[test]
+    fn parses_typed_table_inline_column_constraints() {
+        let statement = parse_one(
+            "CREATE TABLE test.person OF test.person_type (\n\
+             name WITH OPTIONS NOT NULL,\n\
+             age WITH OPTIONS DEFAULT 0\n\
+             );",
+        );
+        let Statement::CreateTable(table) = statement else {
+            panic!("expected CreateTable")
+        };
+        assert_eq!(table.from_type, Some("test.person_type".into()));
+        let columns = table.columns.unwrap();
+        assert_eq!(columns.len(), 2);
+        assert_eq!(columns[0].name, "name");
+        assert_eq!(columns[0].data_type, "");
+        assert_eq!(columns[0].nullable, Some(false));
+        assert_eq!(columns[1].name, "age");
+        assert_eq!(columns[1].default, Some(json!("0")));
+    }
+
+    #[test]
+    fn parses_typed_table_check_constraint() {
+        let statement = parse_one(
+            "CREATE TABLE test.person OF test.person_type (\n\
+             CONSTRAINT person_age_check CHECK (age >= 0)\n\
+             );",
+        );
+        let Statement::CreateTable(table) = statement else {
+            panic!("expected CreateTable")
+        };
+        let constraints = table.check_constraints.unwrap();
+        assert_eq!(constraints.len(), 1);
+        assert_eq!(constraints[0].name, "person_age_check");
+        assert_eq!(constraints[0].expression, "age >= 0");
     }
 
     #[test]

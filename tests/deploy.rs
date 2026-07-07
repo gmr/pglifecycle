@@ -130,7 +130,7 @@ fn table_alters_in_place_function_or_replaces() {
         "function must use CREATE OR REPLACE, not drop:\n{script}"
     );
     assert!(
-        script.contains("CREATE OR REPLACE FUNCTION set_last_modified"),
+        script.contains("CREATE OR REPLACE FUNCTION test.set_last_modified"),
         "missing function OR REPLACE in:\n{script}"
     );
     assert!(

@@ -48,13 +48,39 @@ pub fn render(
             &value,
         )?;
     }
+    let relation_inventory = relation_inventory(assembly);
     for view in &assembly.views {
-        writer.save(nested("views", &view.schema, &view.name)?, view)?;
+        let mut value = serialize(view)?;
+        if let (Some(map), Some(dependencies)) = (
+            value.as_object_mut(),
+            view_dependencies(
+                &view.schema,
+                &view.name,
+                view.query.as_deref(),
+                &relation_inventory,
+            ),
+        ) {
+            map.insert(String::from("dependencies"), dependencies);
+        }
+        writer
+            .save_value(nested("views", &view.schema, &view.name)?, &value)?;
     }
     for view in &assembly.materialized_views {
-        writer.save(
+        let mut value = serialize(view)?;
+        if let (Some(map), Some(dependencies)) = (
+            value.as_object_mut(),
+            view_dependencies(
+                &view.schema,
+                &view.name,
+                view.query.as_deref(),
+                &relation_inventory,
+            ),
+        ) {
+            map.insert(String::from("dependencies"), dependencies);
+        }
+        writer.save_value(
             nested("materialized_views", &view.schema, &view.name)?,
-            view,
+            &value,
         )?;
     }
     writer.write_functions(assembly)?;
@@ -377,6 +403,134 @@ fn table_dependencies(table: &models::Table) -> Option<Value> {
     (!references.is_empty()).then(|| json!({"tables": references}))
 }
 
+/// A `schema.name` → dependency plural key ("tables", "views",
+/// "materialized_views") map of every relation the pulled inventory
+/// knows about, used to resolve a view query's relation references to
+/// real, managed objects
+fn relation_inventory(
+    assembly: &Assembly,
+) -> BTreeMap<(String, String), &'static str> {
+    let mut inventory = BTreeMap::new();
+    for table in &assembly.tables {
+        inventory.insert((table.schema.clone(), table.name.clone()), "tables");
+    }
+    for view in &assembly.views {
+        inventory.insert((view.schema.clone(), view.name.clone()), "views");
+    }
+    for view in &assembly.materialized_views {
+        inventory.insert(
+            (view.schema.clone(), view.name.clone()),
+            "materialized_views",
+        );
+    }
+    inventory
+}
+
+/// Views carry no foreign keys, so pg_dump's default same-priority
+/// alphabetical sort is the only thing ordering them relative to the
+/// tables/views they query; emit a `dependencies` key (mirroring
+/// `table_dependencies`) so `build`/`load` order the referenced
+/// relations first. Referenced relations are found by re-parsing the
+/// view's `query` text and walking its CST for schema-qualified
+/// `relation_expr` nodes; unqualified references (CTE names, or
+/// anything the dump didn't schema-qualify) and references to objects
+/// outside the pulled inventory are conservatively skipped rather than
+/// guessed at.
+fn view_dependencies(
+    schema: &str,
+    name: &str,
+    query: Option<&str>,
+    inventory: &BTreeMap<(String, String), &'static str>,
+) -> Option<Value> {
+    let mut tables = BTreeSet::new();
+    let mut views = BTreeSet::new();
+    let mut materialized_views = BTreeSet::new();
+    for (rel_schema, rel_name) in referenced_relations(query?) {
+        if rel_schema == schema && rel_name == name {
+            continue; // no self edges
+        }
+        let full = format!("{rel_schema}.{rel_name}");
+        match inventory.get(&(rel_schema, rel_name)) {
+            Some(&"tables") => {
+                tables.insert(full);
+            }
+            Some(&"views") => {
+                views.insert(full);
+            }
+            Some(&"materialized_views") => {
+                materialized_views.insert(full);
+            }
+            _ => {}
+        }
+    }
+    if tables.is_empty() && views.is_empty() && materialized_views.is_empty() {
+        return None;
+    }
+    let mut object = Map::new();
+    if !tables.is_empty() {
+        object.insert(String::from("tables"), json!(tables));
+    }
+    if !views.is_empty() {
+        object.insert(String::from("views"), json!(views));
+    }
+    if !materialized_views.is_empty() {
+        object.insert(
+            String::from("materialized_views"),
+            json!(materialized_views),
+        );
+    }
+    Some(Value::Object(object))
+}
+
+/// Parse a view/materialized view's query text and return every
+/// schema-qualified relation it references (`schema`, `name`), in
+/// document order with duplicates kept (the caller dedupes via a
+/// `BTreeSet`). Unqualified references (bare CTE names, or anything
+/// pg_dump didn't schema-qualify) are skipped rather than guessed at.
+/// Returns an empty list if the query fails to parse (should not
+/// happen for text pg_dump itself emitted, but re-parsing is
+/// defensive here rather than load-bearing).
+fn referenced_relations(query: &str) -> Vec<(String, String)> {
+    use crate::ddl::{NodeExt, qualified_name};
+
+    let mut relations = Vec::new();
+    let mut parser = tree_sitter::Parser::new();
+    if parser
+        .set_language(&tree_sitter_postgres::LANGUAGE.into())
+        .is_err()
+    {
+        return relations;
+    }
+    // The stored `query` is a bare SelectStmt (no trailing
+    // semicolon); append one to reparse it as a standalone statement,
+    // independent of the CREATE VIEW statement it came from.
+    let sql = format!("{query};");
+    let Some(tree) = parser.parse(&sql, None) else {
+        return relations;
+    };
+    let root = tree.root_node();
+    if root.has_error() {
+        return relations;
+    }
+    for stmt in root.find_all("stmt") {
+        let Some(node) = stmt.named_child(0) else {
+            continue;
+        };
+        for relation in node.find_all("relation_expr") {
+            let Some(qn) = relation.find("qualified_name") else {
+                continue;
+            };
+            let Ok(name) = qualified_name(&qn, &sql) else {
+                continue;
+            };
+            if let Some(schema) = name.schema {
+                relations.push((schema, name.name));
+            }
+        }
+    }
+    relations
+}
+
 /// `user.yml` does not allow the `login` option (login is implied)
 fn user_options(state: &RoleState) -> Option<models::RoleOptions> {
     let mut options = state.options.clone();
@@ -658,5 +812,106 @@ mod tests {
         // the fn_1 file must contain the real fn_1, not an overload
         let body = &writer.files[&fn_1_path];
         assert!(body.contains("name: fn_1"), "unexpected contents: {body}");
+    }
+
+    #[test]
+    fn referenced_relations_finds_schema_qualified_table() {
+        let relations = referenced_relations("SELECT id FROM test.users");
+        assert_eq!(
+            relations,
+            vec![(String::from("test"), String::from("users"))]
+        );
+    }
+
+    #[test]
+    fn referenced_relations_skips_unqualified_names() {
+        // a bare name could be a CTE, a same-schema table pg_dump
+        // chose not to qualify, or a system relation; conservatively
+        // skip anything that isn't schema-qualified
+        assert_eq!(referenced_relations("SELECT id FROM users"), Vec::new());
+    }
+
+    #[test]
+    fn referenced_relations_skips_cte_names() {
+        let relations = referenced_relations(
+            "WITH recent AS (SELECT id FROM test.orders) \
+             SELECT id FROM recent",
+        );
+        assert_eq!(
+            relations,
+            vec![(String::from("test"), String::from("orders"))]
+        );
+    }
+
+    fn inventory(
+        entries: &[(&str, &str, &'static str)],
+    ) -> BTreeMap<(String, String), &'static str> {
+        entries
+            .iter()
+            .map(|(schema, name, kind)| {
+                ((schema.to_string(), name.to_string()), *kind)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn view_dependencies_emits_edge_for_known_table() {
+        let inv = inventory(&[("test", "users", "tables")]);
+        let deps = view_dependencies(
+            "test",
+            "us_users",
+            Some("SELECT id FROM test.users"),
+            &inv,
+        );
+        assert_eq!(deps, Some(json!({"tables": ["test.users"]})));
+    }
+
+    #[test]
+    fn view_dependencies_emits_edge_for_known_view() {
+        let inv = inventory(&[("test", "base_view", "views")]);
+        let deps = view_dependencies(
+            "test",
+            "wrapper",
+            Some("SELECT id FROM test.base_view"),
+            &inv,
+        );
+        assert_eq!(deps, Some(json!({"views": ["test.base_view"]})));
+    }
+
+    #[test]
+    fn view_dependencies_skips_unknown_relation() {
+        // referenced relation is schema-qualified but absent from the
+        // pulled inventory (a CTE the parser mis-detected, a system
+        // catalog, or an object outside the project) — must not
+        // fabricate an edge that would fail to load
+        let inv = inventory(&[]);
+        let deps = view_dependencies(
+            "test",
+            "v",
+            Some("SELECT id FROM test.unknown"),
+            &inv,
+        );
+        assert_eq!(deps, None);
+    }
+
+    #[test]
+    fn view_dependencies_guards_self_reference() {
+        // even if the view itself is (erroneously) present in the
+        // inventory map, referencing its own qualified name must not
+        // produce a self-edge
+        let inv = inventory(&[("test", "v", "views")]);
+        let deps = view_dependencies(
+            "test",
+            "v",
+            Some("SELECT id FROM test.v"),
+            &inv,
+        );
+        assert_eq!(deps, None);
+    }
+
+    #[test]
+    fn view_dependencies_none_without_query() {
+        let inv = inventory(&[("test", "users", "tables")]);
+        assert_eq!(view_dependencies("test", "v", None, &inv), None);
     }
 }

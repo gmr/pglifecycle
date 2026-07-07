@@ -396,6 +396,15 @@ pub struct Assembly {
     /// PARTITION OF children whose parent table had not yet been
     /// ingested, replayed after the entry loop completes
     deferred_partitions: Vec<(QualifiedName, models::TablePartition)>,
+    /// ALTER TABLE ... ALTER COLUMN ... SET DEFAULT statements whose
+    /// table had not yet been ingested, replayed after the entry loop
+    /// completes
+    deferred_defaults: Vec<(QualifiedName, String, Value)>,
+    /// ALTER TABLE ... ATTACH PARTITION children, replayed after the
+    /// entry loop so both parent and child tables are fully ingested;
+    /// each child is folded into its parent's `partitions` and its
+    /// standalone table is removed
+    attached_partitions: Vec<(QualifiedName, models::TablePartition)>,
     /// (schema, name) -> index into `tables`, kept in sync as tables
     /// are ingested so index/constraint/trigger/comment merges are
     /// O(1) instead of a linear scan per lookup
@@ -513,6 +522,8 @@ impl Assembly {
                 | OT::Constraint
                 | OT::FkConstraint
                 | OT::CheckConstraint
+                | OT::Default
+                | OT::TableAttach
                 | OT::Trigger
                 | OT::ForeignTable
                 | OT::ForeignDataWrapper
@@ -553,6 +564,8 @@ impl Assembly {
         }
         self.apply_deferred_indexes();
         self.apply_deferred_partitions();
+        self.apply_deferred_defaults();
+        self.apply_attached_partitions();
         task.finish();
         Ok(())
     }
@@ -585,6 +598,78 @@ impl Assembly {
                 None => log::warn!("Partition of unknown table {parent}"),
             }
         }
+    }
+
+    /// Attach column defaults (`ALTER TABLE ... ALTER COLUMN ... SET
+    /// DEFAULT`) whose table was not yet ingested when the statement
+    /// was seen; warn for any that remain unresolved
+    fn apply_deferred_defaults(&mut self) {
+        for (table, column, default) in
+            std::mem::take(&mut self.deferred_defaults)
+        {
+            match self.find_table(&table) {
+                Some(t) => set_column_default(t, &column, default),
+                None => {
+                    log::warn!("Column default on unknown table {table}");
+                }
+            }
+        }
+    }
+
+    /// Fold `ATTACH PARTITION` children into their parent tables: move
+    /// each child's bounds (and any table comment picked up during the
+    /// entry loop) into the parent's `partitions`, then drop the child's
+    /// standalone table so partitions are modeled only under the parent
+    fn apply_attached_partitions(&mut self) {
+        let attaches = std::mem::take(&mut self.attached_partitions);
+        if attaches.is_empty() {
+            return;
+        }
+        let mut removed = std::collections::HashSet::new();
+        let mut folds = Vec::with_capacity(attaches.len());
+        for (parent, mut partition) in attaches {
+            let key = (partition.schema.clone(), partition.name.clone());
+            match self.table_index.get(&key).and_then(|&i| self.tables.get(i))
+            {
+                Some(child) => {
+                    if partition.comment.is_none() {
+                        partition.comment = child.comment.clone();
+                    }
+                    removed.insert(key);
+                }
+                None => log::warn!(
+                    "ATTACH PARTITION of unknown child {}.{}",
+                    partition.schema,
+                    partition.name
+                ),
+            }
+            folds.push((parent, partition));
+        }
+        self.tables.retain(|t| {
+            !removed.contains(&(t.schema.clone(), t.name.clone()))
+        });
+        self.rebuild_table_index();
+        for (parent, partition) in folds {
+            match self.find_table(&parent) {
+                Some(table) => {
+                    table.partitions.get_or_insert_default().push(partition);
+                }
+                None => {
+                    log::warn!("ATTACH PARTITION to unknown table {parent}")
+                }
+            }
+        }
+    }
+
+    /// Rebuild `table_index` from the current `tables` order after a
+    /// removal has shifted positions
+    fn rebuild_table_index(&mut self) {
+        self.table_index = self
+            .tables
+            .iter()
+            .enumerate()
+            .map(|(i, t)| ((t.schema.clone(), t.name.clone()), i))
+            .collect();
     }
 
     /// Parse a `pg_dumpall --roles-only` SQL dump, skipping comments,
@@ -654,6 +739,9 @@ impl Assembly {
                         self.deferred_partitions.push((parent, partition));
                     }
                 }
+            }
+            Statement::AttachPartition { parent, partition } => {
+                self.attached_partitions.push((parent, partition));
             }
             Statement::CreateSequence(mut sequence) => {
                 sequence.owner = owner;
@@ -736,6 +824,16 @@ impl Assembly {
             } => match self.find_table(&table) {
                 Some(table) => ddl::apply_constraint(table, name, constraint),
                 None => log::warn!("Constraint on unknown table {table}"),
+            },
+            Statement::SetColumnDefault {
+                table,
+                column,
+                default,
+            } => match self.find_table(&table) {
+                Some(t) => set_column_default(t, &column, default),
+                None => {
+                    self.deferred_defaults.push((table, column, default));
+                }
             },
             Statement::CreateTrigger { table, trigger } => {
                 match self.find_table(&table) {
@@ -933,6 +1031,7 @@ impl Assembly {
                 .map(|v| v.comment = Some(comment.clone()))
                 .is_some(),
             "FUNCTION" => self.apply_function_comment(&schema, name, &comment),
+            "TRIGGER" => self.apply_trigger_comment(target, &comment),
             "INDEX" => {
                 match self.index_location.get(&(schema, name.clone())) {
                     Some(&IndexLocation::Table(idx)) => self.tables[idx]
@@ -1026,6 +1125,40 @@ impl Assembly {
             return false;
         };
         column.comment = Some(comment.to_string());
+        true
+    }
+
+    /// `COMMENT ON TRIGGER trg ON schema.table` — the ddl layer puts
+    /// the owning table's qualified name into `target.schema` (mirrors
+    /// `apply_column_comment`'s two-name COMMENT shape)
+    fn apply_trigger_comment(
+        &mut self,
+        target: &QualifiedName,
+        comment: &str,
+    ) -> bool {
+        let Some(relation) = &target.schema else {
+            return false;
+        };
+        let (schema, table) = match relation.split_once('.') {
+            Some((schema, table)) => (Some(schema.to_string()), table),
+            None => (None, relation.as_str()),
+        };
+        let relation = QualifiedName {
+            schema,
+            name: table.to_string(),
+        };
+        let Some(table) = self.find_table(&relation) else {
+            return false;
+        };
+        let Some(trigger) = table
+            .triggers
+            .iter_mut()
+            .flatten()
+            .find(|t| t.name.as_deref() == Some(target.name.as_str()))
+        else {
+            return false;
+        };
+        trigger.comment = Some(comment.to_string());
         true
     }
 
@@ -1262,6 +1395,29 @@ fn cancel_revokes(statements: Vec<Statement>) -> Vec<Statement> {
 }
 
 /// The quoted value from a `SET name = 'value';` entry definition
+/// Set a table column's default expression, warning if the column
+/// itself is not found (the table exists but not the column — should
+/// not happen for well-formed pg_dump output, but is not fatal)
+fn set_column_default(
+    table: &mut models::Table,
+    column: &str,
+    default: Value,
+) {
+    match table
+        .columns
+        .iter_mut()
+        .flatten()
+        .find(|c| c.name == column)
+    {
+        Some(c) => c.default = Some(default),
+        None => log::warn!(
+            "Default on unknown column {column} of table {}.{}",
+            table.schema,
+            table.name
+        ),
+    }
+}
+
 fn set_value(defn: &str) -> Option<String> {
     let start = defn.find('\'')? + 1;
     let end = defn.rfind('\'')?;
@@ -1296,6 +1452,7 @@ fn extension(entry: &libpgdump::Entry) -> models::Extension {
 #[cfg(test)]
 mod tests {
     use libpgdump::ObjectType as OT;
+    use serde_json::json;
 
     use super::*;
 
@@ -1520,6 +1677,164 @@ mod tests {
     }
 
     #[test]
+    fn trigger_comments_attach_to_owning_table() {
+        let mut dump = libpgdump::new("fixtures", "UTF8", "18.0").unwrap();
+        add(&mut dump, OT::Schema, "", "test", "CREATE SCHEMA test;");
+        add(
+            &mut dump,
+            OT::Table,
+            "test",
+            "users",
+            "CREATE TABLE test.users (id uuid NOT NULL);",
+        );
+        add(
+            &mut dump,
+            OT::Function,
+            "test",
+            "set_last_modified()",
+            "CREATE FUNCTION test.set_last_modified() RETURNS trigger \
+             LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END; $$;",
+        );
+        add(
+            &mut dump,
+            OT::Trigger,
+            "test",
+            "users trg_last_modified",
+            "CREATE TRIGGER trg_last_modified BEFORE UPDATE ON test.users \
+             FOR EACH ROW EXECUTE FUNCTION test.set_last_modified();",
+        );
+        add(
+            &mut dump,
+            OT::Comment,
+            "test",
+            "TRIGGER trg_last_modified ON users",
+            "COMMENT ON TRIGGER trg_last_modified ON test.users IS \
+             'keeps last_modified_at fresh';",
+        );
+        let mut assembly = Assembly::default();
+        assembly.ingest(&dump).unwrap();
+        let table = assembly
+            .tables
+            .iter()
+            .find(|t| t.name == "users")
+            .expect("users table");
+        let trigger = table
+            .triggers
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|t| t.name.as_deref() == Some("trg_last_modified"))
+            .expect("trigger");
+        assert_eq!(
+            trigger.comment.as_deref(),
+            Some("keeps last_modified_at fresh")
+        );
+    }
+
+    #[test]
+    fn set_default_attaches_to_existing_column() {
+        let mut dump = libpgdump::new("fixtures", "UTF8", "18.0").unwrap();
+        add(&mut dump, OT::Schema, "", "test", "CREATE SCHEMA test;");
+        add(
+            &mut dump,
+            OT::Sequence,
+            "test",
+            "t_id_seq",
+            "CREATE SEQUENCE test.t_id_seq START WITH 1 INCREMENT BY 1 \
+             CACHE 1;",
+        );
+        add(
+            &mut dump,
+            OT::Table,
+            "test",
+            "t",
+            "CREATE TABLE test.t (id bigint NOT NULL);",
+        );
+        add(
+            &mut dump,
+            OT::Default,
+            "test",
+            "t id",
+            "ALTER TABLE ONLY test.t ALTER COLUMN id SET DEFAULT \
+             nextval('test.t_id_seq'::regclass);",
+        );
+        let mut assembly = Assembly::default();
+        assembly.ingest(&dump).unwrap();
+        let table = assembly
+            .tables
+            .iter()
+            .find(|t| t.name == "t")
+            .expect("t table");
+        let column = table
+            .columns
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|c| c.name == "id")
+            .expect("id column");
+        assert_eq!(
+            column.default,
+            Some(json!("nextval('test.t_id_seq'::regclass)"))
+        );
+    }
+
+    #[test]
+    fn deferred_default_attaches_after_table_is_ingested() {
+        // exercise the deferred-default retry path directly: the SET
+        // DEFAULT statement arrives before its table has been ingested
+        let mut assembly = Assembly::default();
+        assembly.deferred_defaults.push((
+            QualifiedName {
+                schema: Some("test".into()),
+                name: "t".into(),
+            },
+            "id".into(),
+            json!("nextval('test.t_id_seq'::regclass)"),
+        ));
+        assembly.tables.push(models::Table {
+            name: "t".into(),
+            schema: "test".into(),
+            owner: String::new(),
+            sql: None,
+            unlogged: None,
+            from_type: None,
+            parents: None,
+            like_table: None,
+            columns: Some(vec![models::Column {
+                name: "id".into(),
+                data_type: "bigint".into(),
+                nullable: Some(false),
+                default: None,
+                collation: None,
+                check_constraint: None,
+                generated: None,
+                comment: None,
+            }]),
+            indexes: None,
+            primary_key: None,
+            check_constraints: None,
+            unique_constraints: None,
+            foreign_keys: None,
+            triggers: None,
+            partition: None,
+            partitions: None,
+            access_method: None,
+            storage_parameters: None,
+            tablespace: None,
+            index_tablespace: None,
+            server: None,
+            options: None,
+            comment: None,
+        });
+        assembly.table_index.insert(("test".into(), "t".into()), 0);
+        assembly.apply_deferred_defaults();
+        assert_eq!(
+            assembly.tables[0].columns.as_ref().unwrap()[0].default,
+            Some(json!("nextval('test.t_id_seq'::regclass)"))
+        );
+    }
+
+    #[test]
     fn ingests_project_settings() {
         let assembly = assembled();
         assert_eq!(assembly.dbname, "fixtures");
@@ -1619,6 +1934,63 @@ mod tests {
             partitions[0].for_values_from,
             Some(serde_json::json!("2024-01-01"))
         );
+    }
+
+    #[test]
+    fn folds_attached_partition_children() {
+        // pg_dump's real form: the child is a standalone CREATE TABLE
+        // and a separate `TABLE ATTACH` entry carries the bounds. The
+        // child must be folded into the parent and dropped as a
+        // top-level table.
+        let mut dump = libpgdump::new("fixtures", "UTF8", "18.0").unwrap();
+        add(&mut dump, OT::Schema, "", "test", "CREATE SCHEMA test;");
+        add(
+            &mut dump,
+            OT::Table,
+            "test",
+            "events",
+            "CREATE TABLE test.events (id bigint, ts timestamp) \
+             PARTITION BY RANGE (ts);",
+        );
+        add(
+            &mut dump,
+            OT::Table,
+            "test",
+            "events_2024",
+            "CREATE TABLE test.events_2024 (id bigint, ts timestamp);",
+        );
+        add(
+            &mut dump,
+            OT::Comment,
+            "test",
+            "TABLE events_2024",
+            "COMMENT ON TABLE test.events_2024 IS 'The 2024 slice';",
+        );
+        add(
+            &mut dump,
+            OT::TableAttach,
+            "test",
+            "events_2024",
+            "ALTER TABLE ONLY test.events ATTACH PARTITION \
+             test.events_2024 FOR VALUES FROM ('2024-01-01') \
+             TO ('2025-01-01');",
+        );
+        let mut assembly = Assembly::default();
+        assembly.ingest(&dump).unwrap();
+        // the child no longer stands alone; only the parent remains
+        assert_eq!(assembly.tables.len(), 1);
+        let events = &assembly.tables[0];
+        assert_eq!(events.name, "events");
+        let partitions = events.partitions.as_ref().expect("partitions");
+        assert_eq!(partitions.len(), 1);
+        assert_eq!(partitions[0].name, "events_2024");
+        assert_eq!(
+            partitions[0].for_values_from,
+            Some(serde_json::json!("2024-01-01"))
+        );
+        assert_eq!(partitions[0].for_values_to, Some(json!("2025-01-01")));
+        // a comment on the child carries onto the partition
+        assert_eq!(partitions[0].comment.as_deref(), Some("The 2024 slice"));
     }
 
     #[test]

@@ -65,49 +65,40 @@ CREATE MATERIALIZED VIEW user_states AS
 
 CREATE UNIQUE INDEX user_states_state ON user_states (state);
 
--- Range-partitioned table, exercising the parent's PARTITION BY
--- clause round-trip.
---
--- Partition children (`CREATE TABLE child PARTITION OF parent FOR
--- VALUES ...`, incl. a DEFAULT partition) were attempted here but are
--- skipped: they uncovered a real, previously-unknown product bug.
--- `pg_dump` never emits the inline `PARTITION OF ... FOR VALUES` form
--- pglifecycle's parser handles (src/ddl/table.rs's `create_table`,
--- matched via `kw_partition && kw_of`); it always splits partition
--- attachment into a separate `ALTER TABLE ONLY parent ATTACH
--- PARTITION child FOR VALUES ...` statement (TOC entry "Type: TABLE
--- ATTACH"). No code anywhere in src/ddl/ or src/pull/ recognizes that
--- ALTER TABLE subform, so it is silently dropped: the child comes
--- back from `pull` as a plain, unattached table with no partition
--- bound, and `build` has nothing to re-emit the ATTACH from. The
--- existing pull unit test `merges_partition_children`
--- (src/pull/mod.rs) only exercises the inline `PARTITION OF ... FOR
--- VALUES` form, so it never caught this since that form doesn't
--- occur in real `pg_dump` output.
+-- Range-partitioned table with children, exercising the ATTACH
+-- PARTITION round-trip. The children are authored inline with
+-- `PARTITION OF ... FOR VALUES`, but `pg_dump` always re-emits them as
+-- a plain `CREATE TABLE` plus a separate `ALTER TABLE ONLY parent
+-- ATTACH PARTITION child FOR VALUES ...` (TOC entry "Type: TABLE
+-- ATTACH"); pull now recognizes that form and folds the child back
+-- into the parent's partitions (incl. a DEFAULT partition).
 CREATE TABLE events (
     id         BIGINT NOT NULL,
     created_at DATE   NOT NULL,
     payload    TEXT
 ) PARTITION BY RANGE (created_at);
 
--- Typed table: composite type + CREATE TABLE OF.
---
--- A column constraint (`CREATE TABLE locations OF point_2d
--- (CONSTRAINT locations_x_check CHECK (x IS NOT NULL))`) was
--- attempted here but is skipped: it uncovered another real product
--- bug. `pg_dump` keeps a typed table's column constraint inline in
--- the `CREATE TABLE ... OF type (...)` statement (unlike partition
--- attachment above), but `create_table` (src/ddl/table.rs) only
--- walks `TableElement` children to find constraints/columns; a typed
--- table's parenthesized element list uses a different grammar
--- production, so the CHECK constraint is silently dropped by pull
--- and the round-trip loses it entirely.
+CREATE TABLE events_2024 PARTITION OF events
+    FOR VALUES FROM ('2024-01-01') TO ('2025-01-01');
+
+CREATE TABLE events_2025 PARTITION OF events
+    FOR VALUES FROM ('2025-01-01') TO ('2026-01-01');
+
+CREATE TABLE events_default PARTITION OF events DEFAULT;
+
+-- Typed table: composite type + CREATE TABLE OF, with an inline
+-- column constraint. `pg_dump` keeps a typed table's constraint inline
+-- in the `CREATE TABLE ... OF type (...)` statement; pull now walks the
+-- typed element list (a distinct grammar production) so the constraint
+-- survives the round-trip.
 CREATE TYPE point_2d AS (
     x DOUBLE PRECISION,
     y DOUBLE PRECISION
 );
 
-CREATE TABLE locations OF point_2d;
+CREATE TABLE locations OF point_2d (
+    CONSTRAINT locations_x_check CHECK (x IS NOT NULL)
+);
 
 -- Table-level CHECK constraints
 CREATE TABLE products (
@@ -118,55 +109,54 @@ CREATE TABLE products (
     CONSTRAINT products_quantity_nonneg CHECK (quantity >= 0)
 );
 
+-- View that sorts alphabetically BEFORE its underlying table
+-- ("active_users" < "users"). Table, Sequence, View and ForeignTable
+-- share libpgdump's priority tier, so without a recorded dependency
+-- edge this view would restore before `users` and pg_restore would
+-- fail with "relation ... does not exist". pull now derives view
+-- dependency edges by re-parsing the stored query, so build orders it
+-- after the tables it references.
+CREATE VIEW active_users AS
+    SELECT id, name, surname FROM users WHERE state = 'verified';
+
 -- View with security_barrier and check_option.
---
--- Named to sort alphabetically after `users`: build's dependency
--- graph never records an edge from a view to the tables/views it
--- queries (only tables get FK-derived `dependencies`, per
--- src/pull/writer.rs's table_dependencies()), so a view with no
--- recorded dependency is ordered purely by libpgdump's default
--- same-priority (namespace, tag) sort -- Table, Sequence, View, and
--- ForeignTable all share priority 22. A view alphabetically before
--- its underlying table (e.g. "active_users" before "users") is
--- restored first and pg_restore fails with "relation ... does not
--- exist". This is a real, pre-existing gap (see commit message); it
--- happens to be masked for user_states below because
--- MATERIALIZED VIEW has its own, later, priority tier.
 CREATE VIEW verified_users
     WITH (security_barrier = true, check_option = 'local') AS
     SELECT id, name, surname FROM users WHERE state = 'verified';
 
+-- Zero-argument trigger function + trigger + trigger comment. Trigger
+-- functions are always zero-arg, exercising build's `CREATE FUNCTION
+-- name() RETURNS trigger` rendering (a missing `()` here is invalid
+-- SQL); the `COMMENT ON TRIGGER` exercises pull's trigger-comment
+-- match arm.
+-- The body is authored in libpgfmt's normalized (two-space) form so the
+-- round-trip gate's exact schema diff stays clean; pull reformats
+-- function bodies through libpgfmt regardless of --style.
+CREATE FUNCTION test.touch_last_modified() RETURNS trigger
+    LANGUAGE plpgsql AS $$
+BEGIN
+  NEW.last_modified_at := CURRENT_TIMESTAMP;
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER users_touch_last_modified
+    BEFORE UPDATE ON users
+    FOR EACH ROW EXECUTE FUNCTION test.touch_last_modified();
+
+COMMENT ON TRIGGER users_touch_last_modified ON users IS
+    'Maintains last_modified_at on update';
+
 -- Per-object COMMENT: column
---
--- A trigger + trigger-comment addition was attempted here but is
--- skipped: it uncovered two real product bugs rather than a fixture
--- issue:
---   1. src/pull/mod.rs `apply_comment` has no match arm for TRIGGER
---      (or RULE/POLICY/CONSTRAINT), so `COMMENT ON TRIGGER ... ON t`
---      always logs "Comment on unmatched object" and the comment is
---      silently dropped.
---   2. src/build/mod.rs `dump_function` (and the pull-side
---      src/ddl/function.rs, which no longer appends `()` to a
---      zero-parameter function's name as the Python tokenizer did)
---      renders zero-argument functions as `CREATE FUNCTION name
---      RETURNS ...` with no parameter list, which is invalid SQL and
---      fails pg_restore. This affects any zero-arg function,
---      including the trigger functions PostgreSQL requires.
 COMMENT ON COLUMN users.display_name IS
     'Optional user-facing display name';
 
 -- Bare `public` schema reference, exercising case-folding of an
--- unquoted `public` identifier.
---
--- Uses a plain integer primary key rather than SERIAL: a SERIAL
--- column's DEFAULT is emitted by pg_dump as a separate, later
--- `ALTER TABLE ONLY public.widgets ALTER COLUMN id SET DEFAULT
--- nextval(...)` statement (TOC entry "Type: DEFAULT"), which is
--- another real, previously-unknown bug -- pull only captures a
--- column's default when it is inline in the CREATE TABLE statement
--- itself, so the sequence-owned default is silently dropped and the
--- round-trip loses it.
+-- unquoted `public` identifier. Uses a SERIAL primary key: pg_dump
+-- emits the column default as a separate, later `ALTER TABLE ONLY
+-- public.widgets ALTER COLUMN id SET DEFAULT nextval(...)` (TOC entry
+-- "Type: DEFAULT"), which pull now folds back onto the column.
 CREATE TABLE public.widgets (
-    id   INTEGER PRIMARY KEY,
+    id   SERIAL PRIMARY KEY,
     name TEXT NOT NULL
 );
