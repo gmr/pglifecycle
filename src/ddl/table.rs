@@ -139,6 +139,21 @@ pub(crate) fn create_table(
             table.like_table = Some(like_table(&like_clause, src));
         }
     }
+    // `CREATE TABLE x OF type (col WITH OPTIONS ..., ...)` — a typed
+    // table's element list is a different production (no columnDef,
+    // since the columns themselves come from the composite type; only
+    // per-column constraints via `columnOptions`, plus ordinary table
+    // constraints, are legal here)
+    for element in node.find_all("TypedTableElement") {
+        if let Some(column_options) = element.child_of_kind("columnOptions") {
+            columns.push(column(&column_options, src));
+        } else if let Some(constraint) =
+            element.child_of_kind("TableConstraint")
+        {
+            let (name, parsed) = table_constraint(&constraint, src)?;
+            apply_constraint(&mut table, name, parsed);
+        }
+    }
     if !columns.is_empty() {
         table.columns = Some(columns);
     }
@@ -1025,6 +1040,43 @@ mod tests {
             panic!("expected CreateTable")
         };
         assert_eq!(table.from_type, Some("test.person_type".into()));
+    }
+
+    #[test]
+    fn parses_typed_table_inline_column_constraints() {
+        let statement = parse_one(
+            "CREATE TABLE test.person OF test.person_type (\n\
+             name WITH OPTIONS NOT NULL,\n\
+             age WITH OPTIONS DEFAULT 0\n\
+             );",
+        );
+        let Statement::CreateTable(table) = statement else {
+            panic!("expected CreateTable")
+        };
+        assert_eq!(table.from_type, Some("test.person_type".into()));
+        let columns = table.columns.unwrap();
+        assert_eq!(columns.len(), 2);
+        assert_eq!(columns[0].name, "name");
+        assert_eq!(columns[0].data_type, "");
+        assert_eq!(columns[0].nullable, Some(false));
+        assert_eq!(columns[1].name, "age");
+        assert_eq!(columns[1].default, Some(json!("0")));
+    }
+
+    #[test]
+    fn parses_typed_table_check_constraint() {
+        let statement = parse_one(
+            "CREATE TABLE test.person OF test.person_type (\n\
+             CONSTRAINT person_age_check CHECK (age >= 0)\n\
+             );",
+        );
+        let Statement::CreateTable(table) = statement else {
+            panic!("expected CreateTable")
+        };
+        let constraints = table.check_constraints.unwrap();
+        assert_eq!(constraints.len(), 1);
+        assert_eq!(constraints[0].name, "person_age_check");
+        assert_eq!(constraints[0].expression, "age >= 0");
     }
 
     #[test]
