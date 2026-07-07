@@ -381,7 +381,40 @@ pub(crate) fn qualified_name(
 pub(crate) fn unquote(value: &str) -> String {
     if value.len() >= 2 && value.starts_with('"') && value.ends_with('"') {
         value[1..value.len() - 1].replace("\"\"", "\"")
+    } else if value.eq_ignore_ascii_case("PUBLIC") {
+        // PUBLIC is a keyword denoting the pseudo-role, not a folded
+        // identifier; the rest of the codebase treats it as the
+        // canonical uppercase literal (see `utils::user_mapping_subject`)
+        String::from("PUBLIC")
     } else {
-        value.to_string()
+        // PostgreSQL folds unquoted identifiers to lowercase; quoted
+        // ones (handled above) keep their case as written
+        value.to_lowercase()
+    }
+}
+
+#[cfg(test)]
+mod unquote_tests {
+    use super::unquote;
+
+    #[test]
+    fn unquoted_identifier_is_case_folded() {
+        assert_eq!(unquote("MyTable"), "mytable");
+    }
+
+    #[test]
+    fn quoted_identifier_keeps_case() {
+        assert_eq!(unquote("\"MyTable\""), "MyTable");
+    }
+
+    #[test]
+    fn quoted_identifier_unescapes_doubled_quotes() {
+        assert_eq!(unquote("\"My\"\"Table\""), "My\"Table");
+    }
+
+    #[test]
+    fn unquoted_public_keyword_stays_uppercase() {
+        assert_eq!(unquote("PUBLIC"), "PUBLIC");
+        assert_eq!(unquote("public"), "PUBLIC");
     }
 }
