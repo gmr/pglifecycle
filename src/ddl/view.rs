@@ -39,7 +39,7 @@ pub(crate) fn create_view(
             .and_then(|n| reloptions(&n, src))
             .and_then(|m| m.get("security_barrier").cloned())
             .and_then(|v| match v {
-                serde_json::Value::String(s) => s.parse::<bool>().ok(),
+                serde_json::Value::String(s) => pg_bool(&s),
                 _ => None,
             }),
         query,
@@ -98,6 +98,18 @@ fn view_columns(node: &Node, src: &str) -> Option<Vec<ViewColumn>> {
         .map(|c| ViewColumn::Name(unquote(c.text(src))))
         .collect();
     (!columns.is_empty()).then_some(columns)
+}
+
+/// Parse a PostgreSQL boolean reloption value. PostgreSQL accepts
+/// `on/off/yes/no/1/0/true/false` (case-insensitively) for boolean
+/// reloptions; a bare option key round-trips through `reloptions` as
+/// `"true"`.
+fn pg_bool(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "on" | "yes" | "1" => Some(true),
+        "false" | "off" | "no" | "0" => Some(false),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -165,6 +177,32 @@ mod tests {
             panic!("expected CreateView")
         };
         assert_eq!(view.security_barrier, Some(true));
+    }
+
+    #[test]
+    fn parses_view_bare_security_barrier() {
+        let Statement::CreateView(view) = parse_one(
+            "CREATE VIEW test.v WITH (security_barrier) AS SELECT 1;",
+        ) else {
+            panic!("expected CreateView")
+        };
+        assert_eq!(view.security_barrier, Some(true));
+    }
+
+    #[test]
+    fn parses_view_security_barrier_boolean_forms() {
+        for (sql, expected) in [
+            ("WITH (security_barrier=on)", Some(true)),
+            ("WITH (security_barrier=off)", Some(false)),
+            ("WITH (security_barrier='no')", Some(false)),
+        ] {
+            let stmt =
+                parse_one(&format!("CREATE VIEW test.v {sql} AS SELECT 1;"));
+            let Statement::CreateView(view) = stmt else {
+                panic!("expected CreateView")
+            };
+            assert_eq!(view.security_barrier, expected, "for {sql}");
+        }
     }
 
     #[test]

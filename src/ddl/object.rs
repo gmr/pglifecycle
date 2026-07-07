@@ -443,13 +443,15 @@ pub(crate) fn reloptions(
             }
             None => unquote(first.text(src)),
         };
-        let Some(value) = elem.child_of_kind("def_arg") else {
-            continue;
+        // A bare option (`WITH (security_barrier)`) has no def_arg;
+        // PostgreSQL treats it as shorthand for `= true`.
+        let value = match elem.child_of_kind("def_arg") {
+            Some(value) => value
+                .child_of_kind("Sconst")
+                .map(|s| string_value(&s, src))
+                .unwrap_or_else(|| value.text(src).to_string()),
+            None => "true".to_string(),
         };
-        let value = value
-            .child_of_kind("Sconst")
-            .map(|s| string_value(&s, src))
-            .unwrap_or_else(|| value.text(src).to_string());
         map.insert(key, serde_json::Value::String(value));
     }
     (!map.is_empty()).then_some(map)

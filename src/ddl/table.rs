@@ -609,9 +609,12 @@ fn partition_bound(spec: &Node, src: &str) -> PartitionBound {
 }
 
 fn partition_value(list: &Node, src: &str) -> Value {
-    match list.find_all("a_expr").as_slice() {
+    let exprs = list.find_all("a_expr");
+    match exprs.as_slice() {
         [one] => single_expr_value(one, src),
-        _ => Value::String(list.text(src).to_string()),
+        _ => Value::Array(
+            exprs.iter().map(|e| single_expr_value(e, src)).collect(),
+        ),
     }
 }
 
@@ -989,6 +992,20 @@ mod tests {
         assert_eq!(partition.name, "events_2024");
         assert_eq!(partition.for_values_from, Some(json!("2024-01-01")));
         assert_eq!(partition.for_values_to, Some(json!("2025-01-01")));
+    }
+
+    #[test]
+    fn parses_partition_of_multicolumn_bounds() {
+        let statement = parse_one(
+            "CREATE TABLE test.events_2024 PARTITION OF test.events \
+             FOR VALUES FROM (2020, 1) TO (2021, 1);",
+        );
+        let Statement::CreateTablePartition { partition, .. } = statement
+        else {
+            panic!("expected CreateTablePartition")
+        };
+        assert_eq!(partition.for_values_from, Some(json!([2020, 1])));
+        assert_eq!(partition.for_values_to, Some(json!([2021, 1])));
     }
 
     #[test]

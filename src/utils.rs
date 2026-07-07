@@ -2,10 +2,16 @@
 
 use serde_json::Value;
 
-/// PostgreSQL RESERVED_KEYWORD and TYPE_FUNC_NAME_KEYWORD identifiers
-/// that pg_dump's `fmtId` quotes even when they otherwise look like a
-/// safe unquoted identifier. Must stay sorted for `binary_search`.
+/// PostgreSQL keywords that pg_dump's `fmtId` quotes even when they
+/// otherwise look like a safe unquoted identifier. This covers the
+/// `RESERVED_KEYWORD` and `TYPE_FUNC_NAME_KEYWORD` sets. The
+/// `COL_NAME_KEYWORD` set (e.g. `int`, `timestamp`, `values`) is
+/// deliberately excluded: those double as type names and
+/// `quote_ident` is also applied to type names in some render paths
+/// (e.g. CAST target types), where quoting them would diverge from
+/// pg_dump. Must stay sorted for `binary_search`.
 const RESERVED_KEYWORDS: &[&str] = &[
+    "all",
     "analyse",
     "analyze",
     "and",
@@ -190,6 +196,16 @@ mod tests {
         assert_eq!(quote_ident("order"), "\"order\"");
         assert_eq!(quote_ident("user"), "\"user\"");
         assert_eq!(quote_ident("2fa"), "\"2fa\"");
+        // `all` is a RESERVED keyword pg_dump also quotes
+        assert_eq!(quote_ident("all"), "\"all\"");
+    }
+
+    #[test]
+    fn reserved_keywords_stay_sorted() {
+        assert!(
+            RESERVED_KEYWORDS.windows(2).all(|w| w[0] < w[1]),
+            "RESERVED_KEYWORDS must be sorted and unique for binary_search"
+        );
     }
 
     #[test]

@@ -184,8 +184,8 @@ const NEW_COLUMN_COMMENTS: &[(&str, &str)] = &[
     ("users.created_at", "When the record was created"),
     ("users.id", "The user ID"),
     (
-        "users.last_modified_at,",
-        "When the record was last modified,",
+        "users.last_modified_at",
+        "When the record was last modified",
     ),
     ("users.state", "The current state of the user"),
 ];
