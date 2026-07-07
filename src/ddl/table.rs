@@ -5,7 +5,8 @@ use tree_sitter::Node;
 
 use crate::ddl::object::{reloptions, string_value};
 use crate::ddl::{
-    NodeExt, Statement, TableConstraint, any_name, qualified_name, unquote,
+    NodeExt, Statement, TableConstraint, any_name, column_elems,
+    qualified_name, unquote,
 };
 use crate::models::{
     CheckConstraint, Column, ColumnGenerated, ConstraintColumns, ForeignKey,
@@ -259,12 +260,7 @@ pub(crate) fn create_index(
             .and_then(|n| n.child_of_kind("name"))
             .map(|n| unquote(n.text(src))),
         columns: (!columns.is_empty()).then_some(columns),
-        include: node.find("opt_c_include").map(|n| {
-            n.find_all("columnElem")
-                .iter()
-                .map(|c| unquote(c.text(src)))
-                .collect()
-        }),
+        include: node.find("opt_c_include").map(|n| column_elems(&n, src)),
         where_clause: node
             .child_of_kind("where_clause")
             .and_then(|n| n.find("a_expr"))
@@ -356,27 +352,42 @@ fn table_constraint(
     let elem = node
         .child_of_kind("ConstraintElem")
         .ok_or_else(|| String::from("constraint without ConstraintElem"))?;
-    let constraint = if elem.has("kw_foreign") {
-        TableConstraint::ForeignKey(foreign_key(
+    // FOREIGN KEY / PRIMARY KEY / UNIQUE / CHECK are mutually exclusive
+    // direct children of ConstraintElem (one per grammar alternative),
+    // so a single child-kind scan replaces four separate recursive
+    // `has()` walks of the same subtree
+    let mut cursor = elem.walk();
+    let kind = elem.children(&mut cursor).find_map(|c| match c.kind() {
+        "kw_foreign" | "kw_primary" | "kw_unique" | "kw_check" => {
+            Some(c.kind())
+        }
+        _ => None,
+    });
+    let constraint = match kind {
+        Some("kw_foreign") => TableConstraint::ForeignKey(foreign_key(
             &elem,
             src,
             name.clone().unwrap_or_default(),
-        )?)
-    } else if elem.has("kw_primary") {
-        TableConstraint::PrimaryKey(constraint_columns(&elem, src))
-    } else if elem.has("kw_unique") {
-        TableConstraint::Unique(constraint_columns(&elem, src))
-    } else if elem.has("kw_check") {
-        let expression = elem
-            .find("a_expr")
-            .map(|n| n.text(src).to_string())
-            .ok_or_else(|| String::from("CHECK without an expression"))?;
-        TableConstraint::Check(expression)
-    } else {
-        return Err(format!(
-            "unsupported constraint: {}",
-            crate::ddl::truncate(elem.text(src), 80)
-        ));
+        )?),
+        Some("kw_primary") => {
+            TableConstraint::PrimaryKey(constraint_columns(&elem, src))
+        }
+        Some("kw_unique") => {
+            TableConstraint::Unique(constraint_columns(&elem, src))
+        }
+        Some("kw_check") => {
+            let expression = elem
+                .child_of_kind("a_expr")
+                .map(|n| n.text(src).to_string())
+                .ok_or_else(|| String::from("CHECK without an expression"))?;
+            TableConstraint::Check(expression)
+        }
+        _ => {
+            return Err(format!(
+                "unsupported constraint: {}",
+                crate::ddl::truncate(elem.text(src), 80)
+            ));
+        }
     };
     Ok((name, constraint))
 }
@@ -385,12 +396,7 @@ fn constraint_columns(elem: &Node, src: &str) -> ConstraintColumns {
     let columns = column_list(elem, src);
     let include: Vec<String> = elem
         .find("opt_c_include")
-        .map(|n| {
-            n.find_all("columnElem")
-                .iter()
-                .map(|c| unquote(c.text(src)))
-                .collect()
-        })
+        .map(|n| column_elems(&n, src))
         .unwrap_or_default();
     if include.is_empty() {
         ConstraintColumns::Columns(columns)
@@ -404,12 +410,7 @@ fn constraint_columns(elem: &Node, src: &str) -> ConstraintColumns {
 
 fn column_list(node: &Node, src: &str) -> Vec<String> {
     node.child_of_kind("columnList")
-        .map(|list| {
-            list.find_all("columnElem")
-                .iter()
-                .map(|c| unquote(c.text(src)))
-                .collect()
-        })
+        .map(|list| column_elems(&list, src))
         .unwrap_or_default()
 }
 
@@ -425,12 +426,7 @@ fn foreign_key(
     let references = qualified_name(&references, src)?;
     let ref_columns: Vec<String> = elem
         .child_of_kind("opt_column_and_period_list")
-        .map(|n| {
-            n.find_all("columnElem")
-                .iter()
-                .map(|c| unquote(c.text(src)))
-                .collect()
-        })
+        .map(|n| column_elems(&n, src))
         .unwrap_or_default();
     let spec = elem.child_of_kind("ConstraintAttributeSpec");
     let deferrable = spec.and_then(|s| {

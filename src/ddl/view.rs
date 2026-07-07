@@ -3,7 +3,7 @@
 use tree_sitter::Node;
 
 use crate::ddl::object::reloptions;
-use crate::ddl::{NodeExt, Statement, qualified_name, unquote};
+use crate::ddl::{NodeExt, Statement, column_elems, qualified_name, unquote};
 use crate::models::{MaterializedView, View, ViewColumn};
 
 /// CREATE [OR REPLACE] VIEW → View
@@ -92,10 +92,9 @@ fn view_columns(node: &Node, src: &str) -> Option<Vec<ViewColumn>> {
         node.find("create_mv_target")
             .and_then(|n| n.child_of_kind("opt_column_list"))
     })?;
-    let columns: Vec<ViewColumn> = list
-        .find_all("columnElem")
-        .iter()
-        .map(|c| ViewColumn::Name(unquote(c.text(src))))
+    let columns: Vec<ViewColumn> = column_elems(&list, src)
+        .into_iter()
+        .map(ViewColumn::Name)
         .collect();
     (!columns.is_empty()).then_some(columns)
 }
