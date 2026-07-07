@@ -24,6 +24,9 @@ struct CachedDependency {
 pub struct Loader {
     project: Project,
     cached_dependencies: Vec<CachedDependency>,
+    /// File path each inventory item was loaded from, parallel to
+    /// `project.inventory`, kept for duplicate-object diagnostics
+    paths: Vec<Option<PathBuf>>,
     errors: usize,
 }
 
@@ -40,6 +43,7 @@ impl Loader {
                 inventory: Vec::new(),
             },
             cached_dependencies: Vec::new(),
+            paths: Vec::new(),
             errors: 0,
         }
     }
@@ -87,14 +91,22 @@ impl Loader {
             self.project.encoding = encoding.to_string();
         }
         for entry in array_field(&project, "extensions") {
-            self.add_definition(ObjectType::Extension, entry);
+            self.add_definition(ObjectType::Extension, entry, Some(&path));
         }
         for mut entry in array_field(&project, "foreign_data_wrappers") {
             inject(&mut entry, "owner", &self.project.superuser);
-            self.add_definition(ObjectType::ForeignDataWrapper, entry);
+            self.add_definition(
+                ObjectType::ForeignDataWrapper,
+                entry,
+                Some(&path),
+            );
         }
         for entry in array_field(&project, "languages") {
-            self.add_definition(ObjectType::ProceduralLanguage, entry);
+            self.add_definition(
+                ObjectType::ProceduralLanguage,
+                entry,
+                Some(&path),
+            );
         }
         Ok(())
     }
@@ -102,14 +114,20 @@ impl Loader {
     /// Read regular one-object-per-file definitions
     fn read_object_files(&mut self, ot: ObjectType) -> Result<(), String> {
         log::debug!("Reading {} definitions", ot.as_str());
-        for (mut defn, _) in self.iterate_files(ot)? {
-            let name = object_name(&defn)?;
+        for (mut defn, path) in self.iterate_files(ot)? {
+            let name = match object_name(&defn) {
+                Ok(name) => name,
+                Err(_) => {
+                    self.errors += 1;
+                    continue;
+                }
+            };
             if !validate::validate_object(&ot.schema_file(), &name, &defn) {
                 self.errors += 1;
                 continue;
             }
             self.cache_and_remove_dependencies(ot, &mut defn);
-            self.add_definition(ot, defn);
+            self.add_definition(ot, defn, Some(&path));
         }
         Ok(())
     }
@@ -119,7 +137,7 @@ impl Loader {
     fn read_container_files(&mut self, ot: ObjectType) -> Result<(), String> {
         log::debug!("Reading {} objects", ot.as_str());
         let key = ot.plural_key();
-        for (mut container, _) in self.iterate_files(ot)? {
+        for (mut container, path) in self.iterate_files(ot)? {
             let container_schema =
                 container["schema"].as_str().unwrap_or_default().to_string();
             if !validate::validate_object(key, &container_schema, &container) {
@@ -127,7 +145,7 @@ impl Loader {
                 continue;
             }
             if ot == ObjectType::TextSearch {
-                self.add_definition(ot, container);
+                self.add_definition(ot, container, Some(&path));
                 continue;
             }
             let owner =
@@ -145,7 +163,13 @@ impl Loader {
                         entry["target_type"].as_str().unwrap_or_default()
                     )
                 } else {
-                    object_name(&entry)?
+                    match object_name(&entry) {
+                        Ok(name) => name,
+                        Err(_) => {
+                            self.errors += 1;
+                            continue;
+                        }
+                    }
                 };
                 if !validate::validate_object(&ot.schema_file(), &name, &entry)
                 {
@@ -153,7 +177,7 @@ impl Loader {
                     continue;
                 }
                 self.cache_and_remove_dependencies(ot, &mut entry);
-                self.add_definition(ot, entry);
+                self.add_definition(ot, entry, Some(&path));
             }
         }
         Ok(())
@@ -229,7 +253,17 @@ impl Loader {
         defn: &mut Value,
     ) {
         let namespace = defn["schema"].as_str().map(str::to_string);
-        let tag = defn["name"].as_str().unwrap_or_default().to_string();
+        let tag = if desc == ObjectType::Cast {
+            // casts have no `name` key; their identity is derived from
+            // source/target types (see Definition::name())
+            format!(
+                "({} AS {})",
+                defn["source_type"].as_str().unwrap_or_default(),
+                defn["target_type"].as_str().unwrap_or_default()
+            )
+        } else {
+            defn["name"].as_str().unwrap_or_default().to_string()
+        };
         if let Value::Object(deps) = defn[DEPENDENCIES].take() {
             for (key, names) in &deps {
                 let Some(parent_desc) = ObjectType::from_plural_key(key)
@@ -303,7 +337,12 @@ impl Loader {
 
     /// Deserialize a definition into its model and add it to the
     /// inventory, verifying the model round-trips to the same value
-    fn add_definition(&mut self, ot: ObjectType, value: Value) {
+    fn add_definition(
+        &mut self,
+        ot: ObjectType,
+        value: Value,
+        path: Option<&Path>,
+    ) {
         let definition = match to_definition(ot, value.clone()) {
             Ok(definition) => definition,
             Err(error) => {
@@ -327,12 +366,36 @@ impl Loader {
             self.errors += 1;
             return;
         }
+        if let Some(existing) = lookup_item(
+            &self.project.inventory,
+            ot,
+            definition.schema(),
+            &definition.name(),
+        ) {
+            let existing_path = self
+                .paths
+                .get(existing)
+                .and_then(Option::as_ref)
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| String::from("<unknown>"));
+            log::error!(
+                "Duplicate {} {} defined in {} (already defined in {})",
+                ot.as_str(),
+                definition.name(),
+                path.map(|p| p.display().to_string())
+                    .unwrap_or_else(|| String::from("<unknown>")),
+                existing_path,
+            );
+            self.errors += 1;
+            return;
+        }
         self.project.inventory.push(Item {
             id: self.project.inventory.len(),
             desc: ot,
             definition,
             dependencies: BTreeSet::new(),
         });
+        self.paths.push(path.map(Path::to_path_buf));
     }
 }
 
@@ -467,4 +530,111 @@ fn dir_name(path: &Path) -> String {
         .and_then(|n| n.to_str())
         .unwrap_or_default()
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    /// M6: a second object with the same (desc, schema, name) is
+    /// rejected as an error instead of silently duplicating the item
+    #[test]
+    fn duplicate_objects_are_flagged_as_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let users = dir.path().join("users");
+        std::fs::create_dir_all(&users).unwrap();
+        std::fs::write(users.join("a.yaml"), "name: dup\n").unwrap();
+        std::fs::write(users.join("b.yaml"), "name: dup\n").unwrap();
+
+        let mut loader = Loader::new(dir.path());
+        loader.read_object_files(ObjectType::User).unwrap();
+
+        assert_eq!(loader.errors, 1);
+        assert_eq!(loader.project.inventory.len(), 1);
+    }
+
+    /// L7: a cast's `dependencies` block is cached under the same tag
+    /// `Definition::name()` computes for it, so the edge resolves
+    /// instead of being dropped as "missing"
+    #[test]
+    fn cast_dependency_edge_resolves() {
+        let mut loader = Loader::new(Path::new("."));
+        loader.project.inventory.push(Item {
+            id: 0,
+            desc: ObjectType::Extension,
+            definition: Definition::Extension(crate::models::Extension {
+                name: String::from("myext"),
+                schema: Some(String::from("public")),
+                version: None,
+                cascade: None,
+                comment: None,
+            }),
+            dependencies: BTreeSet::new(),
+        });
+
+        let mut entry = json!({
+            "source_type": "int4",
+            "target_type": "text",
+            "schema": "test",
+            "owner": "postgres",
+            "function": "f",
+            "dependencies": {"extensions": ["public.myext"]},
+        });
+        loader.cache_and_remove_dependencies(ObjectType::Cast, &mut entry);
+        assert_eq!(entry.get("dependencies"), None);
+        loader.add_definition(ObjectType::Cast, entry, None);
+        loader.apply_cached_dependencies().unwrap();
+
+        assert_eq!(loader.project.inventory[1].dependencies, [0].into());
+    }
+
+    /// L10: a container entry missing `name` is skipped as an error
+    /// rather than aborting the read of the rest of the file
+    #[test]
+    fn missing_name_skips_entry_without_aborting() {
+        let dir = tempfile::tempdir().unwrap();
+        let operators = dir.path().join("operators");
+        std::fs::create_dir_all(&operators).unwrap();
+        std::fs::write(
+            operators.join("t.yaml"),
+            "operators:\n  \
+             - function: f1\n    \
+               left_arg: int4\n    \
+               right_arg: int4\n  \
+             - name: valid_op\n    \
+               function: f2\n    \
+               left_arg: int4\n    \
+               right_arg: int4\n",
+        )
+        .unwrap();
+
+        let mut loader = Loader::new(dir.path());
+        loader.read_container_files(ObjectType::Operator).unwrap();
+
+        assert_eq!(loader.errors, 1);
+        assert_eq!(loader.project.inventory.len(), 1);
+        assert_eq!(loader.project.inventory[0].definition.name(), "valid_op");
+    }
+
+    /// L8: dependency keys for object types omitted from
+    /// `from_plural_key` (e.g. servers) are recognized instead of
+    /// being rejected as "Unknown dependency type"
+    #[test]
+    fn previously_unsupported_dependency_type_is_recognized() {
+        let mut loader = Loader::new(Path::new("."));
+        let mut defn = json!({
+            "name": "child",
+            "schema": "test",
+            "dependencies": {"servers": ["myserver"]},
+        });
+        loader.cache_and_remove_dependencies(ObjectType::Table, &mut defn);
+
+        assert_eq!(loader.errors, 0);
+        assert_eq!(loader.cached_dependencies.len(), 1);
+        let dep = &loader.cached_dependencies[0];
+        assert_eq!(dep.parent_desc, ObjectType::Server);
+        assert_eq!(dep.parent_tag, "myserver");
+    }
 }
