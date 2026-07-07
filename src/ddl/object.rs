@@ -315,23 +315,56 @@ pub(crate) fn comment(node: &Node, src: &str) -> Result<Statement, String> {
     // the object type is the keyword sequence between ON and the name
     let mut object_type = Vec::new();
     let mut target: Option<QualifiedName> = None;
+    // two-name forms (`COMMENT ON TRIGGER trg ON tbl`, `... RULE r ON
+    // tbl`, `... POLICY p ON tbl`, `... CONSTRAINT c ON [DOMAIN] tbl`)
+    // give the first name (trg/r/p/c) before the second, so `target` is
+    // set from the leading `name`/`ColId` and this flag marks that it
+    // still needs qualifying by the node that follows rather than being
+    // overwritten by it
+    let mut pending_first_name = false;
     let mut cursor = node.walk();
     let mut past_on = false;
+    // once a target-bearing node has been seen, later `kw_*` children
+    // (e.g. `DOMAIN` in `CONSTRAINT c ON DOMAIN d`) are part of the
+    // target's own syntax, not the object-type keyword sequence
+    let mut in_target = false;
     for child in node.children(&mut cursor) {
-        match child.kind() {
+        let kind = child.kind();
+        match kind {
             "kw_on" => past_on = true,
             "kw_is" => break,
-            kind if kind.starts_with("kw_") && past_on => {
+            _ if kind.starts_with("kw_") && past_on && !in_target => {
                 object_type
                     .push(kind.trim_start_matches("kw_").to_uppercase());
             }
             // most object types nest their keywords (e.g.
-            // `object_type_any_name (kw_table)`)
-            kind if kind.starts_with("object_type") && past_on => {
+            // `object_type_any_name (kw_table)`), including the
+            // two-name forms (`object_type_name_on_any_name (kw_trigger
+            // | kw_rule | kw_policy)`)
+            _ if kind.starts_with("object_type") && past_on => {
                 collect_keywords(&child, &mut object_type);
             }
-            "any_name" => target = Some(any_name(&child, src)),
-            "function_with_argtypes" => {
+            "any_name" | "qualified_name" | "Typename" if past_on => {
+                in_target = true;
+                let qualifier = match kind {
+                    "qualified_name" => {
+                        crate::ddl::qualified_name(&child, src)?
+                    }
+                    "Typename" => split_dotted(child.text(src)),
+                    _ => any_name(&child, src),
+                };
+                target = Some(if pending_first_name {
+                    QualifiedName {
+                        schema: Some(qualifier.to_string()),
+                        name: target.take().unwrap_or_default().name,
+                    }
+                } else {
+                    qualifier
+                });
+                pending_first_name = false;
+            }
+            "function_with_argtypes" if past_on => {
+                in_target = true;
                 let mut name = child
                     .find("func_name")
                     .map(|n| any_name(&n, src))
@@ -343,22 +376,25 @@ pub(crate) fn comment(node: &Node, src: &str) -> Result<Statement, String> {
                     .collect();
                 name.name = format!("{}({})", name.name, args.join(", "));
                 target = Some(name);
+                pending_first_name = false;
             }
-            "qualified_name" => {
-                target = Some(crate::ddl::qualified_name(&child, src)?);
-            }
-            "Typename" => {
-                let text = child.text(src);
-                target = Some(split_dotted(text));
-            }
-            "name" | "ColId" => {
+            "name" | "ColId" if past_on => {
+                in_target = true;
                 target = Some(QualifiedName {
                     schema: None,
                     name: unquote(child.text(src)),
                 });
+                pending_first_name = true;
             }
             _ => {}
         }
+    }
+    if target.is_none() {
+        log::warn!(
+            "Unhandled COMMENT ON {} target: {}",
+            object_type.join(" "),
+            truncate(node.text(src), 80)
+        );
     }
     Ok(Statement::Comment {
         on: object_type.join(" "),
@@ -442,6 +478,70 @@ mod tests {
         assert_eq!(target.schema.as_deref(), Some("test"));
         assert_eq!(target.name, "fn(integer, text)");
         assert_eq!(comment, "x");
+    }
+
+    #[test]
+    fn unquoted_table_name_is_case_folded() {
+        let Statement::CreateTable(table) =
+            parse_one("CREATE TABLE MyTable (id int);")
+        else {
+            panic!("expected CreateTable")
+        };
+        assert_eq!(table.name, "mytable");
+    }
+
+    #[test]
+    fn quoted_table_name_keeps_case() {
+        let Statement::CreateTable(table) =
+            parse_one("CREATE TABLE \"MyTable\" (id int);")
+        else {
+            panic!("expected CreateTable")
+        };
+        assert_eq!(table.name, "MyTable");
+    }
+
+    #[test]
+    fn parses_trigger_comment_preserves_both_names() {
+        let Statement::Comment {
+            on,
+            target,
+            comment,
+        } = parse_one("COMMENT ON TRIGGER trg ON tbl IS 'x';")
+        else {
+            panic!("expected Comment")
+        };
+        assert_eq!(on, "TRIGGER");
+        assert_eq!(target.schema.as_deref(), Some("tbl"));
+        assert_eq!(target.name, "trg");
+        assert_eq!(comment, "x");
+    }
+
+    #[test]
+    fn parses_policy_comment_preserves_both_names() {
+        let Statement::Comment { on, target, .. } =
+            parse_one("COMMENT ON POLICY pol ON tbl IS 'x';")
+        else {
+            panic!("expected Comment")
+        };
+        assert_eq!(on, "POLICY");
+        assert_eq!(target.schema.as_deref(), Some("tbl"));
+        assert_eq!(target.name, "pol");
+    }
+
+    #[test]
+    fn parses_unhandled_comment_target_without_dropping_statement() {
+        // LARGE OBJECT comments have no name/qualified-name/Typename
+        // node for their numeric id, so the target falls through
+        // unhandled; this should log a warning (see `object.rs`) but
+        // still return a Comment statement with an empty target rather
+        // than erroring or panicking
+        let Statement::Comment { on, target, .. } =
+            parse_one("COMMENT ON LARGE OBJECT 12345 IS 'x';")
+        else {
+            panic!("expected Comment")
+        };
+        assert_eq!(on, "LARGE OBJECT");
+        assert_eq!(target, QualifiedName::default());
     }
 
     #[test]
