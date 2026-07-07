@@ -143,7 +143,7 @@ impl ObjectType {
             "domains" => Self::Domain,
             "event_triggers" => Self::EventTrigger,
             "extensions" => Self::Extension,
-            "foreign data wrappers" => Self::ForeignDataWrapper,
+            "foreign_data_wrappers" => Self::ForeignDataWrapper,
             "functions" => Self::Function,
             "groups" => Self::Group,
             "languages" => Self::ProceduralLanguage,

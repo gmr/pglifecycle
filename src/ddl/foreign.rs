@@ -7,7 +7,7 @@ use tree_sitter::Node;
 
 use crate::ddl::object::string_value;
 use crate::ddl::table::column;
-use crate::ddl::{NodeExt, Statement, qualified_name, unquote};
+use crate::ddl::{NodeExt, Statement, qualified_name, unquote, unquote_role};
 use crate::models::{
     ForeignDataWrapper, Server, Table, UserMapping, UserMappingServer,
 };
@@ -83,7 +83,7 @@ pub(crate) fn create_user_mapping(
 ) -> Result<Statement, String> {
     let name = node
         .child_of_kind("auth_ident")
-        .map(|a| unquote(a.text(src)))
+        .map(|a| unquote_role(a.text(src)))
         .ok_or_else(|| String::from("CREATE USER MAPPING without a user"))?;
     let server = node
         .child_of_kind("name")

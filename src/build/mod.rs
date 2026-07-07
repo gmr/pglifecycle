@@ -2237,8 +2237,7 @@ fn render_typed_table_column(column: &Column) -> Option<String> {
         constraints.push("NOT NULL".into());
     }
     if let Some(check_constraint) = &column.check_constraint {
-        constraints.push("CHECK".into());
-        constraints.push(check_constraint.clone());
+        constraints.push(format!("CHECK ({check_constraint})"));
     }
     if let Some(default) = &column.default {
         constraints.push("DEFAULT".into());
@@ -2703,6 +2702,21 @@ mod tests {
             table_defn(&item, libpgdump::ObjectType::Table, "events"),
             "CREATE TABLE test.events OF test.event_type (id WITH OPTIONS \
              NOT NULL, PRIMARY KEY (id));\n"
+        );
+    }
+
+    #[test]
+    fn renders_typed_table_column_check_wrapped_in_parens() {
+        let mut table = base_table("events");
+        table.from_type = Some("test.event_type".into());
+        let mut id = column("id", "bigint", false);
+        id.check_constraint = Some("id > 0".into());
+        table.columns = Some(vec![id]);
+        let item = table_item(1, table);
+        assert_eq!(
+            table_defn(&item, libpgdump::ObjectType::Table, "events"),
+            "CREATE TABLE test.events OF test.event_type (id WITH OPTIONS \
+             CHECK (id > 0));\n"
         );
     }
 
