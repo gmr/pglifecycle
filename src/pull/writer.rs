@@ -230,7 +230,7 @@ impl Writer {
             if kind == crate::pull::RoleKind::User {
                 let user = models::User {
                     name: name.clone(),
-                    comment: None,
+                    comment: state.comment.clone(),
                     environments: None,
                     password: state.password.clone(),
                     valid_until: state.valid_until.clone(),
@@ -243,7 +243,7 @@ impl Writer {
             } else {
                 let role = models::Role {
                     name: name.clone(),
-                    comment: None,
+                    comment: state.comment.clone(),
                     create: (!state.created).then_some(false),
                     environments: None,
                     grants: state.grants.to_acls(),

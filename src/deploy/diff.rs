@@ -64,6 +64,23 @@ fn function_key_name(function: &crate::models::Function) -> String {
     format!("{}({})", function.name, args.join(", "))
 }
 
+/// The function's parameter *types* only, in the format pg_dump's
+/// archive TOC tag uses (no argument names or modes). `deploy`'s
+/// drop-ordering pass (`entry_key` in `mod.rs`) keys snapshot entries
+/// by their literal tag, which does not carry argument names, so it
+/// cannot be compared against [`function_key_name`]'s identity
+/// signature directly; this gives that pass a key in the same shape.
+pub(crate) fn function_tag_name(function: &crate::models::Function) -> String {
+    let args: Vec<String> = function
+        .parameters
+        .iter()
+        .flatten()
+        .filter(|p| p.mode != "OUT" && p.mode != "TABLE")
+        .map(|p| canonical_type(&p.data_type))
+        .collect();
+    format!("{}({})", function.name, args.join(", "))
+}
+
 impl std::fmt::Display for ObjectKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if self.schema.is_empty() {
