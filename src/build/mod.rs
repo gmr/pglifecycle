@@ -666,7 +666,12 @@ impl Builder {
         if let Some(sql) = &d.sql {
             return self.add_item(item, vec![sql.clone()], vec![], false);
         }
-        let func_name = match &d.parameters {
+        // `comment_target` is only set when `func_name` diverges from the
+        // default comment target (`namespace.d.name`) computed in
+        // `add_comment` — i.e. only for the bare, unparenthesized
+        // zero-argument case below, where `()` must be appended for a
+        // valid `COMMENT ON FUNCTION`.
+        let (func_name, comment_target) = match &d.parameters {
             Some(parameters) if !parameters.is_empty() => {
                 let params: Vec<String> = parameters
                     .iter()
@@ -683,13 +688,27 @@ impl Builder {
                         value.join(" ")
                     })
                     .collect();
-                format!(
+                let func_name = format!(
                     "{}({})",
                     d.name.split('(').next().unwrap_or_default(),
                     params.join(", ")
-                )
+                );
+                (func_name, None)
             }
-            _ => d.name.clone(),
+            // no structured `parameters`: `d.name` may already carry an
+            // embedded `(argtypes)` signature (the on-disk convention for
+            // disambiguating overloads); only a bare, unparenthesized
+            // name needs `()` appended for a true zero-argument function
+            _ if d.name.contains('(') => (d.name.clone(), None),
+            _ => {
+                let func_name = format!("{}()", d.name);
+                let comment_target = if d.schema.is_empty() {
+                    func_name.clone()
+                } else {
+                    format!("{}.{}", quote_ident(&d.schema), func_name)
+                };
+                (func_name, Some(comment_target))
+            }
         };
         let mut create = vec![
             "CREATE".into(),
@@ -700,7 +719,7 @@ impl Builder {
             "LANGUAGE".into(),
             d.language.clone().unwrap_or_default(),
         ];
-        let drop = vec!["DROP FUNCTION IF EXISTS".into(), func_name];
+        let drop = vec!["DROP FUNCTION IF EXISTS".into(), func_name.clone()];
         if let Some(transform_types) = &d.transform_types {
             let tts: Vec<String> = transform_types
                 .iter()
@@ -763,7 +782,13 @@ impl Builder {
         if let Some(definition) = &d.definition {
             let create_sql =
                 vec![format!("{} $$\n{}\n$$", create.join(" "), definition)];
-            return self.add_item(item, create_sql, drop, false);
+            return self.add_item_with_comment_target(
+                item,
+                create_sql,
+                drop,
+                false,
+                comment_target,
+            );
         }
         if let (Some(object_file), Some(link_symbol)) =
             (&d.object_file, &d.link_symbol)
@@ -774,7 +799,13 @@ impl Builder {
                 postgres_value(&Value::String(link_symbol.clone()))
             ));
         }
-        self.add_item(item, create, drop, false)
+        self.add_item_with_comment_target(
+            item,
+            create,
+            drop,
+            false,
+            comment_target,
+        )
     }
 
     fn dump_group(&mut self, item: &Item) -> Result<(), String> {
@@ -2813,6 +2844,90 @@ mod tests {
             table_defn(&item, libpgdump::ObjectType::Table, "events_default"),
             "CREATE TABLE test.events_default PARTITION OF test.events \
              DEFAULT;\n"
+        );
+    }
+
+    fn zero_arg_function(name: &str, comment: Option<&str>) -> Item {
+        Item {
+            id: 1,
+            desc: ObjectType::Function,
+            definition: Definition::Function(crate::models::Function {
+                name: name.into(),
+                schema: "test".into(),
+                owner: "app".into(),
+                sql: None,
+                parameters: None,
+                returns: Some("trigger".into()),
+                language: Some("plpgsql".into()),
+                transform_types: None,
+                window: None,
+                immutable: None,
+                stable: None,
+                volatile: None,
+                leak_proof: None,
+                called_on_null_input: None,
+                strict: None,
+                security: None,
+                parallel: None,
+                cost: None,
+                rows: None,
+                support: None,
+                configuration: None,
+                definition: Some("BEGIN\n  RETURN NEW;\nEND;".into()),
+                object_file: None,
+                link_symbol: None,
+                comment: comment.map(String::from),
+            }),
+            dependencies: BTreeSet::new(),
+        }
+    }
+
+    /// Render `item` and return the FUNCTION entry's create and drop SQL
+    fn function_entry(item: &Item) -> (String, String) {
+        let dump = libpgdump::new("t", "UTF-8", "18.0").unwrap();
+        let mut builder = Builder {
+            dump,
+            dump_id_map: HashMap::new(),
+            superuser: "postgres".into(),
+        };
+        builder.dump_item(item).unwrap();
+        let entry = builder
+            .dump
+            .entries()
+            .iter()
+            .find(|e| e.desc == libpgdump::ObjectType::Function)
+            .expect("a FUNCTION entry")
+            .clone();
+        (
+            entry.defn.unwrap_or_default(),
+            entry.drop_stmt.unwrap_or_default(),
+        )
+    }
+
+    #[test]
+    fn renders_zero_arg_function_with_parens() {
+        let item = zero_arg_function("bare_zero", None);
+        let (create, drop) = function_entry(&item);
+        assert!(
+            create.starts_with(
+                "CREATE FUNCTION bare_zero() RETURNS trigger LANGUAGE \
+                 plpgsql AS $$"
+            ),
+            "unexpected CREATE: {create}"
+        );
+        assert_eq!(drop, "DROP FUNCTION IF EXISTS bare_zero();\n");
+    }
+
+    #[test]
+    fn comments_zero_arg_function_with_parens() {
+        let item = zero_arg_function("bare_zero", Some("a trigger fn"));
+        let defns = comment_defns(&item);
+        assert_eq!(
+            defns,
+            vec![
+                "COMMENT ON FUNCTION test.bare_zero() IS $$a trigger \
+                 fn$$;\n;\n"
+            ]
         );
     }
 }
