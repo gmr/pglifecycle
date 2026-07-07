@@ -392,6 +392,9 @@ pub struct Assembly {
     /// index entry was seen (pg_dump sorts INDEX before MATERIALIZED
     /// VIEW), replayed after the entry loop completes
     deferred_indexes: Vec<(QualifiedName, models::Index)>,
+    /// PARTITION OF children whose parent table had not yet been
+    /// ingested, replayed after the entry loop completes
+    deferred_partitions: Vec<(QualifiedName, models::TablePartition)>,
 }
 
 impl Assembly {
@@ -528,6 +531,7 @@ impl Assembly {
             }
         }
         self.apply_deferred_indexes();
+        self.apply_deferred_partitions();
         task.finish();
         Ok(())
     }
@@ -542,6 +546,22 @@ impl Assembly {
                 view.indexes.get_or_insert_default().push(index);
             } else {
                 log::warn!("Index on unknown relation {table}");
+            }
+        }
+    }
+
+    /// Attach PARTITION OF children whose parent table was not yet
+    /// ingested when the child entry was seen; warn for any that
+    /// remain unresolved
+    fn apply_deferred_partitions(&mut self) {
+        for (parent, partition) in
+            std::mem::take(&mut self.deferred_partitions)
+        {
+            match self.find_table(&parent) {
+                Some(table) => {
+                    table.partitions.get_or_insert_default().push(partition);
+                }
+                None => log::warn!("Partition of unknown table {parent}"),
             }
         }
     }
@@ -596,6 +616,19 @@ impl Assembly {
             Statement::CreateTable(mut table) => {
                 table.owner = owner;
                 self.tables.push(*table);
+            }
+            Statement::CreateTablePartition { parent, partition } => {
+                match self.find_table(&parent) {
+                    Some(table) => {
+                        table
+                            .partitions
+                            .get_or_insert_default()
+                            .push(partition);
+                    }
+                    None => {
+                        self.deferred_partitions.push((parent, partition));
+                    }
+                }
             }
             Statement::CreateSequence(mut sequence) => {
                 sequence.owner = owner;
@@ -1495,6 +1528,43 @@ mod tests {
         let fks = addresses.foreign_keys.as_ref().expect("foreign keys");
         assert_eq!(fks[0].name, "addresses_user_id_fkey");
         assert_eq!(fks[0].on_delete.as_deref(), Some("CASCADE"));
+    }
+
+    #[test]
+    fn merges_partition_children() {
+        // the child entry (events_2024) sorts before its parent
+        // (events) in this dump, exercising the deferred-partition
+        // retry path the same way deferred indexes are exercised
+        let mut dump = libpgdump::new("fixtures", "UTF8", "18.0").unwrap();
+        add(&mut dump, OT::Schema, "", "test", "CREATE SCHEMA test;");
+        add(
+            &mut dump,
+            OT::Table,
+            "test",
+            "events_2024",
+            "CREATE TABLE test.events_2024 PARTITION OF test.events \
+             FOR VALUES FROM ('2024-01-01') TO ('2025-01-01');",
+        );
+        add(
+            &mut dump,
+            OT::Table,
+            "test",
+            "events",
+            "CREATE TABLE test.events (id bigint, ts timestamp) \
+             PARTITION BY RANGE (ts);",
+        );
+        let mut assembly = Assembly::default();
+        assembly.ingest(&dump).unwrap();
+        assert_eq!(assembly.tables.len(), 1);
+        let events = &assembly.tables[0];
+        assert_eq!(events.name, "events");
+        let partitions = events.partitions.as_ref().expect("partitions");
+        assert_eq!(partitions.len(), 1);
+        assert_eq!(partitions[0].name, "events_2024");
+        assert_eq!(
+            partitions[0].for_values_from,
+            Some(serde_json::json!("2024-01-01"))
+        );
     }
 
     #[test]

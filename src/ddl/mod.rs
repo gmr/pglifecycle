@@ -24,6 +24,13 @@ use crate::models;
 #[derive(Clone, Debug, PartialEq)]
 pub enum Statement {
     CreateTable(Box<models::Table>),
+    /// CREATE TABLE ... PARTITION OF `parent` FOR VALUES ... — folded
+    /// into the parent table's `partitions` list during pull assembly
+    /// rather than modeled as a standalone table
+    CreateTablePartition {
+        parent: QualifiedName,
+        partition: models::TablePartition,
+    },
     /// CREATE INDEX — `table` is the qualified relation name
     CreateIndex {
         table: QualifiedName,

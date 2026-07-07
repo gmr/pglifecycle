@@ -2,6 +2,7 @@
 
 use tree_sitter::Node;
 
+use crate::ddl::object::reloptions;
 use crate::ddl::{NodeExt, Statement, qualified_name, unquote};
 use crate::models::{MaterializedView, View, ViewColumn};
 
@@ -33,7 +34,14 @@ pub(crate) fn create_view(
             }
             .to_string()
         }),
-        security_barrier: None,
+        security_barrier: node
+            .child_of_kind("opt_reloptions")
+            .and_then(|n| reloptions(&n, src))
+            .and_then(|m| m.get("security_barrier").cloned())
+            .and_then(|v| match v {
+                serde_json::Value::String(s) => s.parse::<bool>().ok(),
+                _ => None,
+            }),
         query,
         comment: None,
     }))
@@ -65,7 +73,9 @@ pub(crate) fn create_materialized_view(
             .find("table_access_method_clause")
             .and_then(|n| n.find("name"))
             .map(|n| unquote(n.text(src))),
-        storage_parameters: None,
+        storage_parameters: node
+            .find("opt_reloptions")
+            .and_then(|n| reloptions(&n, src)),
         tablespace: node
             .find("OptTableSpace")
             .and_then(|n| n.find("name"))
@@ -144,5 +154,30 @@ mod tests {
         assert_eq!(view.schema, "test");
         assert_eq!(view.name, "mv");
         assert_eq!(view.query, Some("SELECT id FROM test.users".into()));
+    }
+
+    #[test]
+    fn parses_view_security_barrier() {
+        let Statement::CreateView(view) = parse_one(
+            "CREATE VIEW test.v WITH (security_barrier=true) AS \
+             SELECT 1;",
+        ) else {
+            panic!("expected CreateView")
+        };
+        assert_eq!(view.security_barrier, Some(true));
+    }
+
+    #[test]
+    fn parses_materialized_view_storage_parameters() {
+        let Statement::CreateMaterializedView(view) = parse_one(
+            "CREATE MATERIALIZED VIEW test.mv WITH (fillfactor=90) AS \
+             SELECT id FROM test.users;",
+        ) else {
+            panic!("expected CreateMaterializedView")
+        };
+        assert_eq!(
+            view.storage_parameters.unwrap().get("fillfactor"),
+            Some(&serde_json::Value::String("90".into()))
+        );
     }
 }

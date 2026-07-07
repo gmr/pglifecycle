@@ -64,11 +64,32 @@ pub(crate) fn create_function(
                 .child_of_kind("NonReservedWord_or_Sconst")
                 .map(|n| unquote(n.text(src)));
         } else if option.has("kw_as") {
-            if let Some(body) = option.find("Sconst") {
-                function.definition = Some(string_value(&body, src));
+            if let Some(func_as) = option.child_of_kind("func_as") {
+                let sconsts = func_as.find_all("Sconst");
+                match sconsts.as_slice() {
+                    [object_file, link_symbol] => {
+                        function.object_file =
+                            Some(string_value(object_file, src));
+                        function.link_symbol =
+                            Some(string_value(link_symbol, src));
+                    }
+                    [body] => {
+                        function.definition = Some(string_value(body, src));
+                    }
+                    _ => {}
+                }
             }
         } else if option.has("kw_window") {
             function.window = Some(true);
+        } else if option.has("kw_transform") {
+            let transform_types: Vec<String> = option
+                .find_all("Typename")
+                .iter()
+                .map(|n| n.text(src).to_string())
+                .collect();
+            if !transform_types.is_empty() {
+                function.transform_types = Some(transform_types);
+            }
         } else if let Some(common) =
             option.child_of_kind("common_func_opt_item")
         {
@@ -262,6 +283,32 @@ mod tests {
             "get_count(in_a_id integer, in_from timestamp with time \
              zone, OUT upload_count bigint)"
         );
+    }
+
+    #[test]
+    fn parses_c_language_function() {
+        let Statement::CreateFunction(function) = parse_one(
+            "CREATE FUNCTION test.c_fn(a integer) RETURNS integer \
+             LANGUAGE c AS 'ext_module', 'c_fn';",
+        ) else {
+            panic!("expected CreateFunction")
+        };
+        assert_eq!(function.language, Some("c".into()));
+        assert_eq!(function.object_file, Some("ext_module".into()));
+        assert_eq!(function.link_symbol, Some("c_fn".into()));
+        assert_eq!(function.definition, None);
+    }
+
+    #[test]
+    fn parses_transform_types() {
+        let Statement::CreateFunction(function) = parse_one(
+            "CREATE FUNCTION test.fn(a hstore) RETURNS integer \
+             LANGUAGE plpython3u TRANSFORM FOR TYPE hstore \
+             AS $$ return 1 $$;",
+        ) else {
+            panic!("expected CreateFunction")
+        };
+        assert_eq!(function.transform_types, Some(vec!["hstore".into()]));
     }
 
     #[test]
