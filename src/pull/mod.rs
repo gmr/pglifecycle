@@ -279,6 +279,7 @@ pub struct RoleState {
     /// Whether a CREATE ROLE statement was seen; grantee-only roles
     /// (e.g. PUBLIC) are written with `create: false`
     pub created: bool,
+    pub comment: Option<String>,
     pub options: models::RoleOptions,
     pub password: Option<String>,
     pub valid_until: Option<String>,
@@ -755,6 +756,13 @@ impl Assembly {
                         }
                     }
                 }
+            }
+            Statement::Comment {
+                on,
+                target,
+                comment,
+            } if on == "ROLE" => {
+                self.role(&target.name).comment = Some(comment);
             }
             other => {
                 log::warn!("Unexpected statement in roles dump: {other:?}");
@@ -1660,6 +1668,57 @@ mod tests {
         let readonly = &assembly.roles["readonly"];
         assert!(readonly.created);
         assert_eq!(readonly.options.login, Some(false));
+    }
+
+    /// `COMMENT ON ROLE` in the roles dump is captured on the role's
+    /// state (rather than dropped with an "Unexpected statement"
+    /// warning) and carried through to both the role and user models
+    /// on write
+    #[test]
+    fn comment_on_role_is_captured_and_written() {
+        use clap::Parser;
+        let mut assembly = Assembly::default();
+        assembly
+            .ingest_roles(
+                "CREATE ROLE app;\n\
+                 ALTER ROLE app WITH LOGIN;\n\
+                 COMMENT ON ROLE app IS 'application role';\n\
+                 CREATE ROLE readonly;\n\
+                 ALTER ROLE readonly WITH NOLOGIN;\n\
+                 COMMENT ON ROLE readonly IS 'read-only role';\n",
+            )
+            .unwrap();
+        assert_eq!(
+            assembly.roles["app"].comment.as_deref(),
+            Some("application role")
+        );
+        assert_eq!(
+            assembly.roles["readonly"].comment.as_deref(),
+            Some("read-only role")
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("project");
+        let dump = dir.path().join("unused.dump");
+        let args = match cli::Cli::try_parse_from([
+            "pglifecycle",
+            "pull",
+            "--dump",
+            dump.to_str().unwrap(),
+            dest.to_str().unwrap(),
+        ])
+        .unwrap()
+        .action
+        {
+            cli::Action::Pull(args) => args,
+            _ => unreachable!(),
+        };
+        let files = writer::render(&assembly, &args).unwrap();
+
+        let user = files.get(Path::new("users/app.yaml")).unwrap();
+        assert!(user.contains("comment: application role"));
+        let role = files.get(Path::new("roles/readonly.yaml")).unwrap();
+        assert!(role.contains("comment: read-only role"));
     }
 
     /// LOGIN roles become users, NOLOGIN roles stay roles, and reserved

@@ -167,9 +167,16 @@ fn plan(
         }
     };
     // pg_dump archives are stored in dependency order, so dropping in
-    // reverse entry order removes dependents before dependencies
-    let wanted: std::collections::BTreeSet<&ObjectKey> =
-        diff.removed.keys().collect();
+    // reverse entry order removes dependents before dependencies.
+    // `entry_key` derives a function's name from the archive tag
+    // (types only, no argument names), while `ObjectKey`'s own name
+    // may include them, so match through `drop_match_key`'s
+    // tag-shaped form rather than the removed key directly
+    let wanted: std::collections::BTreeMap<ObjectKey, &ObjectKey> = diff
+        .removed
+        .iter()
+        .map(|(key, definition)| (drop_match_key(key, definition), key))
+        .collect();
     let mut emitted: std::collections::BTreeSet<&ObjectKey> =
         std::collections::BTreeSet::new();
     let ordered: Vec<&ObjectKey> = snapshot
@@ -400,6 +407,21 @@ fn drop_sql(key: &ObjectKey, definition: Option<&Definition>) -> String {
     format!("DROP {} IF EXISTS {qualified};\n", key.desc.as_str())
 }
 
+/// The key a removed object is looked up under when matching archive
+/// entries for drop ordering: functions use the tag-shaped signature
+/// ([`diff::function_tag_name`]) so they compare equal to
+/// `entry_key`'s output; everything else uses its own key unchanged
+fn drop_match_key(key: &ObjectKey, definition: &Definition) -> ObjectKey {
+    match definition {
+        Definition::Function(f) => ObjectKey {
+            desc: key.desc,
+            schema: key.schema.clone(),
+            name: diff::function_tag_name(f),
+        },
+        _ => key.clone(),
+    }
+}
+
 /// Map a snapshot entry to the diff key space (modeled types only);
 /// the schema component mirrors [`ObjectKey::new`] — empty for
 /// schemaless types and extensions
@@ -462,5 +484,130 @@ fn source_label(args: &cli::Deploy) -> String {
             args.connection.port,
             args.connection.dbname.as_deref().unwrap_or_default()
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use clap::Parser;
+
+    use super::*;
+    use crate::models::Function;
+
+    fn function(json: serde_json::Value) -> Function {
+        serde_json::from_value(json).expect("function deserializes")
+    }
+
+    /// A removed function whose database-side name (with a named
+    /// parameter, per `function_key_name`) diverges from the archive
+    /// tag it was dropped from (types only) must still be matched by
+    /// the ordered drop pass, so it drops before the function it
+    /// depends on rather than falling into the unordered fallback
+    /// (finding L5)
+    #[test]
+    fn removed_function_with_named_parameter_drops_in_dependency_order() {
+        let dep_fn = function(serde_json::json!({
+            "name": "dep",
+            "schema": "public",
+            "owner": "postgres",
+            "returns": "integer",
+            "language": "sql",
+            "parameters": [],
+        }));
+        let main_fn = function(serde_json::json!({
+            "name": "main",
+            "schema": "public",
+            "owner": "postgres",
+            "returns": "integer",
+            "language": "sql",
+            "parameters": [
+                {"mode": "IN", "data_type": "integer", "name": "x"},
+            ],
+        }));
+        let dep_key = ObjectKey::new(
+            constants::ObjectType::Function,
+            &Definition::Function(dep_fn.clone()),
+        );
+        let main_key = ObjectKey::new(
+            constants::ObjectType::Function,
+            &Definition::Function(main_fn.clone()),
+        );
+        // the database-side identity signature includes the
+        // parameter name, unlike the archive tag it must match below
+        assert_eq!(main_key.name, "main(x integer)");
+
+        let mut diff = Diff {
+            items: BTreeMap::new(),
+            changed: BTreeMap::new(),
+            removed: BTreeMap::new(),
+        };
+        diff.removed
+            .insert(dep_key.clone(), Definition::Function(dep_fn));
+        diff.removed
+            .insert(main_key.clone(), Definition::Function(main_fn));
+
+        // pg_dump archives store entries in dependency order: `dep`
+        // before `main`, which depends on it; the TOC tag carries
+        // only parameter types, never argument names
+        let mut snapshot =
+            libpgdump::new("test", "UTF8", "18.0").expect("new dump");
+        let dep_id = snapshot
+            .add_entry(
+                libpgdump::ObjectType::Function,
+                Some("public"),
+                Some("dep()"),
+                None,
+                None,
+                None,
+                None,
+                &[],
+            )
+            .expect("add dep entry");
+        snapshot
+            .add_entry(
+                libpgdump::ObjectType::Function,
+                Some("public"),
+                Some("main(integer)"),
+                None,
+                None,
+                None,
+                None,
+                &[dep_id],
+            )
+            .expect("add main entry");
+
+        let output = build::BuildOutput {
+            dump: libpgdump::new("test", "UTF8", "18.0")
+                .expect("new output dump"),
+            item_ids: std::collections::HashMap::new(),
+        };
+        let cli = cli::Cli::parse_from([
+            "pglifecycle",
+            "deploy",
+            "--allow-drop",
+            "proj",
+        ]);
+        let args = match cli.action {
+            cli::Action::Deploy(deploy) => deploy,
+            _ => unreachable!("parsed the deploy subcommand"),
+        };
+
+        let plan = plan(&diff, &BTreeMap::new(), &output, &snapshot, &args)
+            .expect("plan succeeds");
+
+        assert!(plan.excluded.is_empty());
+        assert_eq!(
+            plan.included
+                .iter()
+                .map(|s| s.label.clone())
+                .collect::<Vec<_>>(),
+            vec![main_key.to_string(), dep_key.to_string()],
+            "main (the dependent) must drop before dep (its \
+             dependency), which requires the removed main() to be \
+             matched by the ordered pass despite its named-parameter \
+             key diverging from the archive tag"
+        );
     }
 }

@@ -6,7 +6,7 @@ use tree_sitter::Node;
 use crate::ddl::object::{string_value, unstring};
 use crate::ddl::{
     Acl, AclTarget, NodeExt, Privilege, RoleDef, Statement, any_name,
-    qualified_name, truncate, unquote,
+    qualified_name, truncate, unquote, unquote_role,
 };
 use crate::models::RoleOptions;
 
@@ -257,7 +257,7 @@ fn role_specs(node: &Node, src: &str) -> Vec<String> {
         .map(|n| {
             n.find_all("RoleSpec")
                 .iter()
-                .map(|r| unquote(r.text(src)))
+                .map(|r| unquote_role(r.text(src)))
                 .collect()
         })
         .unwrap_or_default()

@@ -382,6 +382,56 @@ pub(crate) fn unquote(value: &str) -> String {
     if value.len() >= 2 && value.starts_with('"') && value.ends_with('"') {
         value[1..value.len() - 1].replace("\"\"", "\"")
     } else {
-        value.to_string()
+        // PostgreSQL folds unquoted identifiers to lowercase; quoted
+        // ones (handled above) keep their case as written
+        value.to_lowercase()
+    }
+}
+
+/// Like [`unquote`], but preserves the pseudo-role keyword `PUBLIC` as
+/// the canonical uppercase literal. Use only for role references
+/// (grantees, USER MAPPING subjects) where `PUBLIC` is a keyword rather
+/// than a folded identifier; the rest of the codebase keys the
+/// pseudo-role on the uppercase form (see `utils::user_mapping_subject`).
+pub(crate) fn unquote_role(value: &str) -> String {
+    if value.eq_ignore_ascii_case("PUBLIC") {
+        String::from("PUBLIC")
+    } else {
+        unquote(value)
+    }
+}
+
+#[cfg(test)]
+mod unquote_tests {
+    use super::unquote;
+
+    #[test]
+    fn unquoted_identifier_is_case_folded() {
+        assert_eq!(unquote("MyTable"), "mytable");
+    }
+
+    #[test]
+    fn quoted_identifier_keeps_case() {
+        assert_eq!(unquote("\"MyTable\""), "MyTable");
+    }
+
+    #[test]
+    fn quoted_identifier_unescapes_doubled_quotes() {
+        assert_eq!(unquote("\"My\"\"Table\""), "My\"Table");
+    }
+
+    #[test]
+    fn unquoted_public_identifier_is_case_folded() {
+        assert_eq!(unquote("PUBLIC"), "public");
+        assert_eq!(unquote("public"), "public");
+    }
+
+    #[test]
+    fn unquote_role_preserves_public_keyword() {
+        use super::unquote_role;
+        assert_eq!(unquote_role("PUBLIC"), "PUBLIC");
+        assert_eq!(unquote_role("public"), "PUBLIC");
+        assert_eq!(unquote_role("app_user"), "app_user");
+        assert_eq!(unquote_role("\"MyRole\""), "MyRole");
     }
 }
