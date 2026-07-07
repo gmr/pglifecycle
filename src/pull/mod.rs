@@ -9,7 +9,7 @@
 mod update;
 mod writer;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write;
 use std::io::IsTerminal;
 use std::path::Path;
@@ -396,6 +396,26 @@ pub struct Assembly {
     /// PARTITION OF children whose parent table had not yet been
     /// ingested, replayed after the entry loop completes
     deferred_partitions: Vec<(QualifiedName, models::TablePartition)>,
+    /// (schema, name) -> index into `tables`, kept in sync as tables
+    /// are ingested so index/constraint/trigger/comment merges are
+    /// O(1) instead of a linear scan per lookup
+    table_index: HashMap<(String, String), usize>,
+    /// (schema, name) -> index into `materialized_views`, mirroring
+    /// `table_index`
+    matview_index: HashMap<(String, String), usize>,
+    /// (schema, index name) -> where the index currently lives, kept
+    /// in sync as indexes are attached so `COMMENT ON INDEX` does not
+    /// need to scan every index in every table
+    index_location: HashMap<(String, String), IndexLocation>,
+}
+
+/// Where an ingested index currently lives, for `index_location`
+/// lookups
+#[derive(Debug, Clone, Copy)]
+enum IndexLocation {
+    Table(usize),
+    MaterializedView(usize),
+    Deferred(usize),
 }
 
 impl Assembly {
@@ -616,6 +636,10 @@ impl Assembly {
             }
             Statement::CreateTable(mut table) => {
                 table.owner = owner;
+                self.table_index.insert(
+                    (table.schema.clone(), table.name.clone()),
+                    self.tables.len(),
+                );
                 self.tables.push(*table);
             }
             Statement::CreateTablePartition { parent, partition } => {
@@ -644,6 +668,10 @@ impl Assembly {
             }
             Statement::CreateMaterializedView(mut view) => {
                 view.owner = owner;
+                self.matview_index.insert(
+                    (view.schema.clone(), view.name.clone()),
+                    self.materialized_views.len(),
+                );
                 self.materialized_views.push(view);
             }
             Statement::CreateFunction(mut function) => {
@@ -668,15 +696,36 @@ impl Assembly {
                 }
             }
             Statement::CreateIndex { table, index } => {
-                if let Some(table) = self.find_table(&table) {
-                    table.indexes.get_or_insert_default().push(index);
-                } else if let Some(view) = self.find_materialized_view(&table)
+                let schema = table.schema.clone().unwrap_or_default();
+                let location_key = (schema.clone(), index.name.clone());
+                if let Some(&idx) =
+                    self.table_index.get(&(schema.clone(), table.name.clone()))
                 {
-                    view.indexes.get_or_insert_default().push(index);
+                    self.tables[idx]
+                        .indexes
+                        .get_or_insert_default()
+                        .push(index);
+                    self.index_location
+                        .insert(location_key, IndexLocation::Table(idx));
+                } else if let Some(&idx) =
+                    self.matview_index.get(&(schema, table.name.clone()))
+                {
+                    self.materialized_views[idx]
+                        .indexes
+                        .get_or_insert_default()
+                        .push(index);
+                    self.index_location.insert(
+                        location_key,
+                        IndexLocation::MaterializedView(idx),
+                    );
                 } else {
                     // the target relation may simply not be ingested
                     // yet (matview indexes sort before their matview);
                     // retry after the entry loop
+                    self.index_location.insert(
+                        location_key,
+                        IndexLocation::Deferred(self.deferred_indexes.len()),
+                    );
                     self.deferred_indexes.push((table, index));
                 }
             }
@@ -885,30 +934,29 @@ impl Assembly {
                 .is_some(),
             "FUNCTION" => self.apply_function_comment(&schema, name, &comment),
             "INDEX" => {
-                self.tables
-                    .iter_mut()
-                    .filter(|t| t.schema == schema)
-                    .flat_map(|t| t.indexes.iter_mut().flatten())
-                    .find(|i| i.name == *name)
-                    .map(|i| i.comment = Some(comment.clone()))
-                    .is_some()
-                    || self
-                        .materialized_views
+                match self.index_location.get(&(schema, name.clone())) {
+                    Some(&IndexLocation::Table(idx)) => self.tables[idx]
+                        .indexes
                         .iter_mut()
-                        .filter(|v| v.schema == schema)
-                        .flat_map(|v| v.indexes.iter_mut().flatten())
+                        .flatten()
                         .find(|i| i.name == *name)
                         .map(|i| i.comment = Some(comment.clone()))
-                        .is_some()
-                    || self
-                        .deferred_indexes
+                        .is_some(),
+                    Some(&IndexLocation::MaterializedView(idx)) => self
+                        .materialized_views[idx]
+                        .indexes
                         .iter_mut()
-                        .find(|(rel, i)| {
-                            rel.schema.clone().unwrap_or_default() == schema
-                                && i.name == *name
-                        })
+                        .flatten()
+                        .find(|i| i.name == *name)
+                        .map(|i| i.comment = Some(comment.clone()))
+                        .is_some(),
+                    Some(&IndexLocation::Deferred(idx)) => self
+                        .deferred_indexes
+                        .get_mut(idx)
                         .map(|(_, i)| i.comment = Some(comment.clone()))
-                        .is_some()
+                        .is_some(),
+                    None => false,
+                }
             }
             _ => false,
         };
@@ -986,9 +1034,8 @@ impl Assembly {
         name: &QualifiedName,
     ) -> Option<&mut models::Table> {
         let schema = name.schema.clone().unwrap_or_default();
-        self.tables
-            .iter_mut()
-            .find(|t| t.schema == schema && t.name == name.name)
+        let idx = *self.table_index.get(&(schema, name.name.clone()))?;
+        self.tables.get_mut(idx)
     }
 
     fn find_materialized_view(
@@ -996,9 +1043,8 @@ impl Assembly {
         name: &QualifiedName,
     ) -> Option<&mut models::MaterializedView> {
         let schema = name.schema.clone().unwrap_or_default();
-        self.materialized_views
-            .iter_mut()
-            .find(|v| v.schema == schema && v.name == name.name)
+        let idx = *self.matview_index.get(&(schema, name.name.clone()))?;
+        self.materialized_views.get_mut(idx)
     }
 
     /// Merge ALTER SEQUENCE options (including OWNED BY) into the

@@ -1,6 +1,6 @@
 //! The project directory loader (ports the load half of project.py)
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
@@ -28,6 +28,14 @@ pub struct Loader {
     /// `project.inventory`, kept for duplicate-object diagnostics
     paths: Vec<Option<PathBuf>>,
     errors: usize,
+    /// `(desc, namespace, tag)` -> inventory index, maintained
+    /// incrementally as items are added so both the duplicate-object
+    /// guard in `add_definition` and dependency resolution in
+    /// `apply_cached_dependencies` can look items up in O(1) instead of
+    /// scanning the inventory. Schemaless types are always keyed with a
+    /// `None` namespace, matching `lookup_item`'s old comparison which
+    /// ignored namespace for them.
+    index: HashMap<(ObjectType, Option<String>, String), usize>,
 }
 
 impl Loader {
@@ -45,6 +53,7 @@ impl Loader {
             cached_dependencies: Vec::new(),
             paths: Vec::new(),
             errors: 0,
+            index: HashMap::new(),
         }
     }
 
@@ -294,7 +303,7 @@ impl Loader {
     fn apply_cached_dependencies(&mut self) -> Result<(), String> {
         for dep in &self.cached_dependencies {
             let Some(item) = lookup_item(
-                &self.project.inventory,
+                &self.index,
                 dep.desc,
                 dep.namespace.as_deref(),
                 &dep.tag,
@@ -314,7 +323,7 @@ impl Loader {
             // manage (e.g. a foreign key or inheritance parent owned by
             // an extension); skip the edge rather than failing the load
             let Some(parent) = lookup_item(
-                &self.project.inventory,
+                &self.index,
                 dep.parent_desc,
                 Some(&dep.parent_namespace),
                 &dep.parent_tag,
@@ -367,7 +376,7 @@ impl Loader {
             return;
         }
         if let Some(existing) = lookup_item(
-            &self.project.inventory,
+            &self.index,
             ot,
             definition.schema(),
             &definition.name(),
@@ -389,8 +398,11 @@ impl Loader {
             self.errors += 1;
             return;
         }
+        let id = self.project.inventory.len();
+        let key = index_key(ot, definition.schema(), &definition.name());
+        self.index.insert(key, id);
         self.project.inventory.push(Item {
-            id: self.project.inventory.len(),
+            id,
             desc: ot,
             definition,
             dependencies: BTreeSet::new(),
@@ -399,23 +411,32 @@ impl Loader {
     }
 }
 
-/// Find an inventory item by type, schema, and name
-/// (project.py _lookup_item)
+/// Build the `index` key for a `(desc, namespace, tag)` triple,
+/// normalizing the namespace to `None` for schemaless types so lookups
+/// and insertions always agree regardless of what the caller passed
+/// (project.py _lookup_item ignored namespace entirely in that case)
+fn index_key(
+    desc: ObjectType,
+    namespace: Option<&str>,
+    tag: &str,
+) -> (ObjectType, Option<String>, String) {
+    let namespace = if desc.is_schemaless() {
+        None
+    } else {
+        namespace.map(str::to_string)
+    };
+    (desc, namespace, tag.to_string())
+}
+
+/// Find an inventory item by type, schema, and name via the loader's
+/// `(desc, namespace, tag)` index (project.py _lookup_item)
 fn lookup_item(
-    inventory: &[Item],
+    index: &HashMap<(ObjectType, Option<String>, String), usize>,
     desc: ObjectType,
     namespace: Option<&str>,
     tag: &str,
 ) -> Option<usize> {
-    inventory
-        .iter()
-        .find(|item| {
-            item.desc == desc
-                && item.definition.name() == tag
-                && (desc.is_schemaless()
-                    || item.definition.schema() == namespace)
-        })
-        .map(|item| item.id)
+    index.get(&index_key(desc, namespace, tag)).copied()
 }
 
 fn to_definition(
@@ -573,6 +594,10 @@ mod tests {
             }),
             dependencies: BTreeSet::new(),
         });
+        loader.index.insert(
+            index_key(ObjectType::Extension, Some("public"), "myext"),
+            0,
+        );
 
         let mut entry = json!({
             "source_type": "int4",

@@ -388,6 +388,16 @@ pub(crate) fn unquote(value: &str) -> String {
     }
 }
 
+/// Collect a node's `columnElem` descendants as unquoted, case-folded
+/// column names (`columnList`, `opt_c_include`, etc. all wrap a flat or
+/// left-recursive list of `columnElem`)
+pub(crate) fn column_elems(node: &Node, src: &str) -> Vec<String> {
+    node.find_all("columnElem")
+        .iter()
+        .map(|c| unquote(c.text(src)))
+        .collect()
+}
+
 /// Like [`unquote`], but preserves the pseudo-role keyword `PUBLIC` as
 /// the canonical uppercase literal. Use only for role references
 /// (grantees, USER MAPPING subjects) where `PUBLIC` is a keyword rather

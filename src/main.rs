@@ -61,6 +61,10 @@ fn configure_logging(args: &cli::Cli) {
     } else {
         log::LevelFilter::Warn
     };
+    // initialize progress rendering unconditionally (bars go to stderr
+    // regardless of where logs go) so `--log-file` doesn't disable bars
+    // on a TTY
+    let multi = progress::init();
     if let Some(path) = &args.log_file {
         if let Ok(handle) = std::fs::File::create(path) {
             if let Err(err) = simplelog::WriteLogger::init(
@@ -70,6 +74,8 @@ fn configure_logging(args: &cli::Cli) {
             ) {
                 eprintln!("warning: failed to initialize file logging: {err}");
             } else {
+                // logs go to the file, so there is no risk of them
+                // corrupting the bars; no bridge needed
                 return;
             }
         } else {
@@ -84,7 +90,7 @@ fn configure_logging(args: &cli::Cli) {
         simplelog::TerminalMode::Stderr,
         simplelog::ColorChoice::Auto,
     );
-    match progress::init() {
+    match multi {
         // on a terminal, route log records through the progress bridge
         // so they print above any live bars instead of corrupting them
         Some(multi) => {

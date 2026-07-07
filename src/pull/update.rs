@@ -65,7 +65,9 @@ pub fn merge(
                 format!("failed to remove {}: {e}", path.display())
             })?;
         }
-        remove_emptied_directories(root)?;
+        let tops: Vec<PathBuf> =
+            MANAGED_DIRS.iter().map(|dir| root.join(dir)).collect();
+        writer::remove_empty_directories(&tops)?;
     } else {
         for relative in &stale {
             log::warn!(
@@ -242,51 +244,6 @@ fn stale_files(
     }
     stale.sort();
     Ok(stale)
-}
-
-/// After pruning, drop directories left empty below the managed
-/// top-level directories (the top-level layout itself is preserved)
-fn remove_emptied_directories(root: &Path) -> Result<(), String> {
-    for dir in MANAGED_DIRS {
-        let top = root.join(dir);
-        if !top.is_dir() {
-            continue;
-        }
-        let mut directories = Vec::new();
-        let mut pending = vec![top];
-        while let Some(dir) = pending.pop() {
-            for entry in std::fs::read_dir(&dir).map_err(|e| {
-                format!("failed to read {}: {e}", dir.display())
-            })? {
-                let entry =
-                    entry.map_err(|e| format!("failed to read entry: {e}"))?;
-                let path = entry.path();
-                let file_type = entry.file_type().map_err(|e| {
-                    format!("failed to read type for {}: {e}", path.display())
-                })?;
-                if file_type.is_symlink() {
-                    continue;
-                }
-                if file_type.is_dir() {
-                    directories.push(path.clone());
-                    pending.push(path);
-                }
-            }
-        }
-        directories.sort_by_key(|d| std::cmp::Reverse(d.components().count()));
-        for dir in directories {
-            let empty = std::fs::read_dir(&dir)
-                .map_err(|e| format!("failed to read {}: {e}", dir.display()))?
-                .next()
-                .is_none();
-            if empty {
-                std::fs::remove_dir(&dir).map_err(|e| {
-                    format!("failed to remove {}: {e}", dir.display())
-                })?;
-            }
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]

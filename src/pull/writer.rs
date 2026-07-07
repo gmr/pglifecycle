@@ -1,7 +1,7 @@
 //! YAML project emission for `pull` (ports the storage half of
 //! generate_project.py / storage.py)
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value, json};
@@ -110,7 +110,7 @@ pub fn write_bootstrap(
         remove_unneeded_gitkeeps(&args.destination)?;
     }
     if args.remove_empty_dirs {
-        remove_empty_directories(&args.destination)?;
+        remove_empty_directories(std::slice::from_ref(&args.destination))?;
     }
     Ok(())
 }
@@ -180,13 +180,27 @@ impl Writer {
     }
 
     /// Function files are named by function; overloads get a numeric
-    /// suffix (generate_project.py _function_filename, simplified)
+    /// suffix (generate_project.py _function_filename, simplified). A
+    /// counter-suffixed candidate is skipped when it collides with
+    /// another function's real name (e.g. `fn`, `fn`, `fn_1`), so the
+    /// real `fn_1` is never displaced into `fn_1_1.yaml`
     fn write_functions(&mut self, assembly: &Assembly) -> Result<(), String> {
+        let reserved: HashSet<(String, String)> = assembly
+            .functions
+            .iter()
+            .map(|f| (f.schema.clone(), f.name.clone()))
+            .collect();
         let mut used: BTreeSet<(String, String)> = BTreeSet::new();
         for function in &assembly.functions {
             let mut filename = function.name.clone();
             let mut counter = 1;
-            while used.contains(&(function.schema.clone(), filename.clone())) {
+            while used.contains(&(function.schema.clone(), filename.clone()))
+                || (filename != function.name
+                    && reserved.contains(&(
+                        function.schema.clone(),
+                        filename.clone(),
+                    )))
+            {
                 filename = format!("{}_{counter}", function.name);
                 counter += 1;
             }
@@ -467,25 +481,39 @@ fn remove_unneeded_gitkeeps(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Remove empty directories under the project root, deepest first
-fn remove_empty_directories(root: &Path) -> Result<(), String> {
-    let mut directories = walk_directories(root)?;
-    directories.sort_by_key(|d| std::cmp::Reverse(d.components().count()));
-    for dir in directories {
-        let empty = std::fs::read_dir(&dir)
-            .map_err(|e| format!("failed to read {}: {e}", dir.display()))?
-            .next()
-            .is_none();
-        if empty {
-            std::fs::remove_dir(&dir).map_err(|e| {
-                format!("failed to remove {}: {e}", dir.display())
-            })?;
+/// Remove empty directories below each of `tops`, deepest first;
+/// `tops` themselves are never removed. Shared by the fresh-write path
+/// (a single `tops = [project root]`) and `--update --prune` (`tops =`
+/// the managed directories), so there is one reaper instead of two
+/// with diverging symlink handling
+pub(crate) fn remove_empty_directories(
+    tops: &[PathBuf],
+) -> Result<(), String> {
+    for top in tops {
+        if !top.is_dir() {
+            continue;
+        }
+        let mut directories = walk_directories(top)?;
+        directories.sort_by_key(|d| std::cmp::Reverse(d.components().count()));
+        for dir in directories {
+            let empty = std::fs::read_dir(&dir)
+                .map_err(|e| format!("failed to read {}: {e}", dir.display()))?
+                .next()
+                .is_none();
+            if empty {
+                std::fs::remove_dir(&dir).map_err(|e| {
+                    format!("failed to remove {}: {e}", dir.display())
+                })?;
+            }
         }
     }
     Ok(())
 }
 
-/// All directories below `root`, excluding `root` itself
+/// All directories below `root`, excluding `root` itself. Symlinked
+/// directories are not followed: their targets may live outside the
+/// project (or loop), so treating them as ordinary subdirectories
+/// could remove or wander into unrelated paths
 fn walk_directories(root: &Path) -> Result<Vec<PathBuf>, String> {
     let mut results = Vec::new();
     let mut pending = vec![root.to_path_buf()];
@@ -495,8 +523,17 @@ fn walk_directories(root: &Path) -> Result<Vec<PathBuf>, String> {
         {
             let entry =
                 entry.map_err(|e| format!("failed to read entry: {e}"))?;
-            let path = entry.path();
-            if path.is_dir() {
+            let file_type = entry.file_type().map_err(|e| {
+                format!(
+                    "failed to read type for {}: {e}",
+                    entry.path().display()
+                )
+            })?;
+            if file_type.is_symlink() {
+                continue;
+            }
+            if file_type.is_dir() {
+                let path = entry.path();
                 results.push(path.clone());
                 pending.push(path);
             }
@@ -544,5 +581,66 @@ mod tests {
             top_level("roles", "admin").unwrap(),
             Path::new("roles").join("admin.yaml")
         );
+    }
+
+    fn function(schema: &str, name: &str) -> models::Function {
+        models::Function {
+            name: name.to_string(),
+            schema: schema.to_string(),
+            owner: String::from("postgres"),
+            sql: None,
+            parameters: None,
+            returns: None,
+            language: None,
+            transform_types: None,
+            window: None,
+            immutable: None,
+            stable: None,
+            volatile: None,
+            leak_proof: None,
+            called_on_null_input: None,
+            strict: None,
+            security: None,
+            parallel: None,
+            cost: None,
+            rows: None,
+            support: None,
+            configuration: None,
+            definition: None,
+            object_file: None,
+            link_symbol: None,
+            comment: None,
+        }
+    }
+
+    /// A real `fn_1` must never be displaced into `fn_1_1.yaml` by the
+    /// numeric suffix used to disambiguate `fn` overloads (L9)
+    #[test]
+    fn write_functions_does_not_displace_real_numbered_name() {
+        let assembly = Assembly {
+            functions: vec![
+                function("public", "fn"),
+                function("public", "fn"),
+                function("public", "fn_1"),
+            ],
+            ..Assembly::default()
+        };
+        let mut writer = Writer {
+            ignore: BTreeSet::new(),
+            files: BTreeMap::new(),
+            mode_headers: false,
+            include_password_hashes: false,
+        };
+        writer.write_functions(&assembly).unwrap();
+        let paths: Vec<&PathBuf> = writer.files.keys().collect();
+        let fn_1_path =
+            Path::new("functions").join("public").join("fn_1.yaml");
+        assert!(
+            paths.contains(&&fn_1_path),
+            "expected the real fn_1 to keep its own filename: {paths:?}"
+        );
+        // the fn_1 file must contain the real fn_1, not an overload
+        let body = &writer.files[&fn_1_path];
+        assert!(body.contains("name: fn_1"), "unexpected contents: {body}");
     }
 }
