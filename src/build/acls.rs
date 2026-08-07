@@ -191,6 +191,17 @@ fn dump_memberships(
                     _ => &acls.roles,
                 };
                 for role in roles.iter().flatten() {
+                    // PostgreSQL does not permit PUBLIC as either
+                    // operand of a role membership grant
+                    if role.eq_ignore_ascii_case("public")
+                        || grantee.eq_ignore_ascii_case("public")
+                    {
+                        return Err(format!(
+                            "invalid membership ACL ({role} to \
+                             {grantee}): PostgreSQL does not permit \
+                             PUBLIC in role memberships"
+                        ));
+                    }
                     let entry = memberships
                         .entry((section, role.clone()))
                         .or_default();
@@ -225,7 +236,7 @@ fn dump_memberships(
         let mut dependencies = Vec::new();
         match find_role(builder, index, role) {
             Some(dump_id) => dependencies.push(dump_id),
-            // common and benign: predefined pg_* roles, PUBLIC, and
+            // common and benign: predefined pg_* roles and
             // platform-managed (RDS) roles are never project files,
             // and create: false roles emit no create entry; the
             // membership grant is still emitted
@@ -812,5 +823,55 @@ mod tests {
             .find(|e| e.tag.as_deref() == Some("alice"))
             .expect("user entry");
         assert_eq!(acl.dependencies, vec![user.dump_id]);
+    }
+
+    fn build_error(project: &Project) -> String {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("memberships.dump");
+        crate::build::build(project, &path).unwrap_err()
+    }
+
+    #[test]
+    fn rejects_public_as_the_granted_role() {
+        // PostgreSQL prohibits `GRANT PUBLIC TO alice`
+        let alice: models::User = serde_json::from_value(json!({
+            "name": "alice",
+            "grants": {"roles": ["PUBLIC"]},
+        }))
+        .unwrap();
+        let project = membership_project(vec![item(
+            0,
+            ObjectType::User,
+            Definition::User(alice),
+        )]);
+        let error = build_error(&project);
+        assert!(
+            error.contains("PUBLIC in role memberships"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn rejects_public_as_the_grantee() {
+        // PostgreSQL prohibits `GRANT developers TO PUBLIC`
+        let developers: models::Role = serde_json::from_value(json!({
+            "name": "developers",
+        }))
+        .unwrap();
+        let public: models::Role = serde_json::from_value(json!({
+            "name": "PUBLIC",
+            "create": false,
+            "grants": {"roles": ["developers"]},
+        }))
+        .unwrap();
+        let project = membership_project(vec![
+            item(0, ObjectType::Role, Definition::Role(developers)),
+            item(1, ObjectType::Role, Definition::Role(public)),
+        ]);
+        let error = build_error(&project);
+        assert!(
+            error.contains("PUBLIC in role memberships"),
+            "unexpected error: {error}"
+        );
     }
 }
