@@ -72,5 +72,22 @@ grants:
       - USAGE
 ```
 
+- Role memberships live in the same place, as `roles:`/`groups:`
+  arrays naming the roles the grantee is a member of. `build` emits
+  them as `GRANT role TO grantee` (or `REVOKE ... FROM` under
+  `revocations:`). The granted role does not have to be a project
+  file — reserved roles like `pg_read_all_data` can only ever be
+  referenced, never created, and this is how to express membership in
+  them:
+
+```yaml
+---
+name: alice
+grants:
+  roles:
+    - developers
+    - pg_read_all_data
+```
+
 - `create: false` defines a role without creating it — used for
   built-in pseudo-roles like `PUBLIC`.

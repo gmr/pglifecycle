@@ -53,10 +53,28 @@ const SECTIONS: &[(&str, &str, &[ObjectType])] = &[
     ("types", "TYPE", &[ObjectType::Type]),
 ];
 
+/// Membership ACL sections: `(Acls field, tag keyword)`. Both grant
+/// role membership; `groups` exists for hand-authored projects since
+/// pg_dumpall does not distinguish groups from roles on pull
+const MEMBERSHIP_SECTIONS: &[(&str, &str)] =
+    &[("groups", "GROUP"), ("roles", "ROLE")];
+
+/// A granted role and its grantees may each be defined as a role,
+/// group, or user file
+const ROLES: &[ObjectType] =
+    &[ObjectType::Role, ObjectType::Group, ObjectType::User];
+
 #[derive(Default)]
 struct ObjectAcl {
     revokes: Vec<String>,
     grants: Vec<String>,
+}
+
+#[derive(Default)]
+struct MembershipAcl {
+    revokes: Vec<String>,
+    grants: Vec<String>,
+    grantees: Vec<String>,
 }
 
 pub(super) fn dump_acls(
@@ -140,7 +158,120 @@ pub(super) fn dump_acls(
             )
             .map_err(|e| format!("failed to add ACL {tag}: {e}"))?;
     }
+    dump_memberships(builder, project, &index)
+}
+
+/// Emit `GRANT role TO grantee` / `REVOKE role FROM grantee` entries
+/// from the `roles` and `groups` ACL sections, grouped per granted
+/// role like the object ACLs above. Each entry depends on the granted
+/// role's and every grantee's create entry so the topological sort
+/// restores memberships after the roles exist.
+fn dump_memberships(
+    builder: &mut Builder,
+    project: &Project,
+    index: &ObjectIndex,
+) -> Result<(), String> {
+    let mut memberships: BTreeMap<(usize, String), MembershipAcl> =
+        BTreeMap::new();
+    for item in &project.inventory {
+        let (grants, revocations) = match &item.definition {
+            Definition::Group(d) => (&d.grants, &d.revocations),
+            Definition::Role(d) => (&d.grants, &d.revocations),
+            Definition::User(d) => (&d.grants, &d.revocations),
+            _ => continue,
+        };
+        let grantee = item.definition.name();
+        for (acls, revoke) in [(revocations, true), (grants, false)] {
+            let Some(acls) = acls else {
+                continue;
+            };
+            for (section, (key, _)) in MEMBERSHIP_SECTIONS.iter().enumerate() {
+                let roles = match *key {
+                    "groups" => &acls.groups,
+                    _ => &acls.roles,
+                };
+                for role in roles.iter().flatten() {
+                    let entry = memberships
+                        .entry((section, role.clone()))
+                        .or_default();
+                    let statement = if revoke {
+                        format!(
+                            "REVOKE {} FROM {};",
+                            quote_role(role),
+                            quote_role(&grantee)
+                        )
+                    } else {
+                        format!(
+                            "GRANT {} TO {};",
+                            quote_role(role),
+                            quote_role(&grantee)
+                        )
+                    };
+                    if revoke {
+                        entry.revokes.push(statement);
+                    } else {
+                        entry.grants.push(statement);
+                    }
+                    if !entry.grantees.contains(&grantee) {
+                        entry.grantees.push(grantee.clone());
+                    }
+                }
+            }
+        }
+    }
+    for ((section, role), acl) in &memberships {
+        let (_, keyword) = MEMBERSHIP_SECTIONS[*section];
+        let tag = format!("{keyword} {role}");
+        let mut dependencies = Vec::new();
+        match find_role(builder, index, role) {
+            Some(dump_id) => dependencies.push(dump_id),
+            // common and benign: predefined pg_* roles, PUBLIC, and
+            // platform-managed (RDS) roles are never project files,
+            // and create: false roles emit no create entry; the
+            // membership grant is still emitted
+            None => log::debug!(
+                "Membership target {keyword} {role} not found in the \
+                 project"
+            ),
+        }
+        for grantee in &acl.grantees {
+            if let Some(dump_id) = find_role(builder, index, grantee) {
+                dependencies.push(dump_id);
+            }
+        }
+        let mut statements = acl.revokes.clone();
+        statements.extend(acl.grants.iter().cloned());
+        let defn = format!("{}\n", statements.join("\n"));
+        builder
+            .dump
+            .add_entry(
+                libpgdump::ObjectType::Acl,
+                Some(""),
+                Some(&tag),
+                Some(&builder.superuser),
+                Some(&defn),
+                None,
+                None,
+                &dependencies,
+            )
+            .map_err(|e| format!("failed to add ACL {tag}: {e}"))?;
+    }
     Ok(())
+}
+
+/// Find a role/group/user's entry id. Membership targets are
+/// schemaless, so the name is looked up whole (never schema-split as
+/// in [`find_object`]); `None` also covers `create: false` roles,
+/// which have no create entry.
+fn find_role(
+    builder: &Builder,
+    index: &ObjectIndex,
+    name: &str,
+) -> Option<i32> {
+    ROLES.iter().find_map(|desc| {
+        let item = index.objects.get(&(*desc, None, name.to_string()))?;
+        builder.dump_id_map.get(&item.id).copied()
+    })
 }
 
 /// Render one role's ACLs into the per-object statement map
@@ -523,5 +654,163 @@ mod tests {
                  WITH GRANT OPTION;\n"
             )
         );
+    }
+
+    fn membership_project(inventory: Vec<Item>) -> Project {
+        Project {
+            name: String::from("memberships"),
+            encoding: String::from("UTF8"),
+            stdstrings: true,
+            superuser: String::from("postgres"),
+            default_schema: String::from("public"),
+            path: std::path::PathBuf::new(),
+            inventory,
+        }
+    }
+
+    fn item(id: usize, desc: ObjectType, definition: Definition) -> Item {
+        Item {
+            id,
+            desc,
+            definition,
+            dependencies: BTreeSet::new(),
+        }
+    }
+
+    fn build_dump(project: &Project) -> libpgdump::Dump {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("memberships.dump");
+        crate::build::build(project, &path).unwrap();
+        libpgdump::load(&path).unwrap()
+    }
+
+    fn find_acl<'a>(
+        dump: &'a libpgdump::Dump,
+        tag: &str,
+    ) -> &'a libpgdump::Entry {
+        dump.entries()
+            .iter()
+            .find(|e| {
+                e.desc == libpgdump::ObjectType::Acl
+                    && e.tag.as_deref() == Some(tag)
+            })
+            .unwrap_or_else(|| panic!("missing ACL entry {tag}"))
+    }
+
+    #[test]
+    fn emits_role_membership_grants_with_dependencies() {
+        let developers: models::Role = serde_json::from_value(json!({
+            "name": "developers",
+        }))
+        .unwrap();
+        let alice: models::User = serde_json::from_value(json!({
+            "name": "alice",
+            "grants": {"roles": ["developers"]},
+        }))
+        .unwrap();
+        let project = membership_project(vec![
+            item(0, ObjectType::Role, Definition::Role(developers)),
+            item(1, ObjectType::User, Definition::User(alice)),
+        ]);
+        let dump = build_dump(&project);
+        let acl = find_acl(&dump, "ROLE developers");
+        assert_eq!(acl.namespace.as_deref().unwrap_or_default(), "");
+        assert_eq!(acl.owner.as_deref(), Some("postgres"));
+        assert_eq!(acl.defn.as_deref(), Some("GRANT developers TO alice;\n"));
+        // the membership sorts after both the granted role's and the
+        // grantee's create entries
+        let role = dump
+            .entries()
+            .iter()
+            .find(|e| e.tag.as_deref() == Some("developers"))
+            .expect("role entry");
+        let user = dump
+            .entries()
+            .iter()
+            .find(|e| e.tag.as_deref() == Some("alice"))
+            .expect("user entry");
+        assert_eq!(acl.dependencies, vec![role.dump_id, user.dump_id]);
+    }
+
+    #[test]
+    fn emits_role_membership_revocations() {
+        let developers: models::Role = serde_json::from_value(json!({
+            "name": "developers",
+        }))
+        .unwrap();
+        let alice: models::User = serde_json::from_value(json!({
+            "name": "alice",
+            "grants": {"roles": ["developers"]},
+            "revocations": {"roles": ["developers"]},
+        }))
+        .unwrap();
+        let project = membership_project(vec![
+            item(0, ObjectType::Role, Definition::Role(developers)),
+            item(1, ObjectType::User, Definition::User(alice)),
+        ]);
+        let dump = build_dump(&project);
+        let acl = find_acl(&dump, "ROLE developers");
+        assert_eq!(
+            acl.defn.as_deref(),
+            Some(
+                "REVOKE developers FROM alice;\n\
+                 GRANT developers TO alice;\n"
+            )
+        );
+    }
+
+    #[test]
+    fn emits_group_membership_grants() {
+        let admins: models::Group = serde_json::from_value(json!({
+            "name": "admins",
+        }))
+        .unwrap();
+        let bob: models::Role = serde_json::from_value(json!({
+            "name": "bob",
+            "grants": {"groups": ["admins"]},
+        }))
+        .unwrap();
+        let project = membership_project(vec![
+            item(0, ObjectType::Group, Definition::Group(admins)),
+            item(1, ObjectType::Role, Definition::Role(bob)),
+        ]);
+        let dump = build_dump(&project);
+        let acl = find_acl(&dump, "GROUP admins");
+        assert_eq!(acl.defn.as_deref(), Some("GRANT admins TO bob;\n"));
+        let group = dump
+            .entries()
+            .iter()
+            .find(|e| e.desc == libpgdump::ObjectType::Group)
+            .expect("group entry");
+        assert!(acl.dependencies.contains(&group.dump_id));
+    }
+
+    #[test]
+    fn emits_membership_grants_on_roles_absent_from_the_project() {
+        // predefined pg_* roles are filtered on pull and can never be
+        // project files; the membership grant must still be emitted
+        let alice: models::User = serde_json::from_value(json!({
+            "name": "alice",
+            "grants": {"roles": ["pg_read_all_data"]},
+        }))
+        .unwrap();
+        let project = membership_project(vec![item(
+            0,
+            ObjectType::User,
+            Definition::User(alice),
+        )]);
+        let dump = build_dump(&project);
+        let acl = find_acl(&dump, "ROLE pg_read_all_data");
+        assert_eq!(
+            acl.defn.as_deref(),
+            Some("GRANT pg_read_all_data TO alice;\n")
+        );
+        // only the grantee's create entry is resolvable
+        let user = dump
+            .entries()
+            .iter()
+            .find(|e| e.tag.as_deref() == Some("alice"))
+            .expect("user entry");
+        assert_eq!(acl.dependencies, vec![user.dump_id]);
     }
 }
