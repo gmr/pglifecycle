@@ -9,9 +9,10 @@ use crate::ddl::{
     qualified_name, unquote,
 };
 use crate::models::{
-    CheckConstraint, Column, ColumnGenerated, ConstraintColumns, ForeignKey,
-    ForeignKeyReference, Index, IndexColumn, LikeTable, NotNullConstraint,
-    Table, TablePartition, TablePartitionBehavior, TablePartitionColumn,
+    CheckConstraint, Column, ColumnGenerated, ColumnNotNull,
+    ConstraintColumns, ForeignKey, ForeignKeyReference, Index, IndexColumn,
+    LikeTable, NotNullConstraint, Table, TablePartition,
+    TablePartitionBehavior, TablePartitionColumn,
 };
 use crate::utils::quote_ident;
 
@@ -167,27 +168,27 @@ pub(crate) fn create_table(
     if !columns.is_empty() {
         table.columns = Some(columns);
     }
-    // INHERITS (parent, ...) — the parents are qualified_names scoped to
-    // the OptInherit node (not the table name found above)
-    if let Some(inherit) = node.child_of_kind("OptInherit") {
-        let parents: Vec<String> = inherit
-            .find_all("qualified_name")
-            .iter()
-            .filter_map(|n| qualified_name(n, src).ok())
-            .map(|q| match q.schema {
-                Some(schema) => format!(
-                    "{}.{}",
-                    quote_ident(&schema),
-                    quote_ident(&q.name)
-                ),
-                None => quote_ident(&q.name),
-            })
-            .collect();
-        if !parents.is_empty() {
-            table.parents = Some(parents);
-        }
-    }
+    table.parents = inherits(node, src);
     Ok(Statement::CreateTable(Box::new(table)))
+}
+
+/// `INHERITS (parent, ...)` — the parents are qualified_names scoped to
+/// the OptInherit node, not the statement's own table name. Shared with
+/// CREATE FOREIGN TABLE, which takes the same clause.
+pub(crate) fn inherits(node: &Node, src: &str) -> Option<Vec<String>> {
+    let inherit = node.child_of_kind("OptInherit")?;
+    let parents: Vec<String> = inherit
+        .find_all("qualified_name")
+        .iter()
+        .filter_map(|n| qualified_name(n, src).ok())
+        .map(|q| match q.schema {
+            Some(schema) => {
+                format!("{}.{}", quote_ident(&schema), quote_ident(&q.name))
+            }
+            None => quote_ident(&q.name),
+        })
+        .collect();
+    (!parents.is_empty()).then_some(parents)
 }
 
 pub(crate) fn column(node: &Node, src: &str) -> Column {
@@ -203,6 +204,7 @@ pub(crate) fn column(node: &Node, src: &str) -> Column {
         name,
         data_type,
         nullable: None,
+        not_null_constraint: None,
         default: None,
         collation: None,
         check_constraint: None,
@@ -244,12 +246,30 @@ pub(crate) fn column(node: &Node, src: &str) -> Column {
             });
         }
     }
-    // COLLATE lives in the column qualifier list alongside constraints
+    // COLLATE lives in the column qualifier list alongside constraints,
+    // as does a NOT NULL constraint's name — the name is a sibling of
+    // the ColConstraintElem walked above, not a child of it
     for qual in node.find_all("ColConstraint") {
         if qual.has("kw_collate")
             && let Some(name) = qual.child_of_kind("any_name")
         {
             column.collation = Some(name.text(src).to_string());
+            continue;
+        }
+        let Some(elem) = qual.child_of_kind("ColConstraintElem") else {
+            continue;
+        };
+        if !(elem.has("kw_not") && elem.has("kw_null")) {
+            continue;
+        }
+        // pg_dump prints the name only when it is not the generated
+        // `<table>_<column>_not_null`, so any name here is worth
+        // keeping; a bare NOT NULL needs nothing beyond `nullable`
+        let name = qual.child_of_kind("name").map(|n| unquote(n.text(src)));
+        let no_inherit = elem.child_of_kind("opt_no_inherit").map(|_| true);
+        if name.is_some() || no_inherit.is_some() {
+            column.not_null_constraint =
+                Some(ColumnNotNull { name, no_inherit });
         }
     }
     column
@@ -409,7 +429,7 @@ pub(crate) fn alter_table(
 }
 
 /// Parse a TableConstraint node into (name, constraint)
-fn table_constraint(
+pub(crate) fn table_constraint(
     node: &Node,
     src: &str,
 ) -> Result<(Option<String>, TableConstraint), String> {
@@ -825,6 +845,38 @@ mod tests {
             table.parents,
             Some(vec!["test.parent".into(), "other.base".into()])
         );
+    }
+
+    /// PostgreSQL 18 made NOT NULL a named constraint. pg_dump writes
+    /// the name only when it is not the generated one, so a name here
+    /// is always worth keeping; `nullable: false` alone cannot hold it
+    #[test]
+    fn parses_named_column_not_null() {
+        let Statement::CreateTable(table) = parse_one(
+            "CREATE TABLE test.t (a integer CONSTRAINT a_nn NOT NULL,              b integer CONSTRAINT b_ni NOT NULL NO INHERIT, c integer              NOT NULL, d integer);",
+        ) else {
+            panic!("expected CreateTable")
+        };
+        let columns = table.columns.unwrap();
+        assert_eq!(
+            columns[0].not_null_constraint,
+            Some(ColumnNotNull {
+                name: Some("a_nn".into()),
+                no_inherit: None,
+            })
+        );
+        assert_eq!(
+            columns[1].not_null_constraint,
+            Some(ColumnNotNull {
+                name: Some("b_ni".into()),
+                no_inherit: Some(true),
+            })
+        );
+        // a bare NOT NULL needs nothing beyond `nullable`
+        assert_eq!(columns[2].nullable, Some(false));
+        assert_eq!(columns[2].not_null_constraint, None);
+        assert_eq!(columns[3].nullable, None);
+        assert_eq!(columns[3].not_null_constraint, None);
     }
 
     #[test]

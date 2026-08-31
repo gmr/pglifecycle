@@ -1444,15 +1444,20 @@ impl Builder {
             self.item_name(item),
             "(".into(),
         ];
-        let columns: Vec<String> = table
+        let mut inner: Vec<String> = table
             .columns
             .as_deref()
             .unwrap_or_default()
             .iter()
             .map(render_table_column)
             .collect();
-        create.push(columns.join(", "));
+        push_table_constraints(table, &mut inner);
+        create.push(inner.join(", "));
         create.push(")".into());
+        if let Some(parents) = &table.parents {
+            create.push("INHERITS".into());
+            create.push(format!("({})", parents.join(", ")));
+        }
         create.push("SERVER".into());
         create.push(quote_ident(server));
         if let Some(options) = table.options.as_ref().filter(|o| !o.is_empty())
@@ -2129,6 +2134,22 @@ fn nextval_target(default: &str) -> Option<(String, String)> {
     }
 }
 
+/// `NOT NULL`, carrying the constraint name and NO INHERIT when the
+/// column records them (PostgreSQL 18+)
+pub(crate) fn render_column_not_null(column: &Column) -> String {
+    let Some(not_null) = &column.not_null_constraint else {
+        return String::from("NOT NULL");
+    };
+    let mut sql = match &not_null.name {
+        Some(name) => format!("CONSTRAINT {} NOT NULL", quote_ident(name)),
+        None => String::from("NOT NULL"),
+    };
+    if not_null.no_inherit == Some(true) {
+        sql.push_str(" NO INHERIT");
+    }
+    sql
+}
+
 pub(crate) fn render_table_column(column: &Column) -> String {
     let mut sql = vec![column.name.clone(), column.data_type.clone()];
     if let Some(collation) = &column.collation {
@@ -2136,7 +2157,7 @@ pub(crate) fn render_table_column(column: &Column) -> String {
         sql.push(collation.clone());
     }
     if column.nullable == Some(false) {
-        sql.push("NOT NULL".into());
+        sql.push(render_column_not_null(column));
     }
     if let Some(check_constraint) = &column.check_constraint {
         sql.push("CHECK".into());
@@ -2402,7 +2423,7 @@ fn render_typed_table_column(column: &Column) -> Option<String> {
         constraints.push(collation.clone());
     }
     if column.nullable == Some(false) {
-        constraints.push("NOT NULL".into());
+        constraints.push(render_column_not_null(column));
     }
     if let Some(check_constraint) = &column.check_constraint {
         constraints.push(format!("CHECK ({check_constraint})"));
@@ -2522,7 +2543,8 @@ mod tests {
     use super::*;
     use crate::constants::ObjectType;
     use crate::models::{
-        CheckConstraint, LikeTable, NotNullConstraint, Table, Trigger, View,
+        CheckConstraint, ColumnNotNull, LikeTable, NotNullConstraint, Table,
+        Trigger, View,
     };
 
     fn column(name: &str, data_type: &str, not_null: bool) -> Column {
@@ -2530,6 +2552,7 @@ mod tests {
             name: name.into(),
             data_type: data_type.into(),
             nullable: not_null.then_some(false),
+            not_null_constraint: None,
             default: None,
             collation: None,
             check_constraint: None,
@@ -2631,6 +2654,50 @@ mod tests {
             defn,
             "CREATE FOREIGN TABLE fdw_warehouse.orders ( id integer NOT \
              NULL, total numeric ) SERVER warehouse;\n"
+        );
+    }
+
+    /// An inheriting foreign table declares no columns of its own, so
+    /// only its table constraints and INHERITS render
+    #[test]
+    fn renders_inheriting_foreign_table() {
+        let mut item = foreign_table(None);
+        let Definition::Table(table) = &mut item.definition else {
+            panic!("expected a Table definition")
+        };
+        table.columns = None;
+        table.parents = Some(vec!["fdw_warehouse.parent".into()]);
+        table.check_constraints = Some(vec![CheckConstraint {
+            name: "orders_id_check".into(),
+            expression: "id > 0".into(),
+        }]);
+        assert_eq!(
+            foreign_table_defn(&item),
+            "CREATE FOREIGN TABLE fdw_warehouse.orders ( CONSTRAINT \
+             orders_id_check CHECK (id > 0) ) INHERITS \
+             (fdw_warehouse.parent) SERVER warehouse;\n"
+        );
+    }
+
+    /// A column's NOT NULL carries its name and NO INHERIT when the
+    /// model records them; a bare `nullable: false` renders as before
+    #[test]
+    fn renders_named_column_not_null() {
+        let mut table = base_table("orders");
+        let mut qty = column("qty", "integer", true);
+        qty.not_null_constraint = Some(ColumnNotNull {
+            name: Some("qty_nn".into()),
+            no_inherit: Some(true),
+        });
+        table.columns = Some(vec![qty, column("total", "numeric", true)]);
+        assert_eq!(
+            table_defn(
+                &table_item(1, table),
+                libpgdump::ObjectType::Table,
+                "orders"
+            ),
+            "CREATE TABLE test.orders ( qty integer CONSTRAINT qty_nn \
+             NOT NULL NO INHERIT, total numeric NOT NULL );\n"
         );
     }
 
