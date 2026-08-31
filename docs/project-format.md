@@ -89,5 +89,10 @@ grants:
     - pg_read_all_data
 ```
 
+- Grants on views may be written under either `tables:` or `views:`.
+  PostgreSQL grants on views with `TABLE` syntax, so both emit
+  `GRANT ... ON TABLE` and coalesce into a single ACL entry; `pull`
+  writes view grants under `tables:`.
+
 - `create: false` defines a role without creating it — used for
   built-in pseudo-roles like `PUBLIC`.
