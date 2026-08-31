@@ -79,9 +79,12 @@ jobs:
         run: |
           # A git tag may hold shell-significant characters, and this value reaches a
           # shell and a commit message, so accept only a plain semver tag. The `v` is
-          # optional: this project's tags carry none.
+          # optional: this project's tags carry none. A prerelease is dot-separated
+          # identifiers of alphanumerics and hyphens, so `2.0.0-rc-1` passes. Build
+          # metadata is not accepted: nothing here produces it, and `+` would have to
+          # survive a release asset URL and a Homebrew version string to be useful.
           if ! printf '%s' "$GITHUB_REF_NAME" \
-              | grep -Eq '^v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'; then
+              | grep -Eq '^v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'; then
             echo "refusing to release from tag '$GITHUB_REF_NAME': expected [v]MAJOR.MINOR.PATCH[-PRERELEASE]" >&2
             exit 1
           fi
