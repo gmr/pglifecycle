@@ -2267,4 +2267,84 @@ mod tests {
             ]
         );
     }
+
+    /// Role membership grants survive the full pull → write → load →
+    /// build path: captured from the pg_dumpall roles dump into the
+    /// grantee's `grants: {roles: [...]}`, then rendered back as
+    /// `GRANT role TO grantee` ACL entries in the build archive —
+    /// including grants on reserved pg_* roles, which are filtered
+    /// from the project as files but remain valid membership targets
+    #[test]
+    fn role_membership_round_trips_through_build() {
+        use clap::Parser;
+        let mut assembly = Assembly {
+            dbname: String::from("memberships"),
+            ..Assembly::default()
+        };
+        assembly
+            .ingest_roles(
+                "CREATE ROLE developers;\n\
+                 ALTER ROLE developers WITH NOLOGIN;\n\
+                 CREATE ROLE alice;\n\
+                 ALTER ROLE alice WITH LOGIN;\n\
+                 GRANT developers TO alice GRANTED BY postgres;\n\
+                 GRANT pg_read_all_data TO alice GRANTED BY postgres;\n",
+            )
+            .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("project");
+        let dump = dir.path().join("unused.dump");
+        let args = match cli::Cli::try_parse_from([
+            "pglifecycle",
+            "pull",
+            "--dump",
+            dump.to_str().unwrap(),
+            dest.to_str().unwrap(),
+        ])
+        .unwrap()
+        .action
+        {
+            cli::Action::Pull(args) => args,
+            _ => unreachable!(),
+        };
+        let files = writer::render(&assembly, &args).unwrap();
+        writer::write_bootstrap(&files, &args).unwrap();
+
+        let project = crate::project::load(&dest).unwrap();
+        let alice = project
+            .inventory
+            .iter()
+            .find_map(|item| match &item.definition {
+                models::Definition::User(user) if user.name == "alice" => {
+                    Some(user)
+                }
+                _ => None,
+            })
+            .expect("alice user");
+        assert_eq!(
+            alice.grants.as_ref().and_then(|g| g.roles.clone()),
+            Some(vec![
+                String::from("developers"),
+                String::from("pg_read_all_data"),
+            ])
+        );
+
+        let archive = dir.path().join("memberships.dump");
+        crate::build::build(&project, &archive).unwrap();
+        let built = libpgdump::load(&archive).unwrap();
+        let grants: Vec<&str> = built
+            .entries()
+            .iter()
+            .filter_map(|e| e.defn.as_deref())
+            .filter(|defn| defn.starts_with("GRANT"))
+            .collect();
+        assert_eq!(
+            grants,
+            vec![
+                "GRANT developers TO alice;\n",
+                "GRANT pg_read_all_data TO alice;\n",
+            ]
+        );
+    }
 }
