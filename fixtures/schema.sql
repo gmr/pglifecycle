@@ -94,15 +94,22 @@ CREATE TABLE events_default PARTITION OF events DEFAULT;
 -- portable — older servers simply dump no such constraint. The named
 -- and NO INHERIT forms need PostgreSQL 18 syntax to write, so they
 -- are covered by unit tests rather than here.
-CREATE TABLE measurements (
+--
+-- The child also sorts alphabetically BEFORE its parent
+-- ("calibrated_readings" < "sensor_readings"), the same trap the
+-- `active_users` view below covers for queries: tables share one
+-- libpgdump priority tier, so without a recorded dependency edge the
+-- child restores first and pg_restore fails with "relation ... does
+-- not exist". pull now derives an edge from INHERITS.
+CREATE TABLE sensor_readings (
     taken_at TIMESTAMPTZ,
     sensor   TEXT,
     reading  NUMERIC
 );
 
-CREATE TABLE measurements_calibrated (
+CREATE TABLE calibrated_readings (
     PRIMARY KEY (taken_at, sensor)
-) INHERITS (measurements);
+) INHERITS (sensor_readings);
 
 -- Typed table: composite type + CREATE TABLE OF, with an inline
 -- column constraint. `pg_dump` keeps a typed table's constraint inline
