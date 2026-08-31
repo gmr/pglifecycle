@@ -52,6 +52,29 @@ pub(crate) fn grant_role(
     src: &str,
     revoke: bool,
 ) -> Result<Statement, String> {
+    // REVOKE <option> OPTION FOR role FROM member drops only that
+    // option, leaving the membership in place. Its role and member
+    // lists parse identically to a plain REVOKE, so treating it as one
+    // would revoke the membership itself
+    if node.child_of_kind("kw_for").is_some() {
+        return Ok(Statement::Unsupported(format!(
+            "{}: {}",
+            node.kind(),
+            truncate(node.text(src), 80)
+        )));
+    }
+    // ADMIN/INHERIT/SET options and the grantor have nowhere to go in
+    // the model (schemata/acls.yml holds memberships as plain strings),
+    // so the membership is kept and the modifier reported
+    for kind in ["grant_role_opt_list", "opt_granted_by"] {
+        if let Some(dropped) = node.child_of_kind(kind) {
+            log::warn!(
+                "Unsupported role membership option {:?} in {:?}",
+                truncate(dropped.text(src), 64),
+                truncate(node.text(src), 80)
+            );
+        }
+    }
     let roles = node
         .find_all("privilege")
         .iter()
@@ -458,6 +481,31 @@ mod tests {
         };
         assert!(revoke);
         assert_eq!(members, vec!["bob"]);
+    }
+
+    #[test]
+    fn revoke_admin_option_for_keeps_the_membership() {
+        // the role and member lists are identical to a plain REVOKE,
+        // so parsing it as one would revoke the membership itself
+        let statement =
+            parse_one("REVOKE ADMIN OPTION FOR developers FROM alice;");
+        assert!(
+            matches!(statement, Statement::Unsupported(_)),
+            "expected Unsupported, got {statement:?}"
+        );
+    }
+
+    #[test]
+    fn parses_role_membership_with_admin_option() {
+        // the option itself has nowhere to go in the model (it is
+        // warned about); the membership must still be captured
+        let Statement::RoleMembership { roles, members, .. } =
+            parse_one("GRANT developers TO alice WITH ADMIN OPTION;")
+        else {
+            panic!("expected RoleMembership")
+        };
+        assert_eq!(roles, vec!["developers"]);
+        assert_eq!(members, vec!["alice"]);
     }
 
     #[test]
