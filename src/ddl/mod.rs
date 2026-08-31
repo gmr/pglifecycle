@@ -164,6 +164,10 @@ pub enum TableConstraint {
     Unique(models::ConstraintColumns),
     Check(String),
     ForeignKey(models::ForeignKey),
+    /// `NOT NULL <column>` as a table constraint (PostgreSQL 18+),
+    /// which pg_dump emits only for a column the table inherits rather
+    /// than declares
+    NotNull(models::NotNullConstraint),
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]

@@ -86,6 +86,24 @@ CREATE TABLE events_2025 PARTITION OF events
 
 CREATE TABLE events_default PARTITION OF events DEFAULT;
 
+-- Inheritance: a child whose PRIMARY KEY makes columns it inherits
+-- rather than declares NOT NULL. PostgreSQL 18 dumps that as a
+-- table-level `NOT NULL <column>` constraint, since the child has no
+-- column entry to carry it; before it was recognized the whole CREATE
+-- TABLE failed to parse and pull dropped the table. The DDL below is
+-- portable — older servers simply dump no such constraint. The named
+-- and NO INHERIT forms need PostgreSQL 18 syntax to write, so they
+-- are covered by unit tests rather than here.
+CREATE TABLE measurements (
+    taken_at TIMESTAMPTZ,
+    sensor   TEXT,
+    reading  NUMERIC
+);
+
+CREATE TABLE measurements_calibrated (
+    PRIMARY KEY (taken_at, sensor)
+) INHERITS (measurements);
+
 -- Typed table: composite type + CREATE TABLE OF, with an inline
 -- column constraint. `pg_dump` keeps a typed table's constraint inline
 -- in the `CREATE TABLE ... OF type (...)` statement; pull now walks the

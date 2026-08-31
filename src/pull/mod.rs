@@ -1813,6 +1813,7 @@ mod tests {
             indexes: None,
             primary_key: None,
             check_constraints: None,
+            not_null_constraints: None,
             unique_constraints: None,
             foreign_keys: None,
             triggers: None,
