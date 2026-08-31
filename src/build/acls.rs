@@ -293,10 +293,15 @@ fn collect(
     revoke: bool,
 ) {
     for (index, (key, keyword, _)) in SECTIONS.iter().enumerate() {
-        let Some(map) = section(acls, key) else {
-            continue;
-        };
-        for (object, privileges) in map {
+        // a section may draw from more than one Acls field; both feed
+        // the same bucket so they coalesce into one entry per object
+        let targets: Vec<(&String, &Value)> =
+            [section(acls, key), coalesced(acls, key)]
+                .into_iter()
+                .flatten()
+                .flat_map(|map| map.iter())
+                .collect();
+        for (object, privileges) in targets {
             let privileges: Vec<String> = privileges
                 .as_array()
                 .into_iter()
@@ -505,6 +510,18 @@ fn section<'a>(acls: &'a Acls, key: &str) -> Option<&'a Map<String, Value>> {
     }
 }
 
+/// An additional [`Acls`] field emitted as part of `key`'s section.
+/// PostgreSQL grants on views with TABLE syntax, so `views:` shares
+/// the `tables:` section rather than forming entries of its own —
+/// `pull` writes view grants under `tables:` for the same reason, and
+/// a view named in both must produce a single ACL entry
+fn coalesced<'a>(acls: &'a Acls, key: &str) -> Option<&'a Map<String, Value>> {
+    match key {
+        "tables" => acls.views.as_ref(),
+        _ => None,
+    }
+}
+
 /// Quote each part of a possibly-qualified object name
 fn quote_object(object: &str) -> String {
     object
@@ -667,7 +684,7 @@ mod tests {
         );
     }
 
-    fn membership_project(inventory: Vec<Item>) -> Project {
+    fn project_with(inventory: Vec<Item>) -> Project {
         Project {
             name: String::from("memberships"),
             encoding: String::from("UTF8"),
@@ -708,6 +725,82 @@ mod tests {
             .unwrap_or_else(|| panic!("missing ACL entry {tag}"))
     }
 
+    fn view(name: &str) -> Definition {
+        Definition::View(
+            serde_json::from_value(json!({
+                "name": name,
+                "schema": "test",
+                "owner": "owner_role",
+                "query": "SELECT 1",
+            }))
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn emits_grants_from_the_views_section() {
+        // PostgreSQL grants on views with TABLE syntax, so a views:
+        // grant must reach the archive as GRANT ... ON TABLE
+        let reader: models::Role = serde_json::from_value(json!({
+            "name": "reader",
+            "grants": {"views": {"test.active": ["SELECT"]}},
+        }))
+        .unwrap();
+        let project = project_with(vec![
+            item(0, ObjectType::View, view("active")),
+            item(1, ObjectType::Role, Definition::Role(reader)),
+        ]);
+        let dump = build_dump(&project);
+        let acl = find_acl(&dump, "TABLE active");
+        assert_eq!(acl.namespace.as_deref(), Some("test"));
+        assert_eq!(acl.owner.as_deref(), Some("owner_role"));
+        assert_eq!(
+            acl.defn.as_deref(),
+            Some("GRANT SELECT ON TABLE test.active TO reader;\n")
+        );
+        let entry = dump
+            .entries()
+            .iter()
+            .find(|e| e.desc == libpgdump::ObjectType::View)
+            .expect("view entry");
+        assert_eq!(acl.dependencies, vec![entry.dump_id]);
+    }
+
+    #[test]
+    fn views_and_tables_sections_coalesce_into_one_entry() {
+        // the same view named under both keys is still one object, so
+        // it must not produce two ACL entries with the same tag
+        let reader: models::Role = serde_json::from_value(json!({
+            "name": "reader",
+            "grants": {
+                "tables": {"test.active": ["SELECT"]},
+                "views": {"test.active": ["ALL"]},
+            },
+        }))
+        .unwrap();
+        let project = project_with(vec![
+            item(0, ObjectType::View, view("active")),
+            item(1, ObjectType::Role, Definition::Role(reader)),
+        ]);
+        let dump = build_dump(&project);
+        let entries: Vec<_> = dump
+            .entries()
+            .iter()
+            .filter(|e| {
+                e.desc == libpgdump::ObjectType::Acl
+                    && e.tag.as_deref() == Some("TABLE active")
+            })
+            .collect();
+        assert_eq!(entries.len(), 1, "expected one coalesced ACL entry");
+        assert_eq!(
+            entries[0].defn.as_deref(),
+            Some(
+                "GRANT SELECT ON TABLE test.active TO reader;\n\
+                 GRANT ALL ON TABLE test.active TO reader;\n"
+            )
+        );
+    }
+
     #[test]
     fn emits_role_membership_grants_with_dependencies() {
         let developers: models::Role = serde_json::from_value(json!({
@@ -719,7 +812,7 @@ mod tests {
             "grants": {"roles": ["developers"]},
         }))
         .unwrap();
-        let project = membership_project(vec![
+        let project = project_with(vec![
             item(0, ObjectType::Role, Definition::Role(developers)),
             item(1, ObjectType::User, Definition::User(alice)),
         ]);
@@ -755,7 +848,7 @@ mod tests {
             "revocations": {"roles": ["developers"]},
         }))
         .unwrap();
-        let project = membership_project(vec![
+        let project = project_with(vec![
             item(0, ObjectType::Role, Definition::Role(developers)),
             item(1, ObjectType::User, Definition::User(alice)),
         ]);
@@ -781,7 +874,7 @@ mod tests {
             "grants": {"groups": ["admins"]},
         }))
         .unwrap();
-        let project = membership_project(vec![
+        let project = project_with(vec![
             item(0, ObjectType::Group, Definition::Group(admins)),
             item(1, ObjectType::Role, Definition::Role(bob)),
         ]);
@@ -805,7 +898,7 @@ mod tests {
             "grants": {"roles": ["pg_read_all_data"]},
         }))
         .unwrap();
-        let project = membership_project(vec![item(
+        let project = project_with(vec![item(
             0,
             ObjectType::User,
             Definition::User(alice),
@@ -839,7 +932,7 @@ mod tests {
             "grants": {"roles": ["PUBLIC"]},
         }))
         .unwrap();
-        let project = membership_project(vec![item(
+        let project = project_with(vec![item(
             0,
             ObjectType::User,
             Definition::User(alice),
@@ -864,7 +957,7 @@ mod tests {
             "grants": {"roles": ["developers"]},
         }))
         .unwrap();
-        let project = membership_project(vec![
+        let project = project_with(vec![
             item(0, ObjectType::Role, Definition::Role(developers)),
             item(1, ObjectType::Role, Definition::Role(public)),
         ]);
