@@ -92,9 +92,14 @@ echo "==> Gate 2: convergence (mutate, deploy --apply, re-deploy is empty)"
 # the re-deploy converges)
 # the foreign-object drift (wrapper, server, and foreign-table options)
 # must reconcile in place via the deploy ALTER renderers
+# users.id is a primary-key column, so its renamed NOT NULL constraint
+# has to converge through RENAME CONSTRAINT: PostgreSQL rejects DROP
+# NOT NULL there outright
 psql -d "${TARGET_DB}" -q -v ON_ERROR_STOP=1 <<'SQL'
 ALTER TABLE test.users ADD COLUMN scratch text;
 ALTER TABLE test.users ALTER COLUMN display_name SET NOT NULL;
+ALTER TABLE test.users
+    RENAME CONSTRAINT users_id_not_null TO users_id_nn_drift;
 ALTER DOMAIN test.bcp47_locale SET DEFAULT 'en-US';
 COMMENT ON VIEW test.deploy_probe IS 'stale, not in repo';
 ALTER FOREIGN DATA WRAPPER gate_fdw OPTIONS (SET debug 'false');
