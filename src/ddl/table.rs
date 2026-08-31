@@ -10,8 +10,8 @@ use crate::ddl::{
 };
 use crate::models::{
     CheckConstraint, Column, ColumnGenerated, ConstraintColumns, ForeignKey,
-    ForeignKeyReference, Index, IndexColumn, LikeTable, Table, TablePartition,
-    TablePartitionBehavior, TablePartitionColumn,
+    ForeignKeyReference, Index, IndexColumn, LikeTable, NotNullConstraint,
+    Table, TablePartition, TablePartitionBehavior, TablePartitionColumn,
 };
 use crate::utils::quote_ident;
 
@@ -94,6 +94,7 @@ pub(crate) fn create_table(
         indexes: None,
         primary_key: None,
         check_constraints: None,
+        not_null_constraints: None,
         unique_constraints: None,
         foreign_keys: None,
         triggers: None,
@@ -416,13 +417,13 @@ fn table_constraint(
     let elem = node
         .child_of_kind("ConstraintElem")
         .ok_or_else(|| String::from("constraint without ConstraintElem"))?;
-    // FOREIGN KEY / PRIMARY KEY / UNIQUE / CHECK are mutually exclusive
-    // direct children of ConstraintElem (one per grammar alternative),
-    // so a single child-kind scan replaces four separate recursive
-    // `has()` walks of the same subtree
+    // FOREIGN KEY / PRIMARY KEY / UNIQUE / CHECK / NOT NULL are
+    // mutually exclusive direct children of ConstraintElem (one per
+    // grammar alternative), so a single child-kind scan replaces five
+    // separate recursive `has()` walks of the same subtree
     let mut cursor = elem.walk();
     let kind = elem.children(&mut cursor).find_map(|c| match c.kind() {
-        "kw_foreign" | "kw_primary" | "kw_unique" | "kw_check" => {
+        "kw_foreign" | "kw_primary" | "kw_unique" | "kw_check" | "kw_not" => {
             Some(c.kind())
         }
         _ => None,
@@ -445,6 +446,17 @@ fn table_constraint(
                 .map(|n| n.text(src).to_string())
                 .ok_or_else(|| String::from("CHECK without an expression"))?;
             TableConstraint::Check(expression)
+        }
+        Some("kw_not") => {
+            let column = elem
+                .child_of_kind("ColId")
+                .map(|n| unquote(n.text(src)))
+                .ok_or_else(|| String::from("NOT NULL without a column"))?;
+            TableConstraint::NotNull(NotNullConstraint {
+                name: name.clone(),
+                column,
+                no_inherit: elem.has("kw_inherit").then_some(true),
+            })
         }
         _ => {
             return Err(format!(
@@ -569,6 +581,12 @@ pub(crate) fn apply_constraint(
         }
         TableConstraint::ForeignKey(fk) => {
             table.foreign_keys.get_or_insert_default().push(fk);
+        }
+        TableConstraint::NotNull(not_null) => {
+            table
+                .not_null_constraints
+                .get_or_insert_default()
+                .push(not_null);
         }
     }
 }
@@ -1001,6 +1019,54 @@ mod tests {
         };
         assert_eq!(name, Some("positive".into()));
         assert_eq!(constraint, TableConstraint::Check("value > 0".into()));
+    }
+
+    /// PostgreSQL 18 dumps a child's NOT NULL on an inherited column
+    /// as a table constraint; before it was recognized, the whole
+    /// CREATE TABLE failed to parse and the table was dropped
+    #[test]
+    fn parses_inherited_not_null_table_constraint() {
+        let Statement::CreateTable(table) = parse_one(
+            "CREATE TABLE probe.c (\n    NOT NULL ts,\n    CONSTRAINT \
+             ts_nn NOT NULL sid\n)\nINHERITS (probe.p);",
+        ) else {
+            panic!("expected CreateTable")
+        };
+        assert_eq!(table.parents, Some(vec!["probe.p".into()]));
+        assert_eq!(table.columns, None);
+        assert_eq!(
+            table.not_null_constraints,
+            Some(vec![
+                NotNullConstraint {
+                    name: None,
+                    column: "ts".into(),
+                    no_inherit: None,
+                },
+                NotNullConstraint {
+                    name: Some("ts_nn".into()),
+                    column: "sid".into(),
+                    no_inherit: None,
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn parses_not_null_table_constraint_no_inherit() {
+        let Statement::CreateTable(table) = parse_one(
+            "CREATE TABLE probe.c (CONSTRAINT ts_ni NOT NULL ts NO \
+             INHERIT) INHERITS (probe.p);",
+        ) else {
+            panic!("expected CreateTable")
+        };
+        assert_eq!(
+            table.not_null_constraints,
+            Some(vec![NotNullConstraint {
+                name: Some("ts_ni".into()),
+                column: "ts".into(),
+                no_inherit: Some(true),
+            }])
+        );
     }
 
     #[test]

@@ -175,6 +175,34 @@ properties:
           type: string
         expression:
           type: string
+  not_null_constraints:
+    title: Table NOT NULL Constraints
+    description: >
+      A NOT NULL constraint written at the table level rather than on the
+      column (PostgreSQL 18 and later). pg_dump emits this form only for a
+      column the table inherits rather than declares, since such a table has
+      no column entry to carry `nullable: false`.
+
+      Omit `name` when the constraint carries the name PostgreSQL generates
+      by default, `<table>_<column>_not_null`.
+    type: array
+    items:
+      title: NOT NULL Constraint
+      type: object
+      properties:
+        name:
+          type: string
+        column:
+          type: string
+        no_inherit:
+          title: NO INHERIT
+          description: >
+            Whether the constraint is not inherited by this table's own
+            descendants.
+          type: boolean
+      required:
+        - column
+      additionalProperties: false
   unique_constraints:
     title: Unique Constraints
     description: >

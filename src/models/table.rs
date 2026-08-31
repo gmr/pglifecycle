@@ -30,6 +30,8 @@ pub struct Table {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub check_constraints: Option<Vec<CheckConstraint>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub not_null_constraints: Option<Vec<NotNullConstraint>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub unique_constraints: Option<Vec<ConstraintColumns>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub foreign_keys: Option<Vec<ForeignKey>>,
@@ -97,6 +99,22 @@ pub struct ColumnGenerated {
 pub struct CheckConstraint {
     pub name: String,
     pub expression: String,
+}
+
+/// A table-level `NOT NULL <column>` constraint (PostgreSQL 18+).
+/// pg_dump emits this form only for a column the table inherits rather
+/// than declares, since there is no local column entry to carry it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NotNullConstraint {
+    /// Omitted when the constraint carries the name PostgreSQL
+    /// generates by default (`<table>_<column>_not_null`), which is
+    /// also when pg_dump omits it
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub column: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub no_inherit: Option<bool>,
 }
 
 /// Constraint columns for primary keys and unique constraints. The YAML

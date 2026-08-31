@@ -2367,6 +2367,22 @@ fn push_table_constraints(table: &Table, inner: &mut Vec<String>) {
     for fk in table.foreign_keys.as_deref().unwrap_or_default() {
         inner.push(render_foreign_key(fk));
     }
+    // PostgreSQL 18+ table-level NOT NULL, which pg_dump writes ahead
+    // of the CHECK constraints
+    for not_null in table.not_null_constraints.as_deref().unwrap_or_default() {
+        let mut sql = match &not_null.name {
+            Some(name) => {
+                format!("CONSTRAINT {} NOT NULL", quote_ident(name))
+            }
+            None => String::from("NOT NULL"),
+        };
+        sql.push(' ');
+        sql.push_str(&quote_ident(&not_null.column));
+        if not_null.no_inherit == Some(true) {
+            sql.push_str(" NO INHERIT");
+        }
+        inner.push(sql);
+    }
     for check in table.check_constraints.as_deref().unwrap_or_default() {
         inner.push(format!(
             "CONSTRAINT {} CHECK ({})",
@@ -2505,7 +2521,9 @@ mod tests {
 
     use super::*;
     use crate::constants::ObjectType;
-    use crate::models::{CheckConstraint, LikeTable, Table, Trigger, View};
+    use crate::models::{
+        CheckConstraint, LikeTable, NotNullConstraint, Table, Trigger, View,
+    };
 
     fn column(name: &str, data_type: &str, not_null: bool) -> Column {
         Column {
@@ -2557,6 +2575,7 @@ mod tests {
                 indexes: None,
                 primary_key: None,
                 check_constraints: None,
+                not_null_constraints: None,
                 unique_constraints: None,
                 foreign_keys: None,
                 triggers: None,
@@ -2650,6 +2669,7 @@ mod tests {
             indexes: None,
             primary_key: None,
             check_constraints: None,
+            not_null_constraints: None,
             unique_constraints: None,
             foreign_keys: None,
             triggers: None,
@@ -2757,6 +2777,59 @@ mod tests {
             ),
             "CREATE TABLE test.orders ( qty integer NOT NULL, \
              CONSTRAINT ck_positive CHECK (qty > 0) );\n"
+        );
+    }
+
+    /// A child table's NOT NULL on an inherited column renders at the
+    /// table level, ahead of the CHECK constraints, as pg_dump writes
+    /// it; the name is omitted when PostgreSQL generated it
+    #[test]
+    fn renders_table_not_null_constraints() {
+        let mut table = base_table("orders");
+        table.parents = Some(vec!["test.parent".into()]);
+        table.not_null_constraints = Some(vec![
+            NotNullConstraint {
+                name: None,
+                column: "qty".into(),
+                no_inherit: None,
+            },
+            NotNullConstraint {
+                name: Some("sku_nn".into()),
+                column: "sku".into(),
+                no_inherit: Some(true),
+            },
+        ]);
+        assert_eq!(
+            table_defn(
+                &table_item(1, table),
+                libpgdump::ObjectType::Table,
+                "orders"
+            ),
+            "CREATE TABLE test.orders ( NOT NULL qty, CONSTRAINT sku_nn \
+             NOT NULL sku NO INHERIT ) INHERITS (test.parent);\n"
+        );
+    }
+
+    /// The parser stores the constraint name and column unquoted, so
+    /// the renderer has to quote them back or a mixed-case identifier
+    /// rebuilds as a different, lower-cased one
+    #[test]
+    fn quotes_table_not_null_identifiers() {
+        let mut table = base_table("orders");
+        table.parents = Some(vec!["test.parent".into()]);
+        table.not_null_constraints = Some(vec![NotNullConstraint {
+            name: Some("Sku NN".into()),
+            column: "Sku".into(),
+            no_inherit: None,
+        }]);
+        assert_eq!(
+            table_defn(
+                &table_item(1, table),
+                libpgdump::ObjectType::Table,
+                "orders"
+            ),
+            "CREATE TABLE test.orders ( CONSTRAINT \"Sku NN\" NOT NULL \
+             \"Sku\" ) INHERITS (test.parent);\n"
         );
     }
 

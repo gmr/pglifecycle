@@ -14,8 +14,9 @@ use crate::build;
 use crate::deploy::diff::canonical_type;
 use crate::models::{
     CheckConstraint, Column, Definition, Domain, Extension,
-    ForeignDataWrapper, ForeignKey, Function, Index, Schema, Sequence, Server,
-    Table, Trigger, Type, UserMapping, View, ViewColumn,
+    ForeignDataWrapper, ForeignKey, Function, Index, NotNullConstraint,
+    Schema, Sequence, Server, Table, Trigger, Type, UserMapping, View,
+    ViewColumn,
 };
 use crate::utils::{
     dollar_quote, postgres_value, quote_ident, user_mapping_subject,
@@ -382,6 +383,40 @@ fn constraints(
                 "ALTER TABLE {table} ADD CONSTRAINT {} CHECK ({});\n",
                 quote_ident(&check.name),
                 check.expression
+            )
+        },
+    );
+    // Table-level NOT NULL (PostgreSQL 18+) keys on the column, not
+    // the constraint name: a column carries at most one, and the name
+    // is absent from the model whenever PostgreSQL generated it. DROP
+    // goes through ALTER COLUMN for the same reason — it needs no name
+    let repo_not_null =
+        repo.not_null_constraints.as_deref().unwrap_or_default();
+    let db_not_null = db.not_null_constraints.as_deref().unwrap_or_default();
+    named_pairs(
+        alters,
+        db_not_null,
+        repo_not_null,
+        |not_null: &NotNullConstraint| not_null.column.clone(),
+        |not_null| {
+            format!(
+                "ALTER TABLE {table} ALTER COLUMN {} DROP NOT NULL;\n",
+                quote_ident(&not_null.column)
+            )
+        },
+        |not_null| {
+            format!(
+                "ALTER TABLE {table} ADD {}NOT NULL {}{};\n",
+                match &not_null.name {
+                    Some(name) => format!("CONSTRAINT {} ", quote_ident(name)),
+                    None => String::new(),
+                },
+                quote_ident(&not_null.column),
+                if not_null.no_inherit == Some(true) {
+                    " NO INHERIT"
+                } else {
+                    ""
+                }
             )
         },
     );
@@ -1102,6 +1137,32 @@ mod tests {
                 "ALTER TABLE test.users DROP CONSTRAINT email_has_at;\n",
                 "ALTER TABLE test.users ADD CONSTRAINT email_has_at CHECK \
                  (email ~ '@');\n",
+            ]
+        );
+    }
+
+    /// Table-level NOT NULL keys on the column rather than the
+    /// constraint name, so an unnamed one still reconciles; DROP needs
+    /// no name, and ADD carries one only when the model holds it
+    #[test]
+    fn not_null_constraints_reconcile_by_column() {
+        let mut repo = base_table();
+        repo["not_null_constraints"] = serde_json::json!([
+            {"name": "sku_nn", "column": "sku", "no_inherit": true},
+            {"column": "qty"},
+        ]);
+        let mut db = base_table();
+        db["not_null_constraints"] = serde_json::json!([
+            {"column": "sku"},
+        ]);
+        let alters = statements(table(&parse_table(repo), &parse_table(db)));
+        assert_eq!(
+            sql(&alters),
+            vec![
+                "ALTER TABLE test.users ALTER COLUMN sku DROP NOT NULL;\n",
+                "ALTER TABLE test.users ADD CONSTRAINT sku_nn NOT NULL sku \
+                 NO INHERIT;\n",
+                "ALTER TABLE test.users ADD NOT NULL qty;\n",
             ]
         );
     }
