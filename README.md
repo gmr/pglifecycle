@@ -45,6 +45,19 @@ brew install pglifecycle
 cargo install pglifecycle
 ```
 
+### Docker
+
+The image bundles the PostgreSQL 17 client tools pglifecycle shells out to.
+Mount the project directory at `/project`, the image's working directory:
+
+```bash
+docker run --rm -v "$PWD:/project" ghcr.io/gmr/pglifecycle:latest \
+  build my-project/ mydb.dump
+```
+
+The image runs as uid 65532, so a project it has to write to must be
+writable by that uid; `docker run --user "$(id -u):$(id -g)"` overrides it.
+
 Prebuilt binaries for Linux and macOS (x86_64 and aarch64) are attached
 to each [release](https://github.com/gmr/pglifecycle/releases).
 

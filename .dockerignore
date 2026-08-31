@@ -1,0 +1,15 @@
+target
+.git
+.github
+bin
+compose.yaml
+docs
+examples
+fixtures
+Justfile
+mkdocs.yml
+test-project
+tests
+*.md
+!README.md
+rustfmt.toml

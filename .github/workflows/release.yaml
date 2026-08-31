@@ -2,7 +2,10 @@ name: Release
 
 on:
   release:
-    types: [created]
+    # `created` never fires for a draft, and publishing the draft later does not fire
+    # it either, so a draft-then-publish release would silently never run.
+    # `published` covers both that path and a release published outright.
+    types: [published]
 
 permissions:
   contents: write
@@ -32,6 +35,17 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Check the tag against the crate version
+        run: |
+          # The asset names and the Homebrew formula both carry the tag, while
+          # --version reports the manifest, so a tag that disagrees with Cargo.toml
+          # would ship a binary that contradicts the release it came from.
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          if [ "${GITHUB_REF_NAME#v}" != "$version" ]; then
+            echo "tag '${GITHUB_REF_NAME}' does not match Cargo.toml version '${version}'" >&2
+            exit 1
+          fi
+
       - name: Install cross (Linux aarch64)
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: cargo install cross --git https://github.com/cross-rs/cross
@@ -51,7 +65,7 @@ jobs:
           cd ../../..
 
       - name: Upload release asset
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: pglifecycle-${{ matrix.target }}.tar.gz
 
@@ -62,7 +76,17 @@ jobs:
     steps:
       - name: Get release version
         id: version
-        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+        run: |
+          # A git tag may hold shell-significant characters, and this value reaches a
+          # shell and a commit message, so accept only a plain semver tag. The `v` is
+          # optional: this project's tags carry none.
+          if ! printf '%s' "$GITHUB_REF_NAME" \
+              | grep -Eq '^v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'; then
+            echo "refusing to release from tag '$GITHUB_REF_NAME': expected [v]MAJOR.MINOR.PATCH[-PRERELEASE]" >&2
+            exit 1
+          fi
+          echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
 
       - name: Download release assets and compute checksums
         id: checksums
@@ -86,13 +110,16 @@ jobs:
       - name: Update formula
         env:
           VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
           SHA_AARCH64_APPLE: ${{ steps.checksums.outputs.aarch64_apple_darwin }}
           SHA_X86_64_APPLE: ${{ steps.checksums.outputs.x86_64_apple_darwin }}
           SHA_AARCH64_LINUX: ${{ steps.checksums.outputs.aarch64_unknown_linux_gnu }}
           SHA_X86_64_LINUX: ${{ steps.checksums.outputs.x86_64_unknown_linux_gnu }}
         run: |
           sed -i "s/version \".*\"/version \"${VERSION}\"/" Formula/pglifecycle.rb
-          sed -i "s|download/v[^/]*/|download/v${VERSION}/|g" Formula/pglifecycle.rb
+          # The tag is the release's actual path segment; hardcoding a `v` here pointed
+          # every 2.0.0-alpha.0 formula URL at a release that does not exist.
+          sed -i "s|download/[^/]*/|download/${TAG}/|g" Formula/pglifecycle.rb
           sed -i "/aarch64-apple-darwin/{n;s/sha256 \".*\"/sha256 \"${SHA_AARCH64_APPLE}\"/;}" Formula/pglifecycle.rb
           sed -i "/x86_64-apple-darwin/{n;s/sha256 \".*\"/sha256 \"${SHA_X86_64_APPLE}\"/;}" Formula/pglifecycle.rb
           sed -i "/aarch64-unknown-linux-gnu/{n;s/sha256 \".*\"/sha256 \"${SHA_AARCH64_LINUX}\"/;}" Formula/pglifecycle.rb

@@ -2,7 +2,10 @@ name: Publish to crates.io
 
 on:
   release:
-    types: [created]
+    # `created` never fires for a draft, and publishing the draft later does not fire
+    # it either, so a draft-then-publish release would silently never run.
+    # `published` covers both that path and a release published outright.
+    types: [published]
 
 permissions:
   id-token: write
