@@ -2371,11 +2371,13 @@ fn push_table_constraints(table: &Table, inner: &mut Vec<String>) {
     // of the CHECK constraints
     for not_null in table.not_null_constraints.as_deref().unwrap_or_default() {
         let mut sql = match &not_null.name {
-            Some(name) => format!("CONSTRAINT {name} NOT NULL"),
+            Some(name) => {
+                format!("CONSTRAINT {} NOT NULL", quote_ident(name))
+            }
             None => String::from("NOT NULL"),
         };
         sql.push(' ');
-        sql.push_str(&not_null.column);
+        sql.push_str(&quote_ident(&not_null.column));
         if not_null.no_inherit == Some(true) {
             sql.push_str(" NO INHERIT");
         }
@@ -2805,6 +2807,29 @@ mod tests {
             ),
             "CREATE TABLE test.orders ( NOT NULL qty, CONSTRAINT sku_nn \
              NOT NULL sku NO INHERIT ) INHERITS (test.parent);\n"
+        );
+    }
+
+    /// The parser stores the constraint name and column unquoted, so
+    /// the renderer has to quote them back or a mixed-case identifier
+    /// rebuilds as a different, lower-cased one
+    #[test]
+    fn quotes_table_not_null_identifiers() {
+        let mut table = base_table("orders");
+        table.parents = Some(vec!["test.parent".into()]);
+        table.not_null_constraints = Some(vec![NotNullConstraint {
+            name: Some("Sku NN".into()),
+            column: "Sku".into(),
+            no_inherit: None,
+        }]);
+        assert_eq!(
+            table_defn(
+                &table_item(1, table),
+                libpgdump::ObjectType::Table,
+                "orders"
+            ),
+            "CREATE TABLE test.orders ( CONSTRAINT \"Sku NN\" NOT NULL \
+             \"Sku\" ) INHERITS (test.parent);\n"
         );
     }
 
