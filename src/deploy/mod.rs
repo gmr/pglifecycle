@@ -36,6 +36,9 @@ pub fn deploy(args: &cli::Deploy) -> Result<(), String> {
     log::info!("Comparing {} against {source}", project.name);
     let ddl = pgdump::DumpDdl {
         no_privileges: args.no_privileges,
+        exclude_tables: args.exclude_table.clone(),
+        exclude_schemas: args.exclude_schema.clone(),
+        exclude_extensions: args.exclude_extension.clone(),
         ..Default::default()
     };
     // deploy compares against the project's stored SQL, which pull
