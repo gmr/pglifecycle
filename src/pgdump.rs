@@ -1,9 +1,11 @@
 //! pg_dump / pg_dumpall subprocess wrappers (ports pgdump.py)
 
+use std::ffi::OsString;
+use std::io::IsTerminal;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
 
-use crate::cli;
+use crate::{cli, progress};
 
 /// DDL suppression flags and object exclusions passed through to
 /// pg_dump
@@ -29,16 +31,17 @@ pub fn dump(
     ddl: &DumpDdl,
     path: &Path,
 ) -> Result<(), String> {
-    let mut command = Command::new("pg_dump");
-    connection_args(&mut command, conn);
+    let mut args = connection_args(conn);
     if let Some(dbname) = &conn.dbname {
-        command.arg("-d").arg(dbname);
+        args.push("-d".into());
+        args.push(dbname.into());
     }
-    command.arg("-f").arg(path);
-    command.arg("-Fc");
-    command.arg("--schema-only");
-    command.args(ddl_args(ddl));
-    execute(command)
+    args.push("-f".into());
+    args.push(path.into());
+    args.push("-Fc".into());
+    args.push("--schema-only".into());
+    args.extend(ddl_args(ddl).into_iter().map(OsString::from));
+    execute("pg_dump", args, conn)
 }
 
 /// Dump cluster roles to `path` as SQL via `pg_dumpall --roles-only`.
@@ -73,14 +76,14 @@ fn run_dump_roles(
     path: &Path,
     include_passwords: bool,
 ) -> Result<(), String> {
-    let mut command = Command::new("pg_dumpall");
-    connection_args(&mut command, conn);
-    command.arg("-f").arg(path);
-    command.arg("-r");
+    let mut args = connection_args(conn);
+    args.push("-f".into());
+    args.push(path.into());
+    args.push("-r".into());
     if !include_passwords {
-        command.arg("--no-role-passwords");
+        args.push("--no-role-passwords".into());
     }
-    execute(command)
+    execute("pg_dumpall", args, conn)
 }
 
 /// Whether a failed password-included roles dump should be retried
@@ -96,28 +99,21 @@ fn should_retry_without_passwords(
 /// `psql`, aborting on the first error. Returns psql's stderr on
 /// failure so the caller can map it back to a statement.
 pub fn apply(conn: &cli::Connection, script: &Path) -> Result<(), String> {
-    let mut command = Command::new("psql");
-    connection_args(&mut command, conn);
-    // connection_args may add -W when a password prompt is requested;
-    // inherit stdin so psql can read the prompted password (output()
-    // otherwise closes stdin)
-    command.stdin(Stdio::inherit());
+    let mut args = connection_args(conn);
     if let Some(dbname) = &conn.dbname {
-        command.arg("-d").arg(dbname);
+        args.push("-d".into());
+        args.push(dbname.into());
     }
-    command.arg("-X");
-    command.arg("-q");
-    command.arg("--single-transaction");
-    command.arg("-v").arg("ON_ERROR_STOP=1");
-    command.arg("-f").arg(script);
-    log::debug!("Executing {command:?}");
-    let output = command.output().map_err(|e| {
-        format!("failed to run {:?}: {e}", command.get_program())
-    })?;
+    args.push("-X".into());
+    args.push("-q".into());
+    args.push("--single-transaction".into());
+    args.push("-v".into());
+    args.push("ON_ERROR_STOP=1".into());
+    args.push("-f".into());
+    args.push(script.into());
+    let output = run("psql", &args, conn)?;
     if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr)
-            .trim()
-            .to_string());
+        return Err(stderr_of(&output));
     }
     Ok(())
 }
@@ -149,33 +145,118 @@ fn ddl_args(ddl: &DumpDdl) -> Vec<String> {
     args
 }
 
-fn connection_args(command: &mut Command, conn: &cli::Connection) {
-    command.arg("-h").arg(&conn.host);
-    command.arg("-p").arg(conn.port.to_string());
+/// The connection flags shared by every client tool. `-w` is always
+/// passed: the tools prompt on /dev/tty, where a live progress bar
+/// overwrites the prompt, so pglifecycle prompts itself instead (see
+/// [`run`]) and hands the password over in the environment.
+fn connection_args(conn: &cli::Connection) -> Vec<OsString> {
+    let mut args: Vec<OsString> = vec![
+        "-h".into(),
+        conn.host.clone().into(),
+        "-p".into(),
+        conn.port.to_string().into(),
+    ];
     if let Some(username) = &conn.username {
-        command.arg("-U").arg(username);
+        args.push("-U".into());
+        args.push(username.into());
     }
-    if conn.no_password {
-        command.arg("-w");
-    }
-    if conn.password {
-        command.arg("-W");
-    }
+    args.push("-w".into());
     if let Some(role) = &conn.role {
-        command.arg("--role").arg(role);
+        args.push("--role".into());
+        args.push(role.into());
+    }
+    args
+}
+
+/// Run a client tool, supplying a password when one is needed.
+///
+/// `-W` prompts up front; otherwise the tool runs with whatever
+/// PGPASSWORD or pgpass already provides, and only a "no password
+/// supplied" failure triggers a prompt and one retry. Prompting is
+/// pglifecycle's own (bars suspended, echo off), so it cannot be
+/// erased by a redrawing spinner the way the tools' own /dev/tty
+/// prompt is.
+fn run(
+    program: &str,
+    args: &[OsString],
+    conn: &cli::Connection,
+) -> Result<Output, String> {
+    let mut password = match conn.password {
+        true => Some(prompt_password(program, conn)?),
+        false => None,
+    };
+    loop {
+        let mut command = Command::new(program);
+        command.args(args);
+        // no stdin of our own to give it; the password comes from the
+        // environment and the prompt is read by us, not the child
+        command.stdin(Stdio::null());
+        if let Some(password) = &password {
+            command.env("PGPASSWORD", password);
+        }
+        log::debug!("Executing {command:?}");
+        let output = command.output().map_err(|e| {
+            format!("failed to run {:?}: {e}", command.get_program())
+        })?;
+        if output.status.success()
+            || password.is_some()
+            || !needs_password(&stderr_of(&output))
+            || !can_prompt(conn)
+        {
+            return Ok(output);
+        }
+        password = Some(prompt_password(program, conn)?);
     }
 }
 
-fn execute(mut command: Command) -> Result<(), String> {
-    log::debug!("Executing {command:?}");
-    let output = command.output().map_err(|e| {
-        format!("failed to run {:?}: {e}", command.get_program())
-    })?;
+/// Read a password from the terminal with the progress bars hidden and
+/// echo off
+fn prompt_password(
+    program: &str,
+    conn: &cli::Connection,
+) -> Result<String, String> {
+    let user = conn.username.as_deref().unwrap_or_default();
+    let prompt = format!("Password for {program} as {user}: ");
+    progress::suspend(|| rpassword::prompt_password(prompt))
+        .map_err(|e| format!("failed to read password: {e}"))
+}
+
+/// Whether the failure is the server asking for a password pglifecycle
+/// has not supplied yet
+fn needs_password(stderr: &str) -> bool {
+    stderr.contains("no password supplied")
+}
+
+/// Whether a password can be prompted for: `-w` forbids it, and a
+/// non-interactive stdin has nobody to answer
+fn can_prompt(conn: &cli::Connection) -> bool {
+    !conn.no_password && std::io::stdin().is_terminal()
+}
+
+fn stderr_of(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stderr).trim().to_string()
+}
+
+/// Run a dump command, reporting a non-zero exit as an error and
+/// naming the ways to supply a password when that was the cause and
+/// no prompt was possible
+fn execute(
+    program: &str,
+    args: Vec<OsString>,
+    conn: &cli::Connection,
+) -> Result<(), String> {
+    let output = run(program, &args, conn)?;
     if !output.status.success() {
+        let stderr = stderr_of(&output);
+        let hint = if needs_password(&stderr) {
+            "\nSet PGPASSWORD, add a ~/.pgpass entry, or run in a \
+             terminal (without -w) to be prompted."
+        } else {
+            ""
+        };
         return Err(format!(
-            "Failed to dump ({}): {}",
+            "Failed to dump ({}): {stderr}{hint}",
             output.status.code().unwrap_or(-1),
-            String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
     Ok(())
@@ -229,6 +310,45 @@ mod tests {
     fn does_not_retry_when_passwords_not_requested() {
         let error = "permission denied for table pg_authid";
         assert!(!should_retry_without_passwords(false, error));
+    }
+
+    #[test]
+    fn never_lets_the_client_tools_prompt() {
+        let args = connection_args(&connection(false));
+        assert!(args.contains(&OsString::from("-w")));
+        assert!(!args.contains(&OsString::from("-W")));
+        // -W is pglifecycle's own prompt, not a flag passed through
+        let args = connection_args(&connection(true));
+        assert!(args.contains(&OsString::from("-w")));
+        assert!(!args.contains(&OsString::from("-W")));
+    }
+
+    #[test]
+    fn detects_a_missing_password() {
+        assert!(needs_password(
+            "pg_dump: error: connection to server failed: fe_sendauth: \
+             no password supplied"
+        ));
+        assert!(!needs_password("permission denied for table pg_authid"));
+    }
+
+    #[test]
+    fn no_password_forbids_prompting() {
+        let mut conn = connection(false);
+        conn.no_password = true;
+        assert!(!can_prompt(&conn));
+    }
+
+    fn connection(password: bool) -> cli::Connection {
+        cli::Connection {
+            dbname: Some("app".into()),
+            host: "localhost".into(),
+            port: 5432,
+            username: Some("postgres".into()),
+            no_password: false,
+            password,
+            role: None,
+        }
     }
 
     #[test]

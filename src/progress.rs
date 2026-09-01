@@ -25,6 +25,16 @@ fn multi() -> Option<&'static MultiProgress> {
     MULTI.get().and_then(Option::as_ref)
 }
 
+/// Run `f` with any live bars hidden, so a subprocess that writes to
+/// the terminal (e.g. pg_dump's password prompt, which goes to
+/// /dev/tty) is not overwritten by a redrawing spinner.
+pub fn suspend<T>(f: impl FnOnce() -> T) -> T {
+    match multi() {
+        Some(multi) => multi.suspend(f),
+        None => f(),
+    }
+}
+
 /// A spinner for a phase of unknown duration; ticks on its own until
 /// finished or dropped.
 pub fn spinner(message: impl Into<String>) -> Task {
