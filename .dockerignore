@@ -7,7 +7,7 @@ docs
 examples
 fixtures
 Justfile
-mkdocs.yml
+properdocs.yml
 test-project
 tests
 *.md

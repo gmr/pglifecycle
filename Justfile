@@ -89,9 +89,9 @@ gates: round-trip deploy-gates
 
 # Build the documentation site (strict, as CI does)
 docs:
-    mkdocs build --strict
+    properdocs build --strict
 
-# Install the documentation toolchain (mkdocs and the generator plugins)
+# Install the documentation toolchain (properdocs and the generator plugins)
 docs-deps:
     pip install -r docs/requirements.txt
 
@@ -101,7 +101,7 @@ docs-schema-preview:
 
 # Serve the documentation locally with live reload
 docs-serve:
-    mkdocs serve
+    properdocs serve
 
 # --- Release ---------------------------------------------------------
 #

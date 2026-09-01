@@ -6,7 +6,7 @@ on:
       - main
     paths:
       - 'docs/**'
-      - 'mkdocs.yml'
+      - 'properdocs.yml'
       # the schema reference is generated from these at build time
       - 'schemata/**'
       - 'bin/generate-schema-docs.py'
@@ -40,7 +40,7 @@ jobs:
           pip install -r docs/requirements.txt
 
       - name: Build documentation
-        run: mkdocs build --strict
+        run: properdocs build --strict
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3

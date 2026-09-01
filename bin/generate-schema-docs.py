@@ -8,7 +8,7 @@ validate a project file against a published URL:
 
     # yaml-language-server: $schema=https://gmr.github.io/pglifecycle/schemata/table.json
 
-Run by the mkdocs gen-files plugin (see mkdocs.yml), which routes
+Run by the gen-files plugin (see properdocs.yml), which routes
 `mkdocs_gen_files.open()` into the build rather than the source tree, so
 nothing here is checked in. With `--preview` it writes the same files to ./site-preview instead, for
 looking at the output without a full build:
@@ -498,7 +498,7 @@ def main() -> None:
             from mkdocs_gen_files.editor import FilesEditor
         except ImportError:
             raise SystemExit(
-                'bin/generate-schema-docs.py runs under the mkdocs '
+                'bin/generate-schema-docs.py runs under the properdocs '
                 'gen-files plugin; pass --preview to write ./site-preview '
                 'instead (see docs/requirements.txt)'
             ) from None
@@ -510,7 +510,7 @@ def main() -> None:
         ).resolve():
             raise SystemExit(
                 'bin/generate-schema-docs.py: refusing to write into '
-                'docs/ -- run it through `mkdocs build`, or pass '
+                'docs/ -- run it through `properdocs build`, or pass '
                 '--preview to write ./site-preview'
             )
 

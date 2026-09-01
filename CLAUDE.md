@@ -112,4 +112,5 @@ script by hand, set `PGHOST`/`PGPORT`/`PGUSER` (the recipes use
 - `test-project/` — example project structure; a parity contract.
 - `fixtures/` — test database schema.
 - `bin/` — gate scripts and fixture-data generation.
-- `docs/` — mkdocs site (`just docs` builds with `--strict`).
+- `docs/` — properdocs site (a MkDocs 1.x fork; `just docs` builds
+  with `--strict`).
