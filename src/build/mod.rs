@@ -29,6 +29,11 @@
 //! 12. CREATE/DROP FUNCTION references render schema-qualified (Python
 //!     emitted a bare name, which pg_restore rejects under its reset
 //!     `search_path` with "no schema has been selected to create in")
+//! 13. Storage parameters on tables, materialized views and indexes
+//!     render as `WITH (k=v, ...)` (Python emitted the list without the
+//!     required parentheses, which does not parse). No test-project
+//!     object carries storage parameters, so this one has no parity
+//!     entry to exclude.
 
 mod acls;
 
@@ -113,7 +118,7 @@ pub fn assemble(project: &Project) -> Result<BuildOutput, String> {
             entry.dependencies.extend(deps);
         }
     }
-    builder.split_sequence_defaults(project)?;
+    builder.split_column_defaults(project)?;
     let item_ids = builder
         .dump_id_map
         .iter()
@@ -314,12 +319,15 @@ impl Builder {
         Ok(())
     }
 
-    /// Emit the `ALTER TABLE ... SET DEFAULT nextval(...)` entries held
-    /// out of their `CREATE TABLE` by [`sequence_backed_default`]. Each
-    /// depends on both its table and the referenced sequence so
-    /// pg_restore orders it after both, breaking the SERIAL dependency
-    /// cycle the way pg_dump's separate `DEFAULT` TOC entries do.
-    fn split_sequence_defaults(
+    /// Emit the standalone `DEFAULT` entries: the
+    /// `SET DEFAULT nextval(...)` ones held out of their `CREATE TABLE`
+    /// by [`sequence_backed_default`], and the inherited-column
+    /// defaults in `column_defaults`, which no `CREATE TABLE` form can
+    /// carry inline. Each depends on its table, and on the referenced
+    /// sequence when there is one, so pg_restore orders it after both,
+    /// breaking the SERIAL dependency cycle the way pg_dump's separate
+    /// `DEFAULT` TOC entries do.
+    fn split_column_defaults(
         &mut self,
         project: &Project,
     ) -> Result<(), String> {
@@ -335,24 +343,37 @@ impl Builder {
             let Definition::Table(d) = &item.definition else {
                 continue;
             };
-            // only the plain-column CREATE TABLE path renders defaults
-            // inline; sql-override, foreign, typed and LIKE tables do not
-            if d.sql.is_some()
-                || d.server.is_some()
-                || d.from_type.is_some()
-                || d.like_table.is_some()
-            {
-                continue;
-            }
             let Some(&table_id) = self.dump_id_map.get(&item.id) else {
                 continue;
             };
-            for column in d.columns.as_deref().unwrap_or_default() {
-                let Some(default) = sequence_backed_default(column) else {
-                    continue;
-                };
+            let mut defaults: Vec<(&str, String)> = Vec::new();
+            // a default on an inherited column, which no CREATE TABLE
+            // form renders inline whatever the table's shape
+            for column_default in
+                d.column_defaults.as_deref().unwrap_or_default()
+            {
+                defaults.push((
+                    &column_default.column,
+                    render_default(&column_default.default),
+                ));
+            }
+            // only the plain-column CREATE TABLE path renders defaults
+            // inline; sql-override, foreign, typed and LIKE tables do not
+            if !(d.sql.is_some()
+                || d.server.is_some()
+                || d.from_type.is_some()
+                || d.like_table.is_some())
+            {
+                for column in d.columns.as_deref().unwrap_or_default() {
+                    if let Some(default) = sequence_backed_default(column) {
+                        defaults.push((&column.name, default.to_string()));
+                    }
+                }
+            }
+            for (column, default) in defaults {
                 let mut deps = vec![table_id];
-                if let Some(key) = nextval_target(default)
+                if default.contains("nextval(")
+                    && let Some(key) = nextval_target(&default)
                     && let Some(&seq_id) = sequence_ids.get(&key)
                 {
                     deps.push(seq_id);
@@ -362,7 +383,7 @@ impl Builder {
                     quote_ident(&d.schema),
                     quote_ident(&d.name)
                 );
-                let col = quote_ident(&column.name);
+                let col = quote_ident(column);
                 let defn = vec![format!(
                     "ALTER TABLE ONLY {table} ALTER COLUMN {col} \
                      SET DEFAULT {default}"
@@ -374,7 +395,7 @@ impl Builder {
                 self.add_entry(
                     "DEFAULT",
                     &d.schema,
-                    &format!("{} {}", d.name, column.name),
+                    &format!("{} {column}", d.name),
                     &d.owner,
                     &defn,
                     &drop,
@@ -968,7 +989,7 @@ impl Builder {
                 .iter()
                 .map(|(k, v)| format!("{k} = {}", raw_value(v)))
                 .collect();
-            create.push(params.join(", "));
+            create.push(format!("({})", params.join(", ")));
         }
         if let Some(tablespace) = &d.tablespace {
             create.push("TABLESPACE".into());
@@ -1299,7 +1320,7 @@ impl Builder {
                 let mut inner = Vec::new();
                 for column in d.columns.as_deref().unwrap_or_default() {
                     // sequence-backed defaults are split into a separate
-                    // SET DEFAULT entry (see split_sequence_defaults), so
+                    // SET DEFAULT entry (see split_column_defaults), so
                     // render the column without its default here
                     if sequence_backed_default(column).is_some() {
                         let mut stripped = column.clone();
@@ -1339,7 +1360,7 @@ impl Builder {
                     .iter()
                     .map(|(k, v)| format!("{k}={}", raw_value(v)))
                     .collect();
-                create.push(params.join(", "));
+                create.push(format!("({})", params.join(", ")));
             }
             if let Some(tablespace) = &d.tablespace {
                 create.push("TABLESPACE".into());
@@ -2240,7 +2261,7 @@ pub(crate) fn render_index(index: &Index, table_name: &str) -> Vec<String> {
             .iter()
             .map(|(k, v)| format!("{k}={}", raw_value(v)))
             .collect();
-        create.push(params.join(", "));
+        create.push(format!("({})", params.join(", ")));
     }
     if let Some(tablespace) = &index.tablespace {
         create.push("TABLESPACE".into());
@@ -2586,6 +2607,7 @@ mod tests {
                 name: "orders".into(),
                 schema: "fdw_warehouse".into(),
                 owner: "app".into(),
+                column_defaults: None,
                 sql: None,
                 unlogged: None,
                 from_type: None,
@@ -2727,6 +2749,7 @@ mod tests {
             name: name.into(),
             schema: "test".into(),
             owner: "app".into(),
+            column_defaults: None,
             sql: None,
             unlogged: None,
             from_type: None,
@@ -2844,6 +2867,67 @@ mod tests {
             ),
             "CREATE TABLE test.orders ( qty integer NOT NULL, \
              CONSTRAINT ck_positive CHECK (qty > 0) );\n"
+        );
+    }
+
+    /// Storage parameters need their parentheses; without them the
+    /// CREATE TABLE does not parse (deviation 13)
+    #[test]
+    fn renders_table_storage_parameters_parenthesized() {
+        let mut table = base_table("orders");
+        table.columns = Some(vec![column("qty", "integer", false)]);
+        table.storage_parameters = Some(
+            serde_json::from_value(json!({
+                "fillfactor": 90,
+                "toast.autovacuum_vacuum_threshold": 10000,
+            }))
+            .unwrap(),
+        );
+        assert_eq!(
+            table_defn(
+                &table_item(1, table),
+                libpgdump::ObjectType::Table,
+                "orders"
+            ),
+            "CREATE TABLE test.orders ( qty integer ) WITH \
+             (fillfactor=90, toast.autovacuum_vacuum_threshold=10000);\n"
+        );
+    }
+
+    /// A default on an inherited column has no home in the CREATE
+    /// TABLE, so it renders as its own DEFAULT entry, the way pg_dump
+    /// writes one, depending on the table
+    #[test]
+    fn renders_inherited_column_default_entry() {
+        let mut table = base_table("orders");
+        table.parents = Some(vec!["test.parent".into()]);
+        table.column_defaults = Some(vec![crate::models::ColumnDefault {
+            column: "recorded_at".into(),
+            default: json!("CURRENT_TIMESTAMP"),
+        }]);
+        let project = Project {
+            name: String::from("t"),
+            encoding: String::from("UTF8"),
+            stdstrings: true,
+            superuser: String::from("postgres"),
+            default_schema: String::from("public"),
+            path: std::path::PathBuf::new(),
+            inventory: vec![table_item(1, table)],
+        };
+        let output = assemble(&project).unwrap();
+        let entry = output
+            .dump
+            .entries()
+            .iter()
+            .find(|e| e.desc == libpgdump::ObjectType::Default)
+            .expect("no DEFAULT entry");
+        assert_eq!(entry.tag.as_deref(), Some("orders recorded_at"));
+        assert_eq!(
+            entry.defn.as_deref(),
+            Some(
+                "ALTER TABLE ONLY test.orders ALTER COLUMN recorded_at \
+                 SET DEFAULT CURRENT_TIMESTAMP;\n"
+            )
         );
     }
 

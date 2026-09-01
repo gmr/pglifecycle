@@ -92,6 +92,7 @@ pub(crate) fn create_table(
         parents: None,
         like_table: None,
         columns: None,
+        column_defaults: None,
         indexes: None,
         primary_key: None,
         check_constraints: None,

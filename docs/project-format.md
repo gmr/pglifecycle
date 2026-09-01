@@ -88,6 +88,47 @@ grants:
     - developers
     - pg_read_all_data
 ```
+- A membership that does not behave the way a plain `GRANT role TO
+  member` grants it is written as a mapping instead of a bare name.
+  `admin: true` emits `WITH ADMIN OPTION`; `inherit` and `set` emit the
+  per-membership `WITH INHERIT` / `WITH SET` options, which need
+  PostgreSQL 16 or later. Omit `inherit` to defer to the member role's
+  own `inherit` option, which is what PostgreSQL does — so `pull` keeps
+  an explicit `inherit: true` only for a `NOINHERIT` member, where it
+  is the only thing making the membership inherit:
+
+```yaml
+---
+name: alice
+grants:
+  roles:
+    - developers
+    - role: partition_writer
+      inherit: false
+    - role: analytics
+      admin: true
+```
+
+  The grantor (`GRANTED BY`) is not carried: it records who granted a
+  membership in one cluster, not what the schema is, and PostgreSQL 16
+  and later writes one for every membership.
+
+- A column's default belongs on the column. A table that inherits a
+  column has no column entry to carry one, so a default on an
+  inherited column lives at the table level under `column_defaults:`,
+  which `build` emits as `ALTER TABLE ONLY <table> ALTER COLUMN
+  <column> SET DEFAULT ...` the way `pg_dump` writes it:
+
+```yaml
+---
+name: audit_events_archive
+schema: test
+parents:
+  - test.audit_events
+column_defaults:
+  - column: recorded_at
+    default: CURRENT_TIMESTAMP
+```
 
 - Grants on views may be written under either `tables:` or `views:`.
   PostgreSQL grants on views with `TABLE` syntax, so both emit

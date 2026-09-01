@@ -190,7 +190,8 @@ fn dump_memberships(
                     "groups" => &acls.groups,
                     _ => &acls.roles,
                 };
-                for role in roles.iter().flatten() {
+                for membership in roles.iter().flatten() {
+                    let role = membership.role();
                     // PostgreSQL does not permit PUBLIC as either
                     // operand of a role membership grant
                     if role.eq_ignore_ascii_case("public")
@@ -203,9 +204,10 @@ fn dump_memberships(
                         ));
                     }
                     let entry = memberships
-                        .entry((section, role.clone()))
+                        .entry((section, role.to_string()))
                         .or_default();
                     let statement = if revoke {
+                        // the options go with the membership itself
                         format!(
                             "REVOKE {} FROM {};",
                             quote_role(role),
@@ -213,9 +215,13 @@ fn dump_memberships(
                         )
                     } else {
                         format!(
-                            "GRANT {} TO {};",
+                            "GRANT {} TO {}{};",
                             quote_role(role),
-                            quote_role(&grantee)
+                            quote_role(&grantee),
+                            match membership.options_sql() {
+                                Some(options) => format!(" WITH {options}"),
+                                None => String::new(),
+                            }
                         )
                     };
                     if revoke {
@@ -834,6 +840,40 @@ mod tests {
             .find(|e| e.tag.as_deref() == Some("alice"))
             .expect("user entry");
         assert_eq!(acl.dependencies, vec![role.dump_id, user.dump_id]);
+    }
+
+    /// A membership with options renders them, in the canonical
+    /// order, on the GRANT
+    #[test]
+    fn emits_role_membership_options() {
+        let developers: models::Role = serde_json::from_value(json!({
+            "name": "developers",
+        }))
+        .unwrap();
+        let alice: models::User = serde_json::from_value(json!({
+            "name": "alice",
+            "grants": {
+                "roles": [
+                    {"role": "developers", "admin": true, "inherit": false},
+                ],
+            },
+            // a revoked membership takes its options with it
+            "revocations": {"roles": [{"role": "developers"}]},
+        }))
+        .unwrap();
+        let project = project_with(vec![
+            item(0, ObjectType::Role, Definition::Role(developers)),
+            item(1, ObjectType::User, Definition::User(alice)),
+        ]);
+        let dump = build_dump(&project);
+        assert_eq!(
+            find_acl(&dump, "ROLE developers").defn.as_deref(),
+            Some(
+                "REVOKE developers FROM alice;\n\
+                 GRANT developers TO alice WITH ADMIN OPTION, \
+                 INHERIT FALSE;\n"
+            )
+        );
     }
 
     #[test]

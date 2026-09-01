@@ -90,6 +90,7 @@ pub enum Statement {
         revoke: bool,
         roles: Vec<String>,
         members: Vec<String>,
+        options: MembershipGrant,
     },
     CreateRole(RoleDef),
     /// ALTER ROLE ... WITH options — the assembly merges these into
@@ -465,5 +466,44 @@ mod unquote_tests {
         assert_eq!(unquote_role("public"), "PUBLIC");
         assert_eq!(unquote_role("app_user"), "app_user");
         assert_eq!(unquote_role("\"MyRole\""), "MyRole");
+    }
+}
+
+/// The options a `GRANT role TO member WITH ...` clause carried, as
+/// three-state flags (absent, TRUE, FALSE)
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MembershipGrant {
+    pub admin: Option<bool>,
+    pub inherit: Option<bool>,
+    pub set: Option<bool>,
+}
+
+impl MembershipGrant {
+    /// The project's form of this membership, keeping only the options
+    /// that change what the membership does. `member_inherits` is the
+    /// member role's own INHERIT attribute, which an omitted INHERIT
+    /// option defers to — so an explicit `INHERIT TRUE` matters only
+    /// for a NOINHERIT member.
+    pub fn membership(
+        &self,
+        role: &str,
+        member_inherits: bool,
+    ) -> models::Membership {
+        let options = models::MembershipOptions {
+            role: role.to_string(),
+            admin: self.admin.filter(|&admin| admin),
+            inherit: self
+                .inherit
+                .filter(|&inherit| !inherit || !member_inherits),
+            set: self.set.filter(|&set| !set),
+        };
+        if options.admin.is_none()
+            && options.inherit.is_none()
+            && options.set.is_none()
+        {
+            models::Membership::Name(options.role)
+        } else {
+            models::Membership::Detailed(options)
+        }
     }
 }

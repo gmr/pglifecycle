@@ -11,11 +11,21 @@ use crate::project::{Project, validate};
 use crate::yamlio;
 
 /// A dependency recorded during the read pass and resolved once the
-/// whole inventory is in memory (project.py _ItemDependency)
+/// whole inventory is in memory (project.py _ItemDependency). The
+/// dependent object is held as its inventory id rather than its name,
+/// so an overloaded function's edges land on the overload that
+/// declared them
 struct CachedDependency {
-    desc: ObjectType,
-    namespace: Option<String>,
-    tag: String,
+    item: usize,
+    parent_desc: ObjectType,
+    parent_namespace: String,
+    parent_tag: String,
+}
+
+/// A parent reference read from a definition's `dependencies` block,
+/// waiting for [`Loader::add_definition`] to assign the dependent
+/// object its inventory id
+struct PendingDependency {
     parent_desc: ObjectType,
     parent_namespace: String,
     parent_tag: String,
@@ -28,14 +38,20 @@ pub struct Loader {
     /// `project.inventory`, kept for duplicate-object diagnostics
     paths: Vec<Option<PathBuf>>,
     errors: usize,
-    /// `(desc, namespace, tag)` -> inventory index, maintained
+    /// `(desc, namespace, tag)` -> inventory indexes, maintained
     /// incrementally as items are added so both the duplicate-object
     /// guard in `add_definition` and dependency resolution in
     /// `apply_cached_dependencies` can look items up in O(1) instead of
     /// scanning the inventory. Schemaless types are always keyed with a
     /// `None` namespace, matching `lookup_item`'s old comparison which
-    /// ignored namespace for them.
-    index: HashMap<(ObjectType, Option<String>, String), usize>,
+    /// ignored namespace for them. The key is the bare name, so
+    /// overloaded functions share one entry: a name is what a
+    /// `dependencies` block can reference, while identity (the
+    /// signature) is what makes two definitions duplicates.
+    index: HashMap<(ObjectType, Option<String>, String), Vec<usize>>,
+    /// Parent references read from the definition currently being
+    /// loaded, drained by `add_definition` once the item has an id
+    pending_dependencies: Vec<PendingDependency>,
 }
 
 impl Loader {
@@ -54,6 +70,7 @@ impl Loader {
             paths: Vec::new(),
             errors: 0,
             index: HashMap::new(),
+            pending_dependencies: Vec::new(),
         }
     }
 
@@ -135,7 +152,7 @@ impl Loader {
                 self.errors += 1;
                 continue;
             }
-            self.cache_and_remove_dependencies(ot, &mut defn);
+            self.cache_and_remove_dependencies(&mut defn);
             self.add_definition(ot, defn, Some(&path));
         }
         Ok(())
@@ -185,7 +202,7 @@ impl Loader {
                     self.errors += 1;
                     continue;
                 }
-                self.cache_and_remove_dependencies(ot, &mut entry);
+                self.cache_and_remove_dependencies(&mut entry);
                 self.add_definition(ot, entry, Some(&path));
             }
         }
@@ -255,24 +272,10 @@ impl Loader {
     }
 
     /// Record `dependencies` for post-load resolution and strip the key
-    /// from the definition (project.py _cache_and_remove_dependencies)
-    fn cache_and_remove_dependencies(
-        &mut self,
-        desc: ObjectType,
-        defn: &mut Value,
-    ) {
-        let namespace = defn["schema"].as_str().map(str::to_string);
-        let tag = if desc == ObjectType::Cast {
-            // casts have no `name` key; their identity is derived from
-            // source/target types (see Definition::name())
-            format!(
-                "({} AS {})",
-                defn["source_type"].as_str().unwrap_or_default(),
-                defn["target_type"].as_str().unwrap_or_default()
-            )
-        } else {
-            defn["name"].as_str().unwrap_or_default().to_string()
-        };
+    /// from the definition (project.py _cache_and_remove_dependencies).
+    /// The parents are held in `pending_dependencies` until
+    /// `add_definition` pairs them with the dependent object's id
+    fn cache_and_remove_dependencies(&mut self, defn: &mut Value) {
         if let Value::Object(deps) = defn[DEPENDENCIES].take() {
             for (key, names) in &deps {
                 let Some(parent_desc) = ObjectType::from_plural_key(key)
@@ -284,10 +287,7 @@ impl Loader {
                 for name in names.as_array().into_iter().flatten() {
                     let name = name.as_str().unwrap_or_default();
                     let (parent_namespace, parent_tag) = split_name(name);
-                    self.cached_dependencies.push(CachedDependency {
-                        desc,
-                        namespace: namespace.clone(),
-                        tag: tag.clone(),
+                    self.pending_dependencies.push(PendingDependency {
                         parent_desc,
                         parent_namespace,
                         parent_tag,
@@ -302,44 +302,40 @@ impl Loader {
 
     fn apply_cached_dependencies(&mut self) -> Result<(), String> {
         for dep in &self.cached_dependencies {
-            let Some(item) = lookup_item(
-                &self.index,
-                dep.desc,
-                dep.namespace.as_deref(),
-                &dep.tag,
-            ) else {
-                log::warn!(
-                    "Skipping dependency from {} {}.{} on missing {} {}.{}",
-                    dep.desc.as_str(),
-                    dep.namespace.as_deref().unwrap_or_default(),
-                    dep.tag,
-                    dep.parent_desc.as_str(),
-                    dep.parent_namespace,
-                    dep.parent_tag,
-                );
-                continue;
-            };
             // a dependency may point at an object the project does not
             // manage (e.g. a foreign key or inheritance parent owned by
             // an extension); skip the edge rather than failing the load
-            let Some(parent) = lookup_item(
+            let parents = lookup_items(
                 &self.index,
                 dep.parent_desc,
                 Some(&dep.parent_namespace),
                 &dep.parent_tag,
-            ) else {
+            );
+            if parents.is_empty() {
+                let item = &self.project.inventory[dep.item];
                 log::warn!(
                     "Skipping dependency from {} {}.{} on unmanaged {} {}.{}",
-                    dep.desc.as_str(),
-                    dep.namespace.as_deref().unwrap_or_default(),
-                    dep.tag,
+                    item.desc.as_str(),
+                    item.definition.schema().unwrap_or_default(),
+                    item.definition.name(),
                     dep.parent_desc.as_str(),
                     dep.parent_namespace,
                     dep.parent_tag,
                 );
                 continue;
-            };
-            self.project.inventory[item].dependencies.insert(parent);
+            }
+            // a `dependencies` entry names an object, and a name is
+            // ambiguous across overloads, so every overload of that
+            // name is ordered ahead of the dependent object. A missing
+            // edge fails a restore outright, where a redundant one at
+            // worst costs ordering, so the ambiguity resolves wide
+            for parent in parents {
+                if parent != dep.item {
+                    self.project.inventory[dep.item]
+                        .dependencies
+                        .insert(parent);
+                }
+            }
         }
         Ok(())
     }
@@ -352,6 +348,7 @@ impl Loader {
         value: Value,
         path: Option<&Path>,
     ) {
+        let pending = std::mem::take(&mut self.pending_dependencies);
         let definition = match to_definition(ot, value.clone()) {
             Ok(definition) => definition,
             Err(error) => {
@@ -375,12 +372,20 @@ impl Loader {
             self.errors += 1;
             return;
         }
-        if let Some(existing) = lookup_item(
-            &self.index,
-            ot,
-            definition.schema(),
-            &definition.name(),
-        ) {
+        // two definitions collide only when they share an identity:
+        // overloaded functions share a name but not a signature
+        let key_identity = identity(&definition);
+        let key = index_key(ot, definition.schema(), &definition.name());
+        if let Some(existing) = self
+            .index
+            .get(&key)
+            .into_iter()
+            .flatten()
+            .copied()
+            .find(|&i| {
+                identity(&self.project.inventory[i].definition) == key_identity
+            })
+        {
             let existing_path = self
                 .paths
                 .get(existing)
@@ -390,7 +395,7 @@ impl Loader {
             log::error!(
                 "Duplicate {} {} defined in {} (already defined in {})",
                 ot.as_str(),
-                definition.name(),
+                key_identity,
                 path.map(|p| p.display().to_string())
                     .unwrap_or_else(|| String::from("<unknown>")),
                 existing_path,
@@ -399,8 +404,7 @@ impl Loader {
             return;
         }
         let id = self.project.inventory.len();
-        let key = index_key(ot, definition.schema(), &definition.name());
-        self.index.insert(key, id);
+        self.index.entry(key).or_default().push(id);
         self.project.inventory.push(Item {
             id,
             desc: ot,
@@ -408,6 +412,13 @@ impl Loader {
             dependencies: BTreeSet::new(),
         });
         self.paths.push(path.map(Path::to_path_buf));
+        self.cached_dependencies
+            .extend(pending.into_iter().map(|parent| CachedDependency {
+                item: id,
+                parent_desc: parent.parent_desc,
+                parent_namespace: parent.parent_namespace,
+                parent_tag: parent.parent_tag,
+            }));
     }
 }
 
@@ -428,15 +439,30 @@ fn index_key(
     (desc, namespace, tag.to_string())
 }
 
-/// Find an inventory item by type, schema, and name via the loader's
-/// `(desc, namespace, tag)` index (project.py _lookup_item)
-fn lookup_item(
-    index: &HashMap<(ObjectType, Option<String>, String), usize>,
+/// Find every inventory item of a type, schema, and name via the
+/// loader's `(desc, namespace, tag)` index (project.py _lookup_item).
+/// More than one is returned only for overloaded functions
+fn lookup_items(
+    index: &HashMap<(ObjectType, Option<String>, String), Vec<usize>>,
     desc: ObjectType,
     namespace: Option<&str>,
     tag: &str,
-) -> Option<usize> {
-    index.get(&index_key(desc, namespace, tag)).copied()
+) -> Vec<usize> {
+    index
+        .get(&index_key(desc, namespace, tag))
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// What makes two definitions the same object. A function is
+/// identified by its signature, not its name, so `f(integer)` and
+/// `f(text)` are distinct objects living in `f.yaml` and `f_1.yaml`
+/// (the same identity deploy keys functions by)
+fn identity(definition: &Definition) -> String {
+    match definition {
+        Definition::Function(f) => f.identity(),
+        _ => definition.name(),
+    }
 }
 
 fn to_definition(
@@ -596,7 +622,7 @@ mod tests {
         });
         loader.index.insert(
             index_key(ObjectType::Extension, Some("public"), "myext"),
-            0,
+            vec![0],
         );
 
         let mut entry = json!({
@@ -607,12 +633,87 @@ mod tests {
             "function": "f",
             "dependencies": {"extensions": ["public.myext"]},
         });
-        loader.cache_and_remove_dependencies(ObjectType::Cast, &mut entry);
+        loader.cache_and_remove_dependencies(&mut entry);
         assert_eq!(entry.get("dependencies"), None);
         loader.add_definition(ObjectType::Cast, entry, None);
         loader.apply_cached_dependencies().unwrap();
 
         assert_eq!(loader.project.inventory[1].dependencies, [0].into());
+    }
+
+    /// Overloads are distinct objects: pull writes them to `f.yaml`
+    /// and `f_1.yaml`, and keying the inventory by bare name made the
+    /// second file a duplicate, failing the whole load
+    #[test]
+    fn function_overloads_are_not_duplicates() {
+        let mut loader = Loader::new(Path::new("."));
+        for (file, data_type) in [("f.yaml", "integer"), ("f_1.yaml", "text")]
+        {
+            loader.add_definition(
+                ObjectType::Function,
+                json!({
+                    "name": "f",
+                    "schema": "test",
+                    "owner": "postgres",
+                    "parameters": [{"mode": "IN", "data_type": data_type}],
+                }),
+                Some(Path::new(file)),
+            );
+        }
+        assert_eq!(loader.errors, 0);
+        assert_eq!(loader.project.inventory.len(), 2);
+    }
+
+    /// The same signature twice is still a duplicate
+    #[test]
+    fn identical_function_signatures_are_duplicates() {
+        let mut loader = Loader::new(Path::new("."));
+        for file in ["f.yaml", "copy.yaml"] {
+            loader.add_definition(
+                ObjectType::Function,
+                json!({
+                    "name": "f",
+                    "schema": "test",
+                    "owner": "postgres",
+                    "parameters": [{"mode": "IN", "data_type": "integer"}],
+                }),
+                Some(Path::new(file)),
+            );
+        }
+        assert_eq!(loader.errors, 1);
+        assert_eq!(loader.project.inventory.len(), 1);
+    }
+
+    /// A dependency block belongs to the object it was read with, not
+    /// to whichever overload happens to share its name
+    #[test]
+    fn dependencies_stay_with_the_overload_that_declared_them() {
+        let mut loader = Loader::new(Path::new("."));
+        loader.add_definition(
+            ObjectType::Schema,
+            json!({"name": "test", "owner": "postgres"}),
+            None,
+        );
+        for (data_type, dependencies) in [
+            ("integer", json!({})),
+            ("text", json!({"schemata": ["test"]})),
+        ] {
+            let mut defn = json!({
+                "name": "f",
+                "schema": "test",
+                "owner": "postgres",
+                "parameters": [{"mode": "IN", "data_type": data_type}],
+                "dependencies": dependencies,
+            });
+            loader.cache_and_remove_dependencies(&mut defn);
+            loader.add_definition(ObjectType::Function, defn, None);
+        }
+        loader.apply_cached_dependencies().unwrap();
+
+        assert_eq!(loader.errors, 0);
+        // item 0 is the schema, 1 is f(integer), 2 is f(text)
+        assert!(loader.project.inventory[1].dependencies.is_empty());
+        assert_eq!(loader.project.inventory[2].dependencies, [0].into());
     }
 
     /// L10: a container entry missing `name` is skipped as an error
@@ -654,11 +755,11 @@ mod tests {
             "schema": "test",
             "dependencies": {"servers": ["myserver"]},
         });
-        loader.cache_and_remove_dependencies(ObjectType::Table, &mut defn);
+        loader.cache_and_remove_dependencies(&mut defn);
 
         assert_eq!(loader.errors, 0);
-        assert_eq!(loader.cached_dependencies.len(), 1);
-        let dep = &loader.cached_dependencies[0];
+        assert_eq!(loader.pending_dependencies.len(), 1);
+        let dep = &loader.pending_dependencies[0];
         assert_eq!(dep.parent_desc, ObjectType::Server);
         assert_eq!(dep.parent_tag, "myserver");
     }

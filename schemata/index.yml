@@ -112,7 +112,6 @@ oneOf:
     not:
       required:
         - name
-        - table_name
         - method
         - columns
         - storage_parameters

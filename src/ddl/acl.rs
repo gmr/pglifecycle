@@ -5,8 +5,8 @@ use tree_sitter::Node;
 
 use crate::ddl::object::{string_value, unstring};
 use crate::ddl::{
-    Acl, AclTarget, NodeExt, Privilege, RoleDef, Statement, any_name,
-    column_elems, qualified_name, truncate, unquote, unquote_role,
+    Acl, AclTarget, MembershipGrant, NodeExt, Privilege, RoleDef, Statement,
+    any_name, column_elems, qualified_name, truncate, unquote, unquote_role,
 };
 use crate::models::RoleOptions;
 
@@ -63,18 +63,18 @@ pub(crate) fn grant_role(
             truncate(node.text(src), 80)
         )));
     }
-    // ADMIN/INHERIT/SET options and the grantor have nowhere to go in
-    // the model (schemata/acls.yml holds memberships as plain strings),
-    // so the membership is kept and the modifier reported
-    for kind in ["grant_role_opt_list", "opt_granted_by"] {
-        if let Some(dropped) = node.child_of_kind(kind) {
-            log::warn!(
-                "Unsupported role membership option {:?} in {:?}",
-                truncate(dropped.text(src), 64),
-                truncate(node.text(src), 80)
-            );
-        }
+    // The grantor has nowhere to go in the model, and PostgreSQL 16
+    // and later always writes one, so it is dropped silently
+    if let Some(granted_by) = node.child_of_kind("opt_granted_by") {
+        log::debug!(
+            "Dropping role membership grantor {:?}",
+            truncate(granted_by.text(src), 64)
+        );
     }
+    let options = node
+        .child_of_kind("grant_role_opt_list")
+        .map(|list| membership_options(list.text(src)))
+        .unwrap_or_default();
     let roles = node
         .find_all("privilege")
         .iter()
@@ -93,7 +93,39 @@ pub(crate) fn grant_role(
         revoke,
         roles,
         members,
+        options,
     })
+}
+
+/// Parse a `GRANT role TO member WITH ...` option list. The grammar
+/// keeps the clause as written, so `ADMIN OPTION` (the historical
+/// spelling) and `ADMIN TRUE` (PostgreSQL 16 and later) both appear
+fn membership_options(text: &str) -> MembershipGrant {
+    let mut grant = MembershipGrant::default();
+    for option in text.split(',').map(str::trim) {
+        let mut words = option.split_whitespace();
+        let (Some(keyword), value) = (words.next(), words.next()) else {
+            continue;
+        };
+        let value = match value {
+            // WITH ADMIN OPTION, WITH INHERIT, ...
+            None | Some("OPTION") | Some("option") => Some(true),
+            Some(value) if value.eq_ignore_ascii_case("true") => Some(true),
+            Some(value) if value.eq_ignore_ascii_case("false") => Some(false),
+            _ => None,
+        };
+        match (keyword.to_ascii_uppercase().as_str(), value) {
+            ("ADMIN", value) => grant.admin = value,
+            ("INHERIT", value) => grant.inherit = value,
+            ("SET", value) => grant.set = value,
+            _ => log::warn!(
+                "Unsupported role membership option {:?} in {:?}",
+                truncate(option, 64),
+                truncate(text, 80)
+            ),
+        }
+    }
+    grant
 }
 
 /// CREATE ROLE / ALTER ROLE ... [WITH] options
@@ -345,6 +377,7 @@ fn apply_boolean_option(
 mod tests {
     use super::*;
     use crate::ddl::Parser;
+    use crate::models;
 
     fn parse_one(sql: &str) -> Statement {
         let mut parser = Parser::new().unwrap();
@@ -462,6 +495,7 @@ mod tests {
             revoke,
             roles,
             members,
+            ..
         } = parse_one("GRANT developers TO alice GRANTED BY postgres;")
         else {
             panic!("expected RoleMembership")
@@ -497,8 +531,8 @@ mod tests {
 
     #[test]
     fn parses_role_membership_with_admin_option() {
-        // the option itself has nowhere to go in the model (it is
-        // warned about); the membership must still be captured
+        // the membership itself is what the role list holds; the
+        // options ride along with it (see the options tests below)
         let Statement::RoleMembership { roles, members, .. } =
             parse_one("GRANT developers TO alice WITH ADMIN OPTION;")
         else {
@@ -506,6 +540,101 @@ mod tests {
         };
         assert_eq!(roles, vec!["developers"]);
         assert_eq!(members, vec!["alice"]);
+    }
+
+    /// PostgreSQL 16 and later writes every membership with an
+    /// explicit INHERIT and a grantor, so only the options that change
+    /// what the membership does are kept
+    #[test]
+    fn parses_role_membership_options() {
+        let cases = [
+            (
+                "GRANT r TO m WITH ADMIN OPTION, INHERIT TRUE \
+                 GRANTED BY rdsadmin;",
+                MembershipGrant {
+                    admin: Some(true),
+                    inherit: Some(true),
+                    set: None,
+                },
+            ),
+            (
+                "GRANT r TO m WITH INHERIT FALSE GRANTED BY rdsadmin;",
+                MembershipGrant {
+                    admin: None,
+                    inherit: Some(false),
+                    set: None,
+                },
+            ),
+            (
+                "GRANT r TO m WITH ADMIN TRUE, SET FALSE;",
+                MembershipGrant {
+                    admin: Some(true),
+                    inherit: None,
+                    set: Some(false),
+                },
+            ),
+            ("GRANT r TO m;", MembershipGrant::default()),
+        ];
+        for (sql, expected) in cases {
+            let Statement::RoleMembership { options, .. } = parse_one(sql)
+            else {
+                panic!("expected RoleMembership for {sql}")
+            };
+            assert_eq!(options, expected, "{sql}");
+        }
+    }
+
+    /// An explicit `INHERIT TRUE` says nothing for a member that
+    /// inherits anyway, and is the whole point for a NOINHERIT member
+    #[test]
+    fn membership_keeps_only_meaningful_options() {
+        let inherit_true = MembershipGrant {
+            admin: None,
+            inherit: Some(true),
+            set: None,
+        };
+        assert_eq!(
+            inherit_true.membership("r", true),
+            models::Membership::Name(String::from("r"))
+        );
+        assert_eq!(
+            inherit_true.membership("r", false),
+            models::Membership::Detailed(models::MembershipOptions {
+                role: String::from("r"),
+                admin: None,
+                inherit: Some(true),
+                set: None,
+            })
+        );
+        // ADMIN FALSE and SET TRUE are what a plain GRANT does
+        let defaults = MembershipGrant {
+            admin: Some(false),
+            inherit: None,
+            set: Some(true),
+        };
+        assert_eq!(
+            defaults.membership("r", true),
+            models::Membership::Name(String::from("r"))
+        );
+    }
+
+    #[test]
+    fn renders_membership_options_in_a_canonical_order() {
+        let membership =
+            models::Membership::Detailed(models::MembershipOptions {
+                role: String::from("r"),
+                admin: Some(true),
+                inherit: Some(false),
+                set: Some(false),
+            });
+        assert_eq!(
+            membership.options_sql().as_deref(),
+            Some("ADMIN OPTION, INHERIT FALSE, SET FALSE")
+        );
+        assert_eq!(
+            models::Membership::Name(String::from("r")).options_sql(),
+            None
+        );
     }
 
     #[test]

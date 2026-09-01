@@ -127,6 +127,92 @@ mod tests {
         assert!(items.get("$package_schema").is_none());
     }
 
+    /// Every bundled schema compiles. A schema that does not is a
+    /// silent pass: `validate_object` logs and rejects the object
+    #[test]
+    fn every_bundled_schema_compiles() {
+        for file in SCHEMATA.files() {
+            let stem = file
+                .path()
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .expect("schema file stem");
+            let schema =
+                load_schema(stem).unwrap_or_else(|e| panic!("{stem}: {e}"));
+            jsonschema::validator_for(&schema)
+                .unwrap_or_else(|e| panic!("{stem}: {e}"));
+        }
+    }
+
+    /// A `oneOf`/`anyOf` branch that gates on a property name the
+    /// object does not define can never be satisfied, and JSON Schema
+    /// reports nothing: the `partitions` branches gated on
+    /// `for_values_when` where the property is `for_values_with`, so
+    /// every hash partition failed validation under "is not valid
+    /// under any of the schemas listed in the 'oneOf' keyword"
+    #[test]
+    fn schema_branches_only_gate_on_real_properties() {
+        fn walk(stem: &str, path: &str, node: &Value) {
+            let Value::Object(map) = node else {
+                if let Value::Array(items) = node {
+                    for (index, item) in items.iter().enumerate() {
+                        walk(stem, &format!("{path}/{index}"), item);
+                    }
+                }
+                return;
+            };
+            if let Some(Value::Object(properties)) = map.get("properties") {
+                for keyword in ["oneOf", "anyOf", "allOf"] {
+                    for branch in map
+                        .get(keyword)
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                    {
+                        for name in required_names(branch) {
+                            assert!(
+                                properties.contains_key(&name),
+                                "{stem}: {path}/{keyword} gates on \
+                                 {name:?}, which is not a property of \
+                                 the object it constrains"
+                            );
+                        }
+                    }
+                }
+            }
+            for (key, value) in map {
+                walk(stem, &format!("{path}/{key}"), value);
+            }
+        }
+
+        /// Every name a branch requires, including under `not`
+        fn required_names(branch: &Value) -> Vec<String> {
+            let mut names = Vec::new();
+            for node in [branch, &branch["not"]] {
+                match &node["required"] {
+                    Value::Array(items) => names.extend(
+                        items
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_string),
+                    ),
+                    Value::String(name) => names.push(name.clone()),
+                    _ => {}
+                }
+            }
+            names
+        }
+
+        for file in SCHEMATA.files() {
+            let stem = file
+                .path()
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .expect("schema file stem");
+            walk(stem, "", &load_schema(stem).unwrap());
+        }
+    }
+
     #[test]
     fn dependencies_schema_accepts_every_object_type() {
         // the dependencies schema previously listed only nine plural

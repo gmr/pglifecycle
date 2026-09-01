@@ -292,7 +292,7 @@ pub struct RoleState {
 /// memberships, converted to [`models::Acls`] at write time
 #[derive(Debug, Default)]
 pub struct AclMaps {
-    pub roles: Vec<String>,
+    pub roles: Vec<models::Membership>,
     pub sections: BTreeMap<&'static str, Map<String, Value>>,
 }
 
@@ -889,8 +889,16 @@ impl Assembly {
                 revoke,
                 roles,
                 members,
+                options,
             } => {
                 for member in &members {
+                    // an explicit INHERIT matching what the member role
+                    // does anyway is what pg_dumpall writes for every
+                    // membership from PostgreSQL 16 on, and says
+                    // nothing; for a NOINHERIT member it is the only
+                    // thing making the membership inherit, so it stays
+                    let member_inherits =
+                        self.role(member).options.inherit != Some(false);
                     let state = self.role(member);
                     let maps = if revoke {
                         &mut state.revocations
@@ -898,8 +906,19 @@ impl Assembly {
                         &mut state.grants
                     };
                     for role in &roles {
-                        if !maps.roles.contains(role) {
-                            maps.roles.push(role.clone());
+                        // a REVOKE removes the membership itself, so
+                        // its options would only be noise there
+                        let membership = if revoke {
+                            models::Membership::Name(role.clone())
+                        } else {
+                            options.membership(role, member_inherits)
+                        };
+                        if !maps
+                            .roles
+                            .iter()
+                            .any(|existing| existing.role() == role)
+                        {
+                            maps.roles.push(membership);
                         }
                     }
                 }
@@ -1394,10 +1413,11 @@ fn cancel_revokes(statements: Vec<Statement>) -> Vec<Statement> {
         .collect()
 }
 
-/// The quoted value from a `SET name = 'value';` entry definition
-/// Set a table column's default expression, warning if the column
-/// itself is not found (the table exists but not the column — should
-/// not happen for well-formed pg_dump output, but is not fatal)
+/// Set a table column's default expression. A column the table does
+/// not declare locally is an inherited one — an inheritance child gets
+/// its columns from its parents, so pg_dump has no column entry to
+/// attach the default to and writes a standalone `ALTER TABLE ONLY`
+/// instead; that default is kept in `column_defaults`
 fn set_column_default(
     table: &mut models::Table,
     column: &str,
@@ -1410,14 +1430,21 @@ fn set_column_default(
         .find(|c| c.name == column)
     {
         Some(c) => c.default = Some(default),
-        None => log::warn!(
-            "Default on unknown column {column} of table {}.{}",
-            table.schema,
-            table.name
-        ),
+        None => {
+            let defaults = table.column_defaults.get_or_insert_default();
+            let entry = models::ColumnDefault {
+                column: column.to_string(),
+                default,
+            };
+            match defaults.iter_mut().find(|d| d.column == column) {
+                Some(existing) => *existing = entry,
+                None => defaults.push(entry),
+            }
+        }
     }
 }
 
+/// The quoted value from a `SET name = 'value';` entry definition
 fn set_value(defn: &str) -> Option<String> {
     let start = defn.find('\'')? + 1;
     let end = defn.rfind('\'')?;
@@ -1795,6 +1822,7 @@ mod tests {
             name: "t".into(),
             schema: "test".into(),
             owner: String::new(),
+            column_defaults: None,
             sql: None,
             unlogged: None,
             from_type: None,
@@ -1833,6 +1861,34 @@ mod tests {
         assert_eq!(
             assembly.tables[0].columns.as_ref().unwrap()[0].default,
             Some(json!("nextval('test.t_id_seq'::regclass)"))
+        );
+    }
+
+    /// An inheritance child has no column entry for a column it
+    /// inherits, so pg_dump's standalone `ALTER TABLE ONLY ... SET
+    /// DEFAULT` is kept at the table level instead of being dropped
+    #[test]
+    fn default_on_an_inherited_column_is_kept() {
+        let mut table: models::Table = serde_json::from_value(json!({
+            "name": "child",
+            "schema": "test",
+            "owner": "postgres",
+            "parents": ["test.parent"],
+        }))
+        .unwrap();
+        set_column_default(&mut table, "recorded_at", json!("now()"));
+        // a second statement for the same column replaces the first
+        set_column_default(
+            &mut table,
+            "recorded_at",
+            json!("CURRENT_TIMESTAMP"),
+        );
+        assert_eq!(
+            table.column_defaults,
+            Some(vec![models::ColumnDefault {
+                column: String::from("recorded_at"),
+                default: json!("CURRENT_TIMESTAMP"),
+            }])
         );
     }
 
@@ -2071,7 +2127,10 @@ mod tests {
         assert_eq!(app.valid_until.as_deref(), Some("infinity"));
         assert_eq!(app.options.login, Some(true));
         assert_eq!(app.options.superuser, Some(false));
-        assert_eq!(app.grants.roles, vec!["readonly"]);
+        assert_eq!(
+            app.grants.roles,
+            vec![models::Membership::Name(String::from("readonly"))]
+        );
         // a multi-element setting keeps its list shape; a scalar stays
         // a string
         assert_eq!(
@@ -2327,8 +2386,8 @@ mod tests {
         assert_eq!(
             alice.grants.as_ref().and_then(|g| g.roles.clone()),
             Some(vec![
-                String::from("developers"),
-                String::from("pg_read_all_data"),
+                models::Membership::Name(String::from("developers")),
+                models::Membership::Name(String::from("pg_read_all_data")),
             ])
         );
 

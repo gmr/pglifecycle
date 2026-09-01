@@ -122,6 +122,35 @@ properties:
     type: array
     items:
       $package_schema: column
+  column_defaults:
+    title: Column Defaults
+    description: >
+      Defaults on columns the table does not declare itself. An inheritance
+      child inherits its parent's columns, so it has no column entry to carry
+      a default; pg_dump writes those as a separate
+      `ALTER TABLE ONLY <child> ALTER COLUMN <column> SET DEFAULT ...`.
+
+      A default on a column the table does declare belongs on the column
+      instead.
+    type: array
+    items:
+      title: Column Default
+      type: object
+      properties:
+        column:
+          title: Column Name
+          type: string
+        default:
+          title: Default Value
+          oneOf:
+            - type: boolean
+            - type: integer
+            - type: number
+            - type: string
+      required:
+        - column
+        - default
+      additionalProperties: false
   primary_key:
     title: Primary Key
     description: >
@@ -348,14 +377,14 @@ properties:
         for_values_from:
           title: Partition Values From
           description: Used in RANGE partitioning
-          onOf:
+          oneOf:
             - type: integer
             - type: number
             - type: string
         for_values_to:
           title: Partition Values To
           description: Used in RANGE partitioning
-          onOf:
+          oneOf:
             - type: integer
             - type: number
             - type: string
@@ -377,14 +406,14 @@ properties:
               - for_values_in
               - for_values_from
               - for_values_to
-              - for_values_when
+              - for_values_with
         - required: [for_values_in]
           not:
             required:
               - default
               - for_values_from
               - for_values_to
-              - for_values_when
+              - for_values_with
         - required:
             - for_values_from
             - for_values_to
@@ -392,8 +421,8 @@ properties:
             required:
               - default
               - for_values_in
-              - for_values_when
-        - required: [for_values_when]
+              - for_values_with
+        - required: [for_values_with]
           not:
             required:
               - default
@@ -408,10 +437,12 @@ properties:
     type: string
   storage_parameters:
     title: Storage Parameters
-    description: Storage parameter settings for the table
+    description: >
+      Storage parameter settings for the table. A `toast.` prefix targets the
+      table's TOAST table instead of the table itself.
     type: object
     propertyNames:
-      pattern: ^[A-Za-z0-9_]*$
+      pattern: ^(toast\.)?[A-Za-z0-9_]+$
   tablespace:
     title: Tablespace
     description: >

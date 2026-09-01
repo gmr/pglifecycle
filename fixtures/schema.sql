@@ -185,3 +185,62 @@ CREATE TABLE public.widgets (
     id   SERIAL PRIMARY KEY,
     name TEXT NOT NULL
 );
+
+-- Overloaded functions. pull writes each overload to its own file
+-- (`overloaded.yaml`, `overloaded_1.yaml`); the loader keys objects by
+-- identity, not by bare name, or the second file loads as a duplicate
+-- and the whole project fails to load.
+-- The bodies are authored in libpgfmt's normalized form, as the
+-- trigger function above is, so the schema diff stays clean.
+CREATE FUNCTION test.overloaded(value INTEGER) RETURNS TEXT
+    LANGUAGE sql IMMUTABLE AS $$
+ SELECT value::text;
+$$;
+
+CREATE FUNCTION test.overloaded(value TEXT) RETURNS TEXT
+    LANGUAGE sql IMMUTABLE AS $$
+ SELECT value;
+$$;
+
+-- HASH partitioning: `for_values_with` is the only bound a hash
+-- partition has, and the partition schema's oneOf used to gate on a
+-- property name that did not exist, so every hash partition failed
+-- validation.
+CREATE TABLE hashed_events (
+    id      BIGINT NOT NULL,
+    payload TEXT
+) PARTITION BY HASH (id);
+
+CREATE TABLE hashed_events_0 PARTITION OF hashed_events
+    FOR VALUES WITH (MODULUS 2, REMAINDER 0);
+
+CREATE TABLE hashed_events_1 PARTITION OF hashed_events
+    FOR VALUES WITH (MODULUS 2, REMAINDER 1);
+
+-- `toast.`-prefixed storage parameters, which the storage_parameters
+-- property-name pattern used to reject for the dot.
+CREATE TABLE audited_documents (
+    id   BIGINT NOT NULL,
+    body TEXT
+) WITH (
+    fillfactor = 90,
+    toast.autovacuum_vacuum_threshold = 10000,
+    toast.autovacuum_vacuum_scale_factor = 0.1
+);
+
+-- A default on an inherited column. An inheritance child has no column
+-- entry of its own for `recorded_at`, so pg_dump writes the default as
+-- a standalone `ALTER TABLE ONLY ... SET DEFAULT` (TOC entry
+-- "Type: DEFAULT"); it is kept in the child's `column_defaults`, since
+-- there is no local column to fold it onto.
+CREATE TABLE audit_events (
+    recorded_at TIMESTAMPTZ,
+    detail      TEXT
+);
+
+CREATE TABLE audit_events_archive (
+    CONSTRAINT audit_events_archive_detail_check CHECK (detail IS NOT NULL)
+) INHERITS (audit_events);
+
+ALTER TABLE audit_events_archive
+    ALTER COLUMN recorded_at SET DEFAULT CURRENT_TIMESTAMP;
