@@ -1,6 +1,6 @@
 ---
-$schema: http://json-schema.org/schema#
-$id: https://pglifecycle.readthedocs.io/en/stable/schemata/collation.html
+$schema: https://json-schema.org/draft/2020-12/schema
+$id: https://gmr.github.io/pglifecycle/schemata/collation.json
 title: Collation
 description: >
   A collation is a schema object that provides the locale rules used when

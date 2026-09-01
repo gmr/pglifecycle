@@ -1,12 +1,19 @@
 ---
-$schema: http://json-schema.org/schema#
-$id: https://pglifecycle.readthedocs.io/en/stable/schemata/conversions.html
+$schema: https://json-schema.org/draft/2020-12/schema
+$id: https://gmr.github.io/pglifecycle/schemata/conversions.json
 title: Conversions
 description: Specifies all conversions in a schema
 type: object
 properties:
   schema:
     title: Schema
+    description: The schema every object in this file belongs to.
+    type: string
+  owner:
+    title: Owner
+    description: >
+      The role that owns every object in this file, unless an entry names its
+      own. Defaults to the project's superuser.
     type: string
   conversions:
     title: Conversions
@@ -16,4 +23,4 @@ properties:
 required:
   - schema
   - conversions
-addtionalProperties: false
+additionalProperties: false

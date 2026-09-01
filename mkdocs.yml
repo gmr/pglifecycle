@@ -6,16 +6,21 @@ repo_name: gmr/pglifecycle
 
 theme:
   name: material
+  logo: assets/logo.svg
+  favicon: assets/logo.svg
+  font:
+    text: IBM Plex Sans
+    code: IBM Plex Mono
   palette:
     - scheme: default
-      primary: indigo
-      accent: indigo
+      primary: custom
+      accent: custom
       toggle:
         icon: material/brightness-7
         name: Switch to dark mode
     - scheme: slate
-      primary: indigo
-      accent: indigo
+      primary: custom
+      accent: custom
       toggle:
         icon: material/brightness-4
         name: Switch to light mode
@@ -32,6 +37,12 @@ theme:
 
 plugins:
   - search
+  # The schema reference is generated from schemata/*.yml at build time
+  - gen-files:
+      scripts:
+        - bin/generate-schema-docs.py
+  - literate-nav:
+      nav_file: SUMMARY.md
 
 markdown_extensions:
   - admonition
@@ -45,7 +56,22 @@ markdown_extensions:
   - toc:
       permalink: true
 
+extra_css:
+  - stylesheets/pglifecycle.css
+
+extra:
+  social:
+    - icon: material/web
+      link: https://pglifecycle.com/
+      name: pglifecycle.com
+    - icon: fontawesome/brands/github
+      link: https://github.com/gmr/pglifecycle
+      name: gmr/pglifecycle
+
 nav:
   - Home: index.md
   - Commands: commands.md
   - Project Format: project-format.md
+  - GitHub Actions: github-actions.md
+  - Schema Reference: reference/
+  - pglifecycle.com: https://pglifecycle.com/

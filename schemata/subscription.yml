@@ -1,6 +1,6 @@
 ---
-$schema: http://json-schema.org/schema#
-$id: https://pglifecycle.readthedocs.io/en/stable/schemata/subscription.html
+$schema: https://json-schema.org/draft/2020-12/schema
+$id: https://gmr.github.io/pglifecycle/schemata/subscription.json
 title: Subscription
 description: >
   The subscription represents a replication connection to the publisher.

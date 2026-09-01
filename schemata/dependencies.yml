@@ -1,79 +1,106 @@
 ---
-$schema: http://json-schema.org/schema#
-$id: https://pglifecycle.readthedocs.io/en/stable/schemata/dependencies.html
+$schema: https://json-schema.org/draft/2020-12/schema
+$id: https://gmr.github.io/pglifecycle/schemata/dependencies.json
 title: Dependencies
+description: >
+  Objects this object depends on, for the cases the dependency graph
+  cannot infer: an ordering the topological sort would otherwise get
+  wrong, such as a foreign key between tables or an inheritance parent.
+
+  Each entry names an object as `schema.name`, or unqualified for a
+  schemaless type. A function or aggregate carries its argument
+  signature (`test.f(integer)`) and a cast its types
+  (`(int4 AS timestamp)`), since the name alone is ambiguous.
 type: object
 properties:
   aggregates:
+    description: The aggregates this object depends on.
     type: array
-    propertyNames:
-      pattern: ^([A-Za-z0-9_\-]+)\.([A-Za-z0-9_\-]+)$
+    items:
+      type: string
   collations:
+    description: The collations this object depends on.
     type: array
-    propertyNames:
-      pattern: ^([A-Za-z0-9_\-]+)\.([A-Za-z0-9_\-]+)$
+    items:
+      type: string
   domains:
+    description: The domains this object depends on.
     type: array
-    propertyNames:
-      pattern: ^([A-Za-z0-9_\-]+)\.([A-Za-z0-9_\-]+)$
+    items:
+      type: string
   event_triggers:
+    description: The event triggers this object depends on.
     type: array
-    propertyNames:
-      pattern: ^([A-Za-z0-9_\-]+)$
+    items:
+      type: string
   extensions:
+    description: The extensions this object depends on.
     type: array
-    propertyNames:
-      pattern: ^([A-Za-z0-9_\-]+)$
+    items:
+      type: string
   foreign_data_wrappers:
+    description: The foreign data wrappers this object depends on.
     type: array
-    propertyNames:
-      pattern: ^([A-Za-z0-9_\-]+)$
+    items:
+      type: string
   functions:
+    description: The functions this object depends on.
     type: array
-    propertyNames:
-      pattern: ^([A-Za-z0-9_\-]+).^([A-Za-z0-9_\-]+)\(^([A-Za-z0-9_\-, ]+)\)$
+    items:
+      type: string
   languages:
+    description: The languages this object depends on.
     type: array
-    propertyNames:
-      pattern: ^([A-Za-z0-9_\-]+)$
+    items:
+      type: string
   materialized_views:
+    description: The materialized views this object depends on.
     type: array
-    propertyNames:
-      pattern: ^([A-Za-z0-9_\-]+)\.([A-Za-z0-9_\-]+)$
+    items:
+      type: string
   publications:
+    description: The publications this object depends on.
     type: array
-    propertyNames:
-      pattern: ^([A-Za-z0-9_\-]+)$
+    items:
+      type: string
   sequences:
+    description: The sequences this object depends on.
     type: array
-    propertyNames:
-      pattern: ^([A-Za-z0-9_\-]+)\.([A-Za-z0-9_\-]+)$
+    items:
+      type: string
   servers:
+    description: The servers this object depends on.
     type: array
-    propertyNames:
-      pattern: ^([A-Za-z0-9_\-]+)$
+    items:
+      type: string
   subscriptions:
+    description: The subscriptions this object depends on.
     type: array
-    propertyNames:
-      pattern: ^([A-Za-z0-9_\-]+)$
+    items:
+      type: string
   tables:
+    description: The tables this object depends on.
     type: array
-    propertyNames:
-      pattern: ^([A-Za-z0-9_\-]+)\.([A-Za-z0-9_\-]+)$
+    items:
+      type: string
   types:
+    description: The types this object depends on.
     type: array
-    propertyNames:
-      pattern: ^([A-Za-z0-9_\-]+)\.([A-Za-z0-9_\-]+)$
+    items:
+      type: string
   user_mappings:
+    description: The user mappings this object depends on.
     type: array
-    propertyNames:
-      pattern: ^([A-Za-z0-9_\-]+)$
+    items:
+      type: string
   users:
+    description: The users this object depends on.
     type: array
-    propertyNames:
-      pattern: ^([A-Za-z0-9_\-]+)$
+    items:
+      type: string
   views:
+    description: The views this object depends on.
     type: array
-    propertyNames:
-      pattern: ^([A-Za-z0-9_\-]+)\.([A-Za-z0-9_\-]+)$
+    items:
+      type: string
 additionalProperties: false

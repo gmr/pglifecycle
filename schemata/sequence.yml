@@ -1,6 +1,6 @@
 ---
-$schema: http://json-schema.org/schema#
-$id: https://pglifecycle.readthedocs.io/en/stable/schemata/sequence.html
+$schema: https://json-schema.org/draft/2020-12/schema
+$id: https://gmr.github.io/pglifecycle/schemata/sequence.json
 title: Sequence
 description: Defines a sequence object
 type: object

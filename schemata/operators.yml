@@ -1,12 +1,19 @@
 ---
-$schema: http://json-schema.org/schema#
-$id: https://pglifecycle.readthedocs.io/en/stable/schemata/operators.html
+$schema: https://json-schema.org/draft/2020-12/schema
+$id: https://gmr.github.io/pglifecycle/schemata/operators.json
 title: Operators
 description: Specifies all user-defined operators in a schema
 type: object
 properties:
   schema:
     title: Schema
+    description: The schema every object in this file belongs to.
+    type: string
+  owner:
+    title: Owner
+    description: >
+      The role that owns every object in this file, unless an entry names its
+      own. Defaults to the project's superuser.
     type: string
   operators:
     title: User-defined operators
@@ -16,4 +23,4 @@ properties:
 required:
   - schema
   - operators
-addtionalProperties: false
+additionalProperties: false

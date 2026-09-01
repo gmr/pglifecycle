@@ -91,6 +91,14 @@ gates: round-trip deploy-gates
 docs:
     mkdocs build --strict
 
+# Install the documentation toolchain (mkdocs and the generator plugins)
+docs-deps:
+    pip install -r docs/requirements.txt
+
+# Write the generated schema reference to ./site-preview without a build
+docs-schema-preview:
+    python3 bin/generate-schema-docs.py --preview
+
 # Serve the documentation locally with live reload
 docs-serve:
     mkdocs serve

@@ -5,6 +5,7 @@
 .vscode
 /build/
 site/
+site-preview/
 /target/
 !/src/build/
 pglifecycle-errors.log
