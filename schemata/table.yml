@@ -466,11 +466,16 @@ oneOf:
         - required: [like_table]
         - required: [server]
         - required: [options]
-  - required: [columns, server]
+  # A foreign table: `server` is the discriminator. It may inherit, in
+  # which case the columns come from the parent and it declares none of
+  # its own, so either `columns` or `parents` satisfies it.
+  - required: [server]
+    anyOf:
+      - required: [columns]
+      - required: [parents]
     not:
       anyOf:
         - required: [sql]
-        - required: [parents]
         - required: [like_table]
   - not:
       anyOf:

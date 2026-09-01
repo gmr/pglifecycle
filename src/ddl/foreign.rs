@@ -6,7 +6,7 @@ use serde_json::{Map, Value};
 use tree_sitter::Node;
 
 use crate::ddl::object::string_value;
-use crate::ddl::table::column;
+use crate::ddl::table::{self, column};
 use crate::ddl::{NodeExt, Statement, qualified_name, unquote, unquote_role};
 use crate::models::{
     ForeignDataWrapper, Server, Table, UserMapping, UserMappingServer,
@@ -113,7 +113,7 @@ pub(crate) fn create_foreign_table(
         .iter()
         .map(|c| column(c, src))
         .collect();
-    Ok(Statement::CreateTable(Box::new(Table {
+    let mut table = Table {
         name: name.name,
         schema: name.schema.unwrap_or_default(),
         owner: String::new(),
@@ -146,7 +146,18 @@ pub(crate) fn create_foreign_table(
         ),
         options: generic_options(node, src),
         comment: None,
-    })))
+    };
+    // a foreign table takes the same INHERITS clause and table
+    // constraints as an ordinary one; pg_dump writes a child's CHECK
+    // and table-level NOT NULL here just as it does for a plain table
+    table.parents = table::inherits(node, src);
+    for element in node.find_all("TableElement") {
+        if let Some(constraint) = element.child_of_kind("TableConstraint") {
+            let (name, parsed) = table::table_constraint(&constraint, src)?;
+            table::apply_constraint(&mut table, name, parsed);
+        }
+    }
+    Ok(Statement::CreateTable(Box::new(table)))
 }
 
 /// Parse a `create_generic_options` (`OPTIONS (key 'value', ...)`) into
@@ -186,6 +197,25 @@ mod tests {
         let mut statements = parser.parse(sql).unwrap();
         assert_eq!(statements.len(), 1, "expected one statement");
         statements.remove(0)
+    }
+
+    /// A foreign table takes INHERITS and table constraints like any
+    /// other; before they were parsed, pull silently dropped both and
+    /// the child's columns with them
+    #[test]
+    fn parses_inheriting_foreign_table() {
+        let Statement::CreateTable(table) = parse_one(
+            "CREATE FOREIGN TABLE public.fc (CONSTRAINT fc_id_check              CHECK ((id > 0))) INHERITS (public.fp) SERVER s OPTIONS              (table_name 'remote');",
+        ) else {
+            panic!("expected CreateTable")
+        };
+        assert_eq!(table.parents, Some(vec!["public.fp".into()]));
+        assert_eq!(table.columns, None);
+        assert_eq!(table.server.as_deref(), Some("s"));
+        let checks = table.check_constraints.unwrap();
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].name, "fc_id_check");
+        assert_eq!(checks[0].expression, "(id > 0)");
     }
 
     #[test]

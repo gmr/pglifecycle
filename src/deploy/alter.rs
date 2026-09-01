@@ -13,7 +13,7 @@ use serde_json::{Map, Value};
 use crate::build;
 use crate::deploy::diff::canonical_type;
 use crate::models::{
-    CheckConstraint, Column, Definition, Domain, Extension,
+    CheckConstraint, Column, ColumnNotNull, Definition, Domain, Extension,
     ForeignDataWrapper, ForeignKey, Function, Index, NotNullConstraint,
     Schema, Sequence, Server, Table, Trigger, Type, UserMapping, View,
     ViewColumn,
@@ -259,7 +259,7 @@ fn columns(
                 build::render_table_column(column)
             ))),
             Some(existing) => {
-                if !alter_column(table, column, existing, alters) {
+                if !alter_column(table, &repo.name, column, existing, alters) {
                     return false;
                 }
             }
@@ -276,8 +276,28 @@ fn columns(
     true
 }
 
+/// Whether a column's NOT NULL constraint is NO INHERIT
+fn no_inherit(not_null: &Option<ColumnNotNull>) -> bool {
+    not_null.as_ref().and_then(|c| c.no_inherit) == Some(true)
+}
+
+/// The NOT NULL constraint's name on `relation`, falling back to the
+/// name PostgreSQL generates when the model records none (the model
+/// carries a name only where it differs from the generated one)
+fn not_null_name(relation: &str, column: &Column) -> String {
+    match column
+        .not_null_constraint
+        .as_ref()
+        .and_then(|c| c.name.as_ref())
+    {
+        Some(name) => name.clone(),
+        None => format!("{relation}_{}_not_null", column.name),
+    }
+}
+
 fn alter_column(
     table: &str,
+    relation: &str,
     repo: &Column,
     db: &Column,
     alters: &mut Vec<Alter>,
@@ -311,18 +331,65 @@ fn alter_column(
             ),
         }));
     }
-    if repo.nullable.unwrap_or(true) != db.nullable.unwrap_or(true) {
-        alters.push(Alter::new(if repo.nullable == Some(false) {
-            format!(
-                "ALTER TABLE {table} ALTER COLUMN {column} SET NOT \
-                     NULL;\n"
-            )
-        } else {
-            format!(
+    // NOT NULL is a named constraint from PostgreSQL 18 on, so a
+    // rename or a NO INHERIT change reconciles even when nullability
+    // itself is unchanged. DROP is always the plain ALTER COLUMN form,
+    // which needs no name; ADD carries CONSTRAINT only when the model
+    // records a name to restore
+    let repo_not_null = repo.nullable == Some(false);
+    let db_not_null = db.nullable == Some(false);
+    if repo_not_null != db_not_null {
+        if db_not_null {
+            alters.push(Alter::new(format!(
                 "ALTER TABLE {table} ALTER COLUMN {column} DROP NOT \
-                     NULL;\n"
-            )
-        }));
+                 NULL;\n"
+            )));
+        }
+        if repo_not_null {
+            alters.push(Alter::new(match repo.not_null_constraint.as_ref() {
+                Some(not_null) => format!(
+                    "ALTER TABLE {table} ADD {}NOT NULL {column}{};\n",
+                    match &not_null.name {
+                        Some(name) =>
+                            format!("CONSTRAINT {} ", quote_ident(name)),
+                        None => String::new(),
+                    },
+                    if not_null.no_inherit == Some(true) {
+                        " NO INHERIT"
+                    } else {
+                        ""
+                    }
+                ),
+                None => format!(
+                    "ALTER TABLE {table} ALTER COLUMN {column} SET NOT \
+                         NULL;\n"
+                ),
+            }));
+        }
+    } else if repo_not_null
+        && repo.not_null_constraint != db.not_null_constraint
+    {
+        // both sides are NOT NULL and only the constraint's name or its
+        // inheritance differs. Reconcile it in place: DROP NOT NULL is
+        // rejected outright on a primary-key column, and pg_dump does
+        // write a named NOT NULL there
+        let repo_name = not_null_name(relation, repo);
+        let db_name = not_null_name(relation, db);
+        if repo_name != db_name {
+            alters.push(Alter::new(format!(
+                "ALTER TABLE {table} RENAME CONSTRAINT {} TO {};\n",
+                quote_ident(&db_name),
+                quote_ident(&repo_name)
+            )));
+        }
+        let repo_no_inherit = no_inherit(&repo.not_null_constraint);
+        if repo_no_inherit != no_inherit(&db.not_null_constraint) {
+            alters.push(Alter::new(format!(
+                "ALTER TABLE {table} ALTER CONSTRAINT {} {}INHERIT;\n",
+                quote_ident(&repo_name),
+                if repo_no_inherit { "NO " } else { "" }
+            )));
+        }
     }
     push_comment(
         alters,
@@ -715,7 +782,9 @@ fn foreign_table(repo: &Table, db: &Table) -> Resolution {
         || canonicalize_columns(&repo.columns)
             != canonicalize_columns(&db.columns)
         || repo.sql != db.sql
+        || repo.parents != db.parents
         || repo.check_constraints != db.check_constraints
+        || repo.not_null_constraints != db.not_null_constraints
     {
         return Resolution::Replace;
     }
@@ -1137,6 +1206,82 @@ mod tests {
                 "ALTER TABLE test.users DROP CONSTRAINT email_has_at;\n",
                 "ALTER TABLE test.users ADD CONSTRAINT email_has_at CHECK \
                  (email ~ '@');\n",
+            ]
+        );
+    }
+
+    /// A NOT NULL rename reconciles even though nullability itself is
+    /// unchanged: from PostgreSQL 18 the constraint is named, so the
+    /// name is part of the state deploy has to converge. It renames in
+    /// place rather than dropping and re-adding, because DROP NOT NULL
+    /// is rejected on a primary-key column. The database side carries
+    /// no name, so it holds PostgreSQL's generated one
+    #[test]
+    fn column_not_null_rename_reconciles() {
+        let mut repo = base_table();
+        repo["columns"] = serde_json::json!([
+            {"name": "email", "data_type": "text", "nullable": false,
+             "not_null_constraint": {"name": "email_nn"}},
+        ]);
+        let mut db = base_table();
+        db["columns"] = serde_json::json!([
+            {"name": "email", "data_type": "text", "nullable": false},
+        ]);
+        let alters = statements(table(&parse_table(repo), &parse_table(db)));
+        assert_eq!(
+            sql(&alters),
+            vec![
+                "ALTER TABLE test.users RENAME CONSTRAINT \
+                 users_email_not_null TO email_nn;\n",
+            ]
+        );
+    }
+
+    /// A NO INHERIT change alone reconciles through ALTER CONSTRAINT,
+    /// under the name the repository records
+    #[test]
+    fn column_not_null_no_inherit_reconciles() {
+        let mut repo = base_table();
+        repo["columns"] = serde_json::json!([
+            {"name": "email", "data_type": "text", "nullable": false,
+             "not_null_constraint": {"name": "email_nn",
+                                     "no_inherit": true}},
+        ]);
+        let mut db = base_table();
+        db["columns"] = serde_json::json!([
+            {"name": "email", "data_type": "text", "nullable": false,
+             "not_null_constraint": {"name": "email_nn"}},
+        ]);
+        let alters = statements(table(&parse_table(repo), &parse_table(db)));
+        assert_eq!(
+            sql(&alters),
+            vec![
+                "ALTER TABLE test.users ALTER CONSTRAINT email_nn NO \
+                 INHERIT;\n",
+            ]
+        );
+    }
+
+    /// Adding NOT NULL where the database has none still goes through
+    /// ADD ... NOT NULL, carrying the name and NO INHERIT
+    #[test]
+    fn column_not_null_added_with_name() {
+        let mut repo = base_table();
+        repo["columns"] = serde_json::json!([
+            {"name": "email", "data_type": "text", "nullable": false,
+             "not_null_constraint": {"name": "email_nn",
+                                     "no_inherit": true}},
+        ]);
+        let mut db = base_table();
+        db["columns"] = serde_json::json!([
+            {"name": "email", "data_type": "text"},
+        ]);
+        let alters = statements(table(&parse_table(repo), &parse_table(db)));
+        assert_eq!(
+            sql(&alters),
+            vec![
+                "ALTER TABLE test.users ADD CONSTRAINT email_nn NOT NULL \
+                 email NO INHERIT;\n",
             ]
         );
     }
@@ -1920,6 +2065,7 @@ mod tests {
             name: "id".into(),
             data_type: "int4".into(),
             nullable: None,
+            not_null_constraint: None,
             default: None,
             collation: None,
             check_constraint: None,

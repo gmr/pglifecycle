@@ -387,8 +387,11 @@ fn kind(relative: &Path) -> &'static str {
     }
 }
 
-/// Foreign keys order table creation: emit a `dependencies` key so
-/// the build's topological sort restores referenced tables first
+/// Foreign keys and INHERITS order table creation: emit a
+/// `dependencies` key so the build's topological sort restores
+/// referenced and inherited-from tables first. Without the INHERITS
+/// edge a child restores ahead of its parent whenever it sorts first
+/// (`aaa_child` INHERITS `zzz_parent`), and the CREATE TABLE fails.
 fn table_dependencies(table: &models::Table) -> Option<Value> {
     let this = format!("{}.{}", table.schema, table.name);
     let mut references: Vec<String> = table
@@ -396,6 +399,7 @@ fn table_dependencies(table: &models::Table) -> Option<Value> {
         .iter()
         .flatten()
         .map(|fk| fk.references.name.clone())
+        .chain(table.parents.iter().flatten().cloned())
         .filter(|name| *name != this)
         .collect();
     references.sort();
@@ -852,6 +856,23 @@ mod tests {
                 ((schema.to_string(), name.to_string()), *kind)
             })
             .collect()
+    }
+
+    /// Tables share one libpgdump priority tier, so a child that sorts
+    /// before its parent restores first unless INHERITS records an edge
+    #[test]
+    fn table_dependencies_include_inherited_parents() {
+        let child: models::Table = serde_json::from_value(json!({
+            "name": "aaa_child",
+            "schema": "public",
+            "owner": "postgres",
+            "parents": ["public.zzz_parent"],
+        }))
+        .unwrap();
+        assert_eq!(
+            table_dependencies(&child),
+            Some(json!({"tables": ["public.zzz_parent"]}))
+        );
     }
 
     #[test]

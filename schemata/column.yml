@@ -18,6 +18,26 @@ properties:
     description: Column is NULLABLE when True. Defaults to True.
     type: boolean
     default: True
+  not_null_constraint:
+    title: NOT NULL Constraint
+    description: >
+      The parts of the column's NOT NULL constraint that `nullable` cannot
+      express (PostgreSQL 18 and later, where NOT NULL is a named
+      constraint). Present only when the name is not the one PostgreSQL
+      generates, `<table>_<column>_not_null`, or when the constraint is
+      NO INHERIT. `nullable` stays authoritative for whether the constraint
+      exists at all.
+    type: object
+    properties:
+      name:
+        type: string
+      no_inherit:
+        title: NO INHERIT
+        description: >
+          Whether the constraint is not inherited by this table's
+          descendants.
+        type: boolean
+    additionalProperties: false
   default:
     title: Default Value
     description: Default value for the column.

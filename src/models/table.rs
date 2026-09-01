@@ -69,6 +69,12 @@ pub struct Column {
     pub data_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nullable: Option<bool>,
+    /// The name and NO INHERIT flag of the column's NOT NULL
+    /// constraint (PostgreSQL 18+), present only when either differs
+    /// from the default. `nullable` remains authoritative for whether
+    /// the constraint exists at all.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub not_null_constraint: Option<ColumnNotNull>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -79,6 +85,19 @@ pub struct Column {
     pub generated: Option<ColumnGenerated>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
+}
+
+/// The parts of a column's NOT NULL constraint that `nullable: false`
+/// cannot express. PostgreSQL 18 made NOT NULL a named constraint, and
+/// pg_dump writes the name only when it is not the one PostgreSQL
+/// generates, `<table>_<column>_not_null`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ColumnNotNull {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub no_inherit: Option<bool>,
 }
 
 /// Represents configuration of a generated column

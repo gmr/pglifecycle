@@ -1804,6 +1804,7 @@ mod tests {
                 name: "id".into(),
                 data_type: "bigint".into(),
                 nullable: Some(false),
+                not_null_constraint: None,
                 default: None,
                 collation: None,
                 check_constraint: None,
