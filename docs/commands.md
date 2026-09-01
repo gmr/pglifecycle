@@ -208,15 +208,21 @@ variables:
 | `-p, --port PORT` | Server port (default `5432`) |
 | `-U, --username NAME` | Username to operate as |
 | `-w, --no-password` | Never prompt for a password |
-| `-W, --password` | Prompt for a password |
+| `-W, --password` | Prompt for a password up front |
 | `--role NAME` | Role to assume when connecting |
 
-Passwords are never prompted for unless `-W` is given: `pg_dump` writes
-its prompt to `/dev/tty`, where the progress bar overwrites it, so the
-command would appear to hang with no prompt visible. Without `-W` the
-password must come from `PGPASSWORD` or a pgpass file, and a missing one
-fails immediately. With `-W` the progress bars are hidden while the
-prompt is on screen.
+pglifecycle does its own password prompting rather than letting
+`pg_dump`, `pg_dumpall`, and `psql` prompt: they write the prompt to
+`/dev/tty`, where the progress bar overwrites it, and the command then
+appears to hang with no prompt in sight. The client tools always run
+with `-w`, and pglifecycle supplies the password in the environment.
+
+A prompt appears when the server asks for a password that `PGPASSWORD`
+or a pgpass file did not supply, and the failed attempt is retried with
+it; `-W` prompts up front instead. The progress bars are hidden while
+the prompt is on screen. `-w` suppresses prompting altogether, as does a
+non-interactive stdin, so scripted runs fail with the error rather than
+waiting for input.
 
 DDL options:
 
