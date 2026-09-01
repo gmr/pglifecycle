@@ -14,7 +14,7 @@ include_dir = "0.7.4"
 indicatif = "0.18.4"
 indicatif-log-bridge = "0.2.3"
 jsonschema = { version = "0.46.5", default-features = false }
-libpgdump = "2.1"
+libpgdump = "2.2"
 libpgfmt = "1.3"
 log = "0.4"
 serde = { version = "1.0.228", features = ["derive"] }
@@ -26,7 +26,7 @@ tree-sitter = "0.26"
 tree-sitter-postgres = "19.0.0-beta.2"
 
 [dev-dependencies]
-libpgdump = "2.1"
+libpgdump = "2.2"
 
 [profile.release]
 lto = true
