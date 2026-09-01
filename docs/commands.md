@@ -208,8 +208,15 @@ variables:
 | `-p, --port PORT` | Server port (default `5432`) |
 | `-U, --username NAME` | Username to operate as |
 | `-w, --no-password` | Never prompt for a password |
-| `-W, --password` | Force a password prompt |
+| `-W, --password` | Prompt for a password |
 | `--role NAME` | Role to assume when connecting |
+
+Passwords are never prompted for unless `-W` is given: `pg_dump` writes
+its prompt to `/dev/tty`, where the progress bar overwrites it, so the
+command would appear to hang with no prompt visible. Without `-W` the
+password must come from `PGPASSWORD` or a pgpass file, and a missing one
+fails immediately. With `-W` the progress bars are hidden while the
+prompt is on screen.
 
 DDL options:
 

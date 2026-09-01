@@ -217,7 +217,9 @@ pub struct Connection {
     #[arg(short = 'w', long, help_heading = "Connection Options")]
     pub no_password: bool,
 
-    /// force password prompt (should happen automatically)
+    /// prompt for a password (otherwise a password must come from
+    /// PGPASSWORD or a pgpass file; the dump is not left waiting on a
+    /// prompt)
     #[arg(short = 'W', long, help_heading = "Connection Options")]
     pub password: bool,
 

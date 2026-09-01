@@ -3,7 +3,7 @@
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-use crate::cli;
+use crate::{cli, progress};
 
 /// DDL suppression flags and object exclusions passed through to
 /// pg_dump
@@ -38,7 +38,7 @@ pub fn dump(
     command.arg("-Fc");
     command.arg("--schema-only");
     command.args(ddl_args(ddl));
-    execute(command)
+    execute(command, conn.password)
 }
 
 /// Dump cluster roles to `path` as SQL via `pg_dumpall --roles-only`.
@@ -80,7 +80,7 @@ fn run_dump_roles(
     if !include_passwords {
         command.arg("--no-role-passwords");
     }
-    execute(command)
+    execute(command, conn.password)
 }
 
 /// Whether a failed password-included roles dump should be retried
@@ -155,30 +155,61 @@ fn connection_args(command: &mut Command, conn: &cli::Connection) {
     if let Some(username) = &conn.username {
         command.arg("-U").arg(username);
     }
-    if conn.no_password {
-        command.arg("-w");
-    }
+    // Without -W, pg_dump/pg_dumpall prompt for a password on
+    // /dev/tty, which a live progress bar immediately overwrites: the
+    // command looks hung with no prompt in sight. Only prompt when it
+    // was asked for; otherwise fail fast and say how to supply the
+    // password.
     if conn.password {
         command.arg("-W");
+    } else {
+        command.arg("-w");
     }
     if let Some(role) = &conn.role {
         command.arg("--role").arg(role);
     }
 }
 
-fn execute(mut command: Command) -> Result<(), String> {
+/// Run a dump command. When `prompt` is set the caller asked for a
+/// password prompt (-W), so stdin is inherited and the progress bars
+/// are hidden for the duration, leaving the prompt readable.
+fn execute(mut command: Command, prompt: bool) -> Result<(), String> {
     log::debug!("Executing {command:?}");
-    let output = command.output().map_err(|e| {
-        format!("failed to run {:?}: {e}", command.get_program())
-    })?;
+    if prompt {
+        command.stdin(Stdio::inherit());
+    }
+    let mut run = || {
+        command.output().map_err(|e| {
+            format!("failed to run {:?}: {e}", command.get_program())
+        })
+    };
+    let output = if prompt {
+        progress::suspend(run)
+    } else {
+        run()
+    }?;
     if !output.status.success() {
+        let stderr =
+            String::from_utf8_lossy(&output.stderr).trim().to_string();
         return Err(format!(
-            "Failed to dump ({}): {}",
+            "Failed to dump ({}): {}{}",
             output.status.code().unwrap_or(-1),
-            String::from_utf8_lossy(&output.stderr).trim()
+            stderr,
+            password_hint(&stderr),
         ));
     }
     Ok(())
+}
+
+/// Advice appended to a failure caused by the missing password that
+/// -w turned into an error instead of a hidden prompt
+fn password_hint(stderr: &str) -> &'static str {
+    if stderr.contains("no password supplied") {
+        "\nSet PGPASSWORD, add a ~/.pgpass entry, or pass -W to be \
+         prompted."
+    } else {
+        ""
+    }
 }
 
 #[cfg(test)]
@@ -229,6 +260,44 @@ mod tests {
     fn does_not_retry_when_passwords_not_requested() {
         let error = "permission denied for table pg_authid";
         assert!(!should_retry_without_passwords(false, error));
+    }
+
+    #[test]
+    fn defaults_to_no_password_prompt() {
+        let mut command = Command::new("pg_dump");
+        connection_args(&mut command, &connection(false));
+        let args: Vec<_> = command.get_args().collect();
+        assert!(args.contains(&"-w".as_ref()));
+        assert!(!args.contains(&"-W".as_ref()));
+    }
+
+    #[test]
+    fn prompts_only_when_requested() {
+        let mut command = Command::new("pg_dump");
+        connection_args(&mut command, &connection(true));
+        let args: Vec<_> = command.get_args().collect();
+        assert!(args.contains(&"-W".as_ref()));
+        assert!(!args.contains(&"-w".as_ref()));
+    }
+
+    #[test]
+    fn hints_at_password_sources_when_none_supplied() {
+        let stderr = "pg_dump: error: connection to server failed: \
+                      fe_sendauth: no password supplied";
+        assert!(password_hint(stderr).contains("PGPASSWORD"));
+        assert!(password_hint("permission denied").is_empty());
+    }
+
+    fn connection(password: bool) -> cli::Connection {
+        cli::Connection {
+            dbname: Some("app".into()),
+            host: "localhost".into(),
+            port: 5432,
+            username: Some("postgres".into()),
+            no_password: false,
+            password,
+            role: None,
+        }
     }
 
     #[test]
