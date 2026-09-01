@@ -1,6 +1,6 @@
 [package]
 name = "pglifecycle"
-version = "2.0.0-alpha.0"
+version = "2.0.0-alpha.1"
 edition = "2024"
 description = "PostgreSQL schema management tool"
 license = "BSD-3-Clause"
