@@ -59,6 +59,14 @@ destructive statements are pending).
 | `--allow-drop` | Include destructive statements in the script |
 | `-x, --no-privileges` | Do not include GRANT/REVOKE |
 | `--error-file FILE` | Where to record failures and their DDL (default `pglifecycle-errors.log`) |
+| `-T, --exclude-table PATTERN` | Exclude tables/views/sequences matching `PATTERN` (repeatable; conflicts with `--dump`) |
+| `-N, --exclude-schema PATTERN` | Exclude schemas matching `PATTERN` (repeatable; conflicts with `--dump`) |
+| `--exclude-extension PATTERN` | Exclude extensions matching `PATTERN` (repeatable; conflicts with `--dump`) |
+
+The exclude patterns are the same as `pull`'s and are passed through to
+`pg_dump`. Excluding the schemas the project does not manage keeps them
+out of the snapshot, which both shortens the dump and silences the
+"unmanaged" dependency warnings.
 
 The connection options match `pull` (see below). Like `pull`, `deploy`
 snapshots and formats the database with libpgfmt, so DDL that fails to
