@@ -20,13 +20,13 @@ pub struct Acls {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub functions: Option<Map<String, Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub groups: Option<Vec<String>>,
+    pub groups: Option<Vec<Membership>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub languages: Option<Map<String, Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub large_objects: Option<Map<String, Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub roles: Option<Vec<String>>,
+    pub roles: Option<Vec<Membership>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub schemata: Option<Map<String, Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -39,6 +39,65 @@ pub struct Acls {
     pub types: Option<Map<String, Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub views: Option<Map<String, Value>>,
+}
+
+/// One entry in a role's `roles` or `groups` ACL list: a membership in
+/// that role, written as the bare role name when the membership
+/// behaves the way PostgreSQL would grant it by default, and as a
+/// mapping when it does not
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Membership {
+    Name(String),
+    Detailed(MembershipOptions),
+}
+
+/// A membership and the options that make it differ from a plain
+/// `GRANT role TO member`. `admin` carries WITH ADMIN OPTION;
+/// `inherit` and `set` need PostgreSQL 16 or later to emit
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MembershipOptions {
+    pub role: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub admin: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inherit: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub set: Option<bool>,
+}
+
+impl Membership {
+    /// The role granted, without its options
+    pub fn role(&self) -> &str {
+        match self {
+            Self::Name(role) => role,
+            Self::Detailed(options) => &options.role,
+        }
+    }
+
+    /// The `WITH ...` option list for a GRANT, in a canonical order so
+    /// two spellings of the same membership render identically
+    pub fn options_sql(&self) -> Option<String> {
+        let Self::Detailed(options) = self else {
+            return None;
+        };
+        let mut parts = Vec::new();
+        if options.admin == Some(true) {
+            parts.push(String::from("ADMIN OPTION"));
+        }
+        for (keyword, value) in
+            [("INHERIT", options.inherit), ("SET", options.set)]
+        {
+            if let Some(value) = value {
+                parts.push(format!(
+                    "{keyword} {}",
+                    if value { "TRUE" } else { "FALSE" }
+                ));
+            }
+        }
+        (!parts.is_empty()).then(|| parts.join(", "))
+    }
 }
 
 /// Represents a group

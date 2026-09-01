@@ -13,10 +13,10 @@ use serde_json::{Map, Value};
 use crate::build;
 use crate::deploy::diff::canonical_type;
 use crate::models::{
-    CheckConstraint, Column, ColumnNotNull, Definition, Domain, Extension,
-    ForeignDataWrapper, ForeignKey, Function, Index, NotNullConstraint,
-    Schema, Sequence, Server, Table, Trigger, Type, UserMapping, View,
-    ViewColumn,
+    CheckConstraint, Column, ColumnDefault, ColumnNotNull, Definition, Domain,
+    Extension, ForeignDataWrapper, ForeignKey, Function, Index,
+    NotNullConstraint, Schema, Sequence, Server, Table, Trigger, Type,
+    UserMapping, View, ViewColumn,
 };
 use crate::utils::{
     dollar_quote, postgres_value, quote_ident, user_mapping_subject,
@@ -487,6 +487,29 @@ fn constraints(
             )
         },
     );
+    // Defaults on inherited columns, keyed on the column: a column
+    // carries at most one default, and `ALTER TABLE ONLY` keeps the
+    // change off this table's own descendants, as pg_dump writes it
+    named_pairs(
+        alters,
+        db.column_defaults.as_deref().unwrap_or_default(),
+        repo.column_defaults.as_deref().unwrap_or_default(),
+        |column_default: &ColumnDefault| column_default.column.clone(),
+        |column_default| {
+            format!(
+                "ALTER TABLE ONLY {table} ALTER COLUMN {} DROP DEFAULT;\n",
+                quote_ident(&column_default.column)
+            )
+        },
+        |column_default| {
+            format!(
+                "ALTER TABLE ONLY {table} ALTER COLUMN {} \
+                 SET DEFAULT {};\n",
+                quote_ident(&column_default.column),
+                build::render_default(&column_default.default)
+            )
+        },
+    );
     let repo_fks = repo.foreign_keys.as_deref().unwrap_or_default();
     let db_fks = db.foreign_keys.as_deref().unwrap_or_default();
     named_pairs(
@@ -785,6 +808,7 @@ fn foreign_table(repo: &Table, db: &Table) -> Resolution {
         || repo.parents != db.parents
         || repo.check_constraints != db.check_constraints
         || repo.not_null_constraints != db.not_null_constraints
+        || repo.column_defaults != db.column_defaults
     {
         return Resolution::Replace;
     }
@@ -1282,6 +1306,34 @@ mod tests {
             vec![
                 "ALTER TABLE test.users ADD CONSTRAINT email_nn NOT NULL \
                  email NO INHERIT;\n",
+            ]
+        );
+    }
+
+    /// A default on an inherited column reconciles through
+    /// `ALTER TABLE ONLY`, keyed on the column: changed defaults
+    /// re-SET, and one the repo dropped is DROPped
+    #[test]
+    fn column_defaults_reconcile_by_column() {
+        let mut repo = base_table();
+        repo["column_defaults"] = serde_json::json!([
+            {"column": "recorded_at", "default": "CURRENT_TIMESTAMP"},
+        ]);
+        let mut db = base_table();
+        db["column_defaults"] = serde_json::json!([
+            {"column": "recorded_at", "default": "now()"},
+            {"column": "detail", "default": "'none'::text"},
+        ]);
+        let alters = statements(table(&parse_table(repo), &parse_table(db)));
+        assert_eq!(
+            sql(&alters),
+            vec![
+                "ALTER TABLE ONLY test.users ALTER COLUMN recorded_at \
+                 DROP DEFAULT;\n",
+                "ALTER TABLE ONLY test.users ALTER COLUMN detail \
+                 DROP DEFAULT;\n",
+                "ALTER TABLE ONLY test.users ALTER COLUMN recorded_at \
+                 SET DEFAULT CURRENT_TIMESTAMP;\n",
             ]
         );
     }

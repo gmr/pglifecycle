@@ -96,5 +96,6 @@ oneOf:
       required:
         - recursive
         - columns
-        - options
+        - check_option
+        - security_barrier
         - query

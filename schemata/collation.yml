@@ -1,9 +1,10 @@
 ---
 $schema: http://json-schema.org/schema#
 $id: https://pglifecycle.readthedocs.io/en/stable/schemata/collation.html
-title: Aggregate
+title: Collation
 description: >
-  An Aggregate function computes a single result from a set of input values.
+  A collation is a schema object that provides the locale rules used when
+  sorting and comparing text.
 type: object
 properties:
   name:
@@ -45,6 +46,13 @@ properties:
       collation. Possible values are: icu, libc. libc is the default. The
       available choices depend on the operating system and build options.
     enum: [icu, libc]
+  version:
+    title: Collation Version
+    description: >
+      Specifies the version string to store with the collation. Normally this
+      should be omitted, which causes the version to be computed from the
+      actual version of the collation as provided by the operating system.
+    type: string
   deterministic:
     title: Deterministic Comparisons
     description: >
@@ -63,36 +71,21 @@ properties:
     title: Dependencies
     description: Database objects this object is dependent upon
     $package_schema: dependencies
-requires:
+required:
   - schema
   - name
   - owner
+# A collation is defined one of three ways, and the forms do not mix: raw
+# SQL, copied FROM another collation, or from locale settings (`provider`,
+# `deterministic` and `version` only qualify those). The branches used to
+# gate on a `version` property this schema never declared, and the third
+# branch's `anyOf` gated on `properties`, which says nothing about an
+# absent key -- so it matched everything and every `sql` or `copy_from`
+# collation failed as "valid under each of" two branches.
 oneOf:
   - required: [sql]
-    not:
-      required:
-        - copy_from
-        - locale
-        - lc_collate
-        - lc_ctype
-        - provider
-        - deterministic
-        - version
   - required: [copy_from]
-    not:
-      required:
-        - sql
-        - locale
-        - lc_collate
-        - lc_ctype
-        - provider
-        - deterministic
-        - version
-  - not: {required: [sql, copy_from]}
-    anyOf:
-      - {properties: {locale: {minLength: 1}}}
-      - {properties: {lc_collate: {minLength: 1}}}
-      - {properties: {lc_ctype: {minLength: 1}}}
-      - {properties: {provider: {minLength: 1}}}
-      - {properties: {deterministic: {enum: [true, false]}}}
-      - {properties: {version: {minLength: 1}}}
+  - anyOf:
+      - required: [locale]
+      - required: [lc_collate]
+      - required: [lc_ctype]

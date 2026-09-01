@@ -59,9 +59,49 @@ properties:
         items:
           pattern: "^(EXECUTE|ALL)( WITH GRANT OPTION)?$"
   groups:
+    title: Role Memberships
+    description: >
+      Memberships in other roles. Each entry is the role name on its own when
+      the membership behaves the way `GRANT <role> TO <member>` grants it, or a
+      mapping when it does not.
+
+      `admin: true` writes WITH ADMIN OPTION. `inherit` and `set` write the
+      per-membership WITH INHERIT / WITH SET options, which need PostgreSQL 16
+      or later; omit `inherit` to defer to the member role's own `inherit`
+      option, which is what PostgreSQL does.
+
+      The grantor (`GRANTED BY`) is not carried: it records who granted the
+      membership in one cluster, not what the schema is.
     type: array
     items:
-      type: string
+      oneOf:
+        - title: Role Name
+          type: string
+        - title: Membership With Options
+          type: object
+          properties:
+            role:
+              title: Role Name
+              type: string
+            admin:
+              title: WITH ADMIN OPTION
+              description: >
+                Whether the member may in turn grant this role to others.
+              type: boolean
+            inherit:
+              title: WITH INHERIT
+              description: >
+                Whether the member automatically uses this role's privileges.
+                Omit to defer to the member role's own `inherit` option.
+              type: boolean
+            set:
+              title: WITH SET
+              description: >
+                Whether the member may SET ROLE to this role.
+              type: boolean
+          required:
+            - role
+          additionalProperties: false
     uniqueItems: true
   languages:
     type: object
@@ -82,9 +122,49 @@ properties:
         items:
           pattern: "^(SELECT|UPDATE|ALL)( WITH GRANT OPTION)?$"
   roles:
+    title: Role Memberships
+    description: >
+      Memberships in other roles. Each entry is the role name on its own when
+      the membership behaves the way `GRANT <role> TO <member>` grants it, or a
+      mapping when it does not.
+
+      `admin: true` writes WITH ADMIN OPTION. `inherit` and `set` write the
+      per-membership WITH INHERIT / WITH SET options, which need PostgreSQL 16
+      or later; omit `inherit` to defer to the member role's own `inherit`
+      option, which is what PostgreSQL does.
+
+      The grantor (`GRANTED BY`) is not carried: it records who granted the
+      membership in one cluster, not what the schema is.
     type: array
     items:
-      type: string
+      oneOf:
+        - title: Role Name
+          type: string
+        - title: Membership With Options
+          type: object
+          properties:
+            role:
+              title: Role Name
+              type: string
+            admin:
+              title: WITH ADMIN OPTION
+              description: >
+                Whether the member may in turn grant this role to others.
+              type: boolean
+            inherit:
+              title: WITH INHERIT
+              description: >
+                Whether the member automatically uses this role's privileges.
+                Omit to defer to the member role's own `inherit` option.
+              type: boolean
+            set:
+              title: WITH SET
+              description: >
+                Whether the member may SET ROLE to this role.
+              type: boolean
+          required:
+            - role
+          additionalProperties: false
     uniqueItems: true
   schemata:
     type: object

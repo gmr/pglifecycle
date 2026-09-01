@@ -24,6 +24,8 @@ pub struct Table {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub columns: Option<Vec<Column>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub column_defaults: Option<Vec<ColumnDefault>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub indexes: Option<Vec<Index>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub primary_key: Option<ConstraintColumns>,
@@ -85,6 +87,18 @@ pub struct Column {
     pub generated: Option<ColumnGenerated>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
+}
+
+/// A default on a column the table does not declare locally: an
+/// inheritance child carries defaults for columns it inherits, and
+/// pg_dump writes them as a separate `ALTER TABLE ONLY child ALTER
+/// COLUMN col SET DEFAULT ...` because there is no local column entry
+/// to hold one
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ColumnDefault {
+    pub column: String,
+    pub default: Value,
 }
 
 /// The parts of a column's NOT NULL constraint that `nullable: false`

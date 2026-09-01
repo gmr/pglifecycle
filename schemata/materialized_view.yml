@@ -46,10 +46,12 @@ properties:
     type: string
   storage_parameters:
     title: Storage Parameters
-    description: Storage parameter settings for the materialized view.
+    description: >
+      Storage parameter settings for the materialized view. A `toast.` prefix
+      targets the view's TOAST table instead of the view itself.
     type: object
     propertyNames:
-      pattern: ^[A-Za-z0-9_]*$
+      pattern: ^(toast\.)?[A-Za-z0-9_]+$
   tablespace:
     title: Tablespace
     description: >
