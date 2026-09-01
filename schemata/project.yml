@@ -1,6 +1,10 @@
 ---
-$schema: http://json-schema.org/schema#
-$id: https://pglifecycle.readthedocs.io/en/stable/schemata/project.html
+$schema: https://json-schema.org/draft/2020-12/schema
+$id: https://gmr.github.io/pglifecycle/schemata/project.json
+title: Project
+description: >
+  `project.yaml` at the root of a project: the database-wide settings, and the
+  objects that belong to the database rather than to a schema.
 type: object
 properties:
   name:

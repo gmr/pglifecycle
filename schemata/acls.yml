@@ -1,10 +1,19 @@
 ---
-$schema: http://json-schema.org/schema#
-$id: https://pglifecycle.readthedocs.io/en/stable/schemata/acls.html
+$schema: https://json-schema.org/draft/2020-12/schema
+$id: https://gmr.github.io/pglifecycle/schemata/acls.json
 title: ACLs
+description: >
+  Privileges on database objects, grouped by the kind of object they are on.
+  Written under `grants:` or `revocations:` on the role, user, or group they
+  apply to, so a role file is the whole story of what that role can do.
+
+  `ALL` stands for every privilege the object type has. Append
+  ` WITH GRANT OPTION` to a privilege to let the grantee grant it onward.
 type: object
 properties:
   columns:
+    description: >
+      Privileges on individual columns, keyed by `schema.table.column`.
     type: object
     propertyNames:
       pattern: ^([A-Za-z0-9_\-]+)\.([A-Za-z0-9_\-]+)\.([A-Za-z0-9_\-]+)$
@@ -14,6 +23,8 @@ properties:
         items:
           pattern: "^(SELECT|INSERT|UPDATE|REFERENCES|ALL)( WITH GRANT OPTION)?$"
   databases:
+    description: >
+      Privileges on databases, keyed by database name.
     type: object
     propertyNames:
       pattern: ^([A-Za-z_\-\.])+$
@@ -23,6 +34,8 @@ properties:
         items:
           pattern: "^(CREATE|CONNECT|TEMP|TEMPORARY|ALL)( WITH GRANT OPTION)?$"
   domains:
+    description: >
+      Privileges on domains, keyed by `schema.domain`.
     type: object
     propertyNames:
       pattern: ^([A-Za-z0-9_\-]+)\.([A-Za-z0-9_\-]+)$
@@ -32,6 +45,8 @@ properties:
         items:
           pattern: "^(USAGE|ALL)( WITH GRANT OPTION)?$"
   foreign_data_wrappers:
+    description: >
+      Privileges on foreign data wrappers, keyed by wrapper name.
     type: object
     propertyNames:
       pattern: ^([A-Za-z0-9_\-\.]+)$
@@ -41,6 +56,8 @@ properties:
         items:
           pattern: "^(USAGE|ALL)( WITH GRANT OPTION)?$"
   foreign_servers:
+    description: >
+      Privileges on foreign servers, keyed by server name.
     type: object
     propertyNames:
       pattern: ^([A-Za-z0-9_\-\.]+)$
@@ -50,6 +67,10 @@ properties:
         items:
           pattern: "^(USAGE|ALL)( WITH GRANT OPTION)?$"
   functions:
+    description: >
+      Privileges on functions and procedures, keyed by
+      `schema.function(argument types)`: the signature, since the name alone
+      is ambiguous across overloads.
     type: object
     propertyNames:
       pattern: ^([A-Za-z0-9_\-]+)\.([A-Za-z0-9_\-]+)\((.*)\)$
@@ -104,6 +125,8 @@ properties:
           additionalProperties: false
     uniqueItems: true
   languages:
+    description: >
+      Privileges on procedural languages, keyed by language name.
     type: object
     propertyNames:
       pattern: ^([A-Za-z0-9_\-\.]+)$
@@ -113,6 +136,8 @@ properties:
         items:
           pattern: "^(USAGE|ALL)( WITH GRANT OPTION)?$"
   large_objects:
+    description: >
+      Privileges on large objects, keyed by OID.
     type: object
     propertyNames:
       pattern: ^[0-9]+$
@@ -167,6 +192,8 @@ properties:
           additionalProperties: false
     uniqueItems: true
   schemata:
+    description: >
+      Privileges on schemas, keyed by schema name.
     type: object
     propertyNames:
       pattern: ^([A-Za-z0-9_\-]+)$
@@ -176,6 +203,8 @@ properties:
         items:
           pattern: "^(CREATE|USAGE|ALL)( WITH GRANT OPTION)?$"
   sequences:
+    description: >
+      Privileges on sequences, keyed by `schema.sequence`.
     type: object
     propertyNames:
       pattern: ^([A-Za-z0-9_\-]+)\.([A-Za-z0-9_\-]+)$
@@ -185,6 +214,10 @@ properties:
         items:
           pattern: "^(SELECT|UPDATE|USAGE|ALL)( WITH GRANT OPTION)?$"
   tables:
+    description: >
+      Privileges on tables, keyed by `schema.table`. Privileges on a view may
+      be written here or under `views`: PostgreSQL grants on a view with TABLE
+      syntax, so both emit `GRANT ... ON TABLE`.
     type: object
     propertyNames:
       pattern: ^([A-Za-z0-9_\-]+)\.([A-Za-z0-9_\-]+)$
@@ -194,6 +227,8 @@ properties:
         items:
           pattern: "^(SELECT|INSERT|UPDATE|DELETE|TRUNCATE|REFERENCES|TRIGGER|MAINTAIN|ALL)( WITH GRANT OPTION)?$"
   tablespaces:
+    description: >
+      Privileges on tablespaces, keyed by tablespace name.
     type: object
     propertyNames:
       pattern: ^([A-Za-z0-9_\-]+)$
@@ -203,6 +238,8 @@ properties:
         items:
           pattern: "^(CREATE|USAGE|ALL)( WITH GRANT OPTION)?$"
   types:
+    description: >
+      Privileges on types, keyed by `schema.type`.
     type: object
     propertyNames:
       pattern: ^([A-Za-z0-9_\-]+)\.([A-Za-z0-9_\-]+)$
@@ -212,6 +249,9 @@ properties:
         items:
           pattern: "^(USAGE|ALL)( WITH GRANT OPTION)?$"
   views:
+    description: >
+      Privileges on views, keyed by `schema.view`. Emitted as `GRANT ... ON
+      TABLE`, as PostgreSQL requires.
     type: object
     propertyNames:
       pattern: ^([A-Za-z0-9_\-]+)\.([A-Za-z0-9_\-]+)$

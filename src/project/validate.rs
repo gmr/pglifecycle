@@ -70,11 +70,12 @@ fn preprocess(schema: &Value) -> Result<Value, String> {
         Value::Object(map) => {
             let mut out = serde_json::Map::new();
             for (key, value) in map {
-                // the bundled files use the draft-agnostic
-                // http://json-schema.org/schema# URI, which this crate
-                // rejects; dropping it applies the default draft, as
-                // Python's jsonschema did
-                if key == "$schema" {
+                // a merged fragment brings its own `$schema` and
+                // `$id`, which mean nothing (and in `$id`'s case change
+                // reference resolution) inside the schema they are
+                // merged into; the bundled files declare draft 2020-12,
+                // which is what this crate applies by default
+                if key == "$schema" || key == "$id" {
                     continue;
                 }
                 if key == "$package_schema" {

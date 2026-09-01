@@ -1,6 +1,6 @@
 ---
-$schema: http://json-schema.org/schema#
-$id: https://pglifecycle.readthedocs.io/en/stable/schemata/table.html
+$schema: https://json-schema.org/draft/2020-12/schema
+$id: https://gmr.github.io/pglifecycle/schemata/table.json
 title: Table
 description: Defines a table
 type: object
@@ -201,8 +201,14 @@ properties:
       type: object
       properties:
         name:
+          title: Constraint Name
+          description: The name PostgreSQL knows the constraint by.
           type: string
         expression:
+          title: Expression
+          description: >
+            The boolean expression rows must satisfy, as it appears inside
+            `CHECK (...)`.
           type: string
   not_null_constraints:
     title: Table NOT NULL Constraints

@@ -1,12 +1,19 @@
 ---
-$schema: http://json-schema.org/schema#
-$id: https://pglifecycle.readthedocs.io/en/stable/schemata/types.html
-title: Type
+$schema: https://json-schema.org/draft/2020-12/schema
+$id: https://gmr.github.io/pglifecycle/schemata/types.json
+title: Types
 description: Specifies all user-defined types in a schema
 type: object
 properties:
   schema:
     title: Schema
+    description: The schema every object in this file belongs to.
+    type: string
+  owner:
+    title: Owner
+    description: >
+      The role that owns every object in this file, unless an entry names its
+      own. Defaults to the project's superuser.
     type: string
   types:
     title: User-defined types
@@ -16,4 +23,4 @@ properties:
 required:
   - schema
   - types
-addtionalProperties: false
+additionalProperties: false

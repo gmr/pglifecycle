@@ -69,5 +69,31 @@ Or start from scratch:
 pglifecycle create my-project/
 ```
 
-See [Commands](commands.md) for the full reference and
-[Project Format](project-format.md) for the directory layout.
+See [Commands](commands.md) for the full reference,
+[Project Format](project-format.md) for the directory layout, and the
+[Schema Reference](reference/index.md) for every object type the format
+covers.
+
+### In CI
+
+```yaml
+- uses: gmr/pglifecycle-action@v1
+- run: pglifecycle build ./schema /tmp/schema.dump
+```
+
+The [GitHub Actions](github-actions.md) install the binary and plan a
+deploy against a live database, posting the DDL to the pull request
+without applying it.
+
+### In an editor
+
+Every schema is published as resolvable JSON Schema, so an editor with
+`yaml-language-server` completes and validates project files as you
+type:
+
+```yaml
+# yaml-language-server: $schema=https://gmr.github.io/pglifecycle/schemata/table.json
+---
+name: users
+schema: test
+```
