@@ -119,9 +119,27 @@
   margin-top: 2.2em;
 }
 
-/* the site's wordmark: pg light, lifecycle bold */
+/* the site's wordmark: pg light, lifecycle bold; it links out to
+   pglifecycle.com (see overrides/partials/header.html) but reads as the
+   title, not as a link */
 .md-header__topic .md-ellipsis {
   font-weight: 600;
+}
+
+/* the logo and the wordmark are one lockup: Material's default 1rem
+   gutter pushes them apart */
+.md-header__title,
+[dir="ltr"] .md-header__title {
+  margin-left: 0.1rem;
+}
+
+.md-header__topic .pgl-wordmark {
+  color: inherit;
+  text-decoration: none;
+}
+
+.md-header__topic .pgl-wordmark:hover {
+  color: var(--md-accent-fg-color);
 }
 
 /* --- header: a paper strip with a hairline, not a colored bar ---- */
@@ -208,55 +226,102 @@
 
 /* --- code: dark ink terminals in both schemes -------------------- */
 
+/* Scope the ink palette to the block itself by redefining Material's own
+   code tokens, so everything the theme draws from them -- the pre
+   background, the copy button, line numbers, and every highlight class --
+   follows the dark surface instead of the light page around it. */
+.md-typeset .highlight,
+.md-typeset pre > code,
+.md-typeset .highlighttable {
+  --md-code-bg-color: var(--ink);
+  --md-code-fg-color: #c3d0db;
+
+  /* the copy/select button tray floats on the block: keep it ink too */
+  --md-code-bg-color--light: rgba(231, 238, 244, 0.1);
+  --md-code-bg-color--lighter: rgba(231, 238, 244, 0.05);
+
+  --md-default-fg-color--light: var(--text-ondark-2);
+  --md-default-fg-color--lighter: var(--text-ondark-3);
+  --md-default-fg-color--lightest: rgba(231, 238, 244, 0.16);
+  --md-accent-fg-color: var(--pg-bright);
+
+  --md-code-hl-color: rgba(91, 155, 201, 0.25);
+  --md-code-hl-number-color: #8fd0ae;
+  --md-code-hl-special-color: #d98a8a;
+  --md-code-hl-function-color: #b79bd6;
+  --md-code-hl-constant-color: #8fd0ae;
+  --md-code-hl-keyword-color: #6fa8d6;
+  --md-code-hl-string-color: #d9a45e;
+  --md-code-hl-name-color: #c3d0db;
+  --md-code-hl-operator-color: #9fb2c2;
+  --md-code-hl-punctuation-color: #9fb2c2;
+  --md-code-hl-comment-color: #5d7384;
+  --md-code-hl-generic-color: #9fb2c2;
+  --md-code-hl-variable-color: #7fb6df;
+}
+
+[data-md-color-scheme="slate"] .md-typeset .highlight,
+[data-md-color-scheme="slate"] .md-typeset pre > code,
+[data-md-color-scheme="slate"] .md-typeset .highlighttable {
+  --md-code-bg-color: var(--ink-soft);
+}
+
+/* the rounded corner belongs to the code element; the wrapper must not
+   paint a light rectangle behind it */
+.md-typeset .highlight,
+.md-typeset .highlighttable {
+  background: transparent;
+}
+
 .md-typeset pre > code {
-  background: var(--ink);
-  color: #c3d0db;
   border: 1px solid var(--ink-line);
   border-radius: var(--radius);
 }
 
-.md-typeset .highlight {
-  border-radius: var(--radius);
+.md-typeset .highlight > pre,
+.md-typeset .highlighttable pre {
+  background: transparent;
 }
 
-/* on ink, a code block needs to sit above the page, not merge into it,
-   the way the site's terminals sit on paper */
-[data-md-color-scheme="slate"] .md-typeset pre > code {
+/* line numbers sit on the same ink, divided by a hairline */
+.md-typeset .highlighttable .linenos {
+  background: var(--md-code-bg-color);
+  border-radius: var(--radius) 0 0 var(--radius);
+}
+
+.md-typeset .highlight span.filename {
   background: var(--ink-soft);
+  color: var(--text-ondark);
+  border: 1px solid var(--ink-line);
+  border-bottom: none;
+  border-radius: var(--radius) var(--radius) 0 0;
+  font-family: var(--md-code-font);
 }
 
-[data-md-color-scheme="default"] .md-typeset pre > code .c,
-[data-md-color-scheme="default"] .md-typeset pre > code .c1,
-[data-md-color-scheme="default"] .md-typeset pre > code .cm {
-  color: #5d7384;
+.md-typeset .highlight span.filename + pre > code {
+  border-radius: 0 0 var(--radius) var(--radius);
 }
 
-[data-md-color-scheme="default"] .md-typeset pre > code .k,
-[data-md-color-scheme="default"] .md-typeset pre > code .kd,
-[data-md-color-scheme="default"] .md-typeset pre > code .kn {
-  color: #6fa8d6;
-}
-
-[data-md-color-scheme="default"] .md-typeset pre > code .s,
-[data-md-color-scheme="default"] .md-typeset pre > code .s1,
-[data-md-color-scheme="default"] .md-typeset pre > code .s2 {
-  color: #d9a45e;
-}
-
-[data-md-color-scheme="default"] .md-typeset pre > code .m,
-[data-md-color-scheme="default"] .md-typeset pre > code .mi {
-  color: #8fd0ae;
-}
-
-[data-md-color-scheme="default"] .md-typeset pre > code .nt,
-[data-md-color-scheme="default"] .md-typeset pre > code .nn {
-  color: #7fb6df;
-}
-
-/* inline code: a tint, not a box shout */
+/* inline code stays a paper tint: it is type, not a terminal */
 .md-typeset code {
   border-radius: 4px;
   padding: 0.1em 0.35em;
+}
+
+.md-typeset a > code,
+.md-typeset td code,
+.md-typeset li > code,
+.md-typeset p > code {
+  background: var(--paper-2);
+  color: var(--pg-darker);
+}
+
+[data-md-color-scheme="slate"] .md-typeset a > code,
+[data-md-color-scheme="slate"] .md-typeset td code,
+[data-md-color-scheme="slate"] .md-typeset li > code,
+[data-md-color-scheme="slate"] .md-typeset p > code {
+  background: var(--ink-soft);
+  color: #c3d0db;
 }
 
 /* --- tables: the reference lives in them ------------------------- */
@@ -317,9 +382,11 @@
   border-color: var(--pg);
 }
 
+/* a translucent brand tint, so the title text keeps the page's own
+   foreground colour in both schemes */
 .md-typeset .note > .admonition-title,
 .md-typeset .info > .admonition-title {
-  background: var(--pg-tint);
+  background: rgba(51, 103, 145, 0.12);
 }
 
 .md-typeset .admonition.warning {

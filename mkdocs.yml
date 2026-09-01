@@ -6,6 +6,7 @@ repo_name: gmr/pglifecycle
 
 theme:
   name: material
+  custom_dir: overrides
   logo: assets/logo.svg
   favicon: assets/logo.svg
   font:
@@ -72,6 +73,5 @@ nav:
   - Home: index.md
   - Commands: commands.md
   - Project Format: project-format.md
-  - GitHub Actions: github-actions.md
   - Schema Reference: reference/
-  - pglifecycle.com: https://pglifecycle.com/
+  - GitHub Actions: github-actions.md
