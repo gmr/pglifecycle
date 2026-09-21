@@ -231,10 +231,10 @@ that catch them were opt-in and local. A `gates` job in
 `postgresql-client-18` package because pg_dump refuses to dump a
 server newer than itself.
 
-### Phase 2 — Output that does not restore (~1 day)
+### Phase 2 — Output that does not restore (~2 days)
 
-3 of the 7 A-rows produce invalid or materially wrong archives. Fix
-these first.
+3 of the 7 A-rows produce invalid or materially wrong archives, plus
+the two `build` defects Phase 8 found. Fix these first.
 
 1. Wrap the generated expression in parentheses in
    `render_table_column`; record it as deviation **14** in the header
@@ -249,6 +249,14 @@ these first.
 3. `period: Option<String>` on `ForeignKey` and `ForeignKeyReference`,
    with a `render_foreign_key` arm emitting `PERIOD x` on both sides
    (A6).
+4. Emit foreign keys as their own `ALTER TABLE ... ADD CONSTRAINT
+   <name> FOREIGN KEY ...` entries after the tables, instead of inline
+   in `CREATE TABLE`. Inline FKs cannot express a circular reference,
+   and 8 of pagila's 23 tables fail to restore because of it — see
+   Phase 8. This also restores the constraint name, which the inline
+   form drops. Do this one first: it is a total restore failure on
+   ordinary schema, and it changes where item 3's `PERIOD` clause is
+   rendered.
 
 ### Phase 3 — Silent semantic corruption (~2 days)
 
@@ -397,11 +405,89 @@ Four gates, each checking something the others cannot:
    destructive case twice: without `--allow-drop` the removal is
    withheld and reported; with it, the deploy converges.
 
-Then correct the Postgres 17 → 18 line in `CLAUDE.md`.
+Then correct the Postgres 17 → 18 line in `CLAUDE.md`. (Done in
+Phase 1.)
+
+### Phase 8 — A pagila gate (~1 day)
+
+Take the schema from [xzilla/pagila](https://github.com/xzilla/pagila),
+the PostgreSQL sample database, and gate the full cycle on it: load
+`pagila-schema.sql`, `pull`, `build`, `pg_restore`, and compare
+schema-only dumps of source and restored, the way `bin/round-trip`
+already does for `fixtures/schema.sql`. Vendor the schema file with
+attribution — the author has said we may use it. Schema only: the data
+files are 3 MB and 5 MB, and nothing here needs rows.
+
+**Why it earns a phase of its own.** `fixtures/schema.sql` is a schema
+we wrote, so it tests what we thought to test. Pagila is 2177 lines
+dumped from PostgreSQL 18.0 by someone else, and it independently
+reproduces defects from the audit above plus two this plan had not
+found. A trial run confirmed all of the following.
+
+It hits, without being written to:
+
+- a **virtual** generated column
+  (`rentals_to_breakeven ... AS (ceil(...))`, no keyword) next to a
+  **`STORED`** one on the same table — both halves of A7
+- `ALTER TABLE ONLY public.country REPLICA IDENTITY NOTHING`
+- `CREATE RULE`, `CREATE EVENT TRIGGER`, `CREATE AGGREGATE`
+- `RULE public.rental_report _RETURN` — pg_dump breaks a view
+  dependency cycle by emitting the view's internal `_RETURN` rule, so
+  the caveat in Phase 6.6 has a real example to test against
+- a `PARTITION BY RANGE` table, tsvector columns, 23 tables, 11 views,
+  a materialized view, 15 triggers, 13 sequences
+
+A `pull --allow-unsupported` of it currently models 53 objects and
+leaves 7 entries unmodeled across 5 descriptors: `PROCEDURE` ×2,
+`AGGREGATE`, `TABLE` (the replica identity), `RULE` ×2, `EVENT
+TRIGGER`.
+
+**Two new defects it found.** Neither is in sections A, B or C above;
+both are `build` bugs, and both come from the same line of rendering.
+
+1. **Foreign keys render inline in `CREATE TABLE`, so a circular
+   reference cannot restore.** Pagila's `store` references `staff` and
+   `staff` references `store`. No topological order exists, so
+   whichever way libpgdump breaks the cycle, the inline `FOREIGN KEY`
+   clause names a table that does not exist yet. 8 of 23 tables fail,
+   and the failures cascade: `pg_restore` reports 45 errors, starting
+   `relation "public.address" does not exist` on `CREATE TABLE
+   public.store`. pg_dump avoids this by emitting every FK as its own
+   `ALTER TABLE ... ADD CONSTRAINT` entry after all tables exist, and
+   `build` must do the same. This is the most severe defect found so
+   far: it is not a silent loss but a total restore failure, and it
+   needs no PostgreSQL 18 feature to trigger — a mutual FK between two
+   tables is ordinary schema design.
+2. **Foreign key constraint names are dropped.** `render_foreign_key`
+   emits `FOREIGN KEY (p) REFERENCES t (id)` with no `CONSTRAINT`
+   clause, although the model carries `name`. The name survives only
+   when it happens to match what PostgreSQL generates, which is why
+   pagila's `city_country_id_fkey` round-trips and a hand-named
+   constraint would not. `deploy` reconciles named constraints as
+   DROP/ADD pairs by name (`src/deploy/alter.rs:408`), so a dropped
+   name also costs in-place reconciliation.
+
+Fixing 1 subsumes 2: a separate `ALTER TABLE ... ADD CONSTRAINT <name>
+FOREIGN KEY ...` entry carries the name by construction.
+
+**Sequencing.** The two `build` defects should be fixed in Phase 2,
+alongside the other output that does not restore — they belong with it
+by severity, and this phase found them. The gate itself lands last,
+because pagila also contains `PROCEDURE`, `AGGREGATE`, `RULE` and
+`EVENT TRIGGER`, so a full-cycle comparison cannot be green until
+Phases 5 and 6 land. Until then pagila can ride in `bin/coverage-gate`
+with its own expected list, which measures progress without blocking
+it.
+
+**Also new:** `PROCEDURE` is unmodeled. `PROJECT_DIRS` reserves a
+`procedures` directory and `constants.rs` has no `Procedure` variant,
+so procedures were overlooked entirely rather than deliberately
+deferred. Add them to Phase 5, which is already the "pull parity"
+phase.
 
 ## Effort
 
-Roughly two and a half focused weeks end to end. Phase 0 is a day and
+Roughly three focused weeks end to end. Phase 0 is a day and
 converts every remaining defect — including ones not yet found — from
 silent to visible, so it is worth shipping before anything else is
 decided.
