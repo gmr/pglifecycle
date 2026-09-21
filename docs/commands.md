@@ -181,7 +181,8 @@ database it cannot model are named in a warning and left untouched,
 since they cannot be represented in the plan.
 
 `--save-remaining` is accepted and ignored; `remaining.yaml` is now
-always written when there is anything to put in it.
+always written when there is anything to put in it. It holds the only
+copy of those entries, so the `--ignore` file cannot hold it back.
 
 The exclude patterns are passed through to `pg_dump` (`--exclude-table`,
 `--exclude-schema`, `--exclude-extension`) and use the same pattern
@@ -268,7 +269,8 @@ exactly what changed in the database. Files for objects that no longer
 exist in the database are reported as warnings and left in place;
 `--prune` deletes them instead (confined to the directories `pull`
 manages — `dml/` and other project content is never touched). Paths
-listed in the `--ignore` file are neither rewritten nor pruned. Note
+listed in the `--ignore` file are neither rewritten nor pruned, except
+`remaining.yaml`, which the file cannot hold back. Note
 that overloaded function files are numbered in dump order
 (`name.yaml`, `name_1.yaml`, …), so adding or removing an overload can
 renumber a sibling's file.

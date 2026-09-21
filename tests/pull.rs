@@ -424,6 +424,29 @@ fn allow_unsupported_accepts_an_incomplete_project() {
 }
 
 #[test]
+fn ignore_file_cannot_suppress_remaining_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let archive = dir.path().join("fixtures.dump");
+    archive_with_policy(&archive);
+    let ignore = dir.path().join("ignore.txt");
+    std::fs::write(&ignore, "remaining.yaml\n").unwrap();
+    let dest = dir.path().join("project");
+    pull::pull(&pull_args_with(
+        &archive,
+        &dest,
+        &["--allow-unsupported", "--ignore", ignore.to_str().unwrap()],
+    ))
+    .expect("--allow-unsupported must downgrade the failure to a warning");
+    let remaining =
+        std::fs::read_to_string(dest.join("remaining.yaml")).unwrap();
+    assert!(
+        remaining.contains("users_own_rows"),
+        "--ignore must not hold back the only copy of the entry: \
+         {remaining}"
+    );
+}
+
+#[test]
 fn fully_modeled_archive_writes_no_remaining_file() {
     let dir = tempfile::tempdir().unwrap();
     let archive = dir.path().join("fixtures.dump");

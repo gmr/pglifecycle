@@ -177,9 +177,9 @@ fn filtered_out(dir: &str, relative: &Path, args: &cli::Pull) -> bool {
     false
 }
 
-/// YAML files on disk under the managed directories (plus the
-/// root-level `remaining.yaml`) that the render did not produce and
-/// the ignore file does not cover
+/// YAML files on disk under the managed directories that the render
+/// did not produce and the ignore file does not cover, plus the
+/// root-level `remaining.yaml`, which the ignore file cannot hold back
 fn stale_files(
     root: &Path,
     files: &BTreeMap<PathBuf, String>,
@@ -188,10 +188,7 @@ fn stale_files(
 ) -> Result<Vec<PathBuf>, String> {
     let mut stale = Vec::new();
     let remaining = PathBuf::from(REMAINING_FILE);
-    if root.join(&remaining).is_file()
-        && !files.contains_key(&remaining)
-        && !ignore.contains(REMAINING_FILE)
-    {
+    if root.join(&remaining).is_file() && !files.contains_key(&remaining) {
         stale.push(remaining);
     }
     let roles_extracted = roles_extracted(args);
