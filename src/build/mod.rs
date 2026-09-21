@@ -52,6 +52,22 @@
 //!     the name (`f() (a, b)`), which does not parse. No
 //!     test-project trigger takes arguments, so this one has no
 //!     parity entry to exclude.
+//! 17. FUNCTION, AGGREGATE and OPERATOR drop statements omit
+//!     `IF EXISTS`, as pg_dump's do. pg_restore builds the owner
+//!     statement for exactly those three types by stripping the
+//!     leading `DROP ` off the stored drop statement, because their
+//!     identity needs an argument signature, so the clause landed
+//!     mid-statement and `ALTER FUNCTION IF EXISTS f(...) OWNER TO r`
+//!     does not parse. Every owned function, aggregate and operator
+//!     failed to get its owner on restore. Other types are
+//!     unaffected: pg_restore builds their owner statement from the
+//!     descriptor, namespace and tag.
+//! 18. An entry with no drop statement stores none, where Python
+//!     stored a bare `";"`. pg_restore attempts an owner statement
+//!     only for an entry whose drop statement is non-empty, so the
+//!     bare `";"` on every COMMENT entry made a restore with owners
+//!     applied fail with `don't know how to set owner for object type
+//!     "COMMENT"`.
 
 mod acls;
 
@@ -209,7 +225,15 @@ impl Builder {
                 Some(tag),
                 Some(owner),
                 Some(&format!("{};\n", defn.join(" "))),
-                Some(&format!("{};\n", drop_stmt.join(" "))),
+                // an entry with nothing to drop stores nothing, not a
+                // bare ";". pg_restore only tries to set an owner when
+                // the drop statement is non-empty, and it cannot own a
+                // COMMENT, so a bare ";" made it fail with "don't know
+                // how to set owner for object type COMMENT" once
+                // owners were applied (deviation 18)
+                (!drop_stmt.is_empty())
+                    .then(|| format!("{};\n", drop_stmt.join(" ")))
+                    .as_deref(),
                 None,
                 dependencies,
             )
@@ -521,8 +545,11 @@ impl Builder {
         }
         create.push(format!("({})", options.join(", ")));
         let signature = format!("({})", args.join(", "));
+        // no IF EXISTS: pg_restore builds this type's owner
+        // statement by stripping the leading DROP off this one
+        // (deviation 17)
         let drop = vec![
-            "DROP AGGREGATE IF EXISTS".into(),
+            "DROP AGGREGATE".into(),
             self.item_name(item),
             signature.clone(),
         ];
@@ -845,7 +872,10 @@ impl Builder {
             "LANGUAGE".into(),
             d.language.clone().unwrap_or_default(),
         ];
-        let drop = vec!["DROP FUNCTION IF EXISTS".into(), qualified.clone()];
+        // no IF EXISTS: pg_restore builds this type's owner
+        // statement by stripping the leading DROP off this one
+        // (deviation 17)
+        let drop = vec!["DROP FUNCTION".into(), qualified.clone()];
         if let Some(transform_types) = &d.transform_types {
             let tts: Vec<String> = transform_types
                 .iter()
@@ -1067,11 +1097,11 @@ impl Builder {
             d.left_arg.as_deref().unwrap_or("NONE"),
             d.right_arg.as_deref().unwrap_or("NONE")
         );
-        let drop = vec![
-            "DROP OPERATOR IF EXISTS".into(),
-            name.clone(),
-            signature.clone(),
-        ];
+        // no IF EXISTS: pg_restore builds this type's owner
+        // statement by stripping the leading DROP off this one
+        // (deviation 17)
+        let drop =
+            vec!["DROP OPERATOR".into(), name.clone(), signature.clone()];
         // COMMENT ON OPERATOR needs the argument signature appended
         let comment_target = format!("{name} {signature}");
         self.add_item_with_comment_target(
@@ -3493,7 +3523,10 @@ mod tests {
             ),
             "unexpected CREATE: {create}"
         );
-        assert_eq!(drop, "DROP FUNCTION IF EXISTS test.bare_zero();\n");
+        // no IF EXISTS: pg_restore builds the owner statement for a
+        // FUNCTION by stripping the leading DROP off this one
+        // (deviation 17)
+        assert_eq!(drop, "DROP FUNCTION test.bare_zero();\n");
     }
 
     #[test]
