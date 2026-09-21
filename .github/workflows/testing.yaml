@@ -32,3 +32,72 @@ jobs:
 
       - name: Test
         run: cargo test
+
+  # The unit tests above cannot see the defects that matter most here:
+  # whether a pulled project still rebuilds the database it came from,
+  # and how much schema `pull` drops on the way. Only a real server
+  # answers that, so the gates in bin/ run against a service container
+  # on the same PostgreSQL version compose.yaml pins. They run as their
+  # own job because a gate failure means something different from a
+  # unit-test failure.
+  gates:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      PGHOST: localhost
+      PGPORT: 5432
+      PGUSER: postgres
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # postgresql-client-18 comes from the PGDG repository because the
+      # runner ships an older client and pg_dump refuses to dump a
+      # server newer than itself, so the client major has to match the
+      # service container. python3-yaml is for bin/coverage-gate, which
+      # reads the generated remaining.yaml; its defn entries are block
+      # scalars of arbitrary SQL, so line matching will not do.
+      - name: Install gate dependencies
+        run: |
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSL -o \
+            /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client-18 python3-yaml
+          pg_dump --version
+
+      # The bin/ scripts are called directly rather than through `just`:
+      # the recipes discover the compose.yaml container's mapped port,
+      # and here the service container is already on a fixed one.
+      - name: Coverage gate
+        run: bin/coverage-gate
+
+      - name: Round-trip gate
+        run: bin/round-trip
+
+      - name: Deploy gates
+        run: bin/deploy-gates
