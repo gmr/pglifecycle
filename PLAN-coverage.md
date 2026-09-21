@@ -321,6 +321,23 @@ up once it round-trips.
    two existing string fields cannot carry them. A merge whose table or
    column was never assembled must fail loudly, not fall through to
    `remaining`.
+6. Nothing records a dependency edge for `LIKE`. `CREATE TABLE x (LIKE
+   y ...)` needs `y` to exist first, exactly as `INHERITS` does, and
+   the build renders the clause inline (`src/build/mod.rs`, the
+   `like_table` arm), but `table_dependencies` in
+   `src/pull/writer.rs` reads only `parents`. Only a hand-authored
+   project reaches this: pg_dump expands a `LIKE` clause into explicit
+   columns, so `pull` never writes `like_table` even though
+   `src/ddl/table.rs:142` can parse one. Such a project has to declare
+   the edge itself, and without it the build is free to sort the
+   copied-from table after the table that copies it — measured on a
+   two-table project, the restore fails. Give `like_table` the same
+   edge `parents` gets. Unlike a foreign key this cannot cycle, since
+   a table cannot transitively copy itself, so the edge is safe. The
+   project load already treats `like_table` as backing a
+   table-to-table edge (`is_stale_foreign_key_edge`), so only the
+   producer is missing. Pre-existing, found while reviewing the
+   Phase 2 foreign-key work.
 
 ### Phase 4 — RLS and policies (~3 days)
 

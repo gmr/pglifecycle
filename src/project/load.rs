@@ -346,18 +346,20 @@ impl Loader {
     /// Whether `dep` is a table-to-table edge a project pulled before
     /// build deviation 14 recorded for a foreign key.
     ///
-    /// INHERITS is the only relation between two tables that orders
-    /// their creation, and the parent it names is in the dependent
-    /// table's own `parents`. A foreign key used to add an edge too,
-    /// so that an inline `FOREIGN KEY` clause would find its
-    /// referenced table. The build now emits every foreign key as its
-    /// own post-data entry, which already sorts after every table, and
-    /// the old edge became harmful: two tables that reference each
+    /// Two relations between tables order their creation, and both
+    /// name the other table in the dependent table's own definition:
+    /// INHERITS through `parents`, and LIKE through `like_table`. An
+    /// edge either of those backs is kept. A foreign key used to add
+    /// an edge too, so that an inline `FOREIGN KEY` clause would find
+    /// its referenced table. The build now emits every foreign key as
+    /// its own post-data entry, which already sorts after every table,
+    /// and the old edge became harmful: two tables that reference each
     /// other make it a cycle, and libpgdump breaks a cycle by hoisting
     /// its members ahead of everything else in the archive, including
-    /// the CREATE SCHEMA they need. Such a project builds an archive
-    /// that no longer restores, so drop the edge instead of keeping
-    /// faith with it, and name it so the operator knows to pull again.
+    /// the CREATE SCHEMA they need (gmr/libpgdump#14). Such a project
+    /// builds an archive that no longer restores, so drop the edge
+    /// instead of keeping faith with it, and name it so the operator
+    /// knows to pull again.
     fn is_stale_foreign_key_edge(&self, dep: &CachedDependency) -> bool {
         if dep.parent_desc != ObjectType::Table {
             return false;
@@ -366,12 +368,21 @@ impl Loader {
         let Definition::Table(table) = &item.definition else {
             return false;
         };
-        let inherits = table.parents.iter().flatten().any(|parent| {
-            let (namespace, tag) = split_name(parent);
+        let names_the_parent = |name: &str| {
+            let (namespace, tag) = split_name(name);
             tag == dep.parent_tag
                 && (namespace == dep.parent_namespace || namespace.is_empty())
-        });
-        if inherits {
+        };
+        let ordered = table
+            .parents
+            .iter()
+            .flatten()
+            .any(|parent| names_the_parent(parent))
+            || table
+                .like_table
+                .as_ref()
+                .is_some_and(|like| names_the_parent(&like.name));
+        if ordered {
             return false;
         }
         log::warn!(
@@ -689,42 +700,68 @@ mod tests {
     /// A project pulled before build deviation 14 records a
     /// table-to-table edge for every foreign key. Keeping it would
     /// recreate the cycle that hoists both tables to the front of the
-    /// archive, so the load drops it and keeps only INHERITS.
+    /// archive, so the load drops it. INHERITS and LIKE both order
+    /// table creation, so an edge either one backs is kept.
     #[test]
-    fn stale_foreign_key_edge_is_dropped_and_inherits_kept() {
+    fn stale_foreign_key_edge_is_dropped_and_ordering_kept() {
         let mut loader = Loader::new(Path::new("."));
-        for (name, parents) in
-            [("parent", None), ("child", Some(vec!["test.parent"]))]
-        {
+        // the foreign-key target, an object in its own right so an
+        // edge on it would resolve and be visible if it were kept
+        loader.add_definition(
+            ObjectType::Table,
+            json!({
+                "name": "other",
+                "schema": "test",
+                "owner": "postgres",
+                "columns": [{"name": "id", "data_type": "integer"}],
+            }),
+            None,
+        );
+        // "test.other" stands for the foreign-key edge, which nothing
+        // in any of these definitions backs
+        let deps = json!({"tables": ["test.other", "test.parent"]});
+        for (name, ordering) in [
+            ("parent", None),
+            ("child", Some(json!({"parents": ["test.parent"]}))),
+            ("copy", Some(json!({"like_table": {"name": "test.parent"}}))),
+        ] {
             let mut entry = json!({
                 "name": name,
                 "schema": "test",
                 "owner": "postgres",
-                "columns": [{"name": "id", "data_type": "integer"}],
-                // "test.other" stands for the foreign-key edge, which
-                // no `parents` entry backs
-                "dependencies": {"tables": ["test.other", "test.parent"]},
+                "dependencies": deps,
             });
-            if let Some(parents) = parents {
-                entry["parents"] = json!(parents);
+            match ordering {
+                // a LIKE table copies its columns, so it declares none
+                Some(Value::Object(fields)) => {
+                    for (key, value) in fields {
+                        entry[key] = value;
+                    }
+                }
+                _ => {
+                    entry["columns"] =
+                        json!([{"name": "id", "data_type": "integer"}]);
+                }
             }
             loader.cache_and_remove_dependencies(&mut entry);
             loader.add_definition(ObjectType::Table, entry, None);
         }
         loader.index.insert(
-            index_key(ObjectType::Table, Some("test"), "parent"),
+            index_key(ObjectType::Table, Some("test"), "other"),
             vec![0],
         );
         loader.index.insert(
-            index_key(ObjectType::Table, Some("test"), "other"),
+            index_key(ObjectType::Table, Some("test"), "parent"),
             vec![1],
         );
         loader.apply_cached_dependencies().unwrap();
 
-        // `parent` inherits nothing, so both of its edges are stale
-        assert!(loader.project.inventory[0].dependencies.is_empty());
+        // `parent` neither inherits nor copies, so both edges are stale
+        assert!(loader.project.inventory[1].dependencies.is_empty());
         // `child` keeps only the INHERITS edge on `test.parent`
-        assert_eq!(loader.project.inventory[1].dependencies, [0].into());
+        assert_eq!(loader.project.inventory[2].dependencies, [1].into());
+        // `copy` keeps only the LIKE edge on `test.parent`
+        assert_eq!(loader.project.inventory[3].dependencies, [1].into());
     }
 
     /// Overloads are distinct objects: pull writes them to `f.yaml`
