@@ -215,12 +215,14 @@ sufficient, and a second assertion pass over nine catalogs would add
 maintenance for no coverage. Revisit if a future defect turns out to
 dump identically on both sides.
 
-**Known gap:** GitHub Actions runs `cargo fmt --check`, `clippy` and
-`cargo test` only — no PostgreSQL service, so no gate runs in CI. That
-is why these defects survived: the checks that would catch them are
-opt-in and local. Adding a `postgres:18` service to
-`.github/workflows/testing.yaml` is the single highest-value change
-left in this plan and is not yet done.
+**The gates now run in CI.** They previously did not: GitHub Actions
+ran `cargo fmt --check`, `clippy` and `cargo test` only, with no
+PostgreSQL anywhere, which is why these defects survived — the checks
+that catch them were opt-in and local. A `gates` job in
+`.github/workflows/testing.yaml` runs all three scripts against a
+`postgres:18` service container, with the PGDG
+`postgresql-client-18` package because pg_dump refuses to dump a
+server newer than itself.
 
 ### Phase 2 — Output that does not restore (~1 day)
 

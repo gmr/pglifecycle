@@ -92,8 +92,9 @@ Module headers reference the Python file each replaces ("ports X.py").
 Integration tests live in `tests/`. The database gates need
 PostgreSQL: they bring up `compose.yaml` (Postgres 18) on a
 dynamically-mapped host port and run the scripts in `bin/`. GitHub
-Actions runs only `cargo fmt --check`, `clippy` and `cargo test`, so
-the gates are a local step before opening a pull request.
+Actions runs the same three scripts in a `gates` job against a
+`postgres:18` service container, so a gate failure blocks a pull
+request; run them locally first.
 
 ```bash
 just db-up          # start the container, wait until healthy
