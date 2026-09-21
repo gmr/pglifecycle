@@ -11,13 +11,17 @@
 -- generated columns) do not belong here: they never reach
 -- remaining.yaml. They go into fixtures/schema.sql with their fix,
 -- where the round-trip gate's schema diff is the assertion.
+--
+-- SECURITY LABEL is also absent: it needs a preloaded label provider,
+-- and no provider ships with the standard server, so the statement
+-- fails on the gate's cluster.
 
 CREATE EXTENSION btree_gist;
 
 CREATE SCHEMA unsupported;
 SET search_path = unsupported, public, pg_catalog;
 
-CREATE ROLE coverage_reader;
+CREATE ROLE pglifecycle_coverage_reader;
 
 -- Row level security: the enable/force flags and the policies
 CREATE TABLE documents (
@@ -27,7 +31,8 @@ CREATE TABLE documents (
 );
 ALTER TABLE documents ENABLE ROW LEVEL SECURITY;
 ALTER TABLE documents FORCE ROW LEVEL SECURITY;
-CREATE POLICY documents_tenant ON documents FOR ALL TO coverage_reader
+CREATE POLICY documents_tenant ON documents FOR ALL
+    TO pglifecycle_coverage_reader
     USING (tenant = CURRENT_USER) WITH CHECK (tenant = CURRENT_USER);
 CREATE POLICY documents_read ON documents AS RESTRICTIVE FOR SELECT
     TO PUBLIC USING (true);
@@ -61,7 +66,7 @@ CREATE RULE append_only_no_delete AS
 
 -- Default privileges
 ALTER DEFAULT PRIVILEGES IN SCHEMA unsupported
-    GRANT SELECT ON TABLES TO coverage_reader;
+    GRANT SELECT ON TABLES TO pglifecycle_coverage_reader;
 
 -- Object types `build` and `models` already support, which only `pull`
 -- cannot parse

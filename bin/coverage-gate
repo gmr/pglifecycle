@@ -19,7 +19,12 @@ PGPORT="${PGPORT:-5432}"
 PGUSER="${PGUSER:-postgres}"
 export PGHOST PGPORT PGUSER
 
+# Scratch objects the gate drops and recreates on each run. Roles are
+# cluster-global, so the role name carries the tool prefix to keep the
+# gate from dropping a role the cluster already had. It must match
+# fixtures/unsupported.sql.
 SOURCE_DB=coverage_source
+READER_ROLE=pglifecycle_coverage_reader
 EXPECTED=fixtures/unsupported-descs.txt
 WORKDIR="$(mktemp -d)"
 
@@ -27,7 +32,7 @@ cleanup() {
     rm -rf "${WORKDIR}"
     psql -d postgres -q -c "DROP DATABASE IF EXISTS ${SOURCE_DB}" \
         >/dev/null 2>&1 || true
-    psql -d postgres -q -c "DROP ROLE IF EXISTS coverage_reader" \
+    psql -d postgres -q -c "DROP ROLE IF EXISTS ${READER_ROLE}" \
         >/dev/null 2>&1 || true
 }
 
@@ -38,7 +43,7 @@ cargo build --quiet
 
 echo "==> Creating ${SOURCE_DB} from fixtures/unsupported.sql"
 psql -d postgres -q -c "DROP DATABASE IF EXISTS ${SOURCE_DB}"
-psql -d postgres -q -c "DROP ROLE IF EXISTS coverage_reader"
+psql -d postgres -q -c "DROP ROLE IF EXISTS ${READER_ROLE}"
 psql -d postgres -q -c "CREATE DATABASE ${SOURCE_DB}"
 psql -d "${SOURCE_DB}" -q -v ON_ERROR_STOP=1 -f fixtures/unsupported.sql
 

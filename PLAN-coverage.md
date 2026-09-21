@@ -179,9 +179,9 @@ without a new field in the project schema.
 
 ### Phase 1 — Measure the loss — **DONE**
 
-`fixtures/unsupported.sql` holds every construct from section B and C,
-and `bin/coverage-gate` (`just coverage-gate`) pulls it and compares
-the entries that reach `remaining.yaml` against
+`fixtures/unsupported.sql` holds every construct from section B and C
+except `SECURITY LABEL`, and `bin/coverage-gate` (`just coverage-gate`)
+pulls it and compares the entries that reach `remaining.yaml` against
 `fixtures/unsupported-descs.txt`, currently 18 lines. The gate fails
 whichever way that list changes: a new gap has to be modeled or
 recorded, and a fix has to shrink the list and move the construct into
@@ -191,7 +191,14 @@ the tool drops.
 The gate also asserts that `pull` *fails* on that fixture without
 `--allow-unsupported`, which keeps Phase 0 honest.
 
-**Two changes from the plan above.**
+**Three changes from the plan above.**
+
+*`SECURITY LABEL` cannot be in the fixture.* Verified against 18.4:
+`SECURITY LABEL ON TABLE t IS 'classified'` fails with "no security
+label providers have been loaded" unless the cluster preloads a
+provider, and no provider ships with the standard server. The gate
+would need a custom image to cover it, so Phase 6.7 has to add its own
+coverage instead.
 
 *Fixtures cannot be merged red.* The plan said to add every construct
 and let the gates go red first. That works locally but not as a commit:
@@ -430,10 +437,12 @@ Two recommendations declined:
    and `FOREIGN KEY` accept it, so modeling the attribute more broadly
    would let a project express a state PostgreSQL cannot hold.
 
-Partially adopted: catalog assertions are added **alongside** the
-existing `pg_dump` text diff rather than replacing it. The text diff is
-cheaper, broader, and does catch a dropped object; the catalog pass
-earns its place on the narrower set where two schemas dump identically.
+Declined: catalog assertions alongside the existing `pg_dump` text
+diff. The text diff is cheaper, broader, and does catch a dropped
+object, and every defect in the A list dumps differently on the two
+sides (see "No catalog assertions" in Phase 1), so the narrower set the
+catalog pass was to cover is empty. Revisit if a future defect turns
+out to dump identically on both sides.
 
 ## Open decisions for the user
 
