@@ -69,6 +69,17 @@ properties:
           The expression used to generate the column. Mutually exclusive with the
           sequence column.
         type: string
+      kind:
+        title: Generated Column Kind
+        description: >
+          Whether the expression is materialized on write (stored) or evaluated
+          on read (virtual). PostgreSQL 18 makes virtual the default and pg_dump
+          omits the keyword for a virtual column, so the kind is recorded rather
+          than assumed. An absent value means stored, which is what project
+          files written before this attribute existed have always built.
+        enum:
+          - stored
+          - virtual
       sequence:
         title: Sequence Name
         description: >
@@ -89,7 +100,14 @@ properties:
       - required: [expression]
         not: {required: [sequence, sequence_behavior]}
       - required: [sequence]
-        not: {required: [expression]}
+        # `kind` selects how an expression is materialized, so an
+        # identity column has no use for it and the build ignores it.
+        # Reject the pair instead of accepting a value that does
+        # nothing.
+        not:
+          anyOf:
+            - required: [expression]
+            - required: [kind]
     additionalProperties: false
   comment:
     title: Comment

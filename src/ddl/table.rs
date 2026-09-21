@@ -10,8 +10,8 @@ use crate::ddl::{
 };
 use crate::models::{
     CheckConstraint, Column, ColumnGenerated, ColumnNotNull,
-    ConstraintColumns, ForeignKey, ForeignKeyReference, Index, IndexColumn,
-    LikeTable, NotNullConstraint, Table, TablePartition,
+    ConstraintColumns, ForeignKey, ForeignKeyReference, GeneratedKind, Index,
+    IndexColumn, LikeTable, NotNullConstraint, Table, TablePartition,
     TablePartitionBehavior, TablePartitionColumn,
 };
 use crate::utils::quote_ident;
@@ -227,6 +227,7 @@ pub(crate) fn column(node: &Node, src: &str) -> Column {
         } else if constraint.has("kw_identity") {
             column.generated = Some(ColumnGenerated {
                 expression: None,
+                kind: None,
                 sequence: None,
                 sequence_behavior: Some(
                     if constraint.has("kw_always") {
@@ -240,8 +241,16 @@ pub(crate) fn column(node: &Node, src: &str) -> Column {
         } else if constraint.has("kw_generated")
             && let Some(expr) = constraint.find("a_expr")
         {
+            // PostgreSQL 18 made VIRTUAL the default, so pg_dump
+            // writes the keyword only for a stored column; an absent
+            // one means virtual rather than unknown
             column.generated = Some(ColumnGenerated {
                 expression: Some(expr.text(src).to_string()),
+                kind: Some(if constraint.has("kw_stored") {
+                    GeneratedKind::Stored
+                } else {
+                    GeneratedKind::Virtual
+                }),
                 sequence: None,
                 sequence_behavior: None,
             });
@@ -932,11 +941,14 @@ mod tests {
             columns[0].generated,
             Some(ColumnGenerated {
                 expression: None,
+                kind: None,
                 sequence: None,
                 sequence_behavior: Some("ALWAYS".into()),
             })
         );
         assert_eq!(columns[1].check_constraint, Some("total > 0".into()));
+        // an identity column records no kind: the field describes an
+        // expression's materialization, and there is no expression
         assert_eq!(
             table.primary_key,
             Some(ConstraintColumns::Columns(vec!["id".into()]))

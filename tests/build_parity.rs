@@ -114,12 +114,10 @@ const CORRECTED: &[(&str, &str, &str, &str)] = &[
         "users_unique_email",
         "CREATE UNIQUE INDEX users_unique_email ON test.users",
     ),
-    (
-        "TABLE",
-        "test",
-        "addresses",
-        "PRIMARY KEY (id), FOREIGN KEY (user_id) REFERENCES test.users (id) ON DELETE CASCADE ON UPDATE CASCADE",
-    ),
+    // deviation 14 moved the foreign key out of CREATE TABLE, so only
+    // the recovered primary key is inline here; the foreign key is
+    // asserted as its own entry in NEW_FK_CONSTRAINTS
+    ("TABLE", "test", "addresses", "PRIMARY KEY (id)"),
     (
         "TABLE",
         "test",
@@ -297,6 +295,9 @@ fn matches_python_build_output() {
             // comparison; asserted separately below. ACL entries are
             // new in the Rust build (Python never emitted them)
             key.0 != "ACL"
+                // deviation 14: Python rendered foreign keys inline in
+                // CREATE TABLE, so it emitted no FK CONSTRAINT entries
+                && key.0 != "FK CONSTRAINT"
                 && !CORRECTED
                     .iter()
                     .any(|(d, n, t, _)| &entry_key(d, n, t) == key)
@@ -350,6 +351,28 @@ fn matches_python_build_output() {
         assert!(defn.contains(comment), "{key:?} missing comment text");
     }
 
+    // deviation 14: foreign keys are their own entries now, named and
+    // ordered after every table so a circular reference can restore
+    let fk = rust_tuples
+        .iter()
+        .find(|(key, ..)| key.0 == "FK CONSTRAINT")
+        .expect("missing FK CONSTRAINT entry");
+    assert_eq!(
+        fk.0,
+        entry_key("FK CONSTRAINT", "test", "addresses addresses_user_id")
+    );
+    assert_eq!(
+        fk.2,
+        "ALTER TABLE ONLY test.addresses ADD CONSTRAINT addresses_user_id \
+         FOREIGN KEY (user_id) REFERENCES test.users (id) ON DELETE CASCADE \
+         ON UPDATE CASCADE;\n"
+    );
+    assert_eq!(
+        fk.3,
+        "ALTER TABLE ONLY test.addresses DROP CONSTRAINT IF EXISTS \
+         addresses_user_id;\n"
+    );
+
     // the developers group's grant emits an ACL entry, which the
     // Python build never did
     let acl = rust_tuples
@@ -364,8 +387,9 @@ fn matches_python_build_output() {
     );
 
     // 60 Python entries + 4 recovered text search comments + 12 new
-    // column comments + 1 ACL - 1 create: false role
-    assert_eq!(dump.entries().len(), 76);
+    // column comments + 1 ACL + 1 FK CONSTRAINT (deviation 14)
+    // - 1 create: false role
+    assert_eq!(dump.entries().len(), 77);
 }
 
 #[test]
@@ -409,15 +433,19 @@ fn records_inventory_dependency_edges() {
         })
         .collect();
     edges.sort();
-    // the same 7 inventory edges the loader resolves (Python recorded
+    // the same 7 inventory edges the loader resolves, plus the edge
+    // from the FK CONSTRAINT entry to its own table (Python recorded
     // no dependency edges at all; libpgdump's weighted toposort uses
-    // these to order the archive)
+    // these to order the archive). A foreign key needs no edge to the
+    // table it references: FK CONSTRAINT is a post-data desc, so it
+    // already sorts after every table.
     assert_eq!(
         edges,
         vec![
             "AGGREGATE:test_agg -> \
              FUNCTION:test_aggregate(integer, integer)",
             "DOMAIN:bcp47_locale -> EXTENSION:citext",
+            "FK CONSTRAINT:addresses addresses_user_id -> TABLE:addresses",
             "MATERIALIZED VIEW:user_addresses -> \
              TABLE:addresses, TABLE:users",
             "SERVER:localhost -> EXTENSION:postgres_fdw",
