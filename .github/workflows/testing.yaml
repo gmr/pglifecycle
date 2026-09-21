@@ -33,6 +33,32 @@ jobs:
       - name: Test
         run: cargo test
 
+  # The jobs above and below build on whatever stable is on the day, so
+  # they prove the newest compiler works and say nothing about the
+  # floor Cargo.toml claims. This one pins the declared rust-version,
+  # so raising it becomes a deliberate edit rather than something that
+  # drifts true and then quietly false. `cargo check --all-targets`
+  # is enough: the question is whether the crate compiles on 1.96, and
+  # the other jobs already run the tests.
+  msrv:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Install the minimum supported Rust toolchain
+        uses: dtolnay/rust-toolchain@1.96
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check
+        run: cargo check --all-targets
+
   # The unit tests above cannot see the defects that matter most here:
   # whether a pulled project still rebuilds the database it came from,
   # and how much schema `pull` drops on the way. Only a real server
