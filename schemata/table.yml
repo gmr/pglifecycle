@@ -168,6 +168,12 @@ properties:
           type: string
       - type: object
         properties:
+          name:
+            title: Name
+            description: >
+              The constraint name, kept only when it is not the one PostgreSQL
+              generates.
+            type: string
           columns:
             title: Columns
             description: The list of columns that provide the uniqueness
@@ -181,6 +187,14 @@ properties:
             items:
               title: Column Name
               type: string
+          without_overlaps:
+            title: Without Overlaps
+            description: >
+              Makes the constraint temporal (PostgreSQL 18+). WITHOUT OVERLAPS
+              applies to the last column, which must be a range or multirange:
+              rows may share the other column values as long as their ranges do
+              not overlap.
+            type: boolean
         required:
           - columns
         additionalProperties: false
@@ -281,6 +295,12 @@ properties:
         - title: Unique Constraint
           type: object
           properties:
+            name:
+              title: Name
+              description: >
+                The constraint name, kept only when it is not the one PostgreSQL
+                generates.
+              type: string
             columns:
               title: Columns
               description: The list of columns that provide the uniqueness
@@ -293,6 +313,20 @@ properties:
               items:
                 title: Column Name
                 type: string
+            nulls_not_distinct:
+              title: Nulls Not Distinct
+              description: >
+                Renders UNIQUE NULLS NOT DISTINCT (PostgreSQL 15+), where one
+                null equals another, so at most one null row is allowed. Absent
+                means nulls are distinct, the default. PostgreSQL rejects the
+                clause on a primary key, whose columns cannot be null.
+              type: boolean
+            without_overlaps:
+              title: Without Overlaps
+              description: >
+                Makes the constraint temporal (PostgreSQL 18+). WITHOUT OVERLAPS
+                applies to the last column, which must be a range or multirange.
+              type: boolean
           required:
             - columns
           additionalProperties: false

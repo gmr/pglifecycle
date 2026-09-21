@@ -92,6 +92,12 @@ properties:
     title: Tablespace
     description: Specifies the tablespace to use when creating the index
     type: string
+  nulls_not_distinct:
+    title: Nulls Not Distinct
+    description: >
+      Renders NULLS NOT DISTINCT on a unique index (PostgreSQL 15+), where one
+      null equals another. Absent means nulls are distinct, the default.
+    type: boolean
   where:
     title: Where
     description: Use to provide an expression for creating a partial index

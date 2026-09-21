@@ -38,6 +38,12 @@ properties:
           title: Column Name
           type: string
         minItems: 1
+      period:
+        title: Period Column
+        description: >
+          The range column named after PERIOD in a temporal foreign key
+          (PostgreSQL 18+), on the referenced side.
+        type: string
     additionalProperties: false
     required:
       - name
@@ -84,6 +90,19 @@ properties:
     type: boolean
   initially_deferred:
     title: Initial Constraint Check Behavior
+    type: boolean
+  period:
+    title: Period Column
+    description: >
+      The range column named after PERIOD in a temporal foreign key
+      (PostgreSQL 18+), on the referencing side. Both sides must name one.
+    type: string
+  enforced:
+    title: Enforced
+    description: >
+      false renders NOT ENFORCED (PostgreSQL 18+), which stops the constraint
+      being checked. PostgreSQL records a not-enforced constraint as not
+      validated as well. Absent means enforced, the default.
     type: boolean
 additionalProperties: false
 oneOf:

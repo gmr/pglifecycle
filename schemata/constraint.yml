@@ -9,3 +9,10 @@ properties:
     title: Name
     description: The constraint name
     type: string
+  enforced:
+    title: Enforced
+    description: >
+      false renders NOT ENFORCED (PostgreSQL 18+), which stops the constraint
+      being checked. PostgreSQL records a not-enforced constraint as not
+      validated as well. Absent means enforced, the default.
+    type: boolean

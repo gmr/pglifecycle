@@ -163,7 +163,9 @@ pub struct RoleDef {
 pub enum TableConstraint {
     PrimaryKey(models::ConstraintColumns),
     Unique(models::ConstraintColumns),
-    Check(String),
+    /// A CHECK expression and its `ENFORCED` state, where `None` is
+    /// the default, enforced
+    Check(String, Option<bool>),
     ForeignKey(models::ForeignKey),
     /// `NOT NULL <column>` as a table constraint (PostgreSQL 18+),
     /// which pg_dump emits only for a column the table inherits rather

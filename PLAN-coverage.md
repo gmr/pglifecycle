@@ -1,6 +1,7 @@
 # Coverage plan: silent schema loss, RLS, and PostgreSQL 18
 
-Status: Phases 0, 1 and 2 complete. Phases 3-8 proposed.
+Status: Phases 0, 1 and 2 complete, Phase 3 partly. Phases 4-8
+proposed.
 Written 2026-09-21.
 
 Every claim below was verified against PostgreSQL 18.4 (the version
@@ -287,7 +288,24 @@ takes arguments.
    because of it — see Phase 8. This also restores the constraint
    name, which the inline form dropped.
 
-### Phase 3 — Silent semantic corruption (~2 days)
+### Phase 3 — Silent semantic corruption (~2 days, partly done)
+
+**Done:** A1 (`enforced`), A4 (`nulls_not_distinct`), A5
+(`without_overlaps`) and A6 (`period`), plus constraint names, which
+the fixture for A5 exposed as a separate loss. **Left:** A2 and A3
+(`not_valid`), and identity columns.
+
+`not_valid` is split out because it cannot be tested the way the
+others can. Verified against 18.4: an inline `CHECK ... NOT VALID` in
+`CREATE TABLE` is *silently validated* (`convalidated = t`), and
+pg_dump correctly omits the clause, so a schema-only fixture cannot
+carry one. A real `NOT VALID` constraint needs rows that violate it,
+which makes it a different kind of fixture change. Also verified: an
+inline `NOT NULL NOT VALID` and a column-level `REFERENCES ... NOT
+VALID` are both syntax errors, so `not_valid` belongs only on the
+table-level forms — `CheckConstraint`, `ForeignKey` and
+`NotNullConstraint`, and not on `ColumnNotNull`.
+
 
 One commit per row. Each touches `src/ddl/table.rs`,
 `src/models/table.rs`, `src/build/mod.rs`, the matching `schemata/*.yml`

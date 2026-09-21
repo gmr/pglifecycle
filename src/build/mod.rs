@@ -2359,6 +2359,11 @@ pub(crate) fn render_index(index: &Index, table_name: &str) -> Vec<String> {
     if let Some(include) = &index.include {
         create.push(format!("INCLUDE ({})", include.join(", ")));
     }
+    // pg_dump writes this after the column list and any INCLUDE, and
+    // before the storage parameters
+    if index.nulls_not_distinct == Some(true) {
+        create.push("NULLS NOT DISTINCT".into());
+    }
     if let Some(storage_parameters) = &index.storage_parameters {
         create.push("WITH".into());
         let params: Vec<String> = storage_parameters
@@ -2453,11 +2458,26 @@ pub(crate) fn render_trigger(
 /// FOREIGN KEY clause rendering, shared by the inline table form and
 /// deploy's `ADD CONSTRAINT`
 pub(crate) fn render_foreign_key(fk: &crate::models::ForeignKey) -> String {
+    // a temporal foreign key names its range column after PERIOD, and
+    // the two sides must have the same arity
+    let with_period = |columns: &[String], period: Option<&String>| {
+        let mut parts = columns.to_vec();
+        if let Some(period) = period {
+            parts.push(format!("PERIOD {period}"));
+        }
+        parts.join(", ")
+    };
     let mut fk_sql = vec![
-        format!("FOREIGN KEY ({})", fk.columns.join(", ")),
+        format!(
+            "FOREIGN KEY ({})",
+            with_period(&fk.columns, fk.period.as_ref())
+        ),
         "REFERENCES".into(),
         fk.references.name.clone(),
-        format!("({})", fk.references.columns.join(", ")),
+        format!(
+            "({})",
+            with_period(&fk.references.columns, fk.references.period.as_ref())
+        ),
     ];
     if let Some(match_type) = &fk.match_type {
         fk_sql.push("MATCH".into());
@@ -2481,6 +2501,9 @@ pub(crate) fn render_foreign_key(fk: &crate::models::ForeignKey) -> String {
     if fk.initially_deferred == Some(true) {
         fk_sql.push("INITIALLY DEFERRED".into());
     }
+    if fk.enforced == Some(false) {
+        fk_sql.push("NOT ENFORCED".into());
+    }
     fk_sql.join(" ")
 }
 
@@ -2490,15 +2513,52 @@ pub(crate) fn render_constraint(
     constraint_type: &str,
     constraint: &ConstraintColumns,
 ) -> String {
-    let (columns, include): (Vec<String>, Option<&Vec<String>>) =
+    type Parts<'a> = (
+        Option<&'a String>,
+        Vec<String>,
+        Option<&'a Vec<String>>,
+        bool,
+        bool,
+    );
+    let (name, columns, include, nulls_not_distinct, without_overlaps): Parts =
         match constraint {
-            ConstraintColumns::Name(name) => (vec![name.clone()], None),
-            ConstraintColumns::Columns(columns) => (columns.clone(), None),
-            ConstraintColumns::Detailed { columns, include } => {
-                (columns.clone(), include.as_ref())
+            // the bare-string form is a single column, not a name
+            ConstraintColumns::Name(column) => {
+                (None, vec![column.clone()], None, false, false)
             }
+            ConstraintColumns::Columns(columns) => {
+                (None, columns.clone(), None, false, false)
+            }
+            ConstraintColumns::Detailed {
+                name,
+                columns,
+                include,
+                nulls_not_distinct,
+                without_overlaps,
+            } => (
+                name.as_ref(),
+                columns.clone(),
+                include.as_ref(),
+                *nulls_not_distinct == Some(true),
+                *without_overlaps == Some(true),
+            ),
         };
-    let mut sql = vec![format!("{constraint_type} ({})", columns.join(", "))];
+    // WITHOUT OVERLAPS binds to the last column rather than to the
+    // constraint, so it goes inside the parentheses
+    let mut columns = columns;
+    if without_overlaps && let Some(last) = columns.last_mut() {
+        last.push_str(" WITHOUT OVERLAPS");
+    }
+    let keyword = if nulls_not_distinct {
+        format!("{constraint_type} NULLS NOT DISTINCT")
+    } else {
+        constraint_type.to_string()
+    };
+    let keyword = match name {
+        Some(name) => format!("CONSTRAINT {} {keyword}", quote_ident(name)),
+        None => keyword,
+    };
+    let mut sql = vec![format!("{keyword} ({})", columns.join(", "))];
     if let Some(include) = include {
         sql.push(format!("INCLUDE ({})", include.join(", ")));
     }
@@ -2546,10 +2606,12 @@ fn push_table_constraints(table: &Table, inner: &mut Vec<String>) {
         inner.push(sql);
     }
     for check in table.check_constraints.as_deref().unwrap_or_default() {
-        inner.push(format!(
-            "CONSTRAINT {} CHECK ({})",
-            check.name, check.expression
-        ));
+        let mut sql =
+            format!("CONSTRAINT {} CHECK ({})", check.name, check.expression);
+        if check.enforced == Some(false) {
+            sql.push_str(" NOT ENFORCED");
+        }
+        inner.push(sql);
     }
 }
 
@@ -2812,6 +2874,7 @@ mod tests {
         table.check_constraints = Some(vec![CheckConstraint {
             name: "orders_id_check".into(),
             expression: "id > 0".into(),
+            enforced: None,
         }]);
         assert_eq!(
             foreign_table_defn(&item),
@@ -2833,12 +2896,15 @@ mod tests {
             references: crate::models::ForeignKeyReference {
                 name: "test.customers".into(),
                 columns: vec!["id".into()],
+                period: None,
             },
             match_type: None,
             on_delete: Some("CASCADE".into()),
             on_update: None,
             deferrable: None,
             initially_deferred: None,
+            period: None,
+            enforced: None,
         }]);
         let item = table_item(1, table);
         // the CREATE TABLE carries no FOREIGN KEY clause; a circular
@@ -3121,6 +3187,7 @@ mod tests {
         table.check_constraints = Some(vec![CheckConstraint {
             name: "ck_positive".into(),
             expression: "qty > 0".into(),
+            enforced: None,
         }]);
         assert_eq!(
             table_defn(
