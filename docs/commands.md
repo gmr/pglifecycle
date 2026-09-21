@@ -147,12 +147,42 @@ pglifecycle pull [OPTIONS] DEST
 | `--prune` | With `--update`, delete files whose objects left the database |
 | `--gitkeep` | Create `.gitkeep` files in empty directories |
 | `--remove-empty-dirs` | Remove empty directories after generation |
-| `--save-remaining` | Save unprocessed dump entries to `remaining.yaml` |
+| `--allow-unsupported` | Accept a project that does not reproduce the source database (see below) |
 | `--error-file FILE` | Where to record failures and their DDL (default `pglifecycle-errors.log`) |
 | `--style STYLE` | libpgfmt style for view/materialized view queries and function bodies (default `pg_dump`) |
 | `-T, --exclude-table PATTERN` | Exclude tables/views/sequences matching `PATTERN` (repeatable; ignored with `--dump`) |
 | `-N, --exclude-schema PATTERN` | Exclude schemas matching `PATTERN` (repeatable; ignored with `--dump`) |
 | `--exclude-extension PATTERN` | Exclude extensions matching `PATTERN` (repeatable; ignored with `--dump`) |
+
+## Unsupported dump entries
+
+`pull` parses every schema entry in the archive into the object model.
+An entry it cannot model is written verbatim to `remaining.yaml` at the
+project root, and `pull` then **fails**, because the project it produced
+would not rebuild the database it came from — and nothing downstream
+(`build`, `deploy`, or a review of the YAML) could tell that something
+went missing.
+
+```console
+$ pglifecycle pull ./project -d mydb
+...
+error: 3 dump entries could not be modeled (ROW SECURITY, POLICY), so the
+generated project would not reproduce the source database.
+The entries were preserved in ./project/remaining.yaml; re-run with
+--allow-unsupported to accept the project as it is.
+```
+
+The project directory is written either way, so `remaining.yaml` is
+there to inspect. `--allow-unsupported` downgrades the failure to a
+warning for the cases where an incomplete project is what you want.
+
+`deploy` reports the same condition from the other side: objects in the
+database it cannot model are named in a warning and left untouched,
+since they cannot be represented in the plan.
+
+`--save-remaining` is accepted and ignored; `remaining.yaml` is now
+always written when there is anything to put in it. It holds the only
+copy of those entries, so the `--ignore` file cannot hold it back.
 
 The exclude patterns are passed through to `pg_dump` (`--exclude-table`,
 `--exclude-schema`, `--exclude-extension`) and use the same pattern
@@ -239,7 +269,8 @@ exactly what changed in the database. Files for objects that no longer
 exist in the database are reported as warnings and left in place;
 `--prune` deletes them instead (confined to the directories `pull`
 manages — `dml/` and other project content is never touched). Paths
-listed in the `--ignore` file are neither rewritten nor pruned. Note
+listed in the `--ignore` file are neither rewritten nor pruned, except
+`remaining.yaml`, which the file cannot hold back. Note
 that overloaded function files are numbered in dump order
 (`name.yaml`, `name_1.yaml`, …), so adding or removing an overload can
 renumber a sibling's file.

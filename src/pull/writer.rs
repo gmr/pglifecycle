@@ -90,7 +90,7 @@ pub fn render(
     }
     writer.write_user_mappings(assembly)?;
     writer.write_roles(assembly)?;
-    if args.save_remaining && !assembly.remaining.is_empty() {
+    if !assembly.remaining.is_empty() {
         let entries: Vec<Value> = assembly
             .remaining
             .iter()
@@ -103,10 +103,12 @@ pub fn render(
                 })
             })
             .collect();
-        writer.save_value(
-            PathBuf::from("remaining.yaml"),
+        // The entries exist only in this file, so an --ignore line
+        // for it would make the loss silent again
+        writer.save_required(
+            PathBuf::from(super::REMAINING_FILE),
             &Value::Array(entries),
-        )?;
+        );
     }
     Ok(writer.files)
 }
@@ -340,10 +342,15 @@ impl Writer {
             log::debug!("Skipping ignored file {key}");
             return Ok(());
         }
+        self.save_required(relative, value);
+        Ok(())
+    }
+
+    /// Write a file that `--ignore` cannot suppress
+    fn save_required(&mut self, relative: PathBuf, value: &Value) {
         let body = yamlio::dump(value);
         let header = self.mode_headers.then(|| kind(&relative));
         self.files.insert(relative, yamlio::document(header, &body));
-        Ok(())
     }
 }
 

@@ -367,3 +367,94 @@ fn pull_refuses_existing_destination() {
         "unexpected error: {error}"
     );
 }
+
+/// An archive carrying one entry `pull` cannot model (a policy), on top
+/// of the otherwise fully-supported fixture archive
+fn archive_with_policy(path: &std::path::Path) {
+    fixture_archive(path);
+    let mut dump = libpgdump::load(path).expect("load archive");
+    common::add(
+        &mut dump,
+        libpgdump::ObjectType::Policy,
+        "test",
+        "users users_own_rows",
+        "CREATE POLICY users_own_rows ON test.users USING (true);",
+    );
+    dump.save(path).expect("save archive");
+}
+
+#[test]
+fn unmodeled_entry_fails_pull_and_is_preserved() {
+    let dir = tempfile::tempdir().unwrap();
+    let archive = dir.path().join("fixtures.dump");
+    archive_with_policy(&archive);
+    let dest = dir.path().join("project");
+    let error = pull::pull(&pull_args(&archive, &dest)).unwrap_err();
+    assert!(
+        error.contains("could not be modeled") && error.contains("POLICY"),
+        "unexpected error: {error}"
+    );
+    assert!(
+        error.contains("--allow-unsupported"),
+        "the error must name the override: {error}"
+    );
+    // the project is written either way, so remaining.yaml is there to
+    // inspect even though the command failed
+    let remaining =
+        std::fs::read_to_string(dest.join("remaining.yaml")).unwrap();
+    assert!(
+        remaining.contains("users_own_rows"),
+        "remaining.yaml must carry the entry verbatim: {remaining}"
+    );
+}
+
+#[test]
+fn allow_unsupported_accepts_an_incomplete_project() {
+    let dir = tempfile::tempdir().unwrap();
+    let archive = dir.path().join("fixtures.dump");
+    archive_with_policy(&archive);
+    let dest = dir.path().join("project");
+    pull::pull(&pull_args_with(
+        &archive,
+        &dest,
+        &["--gitkeep", "--allow-unsupported"],
+    ))
+    .expect("--allow-unsupported must downgrade the failure to a warning");
+    assert!(dest.join("remaining.yaml").is_file());
+}
+
+#[test]
+fn ignore_file_cannot_suppress_remaining_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let archive = dir.path().join("fixtures.dump");
+    archive_with_policy(&archive);
+    let ignore = dir.path().join("ignore.txt");
+    std::fs::write(&ignore, "remaining.yaml\n").unwrap();
+    let dest = dir.path().join("project");
+    pull::pull(&pull_args_with(
+        &archive,
+        &dest,
+        &["--allow-unsupported", "--ignore", ignore.to_str().unwrap()],
+    ))
+    .expect("--allow-unsupported must downgrade the failure to a warning");
+    let remaining =
+        std::fs::read_to_string(dest.join("remaining.yaml")).unwrap();
+    assert!(
+        remaining.contains("users_own_rows"),
+        "--ignore must not hold back the only copy of the entry: \
+         {remaining}"
+    );
+}
+
+#[test]
+fn fully_modeled_archive_writes_no_remaining_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let archive = dir.path().join("fixtures.dump");
+    fixture_archive(&archive);
+    let dest = dir.path().join("project");
+    pull::pull(&pull_args(&archive, &dest)).expect("pull failed");
+    assert!(
+        !dest.join("remaining.yaml").exists(),
+        "remaining.yaml must not be written when nothing was left over"
+    );
+}
