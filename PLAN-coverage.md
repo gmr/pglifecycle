@@ -1,6 +1,6 @@
 # Coverage plan: silent schema loss, RLS, and PostgreSQL 18
 
-Status: Phases 0 and 1 complete. Phases 2-7 proposed.
+Status: Phases 0, 1 and 2 complete. Phases 3-8 proposed.
 Written 2026-09-21.
 
 Every claim below was verified against PostgreSQL 18.4 (the version
@@ -231,7 +231,7 @@ that catch them were opt-in and local. A `gates` job in
 `postgresql-client-18` package because pg_dump refuses to dump a
 server newer than itself.
 
-### Phase 2 — Output that does not restore (~2 days)
+### Phase 2 — Output that does not restore — **DONE** (except A6)
 
 3 of the 7 A-rows produce invalid or materially wrong archives, plus
 the two `build` defects Phase 8 found. Fix these first.
@@ -248,15 +248,44 @@ the two `build` defects Phase 8 found. Fix these first.
    `docs/project-format.md`.
 3. `period: Option<String>` on `ForeignKey` and `ForeignKeyReference`,
    with a `render_foreign_key` arm emitting `PERIOD x` on both sides
-   (A6).
+   (A6). **Not done** — it needs parser work in `src/ddl/table.rs`
+   rather than a rendering change, so it moves to Phase 3 with the
+   other constraint modifiers.
+
+Delivered: items 1, 2 and 4, plus two defects and one bug found while
+doing them. Pagila's restore went from 45 errors to 3, and the three
+that remain are the unmodeled `group_concat` aggregate, which is
+Phase 5. The round-trip gate now covers a circular foreign key, a
+stored and a virtual generated column, and a trigger whose function
+takes arguments.
+
+5. **Trigger function arguments rendered outside the parentheses**
+   (deviation 16, found by pagila). `render_trigger` emitted
+   `EXECUTE FUNCTION f() (a, b)` — the model's `function` carries the
+   empty argument list, and the arguments were appended after it as
+   bare words. Both halves were wrong: the arguments belong inside the
+   function's own parentheses, and a trigger argument is always a
+   string literal.
+6. **Foreign-key inventory edges made dependency cycles**, found when
+   the new fixture would not restore even with item 4 in place. `pull`
+   recorded a table → table edge for every foreign key so that an
+   inline `FOREIGN KEY` clause would find its target. With item 4 that
+   reason is gone, and the edge is actively harmful: two tables
+   referencing each other make it a cycle, and libpgdump breaks a
+   cycle by hoisting its members to the *front* of the archive, ahead
+   of the `CREATE SCHEMA` they need. `pull` now records the edge for
+   `INHERITS` only.
+
+   Worth noting for later phases: no dependency edge can fix an entry
+   in a cycle, because the cycle members are exactly the ones the
+   topological sort excludes. An attempt to give every entry an edge
+   to its schema was written and then reverted for that reason.
 4. Emit foreign keys as their own `ALTER TABLE ... ADD CONSTRAINT
    <name> FOREIGN KEY ...` entries after the tables, instead of inline
-   in `CREATE TABLE`. Inline FKs cannot express a circular reference,
-   and 8 of pagila's 23 tables fail to restore because of it — see
-   Phase 8. This also restores the constraint name, which the inline
-   form drops. Do this one first: it is a total restore failure on
-   ordinary schema, and it changes where item 3's `PERIOD` clause is
-   rendered.
+   in `CREATE TABLE` (deviation 14). Inline FKs cannot express a
+   circular reference, and 8 of pagila's 23 tables failed to restore
+   because of it — see Phase 8. This also restores the constraint
+   name, which the inline form dropped.
 
 ### Phase 3 — Silent semantic corruption (~2 days)
 
@@ -266,6 +295,9 @@ and `fixtures/schema.sql`. `deploy` needs no new comparison logic: the
 diff normalizes `Definition` to JSON, so a new optional field is picked
 up once it round-trips.
 
+0. `period: Option<String>` on `ForeignKey` and `ForeignKeyReference`
+   (A6), carried over from Phase 2: the rendering side is ready, the
+   `optionalPeriodName` and `opt_column_and_period_list` parse is not.
 1. `not_valid: Option<bool>` on `CheckConstraint`, `ForeignKey`,
    `NotNullConstraint`, `ColumnNotNull` (A2, A3).
 2. `enforced: Option<bool>` on `CheckConstraint` and `ForeignKey` only

@@ -120,10 +120,38 @@ pub struct ColumnNotNull {
 pub struct ColumnGenerated {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expression: Option<String>,
+    /// Whether the expression is materialized. PostgreSQL 18 made
+    /// `VIRTUAL` the default, and pg_dump omits the keyword for a
+    /// virtual column, so this has to be recorded rather than assumed.
+    ///
+    /// Absent means `Stored`: project files written before this field
+    /// existed carry no keyword and have always rendered `STORED`, so
+    /// reading absence as virtual would silently change what they
+    /// build. `pull` writes the field on every generated column.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<GeneratedKind>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sequence: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sequence_behavior: Option<String>,
+}
+
+/// How a generated column's expression is materialized
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GeneratedKind {
+    Stored,
+    Virtual,
+}
+
+impl GeneratedKind {
+    /// The keyword `CREATE TABLE` expects after the expression
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Stored => "STORED",
+            Self::Virtual => "VIRTUAL",
+        }
+    }
 }
 
 /// Represents a Check Constraint in a Table

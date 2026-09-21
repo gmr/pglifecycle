@@ -34,6 +34,24 @@
 //!     required parentheses, which does not parse). No test-project
 //!     object carries storage parameters, so this one has no parity
 //!     entry to exclude.
+//! 14. Foreign keys render as their own `FK CONSTRAINT` archive
+//!     entries rather than inline in `CREATE TABLE`, which is what
+//!     pg_dump does. Inline foreign keys cannot express a circular
+//!     reference, so a schema where two tables reference each other
+//!     could not be restored at all; the separate entry also keeps
+//!     the constraint name, which the inline form dropped
+//! 15. Generated column expressions render inside the parentheses the
+//!     grammar requires, `GENERATED ALWAYS AS (expr)`, with an
+//!     explicit STORED or VIRTUAL keyword (Python emitted
+//!     `GENERATED ALWAYS AS expr STORED`, which does not parse). No
+//!     test-project column is generated, so this one has no parity
+//!     entry to exclude.
+//! 16. Trigger function arguments render inside the function's own
+//!     parentheses and as string literals, `EXECUTE FUNCTION
+//!     f('a', 'b')`. Python appended a second, bare-word list after
+//!     the name (`f() (a, b)`), which does not parse. No
+//!     test-project trigger takes arguments, so this one has no
+//!     parity entry to exclude.
 
 mod acls;
 
@@ -1393,6 +1411,9 @@ impl Builder {
         for index in d.indexes.as_deref().unwrap_or_default() {
             self.dump_index(index, item, &d.schema, &d.owner)?;
         }
+        for fk in d.foreign_keys.as_deref().unwrap_or_default() {
+            self.dump_foreign_key(fk, item, d)?;
+        }
         for trigger in d.triggers.as_deref().unwrap_or_default() {
             self.dump_trigger(trigger, item, d)?;
         }
@@ -1509,6 +1530,49 @@ impl Builder {
                 None,
             )?;
         }
+        Ok(())
+    }
+
+    /// ALTER TABLE ... ADD CONSTRAINT ... FOREIGN KEY, as its own
+    /// `FK CONSTRAINT` archive entry (deviation 14).
+    ///
+    /// Rendering a foreign key inline in CREATE TABLE cannot express a
+    /// circular reference: two tables that reference each other have
+    /// no valid creation order, so whichever one the archive sorts
+    /// first names a table that does not exist yet and the restore
+    /// fails. pg_dump emits every foreign key this way for that
+    /// reason, and `FK CONSTRAINT` carries the highest post-data sort
+    /// priority, so the entry lands after every table without an
+    /// explicit edge to the table it references.
+    ///
+    /// The separate entry also keeps the constraint name, which the
+    /// inline form dropped.
+    fn dump_foreign_key(
+        &mut self,
+        fk: &crate::models::ForeignKey,
+        parent: &Item,
+        table: &Table,
+    ) -> Result<(), String> {
+        let qualified = self.item_name(parent);
+        let name = quote_ident(&fk.name);
+        let create = vec![format!(
+            "ALTER TABLE ONLY {qualified} ADD CONSTRAINT {name} {}",
+            render_foreign_key(fk)
+        )];
+        let drop = vec![format!(
+            "ALTER TABLE ONLY {qualified} DROP CONSTRAINT IF EXISTS {name}"
+        )];
+        let parent_dump_id = self.dump_id_map[&parent.id];
+        self.add_entry(
+            "FK CONSTRAINT",
+            &table.schema,
+            &format!("{} {}", table.name, fk.name),
+            &table.owner,
+            &create,
+            &drop,
+            &[parent_dump_id],
+            None,
+        )?;
         Ok(())
     }
 
@@ -2190,9 +2254,19 @@ pub(crate) fn render_table_column(column: &Column) -> String {
     }
     if let Some(generated) = &column.generated {
         if let Some(expression) = &generated.expression {
+            // the parentheses are required by the grammar, and the
+            // keyword is not optional here: omitting it would mean
+            // VIRTUAL on PostgreSQL 18 and STORED on 17, so the
+            // rendered DDL states which one it is (deviation 15)
             sql.push("GENERATED ALWAYS AS".into());
-            sql.push(expression.clone());
-            sql.push("STORED".into());
+            sql.push(format!("({expression})"));
+            sql.push(
+                generated
+                    .kind
+                    .unwrap_or(crate::models::GeneratedKind::Stored)
+                    .as_str()
+                    .into(),
+            );
         } else if generated.sequence.is_some() {
             sql.push("GENERATED".into());
             sql.push(generated.sequence_behavior.clone().unwrap_or_default());
@@ -2314,11 +2388,20 @@ pub(crate) fn render_trigger(
     }
     create.push("EXECUTE".into());
     create.push("FUNCTION".into());
-    create.push(trigger.function.clone().unwrap_or_default());
-    if let Some(arguments) = &trigger.arguments {
-        let args: Vec<String> = arguments.iter().map(raw_value).collect();
-        create.push(format!("({})", args.join(", ")));
-    }
+    // the model's `function` carries the empty argument list for a
+    // trigger function taking none (`name()`), so the parentheses have
+    // to come off before the arguments go in; a trigger argument is
+    // always a string literal, never a bare word (deviation 16)
+    let function = trigger.function.clone().unwrap_or_default();
+    let function = function.trim_end().trim_end_matches("()").trim_end();
+    let args: Vec<String> = trigger
+        .arguments
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .map(postgres_value)
+        .collect();
+    create.push(format!("{function}({})", args.join(", ")));
     let drop = vec![
         "DROP TRIGGER IF EXISTS".into(),
         name,
@@ -2383,8 +2466,9 @@ pub(crate) fn render_constraint(
     sql.join(" ")
 }
 
-/// UNIQUE / PRIMARY KEY / FOREIGN KEY constraints shared by the plain
-/// and typed (`OF type`) forms of `CREATE TABLE`. `index_tablespace`
+/// UNIQUE / PRIMARY KEY constraints shared by the plain and typed
+/// (`OF type`) forms of `CREATE TABLE`. Foreign keys are not here:
+/// they are separate archive entries (deviation 14). `index_tablespace`
 /// selects the tablespace for the index backing a UNIQUE or PRIMARY
 /// KEY constraint; the model holds one table-wide value, so it is
 /// attached to the primary key when there is one, else to every
@@ -2405,9 +2489,6 @@ fn push_table_constraints(table: &Table, inner: &mut Vec<String>) {
             sql.push_str(&format!(" USING INDEX TABLESPACE {tablespace}"));
         }
         inner.push(sql);
-    }
-    for fk in table.foreign_keys.as_deref().unwrap_or_default() {
-        inner.push(render_foreign_key(fk));
     }
     // PostgreSQL 18+ table-level NOT NULL, which pg_dump writes ahead
     // of the CHECK constraints
@@ -2703,6 +2784,127 @@ mod tests {
 
     /// A column's NOT NULL carries its name and NO INHERIT when the
     /// model records them; a bare `nullable: false` renders as before
+    #[test]
+    fn renders_foreign_key_as_its_own_entry() {
+        let mut table = base_table("orders");
+        table.columns = Some(vec![column("customer_id", "integer", true)]);
+        table.foreign_keys = Some(vec![crate::models::ForeignKey {
+            name: "orders_customer".into(),
+            columns: vec!["customer_id".into()],
+            references: crate::models::ForeignKeyReference {
+                name: "test.customers".into(),
+                columns: vec!["id".into()],
+            },
+            match_type: None,
+            on_delete: Some("CASCADE".into()),
+            on_update: None,
+            deferrable: None,
+            initially_deferred: None,
+        }]);
+        let item = table_item(1, table);
+        // the CREATE TABLE carries no FOREIGN KEY clause; a circular
+        // reference would have no valid creation order if it did
+        let create = table_defn(&item, libpgdump::ObjectType::Table, "orders");
+        assert!(
+            !create.contains("FOREIGN KEY"),
+            "foreign key rendered inline: {create}"
+        );
+        // and the separate entry keeps the constraint name
+        assert_eq!(
+            table_defn(
+                &item,
+                libpgdump::ObjectType::FkConstraint,
+                "orders orders_customer"
+            ),
+            "ALTER TABLE ONLY test.orders ADD CONSTRAINT orders_customer \
+             FOREIGN KEY (customer_id) REFERENCES test.customers (id) ON \
+             DELETE CASCADE;\n"
+        );
+    }
+
+    #[test]
+    fn renders_generated_column_kinds() {
+        use crate::models::{ColumnGenerated, GeneratedKind};
+
+        let generated = |kind| {
+            let mut c = column("scaled", "numeric", false);
+            c.generated = Some(ColumnGenerated {
+                expression: Some("reading * 2".into()),
+                kind,
+                sequence: None,
+                sequence_behavior: None,
+            });
+            let mut table = base_table("samples");
+            table.columns = Some(vec![c]);
+            table_defn(
+                &table_item(1, table),
+                libpgdump::ObjectType::Table,
+                "samples",
+            )
+        };
+        // the parentheses are required by the grammar, and the keyword
+        // has to be explicit: absent means VIRTUAL on 18 and STORED on
+        // 17
+        assert!(
+            generated(Some(GeneratedKind::Stored)).contains(
+                "scaled numeric GENERATED ALWAYS AS (reading * 2) STORED"
+            ),
+            "{}",
+            generated(Some(GeneratedKind::Stored))
+        );
+        assert!(
+            generated(Some(GeneratedKind::Virtual)).contains(
+                "scaled numeric GENERATED ALWAYS AS (reading * 2) VIRTUAL"
+            ),
+            "{}",
+            generated(Some(GeneratedKind::Virtual))
+        );
+        // absent keeps meaning STORED: that is what project files
+        // written before the field existed have always built
+        assert!(
+            generated(None).contains(
+                "scaled numeric GENERATED ALWAYS AS (reading * 2) STORED"
+            ),
+            "{}",
+            generated(None)
+        );
+    }
+
+    #[test]
+    fn renders_trigger_function_arguments_inside_the_parentheses() {
+        let mut table = base_table("documents");
+        table.columns = Some(vec![column("body", "text", false)]);
+        table.triggers = Some(vec![crate::models::Trigger {
+            sql: None,
+            name: Some("documents_fulltext".into()),
+            when: Some("BEFORE".into()),
+            events: Some(vec!["INSERT".into()]),
+            for_each: Some("ROW".into()),
+            condition: None,
+            function: Some("tsvector_update_trigger()".into()),
+            arguments: Some(vec![
+                serde_json::json!("fulltext"),
+                serde_json::json!("pg_catalog.english"),
+                serde_json::json!("body"),
+            ]),
+            constraint: None,
+            deferrable: None,
+            initially_deferred: None,
+            comment: None,
+        }]);
+        assert_eq!(
+            table_defn(
+                &table_item(1, table),
+                libpgdump::ObjectType::Trigger,
+                "documents_fulltext"
+            ),
+            "CREATE TRIGGER documents_fulltext BEFORE INSERT ON \
+             test.documents FOR EACH ROW EXECUTE FUNCTION \
+             tsvector_update_trigger('fulltext', 'pg_catalog.english', \
+             'body');\n"
+        );
+    }
+
     #[test]
     fn renders_named_column_not_null() {
         let mut table = base_table("orders");

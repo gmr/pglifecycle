@@ -394,20 +394,28 @@ fn kind(relative: &Path) -> &'static str {
     }
 }
 
-/// Foreign keys and INHERITS order table creation: emit a
-/// `dependencies` key so the build's topological sort restores
-/// referenced and inherited-from tables first. Without the INHERITS
-/// edge a child restores ahead of its parent whenever it sorts first
-/// (`aaa_child` INHERITS `zzz_parent`), and the CREATE TABLE fails.
+/// INHERITS orders table creation: emit a `dependencies` key so the
+/// build's topological sort restores an inherited-from table first.
+/// Without the edge a child restores ahead of its parent whenever it
+/// sorts first (`aaa_child` INHERITS `zzz_parent`), and the CREATE
+/// TABLE fails.
+///
+/// A foreign key records no edge. It used to, so that an inline
+/// `FOREIGN KEY` clause would find its referenced table, but the
+/// build now emits every foreign key as its own post-data entry
+/// (build deviation 14), which already sorts after every table. The
+/// edge is worse than useless there: two tables that reference each
+/// other make it a cycle, and libpgdump breaks a cycle by hoisting
+/// its members ahead of everything else in the archive, including the
+/// CREATE SCHEMA they need.
 fn table_dependencies(table: &models::Table) -> Option<Value> {
     let this = format!("{}.{}", table.schema, table.name);
     let mut references: Vec<String> = table
-        .foreign_keys
+        .parents
         .iter()
         .flatten()
-        .map(|fk| fk.references.name.clone())
-        .chain(table.parents.iter().flatten().cloned())
-        .filter(|name| *name != this)
+        .filter(|name| **name != this)
+        .cloned()
         .collect();
     references.sort();
     references.dedup();

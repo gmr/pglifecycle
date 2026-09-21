@@ -244,3 +244,46 @@ CREATE TABLE audit_events_archive (
 
 ALTER TABLE audit_events_archive
     ALTER COLUMN recorded_at SET DEFAULT CURRENT_TIMESTAMP;
+
+-- Two tables that reference each other. No creation order satisfies
+-- both, so a foreign key rendered inline in CREATE TABLE cannot
+-- restore; the build emits every foreign key as its own entry after
+-- the tables (build deviation 14).
+CREATE TABLE warehouses (
+    id           INT NOT NULL PRIMARY KEY,
+    lead_staff_id INT NOT NULL
+);
+
+CREATE TABLE warehouse_staff (
+    id           INT NOT NULL PRIMARY KEY,
+    warehouse_id INT NOT NULL,
+    CONSTRAINT warehouse_staff_warehouse
+        FOREIGN KEY (warehouse_id) REFERENCES warehouses (id)
+);
+
+ALTER TABLE warehouses
+    ADD CONSTRAINT warehouses_lead_staff
+    FOREIGN KEY (lead_staff_id) REFERENCES warehouse_staff (id);
+
+-- Generated columns. PostgreSQL 18 makes VIRTUAL the default and
+-- pg_dump omits the keyword for one, so a project that records no kind
+-- would rebuild a virtual column as stored (build deviation 15).
+CREATE TABLE measurement_samples (
+    reading    NUMERIC(6,2) NOT NULL,
+    multiplier NUMERIC(6,2) NOT NULL,
+    scaled_stored  NUMERIC(12,4) GENERATED ALWAYS AS (reading * multiplier) STORED,
+    scaled_virtual NUMERIC(12,4) GENERATED ALWAYS AS (reading * multiplier) VIRTUAL
+);
+
+-- A trigger whose function takes arguments. They belong inside the
+-- function's own parentheses, as string literals (build deviation 16).
+CREATE TABLE searchable_documents (
+    title    TEXT,
+    body     TEXT,
+    fulltext TSVECTOR
+);
+
+CREATE TRIGGER searchable_documents_fulltext
+    BEFORE INSERT OR UPDATE ON searchable_documents
+    FOR EACH ROW EXECUTE FUNCTION
+        tsvector_update_trigger(fulltext, 'pg_catalog.english', title, body);
