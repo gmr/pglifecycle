@@ -29,6 +29,18 @@ const DEVIATIONS: &[(&str, &str, &str)] = &[
     // Python emitted CREATE ROLE for create: false roles (and
     // rendered BYPASSRLS from create_db); the Rust build skips them
     ("ROLE", "", "postgres"),
+    // deviation 17: pg_restore derives these three types' owner
+    // statements from the stored drop statement, so IF EXISTS in one
+    // produced `ALTER FUNCTION IF EXISTS ...`, which does not parse
+    ("AGGREGATE", "test", "test_agg"),
+    ("OPERATOR", "test", "==="),
+    ("FUNCTION", "test", "disable_alter_domain()"),
+    ("FUNCTION", "test", "test_aggregate(integer, integer)"),
+    (
+        "FUNCTION",
+        "test",
+        "utf8_to_latin1(integer, integer, cstring, internal, integer)",
+    ),
     // Python emitted OPTIONS without the required parentheses, which
     // does not parse
     ("SERVER", "", "localhost"),
@@ -76,6 +88,46 @@ const DEVIATIONS: &[(&str, &str, &str)] = &[
         "FUNCTION",
         "test",
         "utf8_to_latin1(integer, integer, cstring, internal, integer)",
+    ),
+];
+
+/// Deviation 17: entries whose *drop* statement was corrected, with
+/// the exact statement the Rust build must now emit. pg_restore
+/// derives these three types' owner statements from the stored drop
+/// statement, so an `IF EXISTS` in one produced
+/// `ALTER FUNCTION IF EXISTS ...`, which does not parse.
+const CORRECTED_DROPS: &[(&str, &str, &str, &str)] = &[
+    (
+        "AGGREGATE",
+        "test",
+        "test_agg",
+        "DROP AGGREGATE test.test_agg (IN integer);\n",
+    ),
+    (
+        "OPERATOR",
+        "test",
+        "===",
+        "DROP OPERATOR test.=== (box, box);\n",
+    ),
+    (
+        "FUNCTION",
+        "test",
+        "disable_alter_domain()",
+        "DROP FUNCTION test.disable_alter_domain();\n",
+    ),
+    (
+        "FUNCTION",
+        "test",
+        "test_aggregate(integer, integer)",
+        "DROP FUNCTION test.test_aggregate(integer, integer);\n",
+    ),
+    (
+        "FUNCTION",
+        "test",
+        "utf8_to_latin1(integer, integer, cstring, internal, integer)",
+        "DROP FUNCTION test.utf8_to_latin1(IN source_encoding_id INTEGER, \
+         IN destination_encoding_id INTEGER, IN source CSTRING, IN \
+         destination INTERNAL, IN source_length INTEGER);\n",
     ),
 ];
 
@@ -281,7 +333,13 @@ fn matches_python_build_output() {
                 ),
                 py["owner"].as_str().unwrap().to_string(),
                 py["defn"].as_str().unwrap().to_string(),
-                py["drop_stmt"].as_str().unwrap().to_string(),
+                // deviation 18: Python stored a bare ";" for an entry
+                // with nothing to drop, which made pg_restore attempt
+                // an owner statement it cannot build for a COMMENT
+                match py["drop_stmt"].as_str().unwrap() {
+                    ";\n" => String::new(),
+                    other => other.to_string(),
+                },
                 py["tablespace"].as_str().map(String::from),
             )
         })
@@ -301,6 +359,9 @@ fn matches_python_build_output() {
                 && !CORRECTED
                     .iter()
                     .any(|(d, n, t, _)| &entry_key(d, n, t) == key)
+                && !CORRECTED_DROPS
+                    .iter()
+                    .any(|(d, n, t, _)| &entry_key(d, n, t) == key)
                 && !RECOVERED_COMMENTS
                     .iter()
                     .any(|(tag, _)| key == &entry_key("COMMENT", "test", tag))
@@ -312,6 +373,29 @@ fn matches_python_build_output() {
         .collect();
     actual.sort();
     assert_eq!(actual, expected, "non-deviant entries differ");
+
+    // deviation 17: the three types whose owner statement pg_restore
+    // builds from the stored drop statement carry no IF EXISTS
+    for (desc, namespace, tag, expected_drop) in CORRECTED_DROPS {
+        let key = entry_key(desc, namespace, tag);
+        let drop = rust_tuples
+            .iter()
+            .find(|(k, ..)| k == &key)
+            .map(|(_, _, _, drop, _)| drop.as_str())
+            .unwrap_or_else(|| {
+                panic!("missing entry {key:?} in Rust archive")
+            });
+        assert_eq!(drop, *expected_drop, "{key:?} drop statement");
+        assert!(
+            !drop.contains("IF EXISTS"),
+            "{key:?} drop statement still carries IF EXISTS"
+        );
+    }
+
+    // deviation 18: an entry with nothing to drop stores nothing
+    for (key, _, _, drop, _) in &rust_tuples {
+        assert_ne!(drop, ";\n", "{key:?} stores a bare drop statement");
+    }
 
     // the deviant entries must appear in their corrected forms
     for (desc, namespace, tag, fragment) in CORRECTED {

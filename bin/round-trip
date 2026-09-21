@@ -5,6 +5,9 @@
 #   load + validate -> build -> pg_restore -> pg_dump --schema-only
 #   of both databases -> diff is empty
 #
+# Plus a second restore with ownership applied, which the comparing
+# restore cannot check because it runs --no-owner.
+#
 # Requires a PostgreSQL superuser connection (defaults target the
 # compose.yaml container; override with PGHOST/PGPORT/PGUSER) and the
 # postgres client tools on PATH. All commands run via psql/pg_dump
@@ -18,11 +21,14 @@ export PGHOST PGPORT PGUSER
 
 SOURCE_DB=roundtrip_source
 RESTORED_DB=roundtrip_restored
+OWNED_DB=roundtrip_owned
 WORKDIR="$(mktemp -d)"
 
 cleanup() {
     rm -rf "$WORKDIR"
     psql -d postgres -q -c "DROP DATABASE IF EXISTS ${RESTORED_DB}" \
+        >/dev/null 2>&1 || true
+    psql -d postgres -q -c "DROP DATABASE IF EXISTS ${OWNED_DB}" \
         >/dev/null 2>&1 || true
     psql -d postgres -q -c "DROP DATABASE IF EXISTS ${SOURCE_DB}" \
         >/dev/null 2>&1 || true
@@ -64,6 +70,18 @@ psql -d postgres -q -c "DROP DATABASE IF EXISTS ${RESTORED_DB}"
 psql -d postgres -q -c "CREATE DATABASE ${RESTORED_DB}"
 pg_restore -d "${RESTORED_DB}" --no-owner --exit-on-error \
     "${WORKDIR}/build.dump"
+
+# The restore above drops every ownership statement, and the schema
+# diff below cannot see one either, because ownership is unchanged when
+# restoring as the same role. A defect in one was therefore outside
+# this gate entirely, which is how the build came to emit
+# `ALTER FUNCTION IF EXISTS ... OWNER TO ...` for every function. So
+# restore once more with ownership applied; nothing is compared, the
+# statements only have to execute.
+echo "==> pg_restore into ${OWNED_DB} with ownership applied"
+psql -d postgres -q -c "DROP DATABASE IF EXISTS ${OWNED_DB}"
+psql -d postgres -q -c "CREATE DATABASE ${OWNED_DB}"
+pg_restore -d "${OWNED_DB}" --exit-on-error "${WORKDIR}/build.dump"
 
 echo "==> Comparing schema-only dumps"
 # the \restrict/\unrestrict psql guards carry a random per-dump token

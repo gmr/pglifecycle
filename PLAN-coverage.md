@@ -454,6 +454,30 @@ Four gates, each checking something the others cannot:
    destructive case twice: without `--allow-drop` the removal is
    withheld and reported; with it, the deploy converges.
 
+5. **Ownership is outside every gate.** `bin/round-trip` restores with
+   `pg_restore --no-owner --exit-on-error` (line 65) and diffs with
+   `pg_dump --no-owner` (lines 70 and 72), so no defect in an ownership
+   statement can fail it: the statements are never executed, and
+   ownership is unchanged when restoring as the same role, so the
+   schema diff stays clean either way. That blind spot hid a real
+   defect. The build bakes `IF EXISTS` into the drop statement it
+   stores for a FUNCTION, an AGGREGATE and an OPERATOR
+   (`dump_function`, `dump_aggregate` and `dump_operator` in
+   `src/build/mod.rs`), and pg_restore derives
+   the owner statement for exactly those three types by stripping the
+   leading `DROP ` off the stored drop statement, because their
+   identity needs a signature. The clause lands mid-statement and
+   `ALTER FUNCTION IF EXISTS app.f(...) OWNER TO postgres` is a syntax
+   error, so every owned function, aggregate and operator fails to get
+   its owner — 10 failing statements on pagila. Real pg_dump stores
+   the drop without the clause and lets `pg_restore --if-exists` add
+   it at print time, which is the fix: drop `IF EXISTS` from those
+   three drop statements. Every other type is unaffected, since
+   pg_restore builds their owner statement from the descriptor,
+   namespace and tag instead. Candidate gate fix: a second restore
+   with owners applied, or drop `--no-owner`, so the statements are
+   executed at least once.
+
 Then correct the Postgres 17 → 18 line in `CLAUDE.md`. (Done in
 Phase 1.)
 
