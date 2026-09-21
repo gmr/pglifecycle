@@ -462,7 +462,8 @@ Four gates, each checking something the others cannot:
    schema diff stays clean either way. That blind spot hid a real
    defect. The build bakes `IF EXISTS` into the drop statement it
    stores for a FUNCTION, an AGGREGATE and an OPERATOR
-   (`src/build/mod.rs:848`, `:525`, `:1071`), and pg_restore derives
+   (`dump_function`, `dump_aggregate` and `dump_operator` in
+   `src/build/mod.rs`), and pg_restore derives
    the owner statement for exactly those three types by stripping the
    leading `DROP ` off the stored drop statement, because their
    identity needs a signature. The clause lands mid-statement and

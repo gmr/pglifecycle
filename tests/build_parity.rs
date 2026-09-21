@@ -91,8 +91,6 @@ const DEVIATIONS: &[(&str, &str, &str)] = &[
     ),
 ];
 
-/// (desc, namespace, tag, required defn fragment) for the corrected
-/// Rust entries replacing the deviations above
 /// Deviation 17: entries whose *drop* statement was corrected, with
 /// the exact statement the Rust build must now emit. pg_restore
 /// derives these three types' owner statements from the stored drop
@@ -133,6 +131,8 @@ const CORRECTED_DROPS: &[(&str, &str, &str, &str)] = &[
     ),
 ];
 
+/// (desc, namespace, tag, required defn fragment) for the corrected
+/// Rust entries replacing the deviations above
 const CORRECTED: &[(&str, &str, &str, &str)] = &[
     ("ENCODING", "", "", "SET client_encoding = 'UTF-8';\n"),
     (
