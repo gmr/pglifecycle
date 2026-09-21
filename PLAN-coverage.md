@@ -1,6 +1,7 @@
 # Coverage plan: silent schema loss, RLS, and PostgreSQL 18
 
-Status: Phase 0 complete. Phases 1-7 proposed. Written 2026-09-21.
+Status: Phases 0 and 1 complete. Phases 2-7 proposed.
+Written 2026-09-21.
 
 Every claim below was verified against PostgreSQL 18.4 (the version
 `compose.yaml` pins) by creating the object, running `pull`, running
@@ -176,26 +177,50 @@ dropped: its only purpose was letting `deploy` report existence-only
 objects, and item 4 does that directly from `deploy`'s own snapshot,
 without a new field in the project schema.
 
-### Phase 1 — Failing fixtures before any parser work (~1 day)
+### Phase 1 — Measure the loss — **DONE**
 
-Add every construct from sections A and B to `fixtures/schema.sql` and
-let the gates go red. Then add a **catalog** assertion pass to the
-round-trip gate alongside the existing `pg_dump` text diff, querying the
-restored database for:
+`fixtures/unsupported.sql` holds every construct from section B and C,
+and `bin/coverage-gate` (`just coverage-gate`) pulls it and compares
+the entries that reach `remaining.yaml` against
+`fixtures/unsupported-descs.txt`, currently 18 lines. The gate fails
+whichever way that list changes: a new gap has to be modeled or
+recorded, and a fix has to shrink the list and move the construct into
+`fixtures/schema.sql`. The list is now the measure of how much schema
+the tool drops.
 
-`pg_class.relrowsecurity`, `pg_class.relforcerowsecurity`, `pg_policy`,
-`pg_constraint.convalidated`, `pg_constraint.conenforced`,
-`pg_constraint.conperiod`, `pg_attribute.attgenerated`,
-`pg_attribute.attidentity`, `pg_statistic_ext`.
+The gate also asserts that `pull` *fails* on that fixture without
+`--allow-unsupported`, which keeps Phase 0 honest.
 
-The text diff stays — it is the cheaper and broader check, and it does
-catch a dropped object. The catalog pass earns its place on the narrower
-set of defects where two different schemas can produce identical
-`pg_dump` text, and on `attgenerated`, where the dumped text is
-deliberately silent about `VIRTUAL`.
+**Two changes from the plan above.**
 
-→ verify: each new fixture construct fails the gate *before* its fix
-lands, and the failure names the construct.
+*Fixtures cannot be merged red.* The plan said to add every construct
+and let the gates go red first. That works locally but not as a commit:
+red gates on `main` block everyone. Section B and C constructs go in
+`fixtures/unsupported.sql`, which stays green because the expected list
+is checked in. Section A constructs — the ones that parse into the
+wrong model — never reach `remaining.yaml` at all, so they cannot be
+measured this way; each is added to `fixtures/schema.sql` in the same
+commit as its fix, where the round-trip gate's schema diff is the
+assertion.
+
+*No catalog assertions.* Verified against 18.4: `pg_dump --schema-only`
+text already distinguishes every defect in the A list. A stored
+generated column dumps as `GENERATED ALWAYS AS (length(b)) STORED` and
+a virtual one as `GENERATED ALWAYS AS (length(b))`, so even the case
+that looked most likely to need `pg_attribute.attgenerated` is visible
+in the text. `NOT ENFORCED`, `NOT VALID`, `NULLS NOT DISTINCT`,
+`WITHOUT OVERLAPS`, `PERIOD`, the RLS statements and the identity
+`ALTER` are all emitted literally. The existing text diff is therefore
+sufficient, and a second assertion pass over nine catalogs would add
+maintenance for no coverage. Revisit if a future defect turns out to
+dump identically on both sides.
+
+**Known gap:** GitHub Actions runs `cargo fmt --check`, `clippy` and
+`cargo test` only — no PostgreSQL service, so no gate runs in CI. That
+is why these defects survived: the checks that would catch them are
+opt-in and local. Adding a `postgres:18` service to
+`.github/workflows/testing.yaml` is the single highest-value change
+left in this plan and is not yet done.
 
 ### Phase 2 — Output that does not restore (~1 day)
 
@@ -351,12 +376,13 @@ Defer until the above land:
 Four gates, each checking something the others cannot:
 
 1. **Archive coverage** — every schema TOC entry classifies as
-   `Modeled`, `Preserved` or `IgnoredByPolicy`. This is the gate that
-   would have caught all of section B.
+   `Modeled`, `Preserved` or `IgnoredByPolicy`. Shipped in Phase 1 as
+   `bin/coverage-gate`; this is the gate that would have caught all of
+   section B.
 2. **Parse coverage** — every supported descriptor reaches the expected
    `Statement` variant and `Assembly` target.
-3. **Round-trip semantic** — the Phase 1 catalog assertions, plus the
-   existing `pg_dump` text diff.
+3. **Round-trip** — the existing `pg_dump` text diff, which Phase 1
+   showed is sufficient on its own.
 4. **Deploy convergence** — project → deploy into a divergent database
    → pull → compare normalized projects → expect no diff. Run every
    destructive case twice: without `--allow-drop` the removal is

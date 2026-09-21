@@ -1,7 +1,8 @@
 # pglifecycle task runner. Run `just` to list recipes.
 #
-# The round-trip and deploy gates need PostgreSQL; they bring up the
-# compose.yaml container and discover its dynamically-mapped port.
+# The coverage, round-trip and deploy gates need PostgreSQL; they bring
+# up the compose.yaml container and discover its dynamically-mapped
+# port.
 
 set shell := ["bash", "-euo", "pipefail", "-c"]
 
@@ -66,24 +67,31 @@ db-down:
 db-port:
     @docker compose port postgres 5432 | cut -d: -f2
 
-# --- Gates (PLAN.md) -------------------------------------------------
+# --- Gates -----------------------------------------------------------
 
-# Phase 3 round-trip gate (schema → pull → build → restore → diff)
+# Coverage gate (which objects pull still cannot model)
+coverage-gate: build db-up
+    PGHOST=localhost \
+    PGPORT="$(docker compose port postgres 5432 | cut -d: -f2)" \
+    PGUSER=postgres \
+    bin/coverage-gate
+
+# Round-trip gate (schema → pull → build → restore → diff)
 round-trip: build db-up
     PGHOST=localhost \
     PGPORT="$(docker compose port postgres 5432 | cut -d: -f2)" \
     PGUSER=postgres \
     bin/round-trip
 
-# Phase 6 deploy gates (equivalence, convergence, safety)
+# Deploy gates (equivalence, convergence, safety)
 deploy-gates: build db-up
     PGHOST=localhost \
     PGPORT="$(docker compose port postgres 5432 | cut -d: -f2)" \
     PGUSER=postgres \
     bin/deploy-gates
 
-# Both PLAN.md gates
-gates: round-trip deploy-gates
+# Every database gate
+gates: coverage-gate round-trip deploy-gates
 
 # --- Docs ------------------------------------------------------------
 

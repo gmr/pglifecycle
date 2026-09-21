@@ -1,0 +1,18 @@
+AGGREGATE	unsupported.sum_int(integer)
+CAST	CAST (integer AS text)
+COLLATION	unsupported.case_insensitive
+CONSTRAINT	unsupported.reservations reservations_no_overlap
+CONVERSION	unsupported.latin1_to_utf8
+DEFAULT ACL	unsupported.DEFAULT PRIVILEGES FOR TABLES
+EVENT TRIGGER	log_ddl_start
+POLICY	unsupported.documents documents_read
+POLICY	unsupported.documents documents_tenant
+PUBLICATION	measurements_pub
+PUBLICATION TABLE	unsupported.measurements_pub measurements
+ROW SECURITY	unsupported.documents
+RULE	unsupported.append_only append_only_no_delete
+SEQUENCE	unsupported.documents_id_seq
+STATISTICS	unsupported.measurements_stats
+TABLE	unsupported.documents
+TABLE	unsupported.payloads
+TEXT SEARCH CONFIGURATION	unsupported.simple_copy

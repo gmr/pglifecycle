@@ -1,0 +1,85 @@
+-- Fixture schema of constructs `pull` cannot model yet
+--
+-- Every object here is one `pull` drops into remaining.yaml rather
+-- than into the project. bin/coverage-gate pulls this schema and
+-- compares the descriptions that land in remaining.yaml against
+-- fixtures/unsupported-descs.txt, so a new gap fails the gate and a
+-- fix makes the expected list shrink. See PLAN-coverage.md.
+--
+-- Constructs that parse into the *wrong* model (NOT ENFORCED, NOT
+-- VALID, NULLS NOT DISTINCT, WITHOUT OVERLAPS, PERIOD, virtual
+-- generated columns) do not belong here: they never reach
+-- remaining.yaml. They go into fixtures/schema.sql with their fix,
+-- where the round-trip gate's schema diff is the assertion.
+
+CREATE EXTENSION btree_gist;
+
+CREATE SCHEMA unsupported;
+SET search_path = unsupported, public, pg_catalog;
+
+CREATE ROLE coverage_reader;
+
+-- Row level security: the enable/force flags and the policies
+CREATE TABLE documents (
+    id        BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant    TEXT NOT NULL,
+    body      TEXT
+);
+ALTER TABLE documents ENABLE ROW LEVEL SECURITY;
+ALTER TABLE documents FORCE ROW LEVEL SECURITY;
+CREATE POLICY documents_tenant ON documents FOR ALL TO coverage_reader
+    USING (tenant = CURRENT_USER) WITH CHECK (tenant = CURRENT_USER);
+CREATE POLICY documents_read ON documents AS RESTRICTIVE FOR SELECT
+    TO PUBLIC USING (true);
+COMMENT ON POLICY documents_tenant ON documents IS 'tenant isolation';
+
+-- Exclusion constraint
+CREATE TABLE reservations (
+    room   INT,
+    during DATERANGE,
+    CONSTRAINT reservations_no_overlap
+        EXCLUDE USING gist (room WITH =, during WITH &&)
+);
+
+-- Column storage and compression, and the table's replica identity
+CREATE TABLE payloads (
+    id   INT PRIMARY KEY,
+    body TEXT COMPRESSION lz4
+);
+ALTER TABLE payloads ALTER COLUMN body SET STORAGE EXTERNAL;
+ALTER TABLE payloads REPLICA IDENTITY FULL;
+
+-- Extended statistics
+CREATE TABLE measurements (a INT, b INT);
+CREATE STATISTICS measurements_stats (ndistinct, dependencies)
+    ON a, b FROM measurements;
+
+-- Rule
+CREATE TABLE append_only (id INT);
+CREATE RULE append_only_no_delete AS
+    ON DELETE TO append_only DO INSTEAD NOTHING;
+
+-- Default privileges
+ALTER DEFAULT PRIVILEGES IN SCHEMA unsupported
+    GRANT SELECT ON TABLES TO coverage_reader;
+
+-- Object types `build` and `models` already support, which only `pull`
+-- cannot parse
+CREATE COLLATION case_insensitive
+    (provider = icu, locale = 'und-u-ks-level2', deterministic = false);
+
+CREATE AGGREGATE sum_int (INT) (sfunc = int4pl, stype = INT, initcond = '0');
+
+CREATE CAST (INT AS TEXT) WITH INOUT AS IMPLICIT;
+
+CREATE CONVERSION latin1_to_utf8 FOR 'LATIN1' TO 'UTF8'
+    FROM iso8859_1_to_utf8;
+
+CREATE TEXT SEARCH CONFIGURATION simple_copy (COPY = simple);
+
+CREATE PUBLICATION measurements_pub FOR TABLE measurements;
+
+CREATE FUNCTION log_ddl() RETURNS EVENT_TRIGGER LANGUAGE plpgsql
+    AS $$ BEGIN END $$;
+CREATE EVENT TRIGGER log_ddl_start ON ddl_command_start
+    EXECUTE FUNCTION log_ddl();

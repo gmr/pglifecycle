@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+# Coverage gate:
+#
+#   fixtures/unsupported.sql -> PostgreSQL -> pg_dump -Fc -> pull ->
+#   the descriptions in remaining.yaml match
+#   fixtures/unsupported-descs.txt exactly
+#
+# This encodes what `pull` cannot yet model. A new gap fails the gate,
+# and a fix makes the expected list shrink, so the list is the record
+# of how much schema the tool still drops. See PLAN-coverage.md.
+#
+# Requires a PostgreSQL superuser connection (defaults target the
+# compose.yaml container; override with PGHOST/PGPORT/PGUSER) and the
+# postgres client tools on PATH.
+set -euo pipefail
+
+PGHOST="${PGHOST:-localhost}"
+PGPORT="${PGPORT:-5432}"
+PGUSER="${PGUSER:-postgres}"
+export PGHOST PGPORT PGUSER
+
+SOURCE_DB=coverage_source
+EXPECTED=fixtures/unsupported-descs.txt
+WORKDIR="$(mktemp -d)"
+
+cleanup() {
+    rm -rf "${WORKDIR}"
+    psql -d postgres -q -c "DROP DATABASE IF EXISTS ${SOURCE_DB}" \
+        >/dev/null 2>&1 || true
+    psql -d postgres -q -c "DROP ROLE IF EXISTS coverage_reader" \
+        >/dev/null 2>&1 || true
+}
+
+trap cleanup EXIT INT TERM
+
+echo "==> Building pglifecycle"
+cargo build --quiet
+
+echo "==> Creating ${SOURCE_DB} from fixtures/unsupported.sql"
+psql -d postgres -q -c "DROP DATABASE IF EXISTS ${SOURCE_DB}"
+psql -d postgres -q -c "DROP ROLE IF EXISTS coverage_reader"
+psql -d postgres -q -c "CREATE DATABASE ${SOURCE_DB}"
+psql -d "${SOURCE_DB}" -q -v ON_ERROR_STOP=1 -f fixtures/unsupported.sql
+
+echo "==> pg_dump ${SOURCE_DB}"
+pg_dump -d "${SOURCE_DB}" -Fc --schema-only -f "${WORKDIR}/source.dump"
+
+# every object in this fixture is one pull cannot model, so the command
+# is expected to fail without --allow-unsupported
+echo "==> pull (must fail without --allow-unsupported)"
+if ./target/debug/pglifecycle pull --dump "${WORKDIR}/source.dump" \
+    "${WORKDIR}/must-fail" >/dev/null 2>&1; then
+    echo "Coverage gate FAILED: pull succeeded on a schema it cannot" \
+        "model" >&2
+    exit 1
+fi
+
+echo "==> pull --allow-unsupported"
+./target/debug/pglifecycle pull --allow-unsupported \
+    --dump "${WORKDIR}/source.dump" "${WORKDIR}/project" >/dev/null
+
+echo "==> Comparing unsupported entries against ${EXPECTED}"
+# "DESC namespace.tag" per entry, sorted, so the diff names the object
+# that gained or lost support
+python3 - "${WORKDIR}/project/remaining.yaml" \
+    > "${WORKDIR}/actual.txt" <<'PYTHON'
+import sys
+
+import yaml
+
+with open(sys.argv[1]) as handle:
+    entries = yaml.safe_load(handle) or []
+lines = set()
+for entry in entries:
+    namespace = entry.get("namespace") or ""
+    tag = entry.get("tag") or ""
+    name = f"{namespace}.{tag}" if namespace else tag
+    lines.add(f"{entry['desc']}\t{name}")
+print("\n".join(sorted(lines)))
+PYTHON
+
+if diff -u "${EXPECTED}" "${WORKDIR}/actual.txt"; then
+    count="$(wc -l < "${EXPECTED}" | tr -d ' ')"
+    echo "Coverage gate passed: ${count} known unsupported entries"
+else
+    cat >&2 <<'MESSAGE'
+Coverage gate FAILED: the unsupported entries changed.
+
+Lines prefixed - are now supported: delete them from
+fixtures/unsupported-descs.txt, and move the construct into
+fixtures/schema.sql so the round-trip gate covers it from here on.
+
+Lines prefixed + are a new gap: model the object, or add the line if
+the gap is deliberate and recorded in PLAN-coverage.md.
+MESSAGE
+    exit 1
+fi

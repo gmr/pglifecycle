@@ -89,28 +89,41 @@ Module headers reference the Python file each replaces ("ports X.py").
 
 ## Testing & gates
 
-Integration tests live in `tests/`. The round-trip and deploy gates need
-PostgreSQL: they bring up `compose.yaml` (Postgres 17) on a
-dynamically-mapped host port and run the scripts in `bin/`.
+Integration tests live in `tests/`. The database gates need
+PostgreSQL: they bring up `compose.yaml` (Postgres 18) on a
+dynamically-mapped host port and run the scripts in `bin/`. GitHub
+Actions runs only `cargo fmt --check`, `clippy` and `cargo test`, so
+the gates are a local step before opening a pull request.
 
 ```bash
 just db-up          # start the container, wait until healthy
 just db-port        # print the mapped host port
+just coverage-gate  # which objects pull still cannot model
 just round-trip     # schema → pull → build → restore → diff
 just deploy-gates   # deploy equivalence / convergence / safety
-just gates          # both
+just gates          # all three
 ```
 
 The gate recipes discover the mapped port automatically. To run a gate
 script by hand, set `PGHOST`/`PGPORT`/`PGUSER` (the recipes use
 `PGUSER=postgres`).
 
+`just coverage-gate` pulls `fixtures/unsupported.sql` and compares the
+entries that land in `remaining.yaml` against
+`fixtures/unsupported-descs.txt`. Supporting a new object type makes
+that list shrink; the gate fails either way it changes, so the list
+stays an accurate record of what the tool drops. Constructs that parse
+into the *wrong* model belong in `fixtures/schema.sql` instead, where
+the round-trip gate's schema diff catches them.
+
 ## Key directories
 
 - `schemata/` — JSON-Schema (YAML) definitions for PostgreSQL objects;
   the on-disk project contract, carried over from Python unchanged.
 - `test-project/` — example project structure; a parity contract.
-- `fixtures/` — test database schema.
+- `fixtures/` — test database schemata: `schema.sql` for the
+  round-trip and deploy gates, `unsupported.sql` plus
+  `unsupported-descs.txt` for the coverage gate.
 - `bin/` — gate scripts and fixture-data generation.
 - `docs/` — properdocs site (a MkDocs 1.x fork; `just docs` builds
   with `--strict`).
