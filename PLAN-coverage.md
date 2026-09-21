@@ -472,12 +472,20 @@ FOREIGN KEY ...` entry carries the name by construction.
 
 **Sequencing.** The two `build` defects should be fixed in Phase 2,
 alongside the other output that does not restore — they belong with it
-by severity, and this phase found them. The gate itself lands last,
-because pagila also contains `PROCEDURE`, `AGGREGATE`, `RULE` and
-`EVENT TRIGGER`, so a full-cycle comparison cannot be green until
-Phases 5 and 6 land. Until then pagila can ride in `bin/coverage-gate`
-with its own expected list, which measures progress without blocking
-it.
+by severity, and this phase found them. The full-cycle comparison
+lands last, because pagila also contains `PROCEDURE`, `AGGREGATE`,
+`RULE` and `EVENT TRIGGER`, so it cannot be green until Phases 5 and 6
+land.
+
+Measuring pagila before then takes one step first: `bin/coverage-gate`
+hard-codes `fixtures/unsupported.sql` and
+`fixtures/unsupported-descs.txt`, so it has to take the fixture and
+its expected list as arguments (defaulting to the current pair) before
+a second invocation can track pagila. With that done, pagila's
+expected list shrinks as each phase lands, which measures progress
+without blocking it. The full-cycle comparison — load, pull, build,
+restore, diff — is then a separate script, since `bin/coverage-gate`
+stops at `pull` and never builds or restores.
 
 **Also new:** `PROCEDURE` is unmodeled. `PROJECT_DIRS` reserves a
 `procedures` directory and `constants.rs` has no `Procedure` variant,
