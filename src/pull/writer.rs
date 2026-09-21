@@ -90,7 +90,7 @@ pub fn render(
     }
     writer.write_user_mappings(assembly)?;
     writer.write_roles(assembly)?;
-    if args.save_remaining && !assembly.remaining.is_empty() {
+    if !assembly.remaining.is_empty() {
         let entries: Vec<Value> = assembly
             .remaining
             .iter()
@@ -104,7 +104,7 @@ pub fn render(
             })
             .collect();
         writer.save_value(
-            PathBuf::from("remaining.yaml"),
+            PathBuf::from(super::REMAINING_FILE),
             &Value::Array(entries),
         )?;
     }

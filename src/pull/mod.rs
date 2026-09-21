@@ -21,6 +21,9 @@ use crate::ddl::{self, Acl, AclTarget, QualifiedName, RoleDef, Statement};
 use crate::models;
 use crate::{cli, diagnostics, pgdump, progress};
 
+/// The root-level file holding dump entries that could not be modeled
+pub(super) const REMAINING_FILE: &str = "remaining.yaml";
+
 pub fn pull(args: &cli::Pull) -> Result<(), String> {
     if args.update {
         if !args.destination.join("project.yaml").exists() {
@@ -99,7 +102,42 @@ pub fn pull(args: &cli::Pull) -> Result<(), String> {
         args.destination.display(),
         count_grid(&counts),
     );
-    Ok(())
+    report_unmodeled(&assembly, args)
+}
+
+/// Report entries `pull` could not model. They are always written to
+/// remaining.yaml, so the project directory is left in place either
+/// way; what differs is whether the command succeeds. Failing is the
+/// default because a project that silently omits schema does not
+/// reproduce the database it came from, and nothing downstream —
+/// `build`, `deploy`, or a code review of the YAML — can tell that
+/// something went missing.
+fn report_unmodeled(
+    assembly: &Assembly,
+    args: &cli::Pull,
+) -> Result<(), String> {
+    let count = assembly.remaining.len();
+    if count == 0 {
+        return Ok(());
+    }
+    let plural = if count == 1 { "entry" } else { "entries" };
+    let descs = assembly.unmodeled_descs().join(", ");
+    let path = args.destination.join(REMAINING_FILE).display().to_string();
+    if args.allow_unsupported {
+        log::warn!(
+            "{count} dump {plural} could not be modeled ({descs}); they \
+             were preserved in {path}, but the project will not reproduce \
+             the source database"
+        );
+        return Ok(());
+    }
+    Err(format!(
+        "{count} dump {plural} could not be modeled ({descs}), so the \
+         generated project would not reproduce the source database.\n\
+         The {plural} {verb} preserved in {path}; re-run with \
+         --allow-unsupported to accept the project as it is.",
+        verb = if count == 1 { "was" } else { "were" }
+    ))
 }
 
 /// Render the per-type counts as a three-column, column-major grid with
@@ -559,7 +597,10 @@ impl Assembly {
                         }
                     }
                 }
-                _ => self.push_remaining(entry),
+                _ => {
+                    log::warn!("Cannot model {}", entry_label(entry));
+                    self.push_remaining(entry);
+                }
             }
         }
         self.apply_deferred_indexes();
@@ -859,11 +900,7 @@ impl Assembly {
                 );
             }
             Statement::Unsupported(kind) => {
-                log::info!(
-                    "Unsupported {} {:?}: {kind}",
-                    entry.desc.as_str(),
-                    entry.tag
-                );
+                log::warn!("Cannot model {}: {kind}", entry_label(entry));
                 self.push_remaining(entry);
             }
         }
@@ -1280,6 +1317,19 @@ impl Assembly {
         task.finish();
     }
 
+    /// Descriptions of the entries that could not be modeled, in dump
+    /// order and deduplicated, for the summary `pull` prints and the
+    /// error it fails with
+    pub fn unmodeled_descs(&self) -> Vec<String> {
+        let mut descs: Vec<String> = Vec::new();
+        for entry in &self.remaining {
+            if !descs.contains(&entry.desc) {
+                descs.push(entry.desc.clone());
+            }
+        }
+        descs
+    }
+
     fn push_remaining(&mut self, entry: &libpgdump::Entry) {
         self.remaining.push(Remaining {
             desc: entry.desc.as_str().to_string(),
@@ -1287,6 +1337,18 @@ impl Assembly {
             tag: entry.tag.clone(),
             defn: entry.defn.clone(),
         });
+    }
+}
+
+/// `DESC namespace.tag` for an archive entry, for log lines and error
+/// messages that have to name the object a user would recognize
+fn entry_label(entry: &libpgdump::Entry) -> String {
+    let tag = entry.tag.as_deref().unwrap_or("?");
+    match entry.namespace.as_deref().filter(|n| !n.is_empty()) {
+        Some(namespace) => {
+            format!("{} {namespace}.{tag}", entry.desc.as_str())
+        }
+        None => format!("{} {tag}", entry.desc.as_str()),
     }
 }
 

@@ -59,7 +59,7 @@ pub fn deploy(args: &cli::Deploy) -> Result<(), String> {
     output.dump.sort_entries();
     let plan = plan(&diff, &resolutions, &output, &snapshot, args)?;
     task.finish();
-    report(&diff, &plan);
+    report(&diff, &plan, &assembly);
     let script = render_script(&plan, &project.name, &source);
     if let Some(path) = &args.output {
         std::fs::write(path, &script)
@@ -346,7 +346,20 @@ fn plan(
 
 /// Log what the plan skipped or excluded so the script is honest
 /// about what it does not cover
-fn report(diff: &Diff, plan: &Plan) {
+fn report(diff: &Diff, plan: &Plan, assembly: &pull::Assembly) {
+    // objects the snapshot could not model are absent from the diff
+    // entirely, so without this the plan is silent about schema it is
+    // leaving untouched in the database
+    let unmodeled = assembly.remaining.len();
+    if unmodeled > 0 {
+        let plural = if unmodeled == 1 { "object" } else { "objects" };
+        log::warn!(
+            "{unmodeled} database {plural} ({}) cannot be modeled by this \
+             version and are not represented in the plan; they were left \
+             untouched",
+            assembly.unmodeled_descs().join(", ")
+        );
+    }
     let undiffable = diff
         .items
         .values()

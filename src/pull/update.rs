@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use crate::cli;
-use crate::pull::writer;
+use crate::pull::{REMAINING_FILE, writer};
 use crate::yamlio;
 
 /// The directories `pull` writes object files into; staleness (and
@@ -83,10 +83,6 @@ pub fn merge(
     );
     Ok(())
 }
-
-/// The root-level file `--save-remaining` emits; managed for
-/// staleness like the directories above
-const REMAINING_FILE: &str = "remaining.yaml";
 
 /// Whether this run extracted cluster roles/users via `pg_dumpall`.
 /// Mirrors the gate in `pull::pull` (`roles = None` when `--no-roles`

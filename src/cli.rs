@@ -281,9 +281,16 @@ pub struct Pull {
     #[arg(long)]
     pub remove_empty_dirs: bool,
 
-    /// Save any unparsed/unprocessed dump items to remaining.yaml
-    #[arg(long)]
+    /// Deprecated: unparsed dump items are always written to
+    /// remaining.yaml. Accepted for compatibility and ignored.
+    #[arg(long, hide = true)]
     pub save_remaining: bool,
+
+    /// Accept a project that does not reproduce the source database.
+    /// Without this, pull fails when any dump entry could not be
+    /// modeled; the entries are written to remaining.yaml either way
+    #[arg(long)]
+    pub allow_unsupported: bool,
 
     /// File to record DDL that fails to parse or format, and the
     /// statement in flight if interrupted (for reproducing hangs)
