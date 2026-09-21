@@ -2390,16 +2390,25 @@ pub(crate) fn render_trigger(
     create.push("FUNCTION".into());
     // the model's `function` carries the empty argument list for a
     // trigger function taking none (`name()`), so the parentheses have
-    // to come off before the arguments go in; a trigger argument is
-    // always a string literal, never a bare word (deviation 16)
+    // to come off before the arguments go in; an argument renders as
+    // the string literal pg_dump emits (deviation 16)
     let function = trigger.function.clone().unwrap_or_default();
     let function = function.trim_end().trim_end_matches("()").trim_end();
+    // PostgreSQL stores every trigger argument as text, so a boolean
+    // or a number has to be quoted as its text form. `postgres_value`
+    // alone would emit the bare word `True` or a bare numeral, which
+    // the grammar does accept but PostgreSQL then folds to text and
+    // pg_dump reads back as `'true'` or `'42'` — a difference that
+    // makes the next pull and every deploy comparison disagree.
     let args: Vec<String> = trigger
         .arguments
         .as_deref()
         .unwrap_or_default()
         .iter()
-        .map(postgres_value)
+        .map(|value| match value {
+            Value::String(_) => postgres_value(value),
+            other => postgres_value(&Value::String(other.to_string())),
+        })
         .collect();
     create.push(format!("{function}({})", args.join(", ")));
     let drop = vec![
@@ -2932,6 +2941,28 @@ mod tests {
             create.join(" "),
             "CREATE CONSTRAINT TRIGGER emit AFTER INSERT ON test.t \
              FOR EACH ROW EXECUTE FUNCTION test.emit()"
+        );
+    }
+
+    /// PostgreSQL keeps every trigger argument as text, so a boolean
+    /// or a number a project spells as one still has to render as a
+    /// quoted literal. Only a hand-written project reaches this: pull
+    /// reads the arguments back from pg_dump as strings.
+    #[test]
+    fn renders_non_string_trigger_arguments_as_literals() {
+        let mut trigger = constraint_trigger(false);
+        trigger.arguments = Some(vec![
+            Value::String("audit".into()),
+            Value::Bool(true),
+            Value::from(42),
+            Value::from(1.5),
+        ]);
+        let (create, _) = render_trigger(&trigger, "test.t");
+        assert_eq!(
+            create.join(" "),
+            "CREATE CONSTRAINT TRIGGER emit AFTER INSERT ON test.t \
+             FOR EACH ROW EXECUTE FUNCTION \
+             test.emit('audit', 'true', '42', '1.5')"
         );
     }
 

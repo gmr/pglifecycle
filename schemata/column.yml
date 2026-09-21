@@ -100,7 +100,14 @@ properties:
       - required: [expression]
         not: {required: [sequence, sequence_behavior]}
       - required: [sequence]
-        not: {required: [expression]}
+        # `kind` selects how an expression is materialized, so an
+        # identity column has no use for it and the build ignores it.
+        # Reject the pair instead of accepting a value that does
+        # nothing.
+        not:
+          anyOf:
+            - required: [expression]
+            - required: [kind]
     additionalProperties: false
   comment:
     title: Comment

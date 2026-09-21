@@ -172,6 +172,15 @@ CREATE TRIGGER users_touch_last_modified
 COMMENT ON TRIGGER users_touch_last_modified ON users IS
     'Maintains last_modified_at on update';
 
+-- A trigger that takes arguments. PostgreSQL stores every argument as
+-- text and pg_dump emits it as a string literal inside the function's
+-- own parentheses, so the build has to do the same (build deviation
+-- 16). The second argument looks numeric to show it stays quoted.
+CREATE TRIGGER users_touch_last_modified_args
+    BEFORE UPDATE ON users
+    FOR EACH ROW EXECUTE FUNCTION
+        test.touch_last_modified('audit', '42');
+
 -- Per-object COMMENT: column
 COMMENT ON COLUMN users.display_name IS
     'Optional user-facing display name';

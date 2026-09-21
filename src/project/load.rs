@@ -302,9 +302,12 @@ impl Loader {
 
     fn apply_cached_dependencies(&mut self) -> Result<(), String> {
         for dep in &self.cached_dependencies {
+            if self.is_stale_foreign_key_edge(dep) {
+                continue;
+            }
             // a dependency may point at an object the project does not
-            // manage (e.g. a foreign key or inheritance parent owned by
-            // an extension); skip the edge rather than failing the load
+            // manage (e.g. an inheritance parent owned by an
+            // extension); skip the edge rather than failing the load
             let parents = lookup_items(
                 &self.index,
                 dep.parent_desc,
@@ -338,6 +341,48 @@ impl Loader {
             }
         }
         Ok(())
+    }
+
+    /// Whether `dep` is a table-to-table edge a project pulled before
+    /// build deviation 14 recorded for a foreign key.
+    ///
+    /// INHERITS is the only relation between two tables that orders
+    /// their creation, and the parent it names is in the dependent
+    /// table's own `parents`. A foreign key used to add an edge too,
+    /// so that an inline `FOREIGN KEY` clause would find its
+    /// referenced table. The build now emits every foreign key as its
+    /// own post-data entry, which already sorts after every table, and
+    /// the old edge became harmful: two tables that reference each
+    /// other make it a cycle, and libpgdump breaks a cycle by hoisting
+    /// its members ahead of everything else in the archive, including
+    /// the CREATE SCHEMA they need. Such a project builds an archive
+    /// that no longer restores, so drop the edge instead of keeping
+    /// faith with it, and name it so the operator knows to pull again.
+    fn is_stale_foreign_key_edge(&self, dep: &CachedDependency) -> bool {
+        if dep.parent_desc != ObjectType::Table {
+            return false;
+        }
+        let item = &self.project.inventory[dep.item];
+        let Definition::Table(table) = &item.definition else {
+            return false;
+        };
+        let inherits = table.parents.iter().flatten().any(|parent| {
+            let (namespace, tag) = split_name(parent);
+            tag == dep.parent_tag
+                && (namespace == dep.parent_namespace || namespace.is_empty())
+        });
+        if inherits {
+            return false;
+        }
+        log::warn!(
+            "Ignoring the foreign-key dependency of table {}.{} on \
+             table {}.{}. Pull the project again to remove it.",
+            table.schema,
+            table.name,
+            dep.parent_namespace,
+            dep.parent_tag,
+        );
+        true
     }
 
     /// Deserialize a definition into its model and add it to the
@@ -638,6 +683,47 @@ mod tests {
         loader.add_definition(ObjectType::Cast, entry, None);
         loader.apply_cached_dependencies().unwrap();
 
+        assert_eq!(loader.project.inventory[1].dependencies, [0].into());
+    }
+
+    /// A project pulled before build deviation 14 records a
+    /// table-to-table edge for every foreign key. Keeping it would
+    /// recreate the cycle that hoists both tables to the front of the
+    /// archive, so the load drops it and keeps only INHERITS.
+    #[test]
+    fn stale_foreign_key_edge_is_dropped_and_inherits_kept() {
+        let mut loader = Loader::new(Path::new("."));
+        for (name, parents) in
+            [("parent", None), ("child", Some(vec!["test.parent"]))]
+        {
+            let mut entry = json!({
+                "name": name,
+                "schema": "test",
+                "owner": "postgres",
+                "columns": [{"name": "id", "data_type": "integer"}],
+                // "test.other" stands for the foreign-key edge, which
+                // no `parents` entry backs
+                "dependencies": {"tables": ["test.other", "test.parent"]},
+            });
+            if let Some(parents) = parents {
+                entry["parents"] = json!(parents);
+            }
+            loader.cache_and_remove_dependencies(&mut entry);
+            loader.add_definition(ObjectType::Table, entry, None);
+        }
+        loader.index.insert(
+            index_key(ObjectType::Table, Some("test"), "parent"),
+            vec![0],
+        );
+        loader.index.insert(
+            index_key(ObjectType::Table, Some("test"), "other"),
+            vec![1],
+        );
+        loader.apply_cached_dependencies().unwrap();
+
+        // `parent` inherits nothing, so both of its edges are stale
+        assert!(loader.project.inventory[0].dependencies.is_empty());
+        // `child` keeps only the INHERITS edge on `test.parent`
         assert_eq!(loader.project.inventory[1].dependencies, [0].into());
     }
 
