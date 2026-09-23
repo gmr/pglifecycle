@@ -285,6 +285,25 @@ impl Writer {
                 publication,
             )?;
         }
+        let names: Vec<(&str, &str)> = assembly
+            .procedures
+            .iter()
+            .map(|p| (p.schema.as_str(), p.name.as_str()))
+            .collect();
+        for (procedure, filename) in
+            assembly.procedures.iter().zip(overload_file_names(&names))
+        {
+            self.save(
+                nested("procedures", &procedure.schema, &filename)?,
+                procedure,
+            )?;
+        }
+        let operators: Vec<Value> = assembly
+            .operators
+            .iter()
+            .map(serialize)
+            .collect::<Result<_, String>>()?;
+        self.write_container("operators", &operators)?;
         for statistics in &assembly.statistics {
             self.save(
                 nested("statistics", &statistics.schema, &statistics.name)?,
@@ -905,6 +924,7 @@ mod tests {
             support: None,
             configuration: None,
             definition: None,
+            sql_body: None,
             object_file: None,
             link_symbol: None,
             comment: None,

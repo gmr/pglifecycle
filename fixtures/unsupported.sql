@@ -21,11 +21,6 @@ SET search_path = unsupported, public, pg_catalog;
 
 CREATE ROLE pglifecycle_coverage_reader;
 
--- Procedures and operators: build and models support them, but pull
--- cannot parse them yet
-CREATE PROCEDURE archive(days INT) LANGUAGE sql AS 'SELECT 1';
-CREATE OPERATOR === (LEFTARG = INT, RIGHTARG = INT, FUNCTION = int4eq);
-
 -- Operator classes and families, and access methods: no model yet
 CREATE FUNCTION compare_ints(INT, INT) RETURNS INT LANGUAGE sql IMMUTABLE
     AS 'SELECT $1 - $2';

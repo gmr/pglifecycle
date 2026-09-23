@@ -171,16 +171,17 @@ Ownership is not managed (the script behaves like
 `pg_restore --no-owner`), and roles, users, groups, and tablespaces are
 skipped entirely — they are cluster-level objects a single-database
 dump cannot capture. Aggregates, casts, collations, conversions, event
-triggers, publications, text search objects, default privileges and
-extended statistics are created when
+triggers, publications, text search objects, default privileges,
+extended statistics, procedures and operators are created when
 missing but otherwise only existence-checked: `pull` models them, but
 `deploy` does not compare their definitions yet, so a changed one is
-left as the database has it. An aggregate is matched by its name and
-input types, so each overload is checked on its own. Text search
+left as the database has it. An aggregate or procedure is matched by
+its name and input types, and an operator by its name and argument
+types, so each overload is checked on its own. Text search
 objects are checked per schema: when a schema has any text search
 object in the database, `deploy` creates none of the project's text
 search objects in that schema. Object types `pull` does not yet model
-(operators, operator classes and families, access methods, …) are
+(operator classes and families, access methods, …) are
 handled the same way. Privileges on
 created objects are emitted (unless `-x`); privilege changes on objects
 that already exist are not yet diffed.

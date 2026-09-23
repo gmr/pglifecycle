@@ -368,17 +368,17 @@ fn pull_refuses_existing_destination() {
     );
 }
 
-/// An archive carrying one entry `pull` cannot model (a procedure), on top
+/// An archive carrying one entry `pull` cannot model (an operator family), on top
 /// of the otherwise fully-supported fixture archive
-fn archive_with_procedure(path: &std::path::Path) {
+fn archive_with_operator_family(path: &std::path::Path) {
     fixture_archive(path);
     let mut dump = libpgdump::load(path).expect("load archive");
     common::add(
         &mut dump,
-        libpgdump::ObjectType::Procedure,
+        libpgdump::ObjectType::OperatorFamily,
         "test",
-        "archive(integer)",
-        "CREATE PROCEDURE test.archive(days integer) LANGUAGE sql AS $$SELECT 1$$;",
+        "int_family USING btree",
+        "CREATE OPERATOR FAMILY test.int_family USING btree;",
     );
     dump.save(path).expect("save archive");
 }
@@ -387,11 +387,12 @@ fn archive_with_procedure(path: &std::path::Path) {
 fn unmodeled_entry_fails_pull_and_is_preserved() {
     let dir = tempfile::tempdir().unwrap();
     let archive = dir.path().join("fixtures.dump");
-    archive_with_procedure(&archive);
+    archive_with_operator_family(&archive);
     let dest = dir.path().join("project");
     let error = pull::pull(&pull_args(&archive, &dest)).unwrap_err();
     assert!(
-        error.contains("could not be modeled") && error.contains("PROCEDURE"),
+        error.contains("could not be modeled")
+            && error.contains("OPERATOR FAMILY"),
         "unexpected error: {error}"
     );
     assert!(
@@ -403,7 +404,7 @@ fn unmodeled_entry_fails_pull_and_is_preserved() {
     let remaining =
         std::fs::read_to_string(dest.join("remaining.yaml")).unwrap();
     assert!(
-        remaining.contains("archive(integer)"),
+        remaining.contains("int_family"),
         "remaining.yaml must carry the entry verbatim: {remaining}"
     );
 }
@@ -412,7 +413,7 @@ fn unmodeled_entry_fails_pull_and_is_preserved() {
 fn allow_unsupported_accepts_an_incomplete_project() {
     let dir = tempfile::tempdir().unwrap();
     let archive = dir.path().join("fixtures.dump");
-    archive_with_procedure(&archive);
+    archive_with_operator_family(&archive);
     let dest = dir.path().join("project");
     pull::pull(&pull_args_with(
         &archive,
@@ -427,7 +428,7 @@ fn allow_unsupported_accepts_an_incomplete_project() {
 fn ignore_file_cannot_suppress_remaining_file() {
     let dir = tempfile::tempdir().unwrap();
     let archive = dir.path().join("fixtures.dump");
-    archive_with_procedure(&archive);
+    archive_with_operator_family(&archive);
     let ignore = dir.path().join("ignore.txt");
     std::fs::write(&ignore, "remaining.yaml\n").unwrap();
     let dest = dir.path().join("project");
@@ -440,7 +441,7 @@ fn ignore_file_cannot_suppress_remaining_file() {
     let remaining =
         std::fs::read_to_string(dest.join("remaining.yaml")).unwrap();
     assert!(
-        remaining.contains("archive(integer)"),
+        remaining.contains("int_family"),
         "--ignore must not hold back the only copy of the entry: \
          {remaining}"
     );

@@ -396,6 +396,36 @@ pub(crate) fn comment(node: &Node, src: &str) -> Result<Statement, String> {
                 target = Some(name);
                 pending_first_name = false;
             }
+            // `schema.op (left, right)`, named as the operator and its
+            // argument types
+            "operator_with_argtypes" if past_on => {
+                in_target = true;
+                let operator = child.child_of_kind("any_operator");
+                let schema = operator
+                    .and_then(|n| n.child_of_kind("ColId"))
+                    .map(|n| unquote(n.text(src)));
+                let symbol = operator
+                    .and_then(|n| n.find("all_Op"))
+                    .map(|n| n.text(src).to_string())
+                    .unwrap_or_default();
+                let args = child
+                    .child_of_kind("oper_argtypes")
+                    .map(|n| {
+                        let mut cursor = n.walk();
+                        n.children(&mut cursor)
+                            .filter(|c| {
+                                c.kind() == "Typename" || c.kind() == "kw_none"
+                            })
+                            .map(|c| c.text(src).to_string())
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                target = Some(QualifiedName {
+                    schema,
+                    name: format!("{symbol}({})", args.join(", ")),
+                });
+                pending_first_name = false;
+            }
             "function_with_argtypes" if past_on => {
                 in_target = true;
                 let mut name = child
@@ -760,5 +790,16 @@ mod tests {
         assert_eq!(unstring("$$body$$"), "body");
         assert_eq!(unstring("$_$ BEGIN END $_$"), " BEGIN END ");
         assert_eq!(unstring("'it''s'"), "it's");
+    }
+
+    #[test]
+    fn parses_operator_comment_target() {
+        let Statement::Comment { target, .. } =
+            parse_one("COMMENT ON OPERATOR s.=== (integer, integer) IS 'eq';")
+        else {
+            panic!("expected Comment")
+        };
+        assert_eq!(target.schema.as_deref(), Some("s"));
+        assert_eq!(target.name, "===(integer, integer)");
     }
 }

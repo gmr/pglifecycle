@@ -43,7 +43,11 @@ const SECTIONS: &[(&str, &str, &[ObjectType])] = &[
         &[ObjectType::ForeignDataWrapper],
     ),
     ("foreign_servers", "FOREIGN SERVER", &[ObjectType::Server]),
-    ("functions", "FUNCTION", &[ObjectType::Function]),
+    (
+        "functions",
+        "FUNCTION",
+        &[ObjectType::Function, ObjectType::Procedure],
+    ),
     ("languages", "LANGUAGE", &[ObjectType::ProceduralLanguage]),
     ("large_objects", "LARGE OBJECT", &[]),
     ("schemata", "SCHEMA", &[ObjectType::Schema]),
@@ -84,6 +88,9 @@ pub(super) fn dump_acls(
     // (section index, object) → statements; BTreeMap keeps the output
     // deterministic across runs
     let mut objects: BTreeMap<(usize, String), ObjectAcl> = BTreeMap::new();
+    // build the lookup index once rather than rescanning the whole
+    // inventory for every ACL group below
+    let index = ObjectIndex::build(project);
     for item in &project.inventory {
         let (grants, revocations) = match &item.definition {
             Definition::Group(d) => (&d.grants, &d.revocations),
@@ -93,17 +100,15 @@ pub(super) fn dump_acls(
         };
         let role = item.definition.name();
         if let Some(acls) = revocations {
-            collect(&mut objects, acls, &role, true);
+            collect(&mut objects, acls, &role, true, &index);
         }
         if let Some(acls) = grants {
-            collect(&mut objects, acls, &role, false);
+            collect(&mut objects, acls, &role, false, &index);
         }
     }
-    // build the lookup index once rather than rescanning the whole
-    // inventory for every ACL group below
-    let index = ObjectIndex::build(project);
     for ((section, object), acl) in &objects {
         let (key, keyword, dep_types) = SECTIONS[*section];
+        let keyword = object_keyword(&index, key, keyword, object);
         // column grants attach to their table's entry
         let target = match key {
             "columns" => match object.rsplit_once('.') {
@@ -291,12 +296,35 @@ fn find_role(
     })
 }
 
+/// The GRANT keyword for an object: a section's own, except that the
+/// functions section holds procedures too, and PostgreSQL rejects ON
+/// FUNCTION for a procedure
+fn object_keyword(
+    index: &ObjectIndex,
+    key: &str,
+    keyword: &'static str,
+    object: &str,
+) -> &'static str {
+    if key != "functions" {
+        return keyword;
+    }
+    let (schema, name) = match object.split_once('.') {
+        Some((schema, name)) => (Some(schema), name),
+        None => (None, object),
+    };
+    match find_function(index, schema, name) {
+        Some(item) if item.desc == ObjectType::Procedure => "PROCEDURE",
+        _ => keyword,
+    }
+}
+
 /// Render one role's ACLs into the per-object statement map
 fn collect(
     objects: &mut BTreeMap<(usize, String), ObjectAcl>,
     acls: &Acls,
     role: &str,
     revoke: bool,
+    object_index: &ObjectIndex,
 ) {
     for (index, (key, keyword, _)) in SECTIONS.iter().enumerate() {
         // a section may draw from more than one Acls field; both feed
@@ -335,7 +363,7 @@ fn collect(
                 }
                 let statement = statement(
                     revoke,
-                    keyword,
+                    object_keyword(object_index, key, keyword, object),
                     key,
                     object,
                     &privileges,
@@ -435,9 +463,15 @@ impl<'a> ObjectIndex<'a> {
             objects
                 .entry((item.desc, key_schema, item.definition.name()))
                 .or_insert(item);
-            if let Definition::Function(f) = &item.definition {
+            // procedures share the functions ACL section
+            let identity = match &item.definition {
+                Definition::Function(f) => Some(f.identity()),
+                Definition::Procedure(p) => Some(p.identity()),
+                _ => None,
+            };
+            if let Some(identity) = identity {
                 functions_by_identity
-                    .entry((schema, f.identity()))
+                    .entry((schema, identity))
                     .or_insert(item);
                 functions_by_name
                     .entry((schema, item.definition.name()))
@@ -464,7 +498,7 @@ fn find_object(
         Some((schema, name)) => (Some(schema), name),
         None => (None, object),
     };
-    let item = if descs == [ObjectType::Function] {
+    let item = if descs.contains(&ObjectType::Function) {
         find_function(index, schema, name)
     } else {
         descs.iter().find_map(|desc| {

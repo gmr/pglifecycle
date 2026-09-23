@@ -49,6 +49,7 @@ GROUPS: dict[str, list[str]] = {
         'event_trigger',
         'foreign_data_wrapper',
         'function',
+        'procedure',
         'index',
         'materialized_view',
         'operator',

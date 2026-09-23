@@ -302,6 +302,14 @@ fn existence_index(assembly: &Assembly) -> BTreeSet<(String, String, String)> {
         .chain(assembly.text_search.iter().map(|d| {
             (ObjectType::TextSearch, Definition::TextSearch(d.clone()))
         }))
+        .chain(assembly.procedures.iter().map(|d| {
+            (ObjectType::Procedure, Definition::Procedure(d.clone()))
+        }))
+        .chain(
+            assembly.operators.iter().map(|d| {
+                (ObjectType::Operator, Definition::Operator(d.clone()))
+            }),
+        )
         .chain(assembly.statistics.iter().map(|d| {
             (ObjectType::Statistics, Definition::Statistics(d.clone()))
         }))
@@ -349,6 +357,24 @@ fn definition_existence_key(
                 format!("{}({signature})", aggregate.name),
             )
         }
+        // overloads are separate objects, keyed by their input types
+        Definition::Procedure(procedure) => (
+            desc.as_str().to_string(),
+            procedure.schema.clone(),
+            function_tag_name(&procedure.as_function()),
+        ),
+        Definition::Operator(operator) => (
+            desc.as_str().to_string(),
+            operator.schema.clone(),
+            format!(
+                "{}({}, {})",
+                operator.name,
+                canonical_type(operator.left_arg.as_deref().unwrap_or("NONE")),
+                canonical_type(
+                    operator.right_arg.as_deref().unwrap_or("NONE")
+                )
+            ),
+        ),
         Definition::Cast(cast) => {
             let name = format!(
                 "({} AS {})",

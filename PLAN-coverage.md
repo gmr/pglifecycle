@@ -564,9 +564,16 @@ none, so no gate could verify it. It needs a CI image built with a
 provider (`dummy_seclabel` from the PostgreSQL test modules) first.
 
 Every construct the coverage fixture held is now modeled. It records
-the gaps that remain instead: procedures and operators (which build
-and the models support, but pull cannot parse), and operator classes,
-operator families and access methods (which have no model).
+the gaps that remain instead: operator classes, operator families and
+access methods, which have no model. Procedures and operators, which
+build and the models supported but pull could not parse, are now
+pulled too. Doing so found three defects that affected functions as
+well: a SQL-standard body (`BEGIN ATOMIC ... END`) was dropped; the
+stored drop statement carried parameter defaults, so a routine with a
+default got no owner on restore (deviation 28); and the parameter
+`mode` schema listed `BOTH` and `VARADIC`, not `INOUT` and
+`VARIADIC`, so a function with either failed validation. A procedure's
+ACL now renders `ON PROCEDURE`.
 
 
 **Done (items 1 to 3, historical note):** `EXCLUDE` constraints

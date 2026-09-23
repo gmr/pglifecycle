@@ -48,6 +48,10 @@ pub struct Function {
     pub configuration: Option<Map<String, Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub definition: Option<String>,
+    /// A SQL-standard body, `BEGIN ATOMIC ... END`, in place of
+    /// `definition`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sql_body: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub object_file: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -118,10 +122,75 @@ pub struct Procedure {
     pub configuration: Option<Map<String, Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub definition: Option<String>,
+    /// A SQL-standard body, `BEGIN ATOMIC ... END`, in place of
+    /// `definition`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sql_body: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub object_file: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub link_symbol: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
+}
+
+impl Procedure {
+    /// The same routine as a function with no return type, which the
+    /// build renders with PROCEDURE in place of FUNCTION
+    pub fn as_function(&self) -> Function {
+        Function {
+            name: self.name.clone(),
+            schema: self.schema.clone(),
+            owner: self.owner.clone(),
+            sql: self.sql.clone(),
+            parameters: self.parameters.clone(),
+            returns: None,
+            language: self.language.clone(),
+            transform_types: self.transform_types.clone(),
+            window: None,
+            immutable: None,
+            stable: None,
+            volatile: None,
+            leak_proof: None,
+            called_on_null_input: None,
+            strict: None,
+            security: self.security.clone(),
+            parallel: None,
+            cost: None,
+            rows: None,
+            support: None,
+            configuration: self.configuration.clone(),
+            definition: self.definition.clone(),
+            sql_body: self.sql_body.clone(),
+            object_file: self.object_file.clone(),
+            link_symbol: self.link_symbol.clone(),
+            comment: self.comment.clone(),
+        }
+    }
+
+    /// The procedure a parsed routine describes, dropping what only a
+    /// function can have
+    pub fn from_function(function: Function) -> Procedure {
+        Procedure {
+            name: function.name,
+            schema: function.schema,
+            owner: function.owner,
+            sql: function.sql,
+            parameters: function.parameters,
+            language: function.language,
+            transform_types: function.transform_types,
+            security: function.security,
+            configuration: function.configuration,
+            definition: function.definition,
+            sql_body: function.sql_body,
+            object_file: function.object_file,
+            link_symbol: function.link_symbol,
+            comment: function.comment,
+        }
+    }
+
+    /// The identity signature, as [`Function::identity`] computes it
+    pub fn identity(&self) -> String {
+        self.as_function().identity()
+    }
 }
