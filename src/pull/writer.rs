@@ -464,6 +464,7 @@ fn kind(relative: &Path) -> &'static str {
         Some("conversions") => "conversion",
         Some("operators") => "operator",
         Some("publications") => "publication",
+        Some("statistics") => "statistics",
         Some("subscriptions") => "subscription",
         Some("servers") => "server",
         Some("tablespaces") => "tablespace",

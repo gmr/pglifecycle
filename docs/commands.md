@@ -137,6 +137,12 @@ any are pending. Index, trigger, and constraint drops issued while
 reconciling a table are *not* gated: they lose no data and the project
 is authoritative.
 
+`DROP RULE` is gated although a rule holds no data. A `DO INSTEAD
+NOTHING` rule can block writes, so dropping one can let through changes
+the database refused before. A project pulled with a version of
+pglifecycle that did not model rules has none on any table or view,
+and the gate stops a deploy of that project from dropping every rule.
+
 `DROP IDENTITY` is gated although it keeps every row: the sequence goes
 with it, so adding the identity back restarts the numbering and
 collides with existing keys. A project pulled with a version of
@@ -174,7 +180,8 @@ input types, so each overload is checked on its own. Text search
 objects are checked per schema: when a schema has any text search
 object in the database, `deploy` creates none of the project's text
 search objects in that schema. Object types `pull` does not yet model
-(operators, rules, extended statistics, …) are handled the same way. Privileges on
+(operators, operator classes and families, access methods, …) are
+handled the same way. Privileges on
 created objects are emitted (unless `-x`); privilege changes on objects
 that already exist are not yet diffed.
 
@@ -220,14 +227,14 @@ went missing.
 ```console
 $ pglifecycle pull ./project -d mydb
 ...
-error: 3 dump entries could not be modeled (RULE, STATISTICS), so the
+error: 3 dump entries could not be modeled (OPERATOR, OPERATOR CLASS), so the
 generated project would not reproduce the source database.
 The entries were preserved in ./project/remaining.yaml; re-run with
 --allow-unsupported to accept the project as it is.
 ```
 
 A `COMMENT` entry counts as unmodeled when the model has no place for
-it, such as a comment on a primary key or foreign key constraint.
+it, such as a comment on an object type that `pull` does not model.
 
 The project directory is written either way, so `remaining.yaml` is
 there to inspect. `--allow-unsupported` downgrades the failure to a

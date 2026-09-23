@@ -308,7 +308,9 @@ fn identity_index_rebuilt(repo: &Table, db: &Table) -> bool {
 /// Rule reconciliation for a table or view. A changed rule is
 /// replaced in place with CREATE OR REPLACE RULE, which keeps its
 /// state and comment, so those are set only when they differ. A
-/// removed rule is dropped: like a trigger, it holds no data.
+/// removed rule is dropped, gated: a DO INSTEAD NOTHING rule can block
+/// writes, and a project pulled before rules were modeled has none, so
+/// the gate stops a deploy from stripping every rule.
 fn rules(
     relation: &str,
     wanted: &[Rule],
@@ -322,7 +324,7 @@ fn rules(
     };
     for old in existing {
         if !wanted.iter().any(|r| r.name == old.name) {
-            alters.push(Alter::new(format!(
+            alters.push(Alter::destructive(format!(
                 "DROP RULE IF EXISTS {} ON {relation};\n",
                 quote_ident(&old.name)
             )));
@@ -3551,5 +3553,20 @@ mod tests {
                 "ALTER TABLE test.users ENABLE RULE r;\n",
             ]
         );
+    }
+
+    #[test]
+    fn rule_drops_are_gated() {
+        let repo = base_table();
+        let mut db = base_table();
+        db["rules"] = serde_json::json!([
+            {"name": "r", "event": "DELETE", "instead": true}
+        ]);
+        let alters = statements(table(&parse_table(repo), &parse_table(db)));
+        assert_eq!(
+            sql(&alters),
+            vec!["DROP RULE IF EXISTS r ON test.users;\n"]
+        );
+        assert!(alters.iter().all(|a| a.destructive));
     }
 }
