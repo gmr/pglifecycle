@@ -301,39 +301,147 @@ impl Loader {
         }
     }
 
-    /// Order each table after the tables its own definition says it is
-    /// built from: an `INHERITS` parent and a `LIKE` source both have to
-    /// exist before the table is created.
+    /// Order each object after the objects its own definition names,
+    /// which have to exist before it is created: a table's `INHERITS`
+    /// parents and `LIKE` source; the functions an aggregate, cast,
+    /// conversion or event trigger calls; the types an aggregate or
+    /// cast uses; a publication's tables and schemas; and the text
+    /// search objects in other schemas that a text search object uses.
     ///
-    /// A pulled project already carries the INHERITS edge in its
-    /// `dependencies` block, and never has a `LIKE` at all, since pg_dump
-    /// expands one into explicit columns. A hand-written project does,
-    /// and nothing required it to declare the edge as well, so the build
-    /// was free to sort the copy ahead of its source and the restore
-    /// failed. The definition already states the relationship, so it is
-    /// read from there. Neither can form a cycle: a table cannot inherit
-    /// from or copy itself, directly or not.
+    /// A pulled project carries only the INHERITS edge in its
+    /// `dependencies` block, and never has a `LIKE`, since pg_dump
+    /// expands one into explicit columns. Nothing required a
+    /// hand-written project to declare any of these as well, so the
+    /// build was free to sort an object ahead of what it uses, and the
+    /// restore failed. The definition already states the relationship,
+    /// so it is read from there. A name the project does not manage,
+    /// such as a `pg_catalog` function, orders nothing.
     fn apply_structural_dependencies(&mut self) {
         let mut edges = Vec::new();
         for (id, item) in self.project.inventory.iter().enumerate() {
-            let Definition::Table(table) = &item.definition else {
-                continue;
+            let own_schema = item.definition.schema().unwrap_or_default();
+            let mut references: Vec<(ObjectType, String)> = Vec::new();
+            let functions = |names: &[&Option<String>]| {
+                names
+                    .iter()
+                    .filter_map(|name| name.as_deref())
+                    .map(|name| (ObjectType::Function, name.to_string()))
+                    .collect::<Vec<_>>()
             };
-            let sources = table
-                .parents
-                .iter()
-                .flatten()
-                .chain(table.like_table.iter().map(|like| &like.name));
-            for source in sources {
-                let (namespace, tag) = split_sql_name(source);
-                // a source the project does not manage, such as one an
-                // extension owns, orders nothing and is left alone
-                for parent in lookup_items(
-                    &self.index,
-                    ObjectType::Table,
-                    Some(&namespace),
-                    &tag,
-                ) {
+            match &item.definition {
+                Definition::Table(table) => {
+                    let sources =
+                        table.parents.iter().flatten().chain(
+                            table.like_table.iter().map(|like| &like.name),
+                        );
+                    for source in sources {
+                        references.push((ObjectType::Table, source.clone()));
+                    }
+                }
+                Definition::Aggregate(a) => {
+                    references.extend(functions(&[
+                        &Some(a.sfunc.clone()),
+                        &a.ffunc,
+                        &a.combinefunc,
+                        &a.serialfunc,
+                        &a.deserialfunc,
+                        &a.msfunc,
+                        &a.minvfunc,
+                        &a.mffunc,
+                    ]));
+                    let types = a
+                        .arguments
+                        .iter()
+                        .chain(a.order_by.iter().flatten())
+                        .map(|arg| arg.data_type.clone())
+                        .chain([a.state_data_type.clone()])
+                        .chain(a.mstate_data_type.clone());
+                    references.extend(types.flat_map(type_references));
+                }
+                Definition::Cast(c) => {
+                    references.extend(functions(&[&c.function]));
+                    references.extend(
+                        [&c.source_type, &c.target_type]
+                            .into_iter()
+                            .flatten()
+                            .cloned()
+                            .flat_map(type_references),
+                    );
+                }
+                Definition::Conversion(c) => {
+                    references.extend(functions(&[&c.function]));
+                }
+                Definition::EventTrigger(t) => {
+                    references.extend(functions(&[&t.function]));
+                }
+                Definition::Publication(p) => {
+                    for table in p.tables.iter().flatten() {
+                        references.push((
+                            ObjectType::Table,
+                            table.name().to_string(),
+                        ));
+                    }
+                    for schema in p.schemas.iter().flatten() {
+                        references.push((ObjectType::Schema, schema.clone()));
+                    }
+                }
+                Definition::TextSearch(t) => {
+                    // text search objects are keyed by their schema's
+                    // container, so a name in another schema orders this
+                    // container after that one
+                    let names = t
+                        .configurations
+                        .iter()
+                        .flatten()
+                        .flat_map(|c| {
+                            c.parser.iter().chain(c.source.iter()).chain(
+                                c.mappings.iter().flatten().flat_map(
+                                    |(_, dictionaries)| dictionaries.iter(),
+                                ),
+                            )
+                        })
+                        .chain(
+                            t.dictionaries
+                                .iter()
+                                .flatten()
+                                .filter_map(|d| d.template.as_ref()),
+                        );
+                    for name in names {
+                        let (schema, _) = split_sql_name(name);
+                        if !schema.is_empty() {
+                            references.push((ObjectType::TextSearch, schema));
+                        }
+                    }
+                }
+                _ => {}
+            }
+            for (desc, reference) in references {
+                // a function reference may carry its argument list
+                let reference =
+                    reference.split('(').next().unwrap_or_default();
+                let (namespace, tag) = split_sql_name(reference);
+                let (namespace, tag) = match desc {
+                    ObjectType::Schema => {
+                        (String::new(), reference.to_string())
+                    }
+                    ObjectType::TextSearch => (tag.clone(), tag),
+                    _ if namespace.is_empty() => (own_schema.to_string(), tag),
+                    _ => (namespace, tag),
+                };
+                let found =
+                    lookup_items(&self.index, desc, Some(&namespace), &tag)
+                        .into_iter()
+                        .chain(if desc == ObjectType::Type {
+                            lookup_items(
+                                &self.index,
+                                ObjectType::Domain,
+                                Some(&namespace),
+                                &tag,
+                            )
+                        } else {
+                            Vec::new()
+                        });
+                for parent in found {
                     if parent != id {
                         edges.push((id, parent));
                     }
@@ -660,6 +768,19 @@ fn split_sql_name(value: &str) -> (String, String) {
     }
     let tag = parts.pop().unwrap_or_default();
     (parts.pop().unwrap_or_default(), tag)
+}
+
+/// The type a type name refers to, for ordering: its name without an
+/// array suffix or modifier. Built-in types are not in the project, so
+/// the lookup finds nothing for them.
+fn type_references(data_type: String) -> Option<(ObjectType, String)> {
+    let name = data_type
+        .split(['(', '['])
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    (!name.is_empty()).then_some((ObjectType::Type, name))
 }
 
 /// Drop null-valued keys so explicit YAML nulls compare equal to

@@ -79,6 +79,38 @@
 //!     The Python rendered `GENERATED  AS IDENTITY`, which PostgreSQL
 //!     rejects. The test-project identity states its behavior, so this
 //!     has no parity entry to exclude.
+//! 21. An aggregate's `INITCOND` and `MINITCOND` render as string
+//!     constants, and an aggregate with no arguments as `(*)`. The
+//!     Python rendered the value bare, which fails for anything but a
+//!     number, and `()`, which does not parse. It also had no form for
+//!     an ordered-set aggregate's `ORDER BY` arguments. The
+//!     test-project aggregate has one argument and no initial
+//!     condition, so this has no parity entry to exclude.
+//! 22. A cast's source and target types render as written. The Python
+//!     quoted each as a single identifier, so a qualified type such as
+//!     `s.pair` became `"s.pair"`, which names no type. The
+//!     test-project cast uses unqualified built-in types, which quote
+//!     the same either way.
+//! 23. A collation's `LOCALE`, `LC_COLLATE`, `LC_CTYPE` and `VERSION`,
+//!     and a conversion's encodings, render as string constants, and
+//!     `DETERMINISTIC = false` is kept. The Python rendered them bare:
+//!     `LOCALE = fr_FR.utf8` reads as a qualified name, and `FOR UTF8`
+//!     does not parse. It also dropped a non-deterministic setting,
+//!     the only one that changes behavior.
+//! 24. A text search configuration copied from another renders `COPY
+//!     = source`. The Python rendered `SOURCE = source`, which is not
+//!     an option.
+//! 25. Text search objects render qualified with their schema. The
+//!     Python rendered bare names, and pg_restore runs with an empty
+//!     `search_path`, so the restore failed with "no schema has been
+//!     selected to create in". A parser or template also has no
+//!     owner: with one, a restore that applies owners failed with
+//!     "don't know how to set owner for object type".
+//! 26. The comment entry of an event trigger is tagged `EVENT TRIGGER
+//!     name`, as pg_dump tags it. pg_restore creates event triggers
+//!     in its last pass and moves a comment there only by that tag, so
+//!     with the bare name the comment ran first and failed. The
+//!     test-project event trigger has no comment.
 
 mod acls;
 
@@ -130,6 +162,7 @@ pub fn assemble(project: &Project) -> Result<BuildOutput, String> {
     let mut builder = Builder {
         dump,
         dump_id_map: HashMap::new(),
+        text_search_last: HashMap::new(),
         superuser: project.superuser.clone(),
     };
     let task =
@@ -179,6 +212,9 @@ pub fn assemble(project: &Project) -> Result<BuildOutput, String> {
 struct Builder {
     dump: libpgdump::Dump,
     dump_id_map: HashMap<usize, i32>,
+    /// The last entry each text search container added (see
+    /// `add_text_search_item`)
+    text_search_last: HashMap<usize, i32>,
     superuser: String,
 }
 
@@ -360,10 +396,17 @@ impl Builder {
             String::from("IS"),
             format!("{};\n", dollar_quote(comment)),
         ];
+        // pg_restore creates event triggers in its last pass, and moves
+        // a comment there with its trigger only when the tag names the
+        // type, as pg_dump's does (deviation 26)
+        let tag = match desc {
+            "EVENT TRIGGER" => format!("EVENT TRIGGER {tag}"),
+            _ => tag.to_string(),
+        };
         self.add_entry(
             "COMMENT",
             namespace,
-            tag,
+            &tag,
             owner,
             &defn,
             &[],
@@ -481,19 +524,8 @@ impl Builder {
         }
         let mut create =
             vec!["CREATE".into(), "AGGREGATE".into(), self.item_name(item)];
-        let args: Vec<String> = d
-            .arguments
-            .iter()
-            .map(|a| {
-                let mut arg = vec![a.mode.clone().unwrap_or("IN".into())];
-                if let Some(name) = &a.name {
-                    arg.push(name.clone());
-                }
-                arg.push(a.data_type.clone());
-                arg.join(" ")
-            })
-            .collect();
-        create.push(format!("({})", args.join(", ")));
+        let signature = render_aggregate_signature(d);
+        create.push(signature.clone());
         let mut options = vec![
             format!("SFUNC = {}", d.sfunc),
             format!("STYPE = {}", d.state_data_type),
@@ -519,8 +551,9 @@ impl Builder {
         if let Some(v) = &d.deserialfunc {
             options.push(format!("DESERIALFUNC = {v}"));
         }
+        // an initial condition is a string constant (deviation 21)
         if let Some(v) = &d.initial_condition {
-            options.push(format!("INITCOND = {v}"));
+            options.push(format!("INITCOND = {}", string_literal(v)));
         }
         if let Some(v) = &d.msfunc {
             options.push(format!("MSFUNC = {v}"));
@@ -544,7 +577,7 @@ impl Builder {
             options.push(format!("MFINALFUNC_MODIFY = {v}"));
         }
         if let Some(v) = &d.minitial_condition {
-            options.push(format!("MINITCOND = {v}"));
+            options.push(format!("MINITCOND = {}", string_literal(v)));
         }
         if let Some(v) = &d.sort_operator {
             options.push(format!("SORTOP = {v}"));
@@ -556,7 +589,6 @@ impl Builder {
             options.push("HYPOTHETICAL".into());
         }
         create.push(format!("({})", options.join(", ")));
-        let signature = format!("({})", args.join(", "));
         // no IF EXISTS: pg_restore builds this type's owner
         // statement by stripping the leading DROP off this one
         // (deviation 17)
@@ -583,10 +615,13 @@ impl Builder {
         if let Some(sql) = &d.sql {
             return self.add_item(item, vec![sql.clone()], vec![], false);
         }
+        // the types are type names as written, which may be qualified
+        // and carry modifiers, so they are not quoted as one
+        // identifier (deviation 22)
         let name = format!(
             "({} AS {})",
-            quote_ident(d.source_type.as_deref().unwrap_or_default()),
-            quote_ident(d.target_type.as_deref().unwrap_or_default())
+            d.source_type.as_deref().unwrap_or_default(),
+            d.target_type.as_deref().unwrap_or_default()
         );
         let mut create = vec!["CREATE".into(), "CAST".into(), name.clone()];
         if let Some(function) = &d.function {
@@ -626,24 +661,29 @@ impl Builder {
             create.push("FROM".into());
             create.push(copy_from.clone());
         } else {
+            // the locale settings, version and rules are string
+            // literals (deviation 23)
             let mut options = Vec::new();
-            if let Some(v) = &d.locale {
-                options.push(format!("LOCALE = {v}"));
-            }
-            if let Some(v) = &d.lc_collate {
-                options.push(format!("LC_COLLATE = {v}"));
-            }
-            if let Some(v) = &d.lc_ctype {
-                options.push(format!("LC_CTYPE = {v}"));
-            }
             if let Some(v) = &d.provider {
                 options.push(format!("PROVIDER = {v}"));
             }
-            if d.deterministic == Some(true) {
-                options.push("DETERMINISTIC = True".into());
+            if let Some(v) = d.deterministic {
+                options.push(format!("DETERMINISTIC = {v}"));
+            }
+            if let Some(v) = &d.locale {
+                options.push(format!("LOCALE = {}", string_literal(v)));
+            }
+            if let Some(v) = &d.lc_collate {
+                options.push(format!("LC_COLLATE = {}", string_literal(v)));
+            }
+            if let Some(v) = &d.lc_ctype {
+                options.push(format!("LC_CTYPE = {}", string_literal(v)));
+            }
+            if let Some(v) = &d.rules {
+                options.push(format!("RULES = {}", string_literal(v)));
             }
             if let Some(v) = &d.version {
-                options.push(format!("VERSION = {v}"));
+                options.push(format!("VERSION = {}", string_literal(v)));
             }
             create.push(format!("({})", options.join(", ")));
         }
@@ -665,10 +705,15 @@ impl Builder {
             }
             create.push("CONVERSION".into());
             create.push(self.item_name(item));
+            // the encodings are string literals (deviation 23)
             create.push("FOR".into());
-            create.push(d.encoding_from.clone().unwrap_or_default());
+            create.push(string_literal(
+                d.encoding_from.as_deref().unwrap_or_default(),
+            ));
             create.push("TO".into());
-            create.push(d.encoding_to.clone().unwrap_or_default());
+            create.push(string_literal(
+                d.encoding_to.as_deref().unwrap_or_default(),
+            ));
             create.push("FROM".into());
             create.push(d.function.clone().unwrap_or_default());
             create
@@ -748,6 +793,27 @@ impl Builder {
         create.push("EXECUTE".into());
         create.push("FUNCTION".into());
         create.push(d.function.clone().unwrap_or_default());
+        // a trigger that is not in the default state is created and then
+        // altered, as pg_dump writes it
+        if let Some(state) = &d.enabled {
+            let state = match state.as_str() {
+                "DISABLED" => "DISABLE",
+                "REPLICA" => "ENABLE REPLICA",
+                "ALWAYS" => "ENABLE ALWAYS",
+                other => {
+                    return Err(format!(
+                        "event trigger {} has an unknown state {other}",
+                        d.name
+                    ));
+                }
+            };
+            let last = create.len() - 1;
+            create[last].push(';');
+            create.push(format!(
+                "ALTER EVENT TRIGGER {} {state}",
+                self.item_name(item)
+            ));
+        }
         let drop =
             vec!["DROP EVENT TRIGGER IF EXISTS".into(), self.item_name(item)];
         self.add_item(item, create, drop, false)
@@ -1134,13 +1200,32 @@ impl Builder {
         if d.all_tables == Some(true) {
             create.push("FOR ALL TABLES".into());
         } else {
-            create.push("FOR".into());
-            create.push("TABLE".into());
-            create.push(d.tables.clone().unwrap_or_default().join(", "));
+            // each table is exactly the one named: pg_dump lists an
+            // inheritance child separately and adds each with ONLY
+            let mut objects: Vec<String> = d
+                .tables
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .map(render_publication_table)
+                .collect();
+            for schema in d.schemas.as_deref().unwrap_or_default() {
+                objects
+                    .push(format!("TABLES IN SCHEMA {}", quote_ident(schema)));
+            }
+            // a publication with neither publishes nothing until tables
+            // are added, and takes no FOR clause
+            if !objects.is_empty() {
+                create.push("FOR".into());
+                create.push(objects.join(", "));
+            }
         }
         if let Some(parameters) = &d.parameters {
             create.push("WITH".into());
-            create.push(render_parameters(parameters));
+            create.push(format!(
+                "({})",
+                render_publication_parameters(parameters)
+            ));
         }
         let drop =
             vec!["DROP PUBLICATION IF EXISTS".into(), self.item_name(item)];
@@ -1857,78 +1942,13 @@ impl Builder {
         let Definition::TextSearch(d) = &item.definition else {
             unreachable!()
         };
-        for config in d.configurations.as_deref().unwrap_or_default() {
-            let (create, drop) = if let Some(sql) = &config.sql {
-                (vec![sql.clone()], vec![])
-            } else {
-                let value = if let Some(parser) = &config.parser {
-                    format!("PARSER = {parser}")
-                } else if let Some(source) = &config.source {
-                    format!("SOURCE = {source}")
-                } else {
-                    return Err(format!(
-                        "text search configuration {} has no parser or \
-                         source",
-                        config.name
-                    ));
-                };
-                (
-                    vec![
-                        "CREATE".into(),
-                        "TEXT SEARCH CONFIGURATION".into(),
-                        quote_ident(&config.name),
-                        format!("({value})"),
-                    ],
-                    vec![
-                        "DROP TEXT SEARCH CONFIGURATION IF EXISTS".into(),
-                        quote_ident(&config.name),
-                    ],
-                )
-            };
-            self.add_text_search_item(
-                d,
-                "TEXT SEARCH CONFIGURATION",
-                &config.name,
-                create,
-                drop,
-                config.comment.as_deref(),
-            )?;
-        }
-        for dictionary in d.dictionaries.as_deref().unwrap_or_default() {
-            let (create, drop) = if let Some(sql) = &dictionary.sql {
-                (vec![sql.clone()], vec![])
-            } else {
-                let mut value = vec![format!(
-                    "TEMPLATE = {}",
-                    dictionary.template.clone().unwrap_or_default()
-                )];
-                if let Some(options) = &dictionary.options {
-                    for (k, v) in options {
-                        value.push(format!("{k} = {}", postgres_value(v)));
-                    }
-                }
-                (
-                    vec![
-                        "CREATE".into(),
-                        "TEXT SEARCH DICTIONARY".into(),
-                        quote_ident(&dictionary.name),
-                        format!("({})", value.join(", ")),
-                    ],
-                    vec![
-                        "DROP TEXT SEARCH DICTIONARY IF EXISTS".into(),
-                        quote_ident(&dictionary.name),
-                    ],
-                )
-            };
-            self.add_text_search_item(
-                d,
-                "TEXT SEARCH DICTIONARY",
-                &dictionary.name,
-                create,
-                drop,
-                dictionary.comment.as_deref(),
-            )?;
-        }
+        // pg_restore runs with an empty search_path, so every name is
+        // qualified with the container's schema (deviation 25)
+        let qualified = |name: &str| {
+            format!("{}.{}", quote_ident(&d.schema), quote_ident(name))
+        };
+        // in the order they depend on each other: a configuration names a
+        // parser and dictionaries, and a dictionary a template
         for parser in d.parsers.as_deref().unwrap_or_default() {
             let (create, drop) = if let Some(sql) = &parser.sql {
                 (vec![sql.clone()], vec![])
@@ -1958,16 +1978,17 @@ impl Builder {
                     vec![
                         "CREATE".into(),
                         "TEXT SEARCH PARSER".into(),
-                        quote_ident(&parser.name),
+                        qualified(&parser.name),
                         format!("({})", value.join(", ")),
                     ],
                     vec![
                         "DROP TEXT SEARCH PARSER IF EXISTS".into(),
-                        quote_ident(&parser.name),
+                        qualified(&parser.name),
                     ],
                 )
             };
             self.add_text_search_item(
+                item,
                 d,
                 "TEXT SEARCH PARSER",
                 &parser.name,
@@ -1992,16 +2013,17 @@ impl Builder {
                     vec![
                         "CREATE".into(),
                         "TEXT SEARCH TEMPLATE".into(),
-                        quote_ident(&template.name),
+                        qualified(&template.name),
                         format!("({})", value.join(", ")),
                     ],
                     vec![
                         "DROP TEXT SEARCH TEMPLATE IF EXISTS".into(),
-                        quote_ident(&template.name),
+                        qualified(&template.name),
                     ],
                 )
             };
             self.add_text_search_item(
+                item,
                 d,
                 "TEXT SEARCH TEMPLATE",
                 &template.name,
@@ -2010,11 +2032,105 @@ impl Builder {
                 template.comment.as_deref(),
             )?;
         }
+        for dictionary in d.dictionaries.as_deref().unwrap_or_default() {
+            let (create, drop) = if let Some(sql) = &dictionary.sql {
+                (vec![sql.clone()], vec![])
+            } else {
+                let mut value = vec![format!(
+                    "TEMPLATE = {}",
+                    dictionary.template.clone().unwrap_or_default()
+                )];
+                if let Some(options) = &dictionary.options {
+                    for (k, v) in options {
+                        value.push(format!("{k} = {}", postgres_value(v)));
+                    }
+                }
+                (
+                    vec![
+                        "CREATE".into(),
+                        "TEXT SEARCH DICTIONARY".into(),
+                        qualified(&dictionary.name),
+                        format!("({})", value.join(", ")),
+                    ],
+                    vec![
+                        "DROP TEXT SEARCH DICTIONARY IF EXISTS".into(),
+                        qualified(&dictionary.name),
+                    ],
+                )
+            };
+            self.add_text_search_item(
+                item,
+                d,
+                "TEXT SEARCH DICTIONARY",
+                &dictionary.name,
+                create,
+                drop,
+                dictionary.comment.as_deref(),
+            )?;
+        }
+        for config in d.configurations.as_deref().unwrap_or_default() {
+            let (create, drop) = if let Some(sql) = &config.sql {
+                (vec![sql.clone()], vec![])
+            } else {
+                // COPY is the option's name; SOURCE does not parse
+                // (deviation 24)
+                let value = if let Some(parser) = &config.parser {
+                    format!("PARSER = {parser}")
+                } else if let Some(source) = &config.source {
+                    format!("COPY = {source}")
+                } else {
+                    return Err(format!(
+                        "text search configuration {} has no parser or \
+                         source",
+                        config.name
+                    ));
+                };
+                let mut create = vec![
+                    "CREATE".into(),
+                    "TEXT SEARCH CONFIGURATION".into(),
+                    qualified(&config.name),
+                    format!("({value})"),
+                ];
+                for (token, dictionaries) in config.mappings.iter().flatten() {
+                    let last = create.len() - 1;
+                    create[last].push(';');
+                    create.push(format!(
+                        "ALTER TEXT SEARCH CONFIGURATION {} ADD MAPPING FOR \
+                         {} WITH {}",
+                        qualified(&config.name),
+                        quote_ident(token),
+                        dictionaries.join(", ")
+                    ));
+                }
+                (
+                    create,
+                    vec![
+                        "DROP TEXT SEARCH CONFIGURATION IF EXISTS".into(),
+                        qualified(&config.name),
+                    ],
+                )
+            };
+            self.add_text_search_item(
+                item,
+                d,
+                "TEXT SEARCH CONFIGURATION",
+                &config.name,
+                create,
+                drop,
+                config.comment.as_deref(),
+            )?;
+        }
         Ok(())
     }
 
+    /// One text search object's entry. A container holds several, so
+    /// the first stands for the item, which is what deploy and the
+    /// item's own dependency edges use, and each later one depends on
+    /// the one before, which keeps them in the order they were added.
+    #[allow(clippy::too_many_arguments)]
     fn add_text_search_item(
         &mut self,
+        item: &Item,
         parent: &crate::models::TextSearch,
         desc: &str,
         name: &str,
@@ -2022,16 +2138,25 @@ impl Builder {
         drop_stmt: Vec<String>,
         comment: Option<&str>,
     ) -> Result<(), String> {
+        // a parser or template has no owner, and pg_restore fails on an
+        // owner it cannot set (deviation 25)
+        let owner = match desc {
+            "TEXT SEARCH PARSER" | "TEXT SEARCH TEMPLATE" => String::new(),
+            _ => self.superuser.clone(),
+        };
+        let previous = self.text_search_last.get(&item.id).copied();
         let dump_id = self.add_entry(
             desc,
             &parent.schema,
             name,
-            &self.superuser.clone(),
+            &owner,
             &defn,
             &drop_stmt,
-            &[],
+            &previous.into_iter().collect::<Vec<_>>(),
             None,
         )?;
+        self.dump_id_map.entry(item.id).or_insert(dump_id);
+        self.text_search_last.insert(item.id, dump_id);
         if let Some(comment) = comment {
             self.add_comment(
                 desc,
@@ -3019,6 +3144,81 @@ fn render_options(options: &Map<String, Value>) -> String {
 }
 
 /// `key = value` parameter rendering (ports _format_parameters)
+/// A string constant, dollar-quoted when it holds a single quote
+fn string_literal(value: &str) -> String {
+    postgres_value(&Value::String(value.to_string()))
+}
+
+/// `(args)` for CREATE, DROP and COMMENT ON AGGREGATE: the direct
+/// arguments, then ORDER BY and the aggregated ones for an
+/// ordered-set aggregate, or `*` for one that takes none
+pub(crate) fn render_aggregate_signature(
+    aggregate: &crate::models::Aggregate,
+) -> String {
+    let render = |args: &[crate::models::Argument]| -> String {
+        args.iter()
+            .map(|a| {
+                let mut arg = vec![a.mode.clone().unwrap_or("IN".into())];
+                if let Some(name) = &a.name {
+                    arg.push(name.clone());
+                }
+                arg.push(a.data_type.clone());
+                arg.join(" ")
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let direct = render(&aggregate.arguments);
+    match aggregate.order_by.as_deref() {
+        Some(order_by) if direct.is_empty() => {
+            format!("(ORDER BY {})", render(order_by))
+        }
+        Some(order_by) => format!("({direct} ORDER BY {})", render(order_by)),
+        None if direct.is_empty() => String::from("(*)"),
+        None => format!("({direct})"),
+    }
+}
+
+/// One table in a publication's FOR clause
+fn render_publication_table(
+    table: &crate::models::PublicationTable,
+) -> String {
+    use crate::models::PublicationTable;
+    match table {
+        PublicationTable::Name(name) => format!("TABLE ONLY {name}"),
+        PublicationTable::Filtered(table) => {
+            let mut sql = format!("TABLE ONLY {}", table.name);
+            if let Some(columns) = &table.columns {
+                let columns: Vec<String> =
+                    columns.iter().map(|c| quote_ident(c)).collect();
+                sql.push_str(&format!(" ({})", columns.join(", ")));
+            }
+            if let Some(row_filter) = &table.row_filter {
+                sql.push_str(&format!(" WHERE ({row_filter})"));
+            }
+            sql
+        }
+    }
+}
+
+/// A publication's WITH options. `publish` is a list of operations in
+/// the project and one comma-separated string in SQL.
+fn render_publication_parameters(parameters: &Map<String, Value>) -> String {
+    parameters
+        .iter()
+        .map(|(k, v)| match v {
+            Value::Array(items) => {
+                let items: Vec<&str> =
+                    items.iter().filter_map(Value::as_str).collect();
+                format!("{k} = {}", string_literal(&items.join(", ")))
+            }
+            Value::Bool(v) => format!("{k} = {v}"),
+            other => format!("{k} = {}", postgres_value(other)),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn render_parameters(parameters: &Map<String, Value>) -> String {
     parameters
         .iter()
@@ -3118,6 +3318,7 @@ mod tests {
         let mut builder = Builder {
             dump,
             dump_id_map: HashMap::new(),
+            text_search_last: HashMap::new(),
             superuser: "postgres".into(),
         };
         builder.dump_item(item).unwrap();
@@ -3536,6 +3737,7 @@ mod tests {
         let mut builder = Builder {
             dump,
             dump_id_map: HashMap::new(),
+            text_search_last: HashMap::new(),
             superuser: "postgres".into(),
         };
         builder.dump_item(item).unwrap();
@@ -3554,6 +3756,7 @@ mod tests {
         let mut builder = Builder {
             dump,
             dump_id_map: HashMap::new(),
+            text_search_last: HashMap::new(),
             superuser: "postgres".into(),
         };
         builder.dump_item(item).unwrap();
@@ -3784,6 +3987,7 @@ mod tests {
         let mut builder = Builder {
             dump,
             dump_id_map: HashMap::new(),
+            text_search_last: HashMap::new(),
             superuser: "postgres".into(),
         };
         builder.dump_item(&item).unwrap();
@@ -3979,6 +4183,7 @@ mod tests {
         let mut builder = Builder {
             dump,
             dump_id_map: HashMap::new(),
+            text_search_last: HashMap::new(),
             superuser: "postgres".into(),
         };
         builder.dump_item(item).unwrap();

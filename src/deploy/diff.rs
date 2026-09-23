@@ -167,11 +167,9 @@ pub fn diff(project: &Project, assembly: &Assembly) -> Diff {
                     }
                 }
             }
-        } else if existing.contains(&existence_key(
-            item.desc.as_str(),
-            item.definition.schema().unwrap_or_default(),
-            &item.definition.name(),
-        )) {
+        } else if existing
+            .contains(&definition_existence_key(item.desc, &item.definition))
+        {
             Change::Undiffable
         } else {
             Change::Added
@@ -266,18 +264,77 @@ fn database_index(assembly: &Assembly) -> BTreeMap<ObjectKey, Definition> {
 /// Existence-only index over the snapshot entries that were not
 /// parsed into models (`Assembly::remaining`)
 fn existence_index(assembly: &Assembly) -> BTreeSet<(String, String, String)> {
-    assembly
-        .remaining
+    let remaining = assembly.remaining.iter().filter_map(|r| {
+        let tag = r.tag.as_deref()?;
+        Some(existence_key(
+            &r.desc,
+            r.namespace.as_deref().unwrap_or_default(),
+            tag,
+        ))
+    });
+    // types pull models but deploy does not compare yet: they are
+    // matched by existence, like the entries it cannot model at all
+    let modeled = assembly
+        .aggregates
         .iter()
-        .filter_map(|r| {
-            let tag = r.tag.as_deref()?;
-            Some(existence_key(
-                &r.desc,
-                r.namespace.as_deref().unwrap_or_default(),
-                tag,
-            ))
-        })
-        .collect()
+        .map(|d| (ObjectType::Aggregate, Definition::Aggregate(d.clone())))
+        .chain(
+            assembly
+                .casts
+                .iter()
+                .map(|d| (ObjectType::Cast, Definition::Cast(d.clone()))),
+        )
+        .chain(assembly.collations.iter().map(|d| {
+            (ObjectType::Collation, Definition::Collation(d.clone()))
+        }))
+        .chain(assembly.conversions.iter().map(|d| {
+            (ObjectType::Conversion, Definition::Conversion(d.clone()))
+        }))
+        .chain(assembly.event_triggers.iter().map(|d| {
+            (
+                ObjectType::EventTrigger,
+                Definition::EventTrigger(d.clone()),
+            )
+        }))
+        .chain(assembly.publications.iter().map(|d| {
+            (ObjectType::Publication, Definition::Publication(d.clone()))
+        }))
+        .chain(assembly.text_search.iter().map(|d| {
+            (ObjectType::TextSearch, Definition::TextSearch(d.clone()))
+        }))
+        .map(|(desc, definition)| definition_existence_key(desc, &definition));
+    remaining.chain(modeled).collect()
+}
+
+/// [`existence_key`] for a model. A cast has no schema: the project
+/// files it under one, and pull picks one from its types, so the two
+/// need not agree and the key leaves it out. Its name, `(source AS
+/// target)`, is kept whole, since stripping an argument list would
+/// leave every cast the same empty name, and its types canonical, so
+/// `int4` matches the `integer` pg_dump writes.
+fn definition_existence_key(
+    desc: ObjectType,
+    definition: &Definition,
+) -> (String, String, String) {
+    match definition {
+        Definition::Cast(cast) => {
+            let name = format!(
+                "({} AS {})",
+                canonical_type(
+                    cast.source_type.as_deref().unwrap_or_default()
+                ),
+                canonical_type(
+                    cast.target_type.as_deref().unwrap_or_default()
+                )
+            );
+            (desc.as_str().to_string(), String::new(), name)
+        }
+        _ => existence_key(
+            desc.as_str(),
+            definition.schema().unwrap_or_default(),
+            &definition.name(),
+        ),
+    }
 }
 
 /// Match key for existence-only comparison; argument lists are

@@ -1,6 +1,6 @@
 # Coverage plan: silent schema loss, RLS, and PostgreSQL 18
 
-Status: Phases 0 to 4 complete. Phases 5-8 proposed.
+Status: Phases 0 to 5 complete. Phases 6-8 proposed.
 Written 2026-09-21.
 
 Every claim below was verified against PostgreSQL 18.4 (the version
@@ -490,7 +490,48 @@ within a table, and `deploy` can reuse `named_pairs()`
 RLS must already make `pull` fail (Phase 0) before this lands, so that
 the window where policies are silently dropped closes first.
 
-### Phase 5 — `pull` parity with `build` (~1.5 days)
+### Phase 5 — `pull` parity with `build` — **DONE**
+
+**Done:** pull models aggregates (including ordered-set ones), casts,
+collations, conversions, event triggers (with their enabled state),
+publications (with column lists, row filters, `TABLES IN SCHEMA` and
+`publish_via_partition_root`) and text search parsers, templates,
+dictionaries and configurations (with their mappings), plus a comment
+on each. All seven moved from `fixtures/unsupported.sql` to
+`fixtures/schema.sql`; the coverage list is down from 13 entries to 5.
+
+The item below said the models, renderers and schemata already
+existed, so each type was a parse and a push. That was wrong. None of
+the renderers had ever been restored, and most were Python ports with
+their own bugs:
+
+- **Missing model fields.** Publications had no column lists, row
+  filters or schemas, text search configurations no mappings, event
+  triggers no enabled state, collations no ICU rules, and aggregates no
+  form for `ORDER BY` arguments. Each is added.
+- **Build bugs**, now deviations 21 to 26: a bare `INITCOND` and `()`
+  for a zero-argument aggregate; a cast's qualified type quoted as one
+  identifier; a collation's locale and a conversion's encodings
+  unquoted; `SOURCE =` instead of `COPY =`; unqualified text search
+  names, which fail under pg_restore's empty `search_path`, and an
+  owner on parsers and templates, which have none; and an event
+  trigger's comment restored before the trigger.
+- **Ordering.** Nothing ordered these objects after what they use, so
+  a cast could restore before its function. The loader now derives
+  those edges from each definition, as it already did for `INHERITS`
+  and `LIKE`. A text search container's entries are chained in
+  dependency order and the first stands for the item, so deploy can
+  find them.
+- **Deploy** matches these types by existence only, as it did while
+  they were unmodeled; comparing their definitions is later work.
+
+Found on the way and fixed in its own commit: a value written at its
+default (`forced: false`, `not_valid: false`, `command: ALL`) made the
+project fail to load, because the model read it as absent and the
+loader's round-trip check then saw a key go missing. Defaults are now
+read as absent only where deploy compares (`Table::canonical`).
+
+The original item follows.
 
 Add `dispatch()` arms for `DefineStmt` (aggregate, collation, text
 search parser/dictionary/template/configuration), `CreateCastStmt`,
