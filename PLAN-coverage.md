@@ -1,7 +1,7 @@
 # Coverage plan: silent schema loss, RLS, and PostgreSQL 18
 
-Status: Phases 0 to 5 complete, and Phase 6 items 1 to 3. The rest of
-Phase 6, and Phases 7 and 8, proposed.
+Status: Phases 0 to 5 complete, and Phase 6 items 1 to 6. Phase 6
+item 7, and Phases 7 and 8, proposed.
 Written 2026-09-21.
 
 Every claim below was verified against PostgreSQL 18.4 (the version
@@ -548,22 +548,42 @@ enabled state.
 → verify: pull a database containing all seven; `remaining.yaml` is
 absent, and `just round-trip` passes with them in `fixtures/schema.sql`.
 
-### Phase 6 — New object models (~4 days, ranked) — items 1 to 3 **DONE**
+### Phase 6 — New object models (~4 days, ranked) — items 1 to 6 **DONE**
 
-**Done:** `EXCLUDE` constraints (item 1), `REPLICA IDENTITY` (item 2)
-and default privileges (item 3), each pulled, built, deployed and in
-`fixtures/schema.sql`. The coverage gate list is down from 5 entries
-to 4. Items 4 to 7 are still open.
+**Items 4 to 6 done:** column `COMPRESSION` and `STORAGE`, plus the
+statistics target and attribute options, which pg_dump writes the same
+way (item 4); extended `STATISTICS` as a top-level object (item 5); and
+`RULE` on tables and views, with a view's `_RETURN` rule folded into
+its query (item 6). Also comments on primary key, unique, check,
+foreign key and NOT NULL constraints, which the unmatched-comment rule
+from items 1 to 3 otherwise turned into pull failures.
 
-Where the work departs from the items below:
+**Item 7, `SECURITY LABEL`, is deferred.** A label needs a provider
+module preloaded into the server, and the stock `postgres:18` image has
+none, so no gate could verify it. It needs a CI image built with a
+provider (`dummy_seclabel` from the PostgreSQL test modules) first.
+
+Every construct the coverage fixture held is now modeled. It records
+the gaps that remain instead: procedures and operators (which build
+and the models support, but pull cannot parse), and operator classes,
+operator families and access methods (which have no model).
+
+
+**Done (items 1 to 3, historical note):** `EXCLUDE` constraints
+(item 1), `REPLICA IDENTITY` (item 2) and default privileges (item 3),
+each pulled, built, deployed and in `fixtures/schema.sql`. When these
+items were done, items 4 to 7 were still open; see the status above
+for their current state.
+
+Where the work on items 1 to 3 departs from the items below:
 
 - **An unmatched comment now fails the pull.** Pull logged a warning
   for a comment it could not attach and dropped it, which the
   governing invariant forbids. It now keeps the entry in
-  `remaining.yaml`. The model has a comment for an exclusion
-  constraint only, so a comment on a primary key, unique, check or
-  foreign key constraint now fails the pull, and the coverage fixture
-  records that gap.
+  `remaining.yaml`. At that time the model had a comment for an
+  exclusion constraint only, so a comment on another constraint type
+  failed the pull. The `constraint_comments` map on a table (added
+  with items 4 to 6) now closes that gap.
 - **Default privileges are a new top-level object type**,
   `default_privileges/<role>.yaml`, not part of `src/build/acls.rs`:
   they are keyed by the role the defaults are `FOR`, and the role files

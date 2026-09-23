@@ -16,11 +16,11 @@ use crate::models::{
     CheckConstraint, Column, ColumnDefault, ColumnGenerated, ColumnNotNull,
     Definition, Domain, ExcludeConstraint, Extension, ForeignDataWrapper,
     ForeignKey, Function, Index, NotNullConstraint, Policy, ReplicaIdentity,
-    Schema, Sequence, SequenceOptions, Server, Table, Trigger, Type,
+    Rule, Schema, Sequence, SequenceOptions, Server, Table, Trigger, Type,
     UserMapping, View, ViewColumn,
 };
 use crate::utils::{
-    dollar_quote, postgres_value, quote_ident, user_mapping_subject,
+    dollar_quote, postgres_value, quote_ident, raw_value, user_mapping_subject,
 };
 
 /// One reconciliation statement
@@ -71,7 +71,12 @@ pub(crate) enum Resolution {
     /// `comment` carries the `COMMENT ON` statement to run afterward
     /// when it changed (including the `IS NULL` form on removal); `None`
     /// means the comment is unchanged.
-    OrReplace { comment: Option<String> },
+    /// `then` holds statements to run after it, which reconcile the
+    /// object's children (a view's rules).
+    OrReplace {
+        comment: Option<String>,
+        then: Vec<Alter>,
+    },
     /// No in-place form exists (or is implemented yet): drop and
     /// recreate from the repo definition, gated behind --allow-drop
     Replace,
@@ -109,6 +114,7 @@ pub(crate) fn resolve(repo: &Definition, database: &Definition) -> Resolution {
                         &repo.comment,
                         &db.comment,
                     ),
+                    then: Vec::new(),
                 }
             } else {
                 Resolution::Replace
@@ -169,13 +175,17 @@ fn out_parameters(function: &Function) -> Vec<(String, String, String)> {
 /// here.
 fn view(repo: &View, db: &View) -> Resolution {
     if view_columns_compatible(repo, db) {
+        let name = qualified(&repo.schema, &repo.name);
+        let mut then = Vec::new();
+        rules(
+            &name,
+            repo.rules.as_deref().unwrap_or_default(),
+            db.rules.as_deref().unwrap_or_default(),
+            &mut then,
+        );
         Resolution::OrReplace {
-            comment: comment_delta(
-                "VIEW",
-                &qualified(&repo.schema, &repo.name),
-                &repo.comment,
-                &db.comment,
-            ),
+            comment: comment_delta("VIEW", &name, &repo.comment, &db.comment),
+            then,
         }
     } else {
         Resolution::Replace
@@ -248,6 +258,12 @@ fn table(repo: &Table, db: &Table) -> Resolution {
         return Resolution::Replace;
     }
     indexes(&name, repo, db, &mut alters);
+    rules(
+        &name,
+        repo.rules.as_deref().unwrap_or_default(),
+        db.rules.as_deref().unwrap_or_default(),
+        &mut alters,
+    );
     // after the indexes, which a USING INDEX identity may name. A
     // rebuilt identity index loses its mark, so the identity is set
     // again although both sides name the same index.
@@ -264,6 +280,7 @@ fn table(repo: &Table, db: &Table) -> Resolution {
         });
         alters.push(Alter::new(format!("{sql};\n")));
     }
+    constraint_comments(&name, repo, db, &mut alters);
     row_security(&name, repo, db, &mut alters);
     policies(&name, repo, db, &mut alters);
     push_comment(&mut alters, "TABLE", &name, &repo.comment, &db.comment);
@@ -286,6 +303,167 @@ fn identity_index_rebuilt(repo: &Table, db: &Table) -> bool {
             .cloned()
     };
     matches!((find(repo), find(db)), (Some(r), Some(d)) if r != d)
+}
+
+/// Rule reconciliation for a table or view. A changed rule is
+/// replaced in place with CREATE OR REPLACE RULE, which keeps its
+/// state and comment, so those are set only when they differ. A
+/// removed rule is dropped, gated: a DO INSTEAD NOTHING rule can block
+/// writes, and a project pulled before rules were modeled has none, so
+/// the gate stops a deploy from stripping every rule.
+fn rules(
+    relation: &str,
+    wanted: &[Rule],
+    existing: &[Rule],
+    alters: &mut Vec<Alter>,
+) {
+    let body = |rule: &Rule| Rule {
+        enabled: None,
+        comment: None,
+        ..rule.clone()
+    };
+    for old in existing {
+        if !wanted.iter().any(|r| r.name == old.name) {
+            alters.push(Alter::destructive(format!(
+                "DROP RULE IF EXISTS {} ON {relation};\n",
+                quote_ident(&old.name)
+            )));
+        }
+    }
+    for rule in wanted {
+        let old = existing.iter().find(|r| r.name == rule.name);
+        if old.map(body) != Some(body(rule)) {
+            alters.push(Alter::new(format!(
+                "{};\n",
+                build::render_rule(rule, relation, true)
+            )));
+        }
+        let state = |r: &Rule| {
+            r.enabled
+                .as_deref()
+                .map(str::to_uppercase)
+                .filter(|s| s != "ORIGIN")
+        };
+        if old.and_then(state) != state(rule) {
+            let sql = build::render_rule_state(rule, relation).unwrap_or_else(
+                || {
+                    format!(
+                        "ALTER TABLE {relation} ENABLE RULE {}",
+                        quote_ident(&rule.name)
+                    )
+                },
+            );
+            alters.push(Alter::new(format!("{sql};\n")));
+        }
+        let comment = old.and_then(|r| r.comment.clone());
+        push_comment(
+            alters,
+            "RULE",
+            &format!("{} ON {relation}", quote_ident(&rule.name)),
+            &rule.comment,
+            &comment,
+        );
+    }
+}
+
+/// Comments on the table's other constraints, after the statements
+/// that reconcile the constraints themselves. A constraint those
+/// statements add loses any comment it had, so its comment is set
+/// again. A comment the repo removes is cleared only while the
+/// constraint stays; a dropped constraint takes its comment with it.
+fn constraint_comments(
+    table: &str,
+    repo: &Table,
+    db: &Table,
+    alters: &mut Vec<Alter>,
+) {
+    let wanted = repo.constraint_comments.clone().unwrap_or_default();
+    let existing = db.constraint_comments.clone().unwrap_or_default();
+    let added = |name: &str| {
+        let marker = format!("ADD CONSTRAINT {} ", quote_ident(name));
+        alters.iter().any(|a| a.sql.contains(&marker))
+    };
+    let mut comments = Vec::new();
+    for (name, comment) in &wanted {
+        if existing.get(name) != Some(comment) || added(name) {
+            comments.push(comment_on(
+                "CONSTRAINT",
+                &format!("{} ON {table}", quote_ident(name)),
+                Some(comment),
+            ));
+        }
+    }
+    let kept = constraint_names(repo);
+    for name in existing.keys() {
+        if !wanted.contains_key(name) && kept.contains(name) && !added(name) {
+            comments.push(comment_on(
+                "CONSTRAINT",
+                &format!("{} ON {table}", quote_ident(name)),
+                None,
+            ));
+        }
+    }
+    alters.extend(comments.into_iter().map(Alter::new));
+}
+
+/// The names of a table's primary key, unique, check, foreign key and
+/// NOT NULL constraints, with the ones PostgreSQL generates where the
+/// model records none
+fn constraint_names(table: &Table) -> std::collections::BTreeSet<String> {
+    use crate::models::ConstraintColumns;
+    let mut names = std::collections::BTreeSet::new();
+    let generated = |columns: &[String], suffix: &str| {
+        format!("{}_{}_{suffix}", table.name, columns.join("_"))
+    };
+    let mut columns_constraint = |c: &ConstraintColumns, suffix: &str| {
+        let name = match c {
+            ConstraintColumns::Detailed {
+                name: Some(name), ..
+            } => name.clone(),
+            _ if suffix == "pkey" => format!("{}_pkey", table.name),
+            ConstraintColumns::Name(column) => {
+                generated(std::slice::from_ref(column), suffix)
+            }
+            ConstraintColumns::Columns(columns)
+            | ConstraintColumns::Detailed { columns, .. } => {
+                generated(columns, suffix)
+            }
+        };
+        names.insert(name);
+    };
+    if let Some(pk) = &table.primary_key {
+        columns_constraint(pk, "pkey");
+    }
+    for unique in table.unique_constraints.iter().flatten() {
+        columns_constraint(unique, "key");
+    }
+    names.extend(
+        table
+            .check_constraints
+            .iter()
+            .flatten()
+            .map(|c| c.name.clone()),
+    );
+    names.extend(table.foreign_keys.iter().flatten().map(|f| f.name.clone()));
+    for not_null in table.not_null_constraints.iter().flatten() {
+        names.insert(not_null.name.clone().unwrap_or_else(|| {
+            format!("{}_{}_not_null", table.name, not_null.column)
+        }));
+    }
+    for column in table.columns.iter().flatten() {
+        if column.nullable == Some(false) {
+            names.insert(
+                column
+                    .not_null_constraint
+                    .as_ref()
+                    .and_then(|n| n.name.clone())
+                    .unwrap_or_else(|| {
+                        format!("{}_{}_not_null", table.name, column.name)
+                    }),
+            );
+        }
+    }
+    names
 }
 
 /// Row security reconciliation. A statement that turns protection on
@@ -703,6 +881,7 @@ fn alter_column(
             )));
         }
     }
+    column_attributes(table, &column, repo, db, alters);
     // last, because ADD GENERATED needs the column NOT NULL and free of
     // a default, which the statements above may be what establishes
     if identities && !identity(table, &column, repo, db, alters) {
@@ -722,6 +901,61 @@ fn alter_column(
 /// states [`identity`] reconciles in place. A pulled identity carries
 /// only its behavior; an older project file names a separate sequence
 /// instead.
+/// STATISTICS, STORAGE, COMPRESSION and attribute options, each set in
+/// place. None of them rewrites existing rows: a new compression or
+/// storage applies to values written later. An attribute the repo no
+/// longer states goes back to its default (DEFAULT, or -1 for the
+/// statistics target, and RESET for an option).
+fn column_attributes(
+    table: &str,
+    column: &str,
+    repo: &Column,
+    db: &Column,
+    alters: &mut Vec<Alter>,
+) {
+    let prefix = format!("ALTER TABLE {table} ALTER COLUMN {column}");
+    if repo.statistics != db.statistics {
+        alters.push(Alter::new(format!(
+            "{prefix} SET STATISTICS {};\n",
+            repo.statistics.unwrap_or(-1)
+        )));
+    }
+    if repo.storage != db.storage {
+        alters.push(Alter::new(format!(
+            "{prefix} SET STORAGE {};\n",
+            repo.storage.as_deref().unwrap_or("DEFAULT")
+        )));
+    }
+    if repo.compression != db.compression {
+        alters.push(Alter::new(format!(
+            "{prefix} SET COMPRESSION {};\n",
+            repo.compression.as_deref().unwrap_or("DEFAULT")
+        )));
+    }
+    let wanted = repo.options.clone().unwrap_or_default();
+    let existing = db.options.clone().unwrap_or_default();
+    let reset: Vec<&String> = existing
+        .keys()
+        .filter(|k| !wanted.contains_key(*k))
+        .collect();
+    if !reset.is_empty() {
+        let keys: Vec<&str> = reset.iter().map(|k| k.as_str()).collect();
+        alters.push(Alter::new(format!(
+            "{prefix} RESET ({});\n",
+            keys.join(", ")
+        )));
+    }
+    let set: Vec<String> = wanted
+        .iter()
+        .filter(|(k, v)| existing.get(*k) != Some(*v))
+        .map(|(k, v)| format!("{k}={}", raw_value(v)))
+        .collect();
+    if !set.is_empty() {
+        alters
+            .push(Alter::new(format!("{prefix} SET ({});\n", set.join(", "))));
+    }
+}
+
 fn is_identity_or_none(generated: &Option<ColumnGenerated>) -> bool {
     generated.as_ref().is_none_or(|g| {
         g.expression.is_none()
@@ -2470,7 +2704,7 @@ mod tests {
 
     fn or_replace_comment(resolution: Resolution) -> Option<String> {
         match resolution {
-            Resolution::OrReplace { comment } => comment,
+            Resolution::OrReplace { comment, .. } => comment,
             _ => panic!("expected OR REPLACE"),
         }
     }
@@ -2927,6 +3161,10 @@ mod tests {
             collation: None,
             check_constraint: None,
             generated: None,
+            storage: None,
+            compression: None,
+            statistics: None,
+            options: None,
             comment: None,
         }]);
         assert!(matches!(table(&repo, &db), Resolution::Statements(_)));
@@ -3237,5 +3475,98 @@ mod tests {
         let db = with_key("exclude_constraints", constraint(Some("btree")));
         let repo = with_key("exclude_constraints", constraint(None));
         assert!(sql(&statements(table(&repo, &db))).is_empty());
+    }
+
+    #[test]
+    fn column_attributes_are_set_in_place() {
+        let mut repo = base_table();
+        repo["columns"][1]["storage"] = serde_json::json!("EXTERNAL");
+        repo["columns"][1]["compression"] = serde_json::json!("lz4");
+        repo["columns"][1]["options"] =
+            serde_json::json!({"n_distinct": "100"});
+        let mut db = base_table();
+        db["columns"][1]["statistics"] = serde_json::json!(500);
+        db["columns"][1]["options"] =
+            serde_json::json!({"n_distinct_inherited": "-1"});
+        let alters = statements(table(&parse_table(repo), &parse_table(db)));
+        assert_eq!(
+            sql(&alters),
+            vec![
+                "ALTER TABLE test.users ALTER COLUMN email SET STATISTICS -1;\n",
+                "ALTER TABLE test.users ALTER COLUMN email SET STORAGE EXTERNAL;\n",
+                "ALTER TABLE test.users ALTER COLUMN email SET COMPRESSION lz4;\n",
+                "ALTER TABLE test.users ALTER COLUMN email RESET \
+                 (n_distinct_inherited);\n",
+                "ALTER TABLE test.users ALTER COLUMN email SET (n_distinct=100);\n",
+            ]
+        );
+        assert!(alters.iter().all(|a| !a.destructive));
+    }
+
+    /// A re-added constraint loses its comment, so the comment is set
+    /// again even though it has not changed; one the repo removes is
+    /// cleared while the constraint stays
+    #[test]
+    fn constraint_comments_follow_their_constraints() {
+        let check = |expression: &str| serde_json::json!([{"name": "positive", "expression": expression}]);
+        let mut repo = base_table();
+        repo["check_constraints"] = check("id > 0");
+        repo["constraint_comments"] = serde_json::json!({"positive": "kept"});
+        let mut db = base_table();
+        db["check_constraints"] = check("id >= 0");
+        db["constraint_comments"] =
+            serde_json::json!({"positive": "kept", "users_pkey": "old"});
+        db["primary_key"] = serde_json::json!(["id"]);
+        repo["primary_key"] = serde_json::json!(["id"]);
+        let alters = statements(table(&parse_table(repo), &parse_table(db)));
+        let sql = sql(&alters);
+        assert!(sql.contains(
+            &"COMMENT ON CONSTRAINT positive ON test.users IS $$kept$$;\n"
+        ));
+        assert!(sql.contains(
+            &"COMMENT ON CONSTRAINT users_pkey ON test.users IS NULL;\n"
+        ));
+    }
+
+    #[test]
+    fn rules_are_replaced_in_place() {
+        let rule = |instead: bool, enabled: Option<&str>| {
+            let mut r = serde_json::json!({"name": "r", "event": "DELETE"});
+            if instead {
+                r["instead"] = serde_json::json!(true);
+            }
+            if let Some(enabled) = enabled {
+                r["enabled"] = serde_json::json!(enabled);
+            }
+            serde_json::json!([r])
+        };
+        let mut repo = base_table();
+        repo["rules"] = rule(true, None);
+        let mut db = base_table();
+        db["rules"] = rule(false, Some("DISABLED"));
+        let alters = statements(table(&parse_table(repo), &parse_table(db)));
+        assert_eq!(
+            sql(&alters),
+            vec![
+                "CREATE OR REPLACE RULE r AS ON DELETE TO test.users DO \
+                 INSTEAD NOTHING;\n",
+                "ALTER TABLE test.users ENABLE RULE r;\n",
+            ]
+        );
+    }
+
+    #[test]
+    fn rule_drops_are_gated() {
+        let repo = base_table();
+        let mut db = base_table();
+        db["rules"] = serde_json::json!([
+            {"name": "r", "event": "DELETE", "instead": true}
+        ]);
+        let alters = statements(table(&parse_table(repo), &parse_table(db)));
+        assert_eq!(
+            sql(&alters),
+            vec!["DROP RULE IF EXISTS r ON test.users;\n"]
+        );
+        assert!(alters.iter().all(|a| a.destructive));
     }
 }

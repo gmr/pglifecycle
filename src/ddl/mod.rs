@@ -58,6 +58,13 @@ pub enum Statement {
     /// column defaults this way (e.g. `nextval(...)` for SERIAL) rather
     /// than inline on the CREATE TABLE column; folded onto the matching
     /// column of the already-ingested table during pull assembly
+    /// ALTER TABLE ... ALTER COLUMN ... SET STORAGE / COMPRESSION /
+    /// STATISTICS / (options), which pg_dump writes after CREATE TABLE
+    SetColumnAttribute {
+        table: QualifiedName,
+        column: String,
+        attribute: ColumnAttribute,
+    },
     SetColumnDefault {
         table: QualifiedName,
         column: String,
@@ -116,6 +123,24 @@ pub enum Statement {
         configuration: QualifiedName,
         tokens: Vec<String>,
         dictionaries: Vec<String>,
+    },
+    CreateStatistics(models::Statistics),
+    /// ALTER STATISTICS ... SET STATISTICS `target`
+    AlterStatistics {
+        name: QualifiedName,
+        target: i64,
+    },
+    /// CREATE RULE on a table or view
+    CreateRule {
+        relation: QualifiedName,
+        rule: models::Rule,
+    },
+    /// ALTER TABLE ... ENABLE [REPLICA | ALWAYS] / DISABLE RULE;
+    /// `enabled` is `None` for the default state
+    RuleState {
+        relation: QualifiedName,
+        name: String,
+        enabled: Option<String>,
     },
     CreatePolicy {
         table: QualifiedName,
@@ -243,6 +268,15 @@ pub enum TableConstraint {
     Exclude(models::ExcludeConstraint),
 }
 
+/// One column attribute an ALTER COLUMN ... SET sets
+#[derive(Clone, Debug, PartialEq)]
+pub enum ColumnAttribute {
+    Storage(String),
+    Compression(String),
+    Statistics(i64),
+    Options(serde_json::Map<String, serde_json::Value>),
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct QualifiedName {
     pub schema: Option<String>,
@@ -348,6 +382,9 @@ fn dispatch(node: &Node, src: &str) -> Result<Vec<Statement>, String> {
         "AlterTSConfigurationStmt" => {
             Ok(vec![misc::alter_text_search_configuration(node, src)?])
         }
+        "CreateStatsStmt" => Ok(vec![misc::create_statistics(node, src)?]),
+        "AlterStatsStmt" => Ok(vec![misc::alter_statistics(node, src)?]),
+        "RuleStmt" => Ok(vec![misc::create_rule(node, src)?]),
         "CreatePolicyStmt" => Ok(vec![policy::create_policy(node, src)?]),
         "CommentStmt" => Ok(vec![object::comment(node, src)?]),
         "GrantStmt" => Ok(vec![acl::grant(node, src, false)?]),

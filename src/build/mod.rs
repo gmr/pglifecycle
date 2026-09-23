@@ -273,6 +273,7 @@ impl Builder {
             Definition::Schema(_) => self.dump_schema(item),
             Definition::Sequence(_) => self.dump_sequence(item),
             Definition::Server(_) => self.dump_server(item),
+            Definition::Statistics(_) => self.dump_statistics(item),
             Definition::Subscription(_) => self.dump_subscription(item),
             Definition::Table(_) => self.dump_table(item),
             Definition::Tablespace(_) => self.dump_tablespace(item),
@@ -818,6 +819,31 @@ impl Builder {
             previous = Some(dump_id);
         }
         Ok(())
+    }
+
+    fn dump_statistics(&mut self, item: &Item) -> Result<(), String> {
+        let Definition::Statistics(d) = &item.definition else {
+            unreachable!()
+        };
+        let name = self.item_name(item);
+        let mut create = format!("CREATE STATISTICS {name}");
+        if let Some(kinds) = &d.kinds {
+            create.push_str(&format!(" ({})", kinds.join(", ")));
+        }
+        create.push_str(&format!(
+            " ON {} FROM {}",
+            d.elements.join(", "),
+            d.table
+        ));
+        let mut defn = vec![create];
+        if let Some(target) = d.target {
+            defn[0].push(';');
+            defn.push(format!(
+                "ALTER STATISTICS {name} SET STATISTICS {target}"
+            ));
+        }
+        let drop = vec![format!("DROP STATISTICS IF EXISTS {name}")];
+        self.add_item(item, defn, drop, false)
     }
 
     fn dump_domain(&mut self, item: &Item) -> Result<(), String> {
@@ -1613,6 +1639,13 @@ impl Builder {
                 create.push("TABLESPACE".into());
                 create.push(tablespace.clone());
             }
+            // column attributes follow the CREATE, as pg_dump writes
+            // them
+            for sql in render_column_attributes(d, &self.item_name(item)) {
+                let last = create.len() - 1;
+                create[last].push(';');
+                create.push(sql);
+            }
             // FULL and NOTHING follow the CREATE, as pg_dump writes
             // them; USING INDEX has to wait for its index
             if let Some(sql) = render_replica_identity(
@@ -1663,18 +1696,23 @@ impl Builder {
             };
             self.dump_index(index, item, &d.schema, &d.owner, replica)?;
         }
+        // the entry that creates each constraint outside CREATE TABLE,
+        // which its comment has to follow
+        let mut constraint_entries: HashMap<String, i32> = HashMap::new();
         for fk in d.foreign_keys.as_deref().unwrap_or_default() {
-            self.dump_foreign_key(fk, item, d)?;
+            let id = self.dump_foreign_key(fk, item, d)?;
+            constraint_entries.insert(fk.name.clone(), id);
         }
         for check in d.check_constraints.as_deref().unwrap_or_default() {
             if check.not_valid == Some(true) {
-                self.dump_not_valid_constraint(
+                let id = self.dump_not_valid_constraint(
                     "CHECK CONSTRAINT",
                     item,
                     d,
                     &check.name,
                     &render_check_constraint(check),
                 )?;
+                constraint_entries.insert(check.name.clone(), id);
             }
         }
         for not_null in d.not_null_constraints.as_deref().unwrap_or_default() {
@@ -1684,17 +1722,36 @@ impl Builder {
                 let name = not_null.name.clone().unwrap_or_else(|| {
                     format!("{}_{}_not_null", d.name, not_null.column)
                 });
-                self.dump_not_valid_constraint(
+                let id = self.dump_not_valid_constraint(
                     "CONSTRAINT",
                     item,
                     d,
                     &name,
                     &render_not_null_constraint(not_null),
                 )?;
+                constraint_entries.insert(name, id);
             }
+        }
+        for (name, comment) in d.constraint_comments.iter().flatten() {
+            let parent =
+                constraint_entries.get(name).copied().unwrap_or(dump_id);
+            let target =
+                format!("{} ON {}", quote_ident(name), self.item_name(item));
+            self.add_comment(
+                "CONSTRAINT",
+                &d.schema,
+                &format!("{name} ON {}", d.name),
+                &d.owner,
+                parent,
+                comment,
+                Some(target),
+            )?;
         }
         for trigger in d.triggers.as_deref().unwrap_or_default() {
             self.dump_trigger(trigger, item, d)?;
+        }
+        for rule in d.rules.as_deref().unwrap_or_default() {
+            self.dump_rule(rule, item, &d.schema, &d.name, &d.owner)?;
         }
         for exclude in d.exclude_constraints.as_deref().unwrap_or_default() {
             if let Some(comment) = &exclude.comment {
@@ -1811,6 +1868,12 @@ impl Builder {
         {
             create.push(format!("OPTIONS ({})", render_options(options)));
         }
+        // column attributes follow the CREATE, as pg_dump writes them
+        for sql in render_column_attributes(table, &self.item_name(item)) {
+            let last = create.len() - 1;
+            create[last].push(';');
+            create.push(sql);
+        }
         let drop =
             vec!["DROP FOREIGN TABLE IF EXISTS".into(), self.item_name(item)];
         let dump_id = self.add_entry(
@@ -1857,7 +1920,7 @@ impl Builder {
         fk: &crate::models::ForeignKey,
         parent: &Item,
         table: &Table,
-    ) -> Result<(), String> {
+    ) -> Result<i32, String> {
         let qualified = self.item_name(parent);
         let name = quote_ident(&fk.name);
         let create = vec![format!(
@@ -1868,7 +1931,7 @@ impl Builder {
             "ALTER TABLE ONLY {qualified} DROP CONSTRAINT IF EXISTS {name}"
         )];
         let parent_dump_id = self.dump_id_map[&parent.id];
-        self.add_entry(
+        let dump_id = self.add_entry(
             "FK CONSTRAINT",
             &table.schema,
             &format!("{} {}", table.name, fk.name),
@@ -1878,7 +1941,7 @@ impl Builder {
             &[parent_dump_id],
             None,
         )?;
-        Ok(())
+        Ok(dump_id)
     }
 
     /// A NOT VALID CHECK or NOT NULL constraint, as its own entry after
@@ -1895,7 +1958,7 @@ impl Builder {
         table: &Table,
         name: &str,
         constraint: &str,
-    ) -> Result<(), String> {
+    ) -> Result<i32, String> {
         let qualified = self.item_name(parent);
         let create = vec![format!("ALTER TABLE {qualified} ADD {constraint}")];
         let drop = vec![format!(
@@ -1903,7 +1966,7 @@ impl Builder {
             quote_ident(name)
         )];
         let parent_dump_id = self.dump_id_map[&parent.id];
-        self.add_entry(
+        let dump_id = self.add_entry(
             desc,
             &table.schema,
             &format!("{} {name}", table.name),
@@ -1913,7 +1976,7 @@ impl Builder {
             &[parent_dump_id],
             None,
         )?;
-        Ok(())
+        Ok(dump_id)
     }
 
     /// An index's entry; `then` is a statement that has to follow the
@@ -1958,6 +2021,52 @@ impl Builder {
                 dump_id,
                 comment,
                 None,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// A rule's entry after its table or view, with its state and its
+    /// comment
+    fn dump_rule(
+        &mut self,
+        rule: &crate::models::Rule,
+        parent: &Item,
+        schema: &str,
+        relation: &str,
+        owner: &str,
+    ) -> Result<(), String> {
+        let qualified = self.item_name(parent);
+        let mut create = vec![render_rule(rule, &qualified, false)];
+        if let Some(state) = render_rule_state(rule, &qualified) {
+            create[0].push(';');
+            create.push(state);
+        }
+        let drop = vec![format!(
+            "DROP RULE IF EXISTS {} ON {qualified}",
+            quote_ident(&rule.name)
+        )];
+        let parent_dump_id = self.dump_id_map[&parent.id];
+        let dump_id = self.add_entry(
+            "RULE",
+            schema,
+            &format!("{relation} {}", rule.name),
+            owner,
+            &create,
+            &drop,
+            &[parent_dump_id],
+            None,
+        )?;
+        if let Some(comment) = &rule.comment {
+            let target = format!("{} ON {qualified}", quote_ident(&rule.name));
+            self.add_comment(
+                "RULE",
+                schema,
+                &format!("{} ON {relation}", rule.name),
+                owner,
+                dump_id,
+                comment,
+                Some(target),
             )?;
         }
         Ok(())
@@ -2604,7 +2713,11 @@ impl Builder {
             unreachable!()
         };
         if let Some(sql) = &d.sql {
-            return self.add_item(item, vec![sql.clone()], vec![], false);
+            self.add_item(item, vec![sql.clone()], vec![], false)?;
+            for rule in d.rules.as_deref().unwrap_or_default() {
+                self.dump_rule(rule, item, &d.schema, &d.name, &d.owner)?;
+            }
+            return Ok(());
         }
         let mut create = vec!["CREATE".into()];
         if d.recursive == Some(true) {
@@ -2630,7 +2743,11 @@ impl Builder {
         create.push("AS".into());
         create.push(d.query.clone().unwrap_or_default());
         let drop = vec!["DROP VIEW IF EXISTS".into(), self.item_name(item)];
-        self.add_item(item, create, drop, false)
+        self.add_item(item, create, drop, false)?;
+        for rule in d.rules.as_deref().unwrap_or_default() {
+            self.dump_rule(rule, item, &d.schema, &d.name, &d.owner)?;
+        }
+        Ok(())
     }
 }
 
@@ -2973,6 +3090,93 @@ fn render_index_column(column: &crate::models::IndexColumn) -> String {
         sql.push(null_placement.clone());
     }
     sql.join(" ")
+}
+
+/// `ALTER [FOREIGN] TABLE ONLY ... ALTER COLUMN ... SET ...` for each
+/// column attribute the table's columns set, in pg_dump's order:
+/// statistics, storage, compression, options. A foreign table takes
+/// no compression, so its compression is not written.
+pub(crate) fn render_column_attributes(
+    table: &Table,
+    table_name: &str,
+) -> Vec<String> {
+    let foreign = table.server.is_some();
+    let kind = if foreign { "FOREIGN TABLE" } else { "TABLE" };
+    let mut statements = Vec::new();
+    for column in table.columns.iter().flatten() {
+        let prefix = format!(
+            "ALTER {kind} ONLY {table_name} ALTER COLUMN {}",
+            quote_ident(&column.name)
+        );
+        if let Some(statistics) = column.statistics {
+            statements.push(format!("{prefix} SET STATISTICS {statistics}"));
+        }
+        if let Some(storage) = &column.storage {
+            statements.push(format!("{prefix} SET STORAGE {storage}"));
+        }
+        if let Some(compression) = column.compression.as_ref()
+            && !foreign
+        {
+            statements.push(format!("{prefix} SET COMPRESSION {compression}"));
+        }
+        if let Some(options) =
+            column.options.as_ref().filter(|o| !o.is_empty())
+        {
+            let options: Vec<String> = options
+                .iter()
+                .map(|(k, v)| format!("{k}={}", raw_value(v)))
+                .collect();
+            statements.push(format!("{prefix} SET ({})", options.join(", ")));
+        }
+    }
+    statements
+}
+
+/// CREATE [OR REPLACE] RULE, shared by build and deploy
+pub(crate) fn render_rule(
+    rule: &crate::models::Rule,
+    relation: &str,
+    or_replace: bool,
+) -> String {
+    let mut sql = format!(
+        "CREATE {}RULE {} AS ON {} TO {relation}",
+        if or_replace { "OR REPLACE " } else { "" },
+        quote_ident(&rule.name),
+        rule.event.to_uppercase()
+    );
+    if let Some(condition) = &rule.condition {
+        sql.push_str(&format!(" WHERE {condition}"));
+    }
+    sql.push_str(if rule.instead == Some(true) {
+        " DO INSTEAD"
+    } else {
+        " DO ALSO"
+    });
+    match rule.commands.as_deref() {
+        None | Some([]) => sql.push_str(" NOTHING"),
+        Some([command]) => sql.push_str(&format!(" {command}")),
+        Some(commands) => sql.push_str(&format!(" ({})", commands.join("; "))),
+    }
+    sql
+}
+
+/// `ALTER TABLE ... DISABLE RULE` or `ENABLE REPLICA|ALWAYS RULE` for
+/// a rule that is not in the default state
+pub(crate) fn render_rule_state(
+    rule: &crate::models::Rule,
+    relation: &str,
+) -> Option<String> {
+    let state = match rule.enabled.as_deref()?.to_uppercase().as_str() {
+        "ORIGIN" => return None,
+        "DISABLED" => "DISABLE",
+        "REPLICA" => "ENABLE REPLICA",
+        "ALWAYS" => "ENABLE ALWAYS",
+        _ => return None,
+    };
+    Some(format!(
+        "ALTER TABLE {relation} {state} RULE {}",
+        quote_ident(&rule.name)
+    ))
 }
 
 /// `ALTER TABLE ONLY ... REPLICA IDENTITY ...` for a table whose
@@ -3570,6 +3774,10 @@ mod tests {
             collation: None,
             check_constraint: None,
             generated: None,
+            storage: None,
+            compression: None,
+            statistics: None,
+            options: None,
             comment: None,
         }
     }
@@ -3616,7 +3824,9 @@ mod tests {
                 unique_constraints: None,
                 foreign_keys: None,
                 exclude_constraints: None,
+                constraint_comments: None,
                 triggers: None,
+                rules: None,
                 row_level_security: None,
                 replica_identity: None,
                 policies: None,
@@ -3675,6 +3885,33 @@ mod tests {
             defn,
             "CREATE FOREIGN TABLE fdw_warehouse.orders ( id integer NOT \
              NULL, total numeric ) SERVER warehouse;\n"
+        );
+    }
+
+    /// A foreign table's column attributes follow the CREATE as
+    /// ALTER FOREIGN TABLE statements; compression is not written
+    #[test]
+    fn renders_foreign_table_column_attributes() {
+        let mut item = foreign_table(None);
+        let Definition::Table(table) = &mut item.definition else {
+            panic!("expected a Table definition")
+        };
+        let columns = table.columns.as_mut().unwrap();
+        columns[1].statistics = Some(500);
+        columns[1].storage = Some("MAIN".into());
+        columns[1].compression = Some("lz4".into());
+        let mut options = Map::new();
+        options.insert("n_distinct".into(), json!(100));
+        columns[1].options = Some(options);
+        assert_eq!(
+            foreign_table_defn(&item),
+            "CREATE FOREIGN TABLE fdw_warehouse.orders ( id integer NOT \
+             NULL, total numeric ) SERVER warehouse; ALTER FOREIGN TABLE \
+             ONLY fdw_warehouse.orders ALTER COLUMN total SET STATISTICS \
+             500; ALTER FOREIGN TABLE ONLY fdw_warehouse.orders ALTER \
+             COLUMN total SET STORAGE MAIN; ALTER FOREIGN TABLE ONLY \
+             fdw_warehouse.orders ALTER COLUMN total SET \
+             (n_distinct=100);\n"
         );
     }
 
@@ -4027,7 +4264,9 @@ mod tests {
             unique_constraints: None,
             foreign_keys: None,
             exclude_constraints: None,
+            constraint_comments: None,
             triggers: None,
+            rules: None,
             row_level_security: None,
             replica_identity: None,
             policies: None,
@@ -4310,6 +4549,7 @@ mod tests {
                 security_barrier: Some(true),
                 query: Some("SELECT 1".into()),
                 comment: None,
+                rules: None,
             }),
             dependencies: BTreeSet::new(),
         };
@@ -4335,6 +4575,57 @@ mod tests {
             "CREATE VIEW public.active_orders WITH (check_option = \
              local, security_barrier = true) AS SELECT 1;\n"
         );
+    }
+
+    /// A view that keeps its definition as raw SQL still gets its rules
+    #[test]
+    fn raw_sql_view_emits_rules() {
+        let item = Item {
+            id: 1,
+            desc: ObjectType::View,
+            definition: Definition::View(View {
+                name: "active_orders".into(),
+                schema: "public".into(),
+                owner: "app".into(),
+                sql: Some(
+                    "CREATE VIEW public.active_orders AS SELECT 1;".into(),
+                ),
+                recursive: None,
+                columns: None,
+                check_option: None,
+                security_barrier: None,
+                query: None,
+                comment: None,
+                rules: Some(vec![crate::models::Rule {
+                    name: "no_delete".into(),
+                    event: "DELETE".into(),
+                    condition: None,
+                    instead: Some(true),
+                    commands: None,
+                    enabled: None,
+                    comment: None,
+                }]),
+            }),
+            dependencies: BTreeSet::new(),
+        };
+        let dump = libpgdump::new("t", "UTF-8", "18.0").unwrap();
+        let mut builder = Builder {
+            dump,
+            dump_id_map: HashMap::new(),
+            text_search_last: HashMap::new(),
+            text_search_ids: HashMap::new(),
+            text_search_refs: Vec::new(),
+            superuser: "postgres".into(),
+        };
+        builder.dump_item(&item).unwrap();
+        let rules: Vec<_> = builder
+            .dump
+            .entries()
+            .iter()
+            .filter(|e| e.desc == libpgdump::ObjectType::Rule)
+            .filter_map(|e| e.tag.clone())
+            .collect();
+        assert_eq!(rules, vec!["active_orders no_delete".to_string()]);
     }
 
     #[test]

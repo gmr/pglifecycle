@@ -434,6 +434,7 @@ pub struct Assembly {
     /// One per schema, as the project stores them
     pub text_search: Vec<models::TextSearch>,
     pub default_privileges: Vec<models::DefaultPrivileges>,
+    pub statistics: Vec<models::Statistics>,
     pub roles: BTreeMap<String, RoleState>,
     pub remaining: Vec<Remaining>,
     /// Indexes whose target relation had not yet been ingested when the
@@ -519,6 +520,7 @@ impl Assembly {
             ("publications", self.publications.len()),
             ("event triggers", self.event_triggers.len()),
             ("default privileges", self.default_privileges.len()),
+            ("statistics", self.statistics.len()),
             ("foreign data wrappers", self.foreign_data_wrappers.len()),
             ("servers", self.servers.len()),
             ("user mappings", self.user_mappings.len()),
@@ -606,6 +608,8 @@ impl Assembly {
                 | OT::TextSearchParser
                 | OT::TextSearchTemplate
                 | OT::DefaultAcl
+                | OT::Statistics
+                | OT::Rule
                 | OT::ForeignTable
                 | OT::ForeignDataWrapper
                 | OT::ForeignServer
@@ -965,6 +969,40 @@ impl Assembly {
                 Some(table) => ddl::apply_constraint(table, name, constraint),
                 None => log::warn!("Constraint on unknown table {table}"),
             },
+            Statement::SetColumnAttribute {
+                table,
+                column,
+                attribute,
+            } => {
+                let found = self.find_table(&table).and_then(|t| {
+                    t.columns.iter_mut().flatten().find(|c| c.name == column)
+                });
+                match found {
+                    Some(c) => match attribute {
+                        ddl::ColumnAttribute::Storage(v) => {
+                            c.storage = Some(v)
+                        }
+                        ddl::ColumnAttribute::Compression(v) => {
+                            c.compression = Some(v);
+                        }
+                        ddl::ColumnAttribute::Statistics(v) => {
+                            c.statistics = Some(v);
+                        }
+                        ddl::ColumnAttribute::Options(v) => {
+                            c.options.get_or_insert_default().extend(v);
+                        }
+                    },
+                    // an inherited column has no entry of its own to
+                    // hold the attribute, so the entry is kept
+                    None => {
+                        log::warn!(
+                            "Column attribute on unknown column \
+                             {table}.{column}"
+                        );
+                        self.push_remaining(entry);
+                    }
+                }
+            }
             Statement::SetColumnDefault {
                 table,
                 column,
@@ -1145,6 +1183,44 @@ impl Assembly {
                                     .then_some(true),
                             });
                         }
+                    }
+                }
+            }
+            Statement::CreateStatistics(mut statistics) => {
+                statistics.owner = owner;
+                self.statistics.push(statistics);
+            }
+            Statement::AlterStatistics { name, target } => {
+                let schema = name.schema.clone().unwrap_or_default();
+                match self
+                    .statistics
+                    .iter_mut()
+                    .find(|s| s.schema == schema && s.name == name.name)
+                {
+                    Some(statistics) => statistics.target = Some(target),
+                    None => {
+                        log::warn!("Target of unknown statistics {name}");
+                        self.push_remaining(entry);
+                    }
+                }
+            }
+            Statement::CreateRule { relation, rule } => {
+                self.add_rule(relation, rule, entry);
+            }
+            Statement::RuleState {
+                relation,
+                name,
+                enabled,
+            } => {
+                let found = match self.rules_of(&relation) {
+                    Some(rules) => rules.iter_mut().find(|r| r.name == name),
+                    None => None,
+                };
+                match found {
+                    Some(rule) => rule.enabled = enabled,
+                    None => {
+                        log::warn!("State of unknown rule {relation} {name}");
+                        self.push_remaining(entry);
                     }
                 }
             }
@@ -1406,6 +1482,7 @@ impl Assembly {
             "FUNCTION" => self.apply_function_comment(&schema, name, &comment),
             "TRIGGER" => self.apply_trigger_comment(target, &comment),
             "POLICY" => self.apply_policy_comment(target, &comment),
+            "RULE" => self.apply_rule_comment(target, &comment),
             "CONSTRAINT" => self.apply_constraint_comment(target, &comment),
             "AGGREGATE" => self
                 .aggregates
@@ -1430,6 +1507,12 @@ impl Assembly {
                 .iter_mut()
                 .find(|c| c.schema == schema && c.name == *name)
                 .map(|c| c.comment = Some(comment.clone()))
+                .is_some(),
+            "STATISTICS" => self
+                .statistics
+                .iter_mut()
+                .find(|s| s.schema == schema && s.name == *name)
+                .map(|s| s.comment = Some(comment.clone()))
                 .is_some(),
             "CONVERSION" => self
                 .conversions
@@ -1584,6 +1667,60 @@ impl Assembly {
         true
     }
 
+    /// A rule belongs to its table or view. A view's `_RETURN` rule is
+    /// the view's query: pg_dump writes a view that way when its
+    /// query depends on something that depends on the view, as a
+    /// placeholder view and then the rule, so the rule's SELECT
+    /// replaces the placeholder query and is never kept as a rule.
+    fn add_rule(
+        &mut self,
+        relation: QualifiedName,
+        rule: models::Rule,
+        entry: &libpgdump::Entry,
+    ) {
+        let schema = relation.schema.clone().unwrap_or_default();
+        if rule.name == "_RETURN" && rule.event == "SELECT" {
+            let view = self
+                .views
+                .iter_mut()
+                .find(|v| v.schema == schema && v.name == relation.name);
+            match (view, rule.commands.as_deref()) {
+                (Some(view), Some([query])) => {
+                    view.query = Some(query.clone());
+                }
+                _ => {
+                    log::warn!("Cannot model _RETURN rule on {relation}");
+                    self.push_remaining(entry);
+                }
+            }
+            return;
+        }
+        match self.rules_of(&relation) {
+            Some(rules) => rules.push(rule),
+            None => {
+                log::warn!("Rule on unknown relation {relation}");
+                self.push_remaining(entry);
+            }
+        }
+    }
+
+    /// The rule list of a table or view, created if absent
+    fn rules_of(
+        &mut self,
+        relation: &QualifiedName,
+    ) -> Option<&mut Vec<models::Rule>> {
+        let schema = relation.schema.clone().unwrap_or_default();
+        if self.find_table(relation).is_some() {
+            return self
+                .find_table(relation)
+                .map(|t| t.rules.get_or_insert_default());
+        }
+        self.views
+            .iter_mut()
+            .find(|v| v.schema == schema && v.name == relation.name)
+            .map(|v| v.rules.get_or_insert_default())
+    }
+
     /// File a text search object under its schema's container
     fn add_text_search(
         &mut self,
@@ -1667,9 +1804,9 @@ impl Assembly {
     }
 
     /// `COMMENT ON CONSTRAINT c ON schema.table`, the same two-name
-    /// shape as [`Self::apply_trigger_comment`]. Only an exclusion
-    /// constraint carries a comment in the model; one on another kind
-    /// is left unmatched, so the pull fails rather than drop it.
+    /// shape as [`Self::apply_trigger_comment`]. An exclusion
+    /// constraint keeps its comment on itself; any other kind's goes
+    /// into the table's `constraint_comments`.
     fn apply_constraint_comment(
         &mut self,
         target: &QualifiedName,
@@ -1686,16 +1823,50 @@ impl Assembly {
             schema,
             name: table.to_string(),
         };
-        let Some(constraint) = self.find_table(&relation).and_then(|table| {
-            table
-                .exclude_constraints
-                .iter_mut()
-                .flatten()
-                .find(|c| c.name == target.name)
+        let Some(table) = self.find_table(&relation) else {
+            return false;
+        };
+        match table
+            .exclude_constraints
+            .iter_mut()
+            .flatten()
+            .find(|c| c.name == target.name)
+        {
+            Some(exclude) => exclude.comment = Some(comment.to_string()),
+            None => {
+                table
+                    .constraint_comments
+                    .get_or_insert_default()
+                    .insert(target.name.clone(), comment.to_string());
+            }
+        }
+        true
+    }
+
+    /// `COMMENT ON RULE r ON schema.relation`, the same two-name shape
+    /// as [`Self::apply_trigger_comment`]
+    fn apply_rule_comment(
+        &mut self,
+        target: &QualifiedName,
+        comment: &str,
+    ) -> bool {
+        let Some(relation) = &target.schema else {
+            return false;
+        };
+        let (schema, name) = match relation.split_once('.') {
+            Some((schema, name)) => (Some(schema.to_string()), name),
+            None => (None, relation.as_str()),
+        };
+        let relation = QualifiedName {
+            schema,
+            name: name.to_string(),
+        };
+        let Some(rule) = self.rules_of(&relation).and_then(|rules| {
+            rules.iter_mut().find(|r| r.name == target.name)
         }) else {
             return false;
         };
-        constraint.comment = Some(comment.to_string());
+        rule.comment = Some(comment.to_string());
         true
     }
 
@@ -2548,8 +2719,8 @@ mod tests {
             &mut dump,
             OT::Comment,
             "s",
-            "CONSTRAINT t_pkey ON t",
-            "COMMENT ON CONSTRAINT t_pkey ON s.t IS 'the key';",
+            "RULE r ON t",
+            "COMMENT ON RULE r ON s.t IS 'a rule';",
         );
         let mut assembly = Assembly::default();
         assembly.ingest(&dump).unwrap();
@@ -2636,6 +2807,10 @@ mod tests {
                 collation: None,
                 check_constraint: None,
                 generated: None,
+                storage: None,
+                compression: None,
+                statistics: None,
+                options: None,
                 comment: None,
             }]),
             indexes: None,
@@ -2645,7 +2820,9 @@ mod tests {
             unique_constraints: None,
             foreign_keys: None,
             exclude_constraints: None,
+            constraint_comments: None,
             triggers: None,
+            rules: None,
             row_level_security: None,
             replica_identity: None,
             policies: None,

@@ -55,6 +55,7 @@ GROUPS: dict[str, list[str]] = {
         'publication',
         'schema',
         'sequence',
+        'statistics',
         'server',
         'subscription',
         'table',
@@ -78,6 +79,7 @@ GROUPS: dict[str, list[str]] = {
         'dependencies',
         'foreign_key',
         'policy',
+        'rule',
         'trigger',
     ],
     'Per-schema container files': [

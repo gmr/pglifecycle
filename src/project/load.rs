@@ -372,6 +372,11 @@ impl Loader {
                 Definition::Conversion(c) => {
                     references.extend(functions(&[&c.function]));
                 }
+                Definition::Statistics(s) => {
+                    references.push((ObjectType::Table, s.table.clone()));
+                    references
+                        .push((ObjectType::MaterializedView, s.table.clone()));
+                }
                 Definition::EventTrigger(t) => {
                     references.extend(functions(&[&t.function]));
                 }
@@ -677,6 +682,7 @@ fn to_definition(
         ObjectType::Schema => Definition::Schema(from(value)?),
         ObjectType::Sequence => Definition::Sequence(from(value)?),
         ObjectType::Server => Definition::Server(from(value)?),
+        ObjectType::Statistics => Definition::Statistics(from(value)?),
         ObjectType::Subscription => Definition::Subscription(from(value)?),
         ObjectType::Table => Definition::Table(from(value)?),
         ObjectType::Tablespace => Definition::Tablespace(from(value)?),

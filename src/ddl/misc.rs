@@ -11,8 +11,8 @@ use crate::ddl::{NodeExt, Statement, any_name, unquote};
 use crate::models::{
     Aggregate, Argument, Cast, Collation, Conversion, EventTrigger,
     EventTriggerFilter, FilteredPublicationTable, Publication,
-    PublicationTable, TextSearchConfig, TextSearchDict, TextSearchParser,
-    TextSearchTemplate,
+    PublicationTable, Rule, Statistics, TextSearchConfig, TextSearchDict,
+    TextSearchParser, TextSearchTemplate,
 };
 
 /// A text search object and the schema it belongs to
@@ -644,6 +644,118 @@ pub(crate) fn alter_publication(
     })
 }
 
+/// CREATE STATISTICS → Statistics
+pub(crate) fn create_statistics(
+    node: &Node,
+    src: &str,
+) -> Result<Statement, String> {
+    let name = node
+        .child_of_kind("opt_qualified_name")
+        .and_then(|n| n.child_of_kind("any_name"))
+        .map(|n| any_name(&n, src))
+        .ok_or_else(|| String::from("CREATE STATISTICS without a name"))?;
+    let tables = node
+        .child_of_kind("from_list")
+        .map(|n| n.find_all("table_ref"))
+        .unwrap_or_default();
+    let [table] = tables.as_slice() else {
+        return Err(String::from("CREATE STATISTICS without one table"));
+    };
+    let kinds: Vec<String> = node
+        .child_of_kind("opt_name_list")
+        .map(|n| {
+            n.find_all("name")
+                .iter()
+                .map(|k| unquote(k.text(src)))
+                .collect()
+        })
+        .unwrap_or_default();
+    let elements = node
+        .child_of_kind("stats_params")
+        .map(|n| {
+            n.find_all("stats_param")
+                .iter()
+                .map(|p| p.text(src).to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(Statement::CreateStatistics(Statistics {
+        name: name.name,
+        schema: name.schema.unwrap_or_default(),
+        owner: String::new(),
+        table: table.text(src).to_string(),
+        kinds: (!kinds.is_empty()).then_some(kinds),
+        elements,
+        target: None,
+        comment: None,
+    }))
+}
+
+/// ALTER STATISTICS ... SET STATISTICS n, the form pg_dump writes
+pub(crate) fn alter_statistics(
+    node: &Node,
+    src: &str,
+) -> Result<Statement, String> {
+    let name = node
+        .child_of_kind("any_name")
+        .map(|n| any_name(&n, src))
+        .ok_or_else(|| String::from("ALTER STATISTICS without a name"))?;
+    let Some(target) = node
+        .find("SignedIconst")
+        .and_then(|n| n.text(src).trim().parse::<i64>().ok())
+    else {
+        return Ok(Statement::Unsupported(String::from(
+            "ALTER STATISTICS other than SET STATISTICS",
+        )));
+    };
+    Ok(Statement::AlterStatistics { name, target })
+}
+
+/// CREATE RULE → (relation, Rule)
+pub(crate) fn create_rule(
+    node: &Node,
+    src: &str,
+) -> Result<Statement, String> {
+    let name = node
+        .child_of_kind("name")
+        .map(|n| unquote(n.text(src)))
+        .ok_or_else(|| String::from("CREATE RULE without a name"))?;
+    let relation = node
+        .child_of_kind("qualified_name")
+        .ok_or_else(|| String::from("CREATE RULE without a relation"))?;
+    let relation = crate::ddl::qualified_name(&relation, src)?;
+    let event = node
+        .child_of_kind("event")
+        .map(|n| n.text(src).to_uppercase())
+        .ok_or_else(|| String::from("CREATE RULE without an event"))?;
+    let actions = node
+        .child_of_kind("RuleActionList")
+        .ok_or_else(|| String::from("CREATE RULE without actions"))?;
+    let commands: Vec<String> = actions
+        .find_all("RuleActionStmt")
+        .iter()
+        .map(|n| n.text(src).trim().to_string())
+        .collect();
+    Ok(Statement::CreateRule {
+        relation,
+        rule: Rule {
+            name,
+            event,
+            condition: node
+                .child_of_kind("where_clause")
+                .and_then(|n| n.child_of_kind("a_expr"))
+                .map(|n| n.text(src).to_string()),
+            instead: node
+                .child_of_kind("opt_instead")
+                .is_some_and(|n| n.child_of_kind("kw_instead").is_some())
+                .then_some(true),
+            commands: (!commands.is_empty()).then_some(commands),
+            enabled: None,
+            comment: None,
+        },
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -821,5 +933,51 @@ mod tests {
             dictionaries,
             vec![String::from("s.d"), String::from("simple")]
         );
+    }
+
+    #[test]
+    fn parses_statistics() {
+        let Statement::CreateStatistics(statistics) = parse_one(
+            "CREATE STATISTICS s.m_expr (mcv) ON (a + b), lower(c), a \
+             FROM s.m;",
+        ) else {
+            panic!("expected CreateStatistics")
+        };
+        assert_eq!(
+            (statistics.schema.as_str(), statistics.name.as_str()),
+            ("s", "m_expr")
+        );
+        assert_eq!(statistics.table, "s.m");
+        assert_eq!(statistics.kinds, Some(vec![String::from("mcv")]));
+        assert_eq!(statistics.elements, vec!["(a + b)", "lower(c)", "a"]);
+        let Statement::AlterStatistics { target, .. } =
+            parse_one("ALTER STATISTICS s.m_all SET STATISTICS 500;")
+        else {
+            panic!("expected AlterStatistics")
+        };
+        assert_eq!(target, 500);
+    }
+
+    #[test]
+    fn parses_rules() {
+        let Statement::CreateRule { relation, rule } = parse_one(
+            "CREATE RULE t_log AS\n    ON INSERT TO public.t\n   WHERE \
+             (new.id > 0) DO ( INSERT INTO public.log (id)\n  VALUES \
+             (new.id);\n INSERT INTO public.log (id)\n  VALUES ((- \
+             new.id));\n);",
+        ) else {
+            panic!("expected CreateRule")
+        };
+        assert_eq!(relation.to_string(), "public.t");
+        assert_eq!(rule.event, "INSERT");
+        assert_eq!(rule.condition.as_deref(), Some("(new.id > 0)"));
+        assert_eq!(rule.instead, None);
+        assert_eq!(rule.commands.map(|c| c.len()), Some(2));
+        let Statement::CreateRule { rule, .. } = parse_one(
+            "CREATE RULE r AS ON DELETE TO public.t DO INSTEAD NOTHING;",
+        ) else {
+            panic!("expected CreateRule")
+        };
+        assert_eq!((rule.instead, rule.commands), (Some(true), None));
     }
 }

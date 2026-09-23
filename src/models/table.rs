@@ -46,8 +46,16 @@ pub struct Table {
     pub foreign_keys: Option<Vec<ForeignKey>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exclude_constraints: Option<Vec<ExcludeConstraint>>,
+    /// Comments on the table's primary key, unique, check, foreign key
+    /// and NOT NULL constraints, by constraint name. An exclusion
+    /// constraint keeps its comment on itself.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub constraint_comments:
+        Option<std::collections::BTreeMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub triggers: Option<Vec<Trigger>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rules: Option<Vec<Rule>>,
     /// Whether row-level security is enabled and forced. Absent means
     /// the project does not manage it: deploy then leaves the table's
     /// row security, and its policies unless `policies` is given, as
@@ -233,6 +241,19 @@ pub struct Column {
     pub check_constraint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub generated: Option<ColumnGenerated>,
+    /// SET STORAGE: PLAIN, EXTERNAL, EXTENDED or MAIN, when it differs
+    /// from the type's default
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub storage: Option<String>,
+    /// SET COMPRESSION: pglz or lz4, when set for the column
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compression: Option<String>,
+    /// SET STATISTICS: the column's statistics target
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub statistics: Option<i64>,
+    /// SET (...): attribute options such as n_distinct
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub options: Option<Map<String, Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
 }
@@ -710,6 +731,29 @@ impl Policy {
             ..self.clone()
         }
     }
+}
+
+/// A rewrite rule on a table or view (CREATE RULE)
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Rule {
+    pub name: String,
+    /// SELECT, INSERT, UPDATE or DELETE
+    pub event: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub condition: Option<String>,
+    /// DO INSTEAD; the default is DO ALSO
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instead: Option<bool>,
+    /// The commands the rule runs; absent for NOTHING
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commands: Option<Vec<String>>,
+    /// DISABLED, REPLICA or ALWAYS (ALTER TABLE ... RULE); absent is
+    /// the default, ORIGIN
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
 }
 
 /// Table Triggers

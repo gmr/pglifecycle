@@ -21,23 +21,15 @@ SET search_path = unsupported, public, pg_catalog;
 
 CREATE ROLE pglifecycle_coverage_reader;
 
--- Column storage and compression
-CREATE TABLE payloads (
-    id   INT PRIMARY KEY,
-    body TEXT COMPRESSION lz4
-);
-ALTER TABLE payloads ALTER COLUMN body SET STORAGE EXTERNAL;
+-- Procedures and operators: build and models support them, but pull
+-- cannot parse them yet
+CREATE PROCEDURE archive(days INT) LANGUAGE sql AS 'SELECT 1';
+CREATE OPERATOR === (LEFTARG = INT, RIGHTARG = INT, FUNCTION = int4eq);
 
--- A comment on a primary key, unique, check or foreign key constraint:
--- only an exclusion constraint carries one in the model
-COMMENT ON CONSTRAINT payloads_pkey ON payloads IS 'The payload id';
-
--- Extended statistics
-CREATE TABLE measurements (a INT, b INT);
-CREATE STATISTICS measurements_stats (ndistinct, dependencies)
-    ON a, b FROM measurements;
-
--- Rule
-CREATE TABLE append_only (id INT);
-CREATE RULE append_only_no_delete AS
-    ON DELETE TO append_only DO INSTEAD NOTHING;
+-- Operator classes and families, and access methods: no model yet
+CREATE FUNCTION compare_ints(INT, INT) RETURNS INT LANGUAGE sql IMMUTABLE
+    AS 'SELECT $1 - $2';
+CREATE OPERATOR FAMILY int_family USING btree;
+CREATE OPERATOR CLASS int_class FOR TYPE INT USING btree FAMILY int_family
+    AS OPERATOR 1 <, FUNCTION 1 compare_ints(INT, INT);
+CREATE ACCESS METHOD pglifecycle_heap TYPE TABLE HANDLER heap_tableam_handler;

@@ -1,4 +1,5 @@
-COMMENT	unsupported.CONSTRAINT payloads_pkey ON payloads
-RULE	unsupported.append_only append_only_no_delete
-STATISTICS	unsupported.measurements_stats
-TABLE	unsupported.payloads
+ACCESS METHOD	pglifecycle_heap
+OPERATOR	unsupported.===
+OPERATOR CLASS	unsupported.int_class
+OPERATOR FAMILY	unsupported.int_family
+PROCEDURE	unsupported.archive(integer)

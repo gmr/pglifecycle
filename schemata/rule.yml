@@ -1,0 +1,41 @@
+---
+$schema: https://json-schema.org/draft/2020-12/schema
+$id: https://gmr.github.io/pglifecycle/schemata/rule.json
+title: Rule
+description: Defines a rewrite rule on a table or view (CREATE RULE)
+type: object
+properties:
+  name:
+    title: Name
+    description: The rule name, unique within its table or view
+    type: string
+  event:
+    title: Event
+    enum: [SELECT, INSERT, UPDATE, DELETE]
+  condition:
+    title: Condition
+    description: The WHERE expression that decides whether the rule applies
+    type: string
+  instead:
+    title: Instead
+    description: Run the commands instead of the original one (DO INSTEAD); the default is DO ALSO
+    type: boolean
+  commands:
+    title: Commands
+    description: The commands the rule runs; absent for NOTHING
+    type: array
+    items:
+      type: string
+    minItems: 1
+  enabled:
+    title: Enabled
+    description: >
+      When the rule fires (ALTER TABLE ... RULE). ORIGIN, the default,
+      fires it in a normal session; REPLICA only when
+      session_replication_role is replica; ALWAYS in both; DISABLED never.
+    enum: [ORIGIN, REPLICA, ALWAYS, DISABLED]
+  comment:
+    title: Comment
+    type: string
+required: [name, event]
+additionalProperties: false

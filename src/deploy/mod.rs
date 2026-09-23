@@ -310,7 +310,7 @@ fn plan(
                         );
                     }
                 }
-                Some(Resolution::OrReplace { comment }) => {
+                Some(Resolution::OrReplace { comment, then }) => {
                     push(
                         false,
                         Statement {
@@ -329,9 +329,22 @@ fn plan(
                         push(
                             false,
                             Statement {
-                                label,
+                                label: label.clone(),
                                 sql: comment.clone(),
                                 fails_open: false,
+                            },
+                        );
+                    }
+                    for alter in then {
+                        push(
+                            alter.destructive,
+                            Statement {
+                                label: alter
+                                    .label
+                                    .clone()
+                                    .unwrap_or_else(|| label.clone()),
+                                sql: alter.sql.clone(),
+                                fails_open: alter.fails_open,
                             },
                         );
                     }

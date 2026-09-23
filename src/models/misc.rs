@@ -290,6 +290,29 @@ pub struct Operator {
     pub comment: Option<String>,
 }
 
+/// Extended statistics on a table or materialized view (CREATE
+/// STATISTICS). A top-level object, not a table child: its name is
+/// schema-qualified, and its owner need not own the table.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Statistics {
+    pub name: String,
+    pub schema: String,
+    pub owner: String,
+    /// The table or materialized view, schema-qualified
+    pub table: String,
+    /// ndistinct, dependencies or mcv; absent for all of them
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kinds: Option<Vec<String>>,
+    /// Each column or parenthesized expression, as written
+    pub elements: Vec<String>,
+    /// ALTER STATISTICS ... SET STATISTICS
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+}
+
 /// Represents a Publication
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
