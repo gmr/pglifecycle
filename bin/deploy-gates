@@ -99,7 +99,9 @@ echo "==> Gate 2: convergence (mutate, deploy --apply, re-deploy is empty)"
 # edited, one database-only, and a changed policy comment
 # replica identity reset and changed, an exclusion constraint's comment
 # changed, and another one dropped; column storage, compression,
-# statistics target and options changed
+# statistics target and options changed; constraint comments changed
+# and cleared, and a commented check replaced by a different one, whose
+# comment deploy has to set again after re-adding it
 psql -d "${TARGET_DB}" -q -v ON_ERROR_STOP=1 <<'SQL'
 ALTER TABLE test.users ADD COLUMN scratch text;
 ALTER TABLE test.users ALTER COLUMN display_name SET NOT NULL;
@@ -126,6 +128,11 @@ ALTER TABLE test.documents ALTER COLUMN body SET STORAGE EXTENDED;
 ALTER TABLE test.documents ALTER COLUMN body SET COMPRESSION pglz;
 ALTER TABLE test.documents ALTER COLUMN id SET STATISTICS 100;
 ALTER TABLE test.documents ALTER COLUMN size RESET (n_distinct);
+COMMENT ON CONSTRAINT invoices_pkey ON test.invoices IS 'drift';
+COMMENT ON CONSTRAINT invoices_number_key ON test.invoices IS NULL;
+ALTER TABLE test.invoices DROP CONSTRAINT invoices_total_positive;
+ALTER TABLE test.invoices ADD CONSTRAINT invoices_total_positive
+    CHECK (total > 0);
 SQL
 ./target/debug/pglifecycle deploy --apply --allow-drop -d "${TARGET_DB}" \
     "${WORKDIR}/project"

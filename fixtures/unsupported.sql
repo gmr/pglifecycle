@@ -21,12 +21,6 @@ SET search_path = unsupported, public, pg_catalog;
 
 CREATE ROLE pglifecycle_coverage_reader;
 
-CREATE TABLE payloads (id INT PRIMARY KEY);
-
--- A comment on a primary key, unique, check or foreign key constraint:
--- only an exclusion constraint carries one in the model
-COMMENT ON CONSTRAINT payloads_pkey ON payloads IS 'The payload id';
-
 -- Extended statistics
 CREATE TABLE measurements (a INT, b INT);
 CREATE STATISTICS measurements_stats (ndistinct, dependencies)

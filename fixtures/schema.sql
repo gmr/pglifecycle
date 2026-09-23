@@ -538,3 +538,21 @@ ALTER TABLE test.documents ALTER COLUMN body SET STORAGE EXTERNAL;
 ALTER TABLE test.documents ALTER COLUMN blob SET STORAGE MAIN;
 ALTER TABLE test.documents ALTER COLUMN id SET STATISTICS 500;
 ALTER TABLE test.documents ALTER COLUMN size SET (n_distinct = 100);
+
+-- Comments on each kind of constraint: primary key, unique, check,
+-- foreign key, NOT NULL, and a NOT VALID check, whose comment follows
+-- its own entry
+CREATE TABLE test.invoices (
+    id       INTEGER CONSTRAINT invoices_pkey PRIMARY KEY,
+    number   TEXT NOT NULL UNIQUE,
+    total    NUMERIC CONSTRAINT invoices_total_positive CHECK (total >= 0),
+    document INTEGER CONSTRAINT invoices_document REFERENCES test.documents (id)
+);
+ALTER TABLE test.invoices
+    ADD CONSTRAINT invoices_number_short CHECK (length(number) < 20) NOT VALID;
+COMMENT ON CONSTRAINT invoices_pkey ON test.invoices IS 'The invoice id';
+COMMENT ON CONSTRAINT invoices_number_key ON test.invoices IS 'One per number';
+COMMENT ON CONSTRAINT invoices_total_positive ON test.invoices IS 'No credits';
+COMMENT ON CONSTRAINT invoices_document ON test.invoices IS 'Its source';
+COMMENT ON CONSTRAINT invoices_number_not_null ON test.invoices IS 'Required';
+COMMENT ON CONSTRAINT invoices_number_short ON test.invoices IS 'Legacy rows';

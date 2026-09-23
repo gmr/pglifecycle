@@ -360,6 +360,15 @@ properties:
     type: array
     items:
       $package_schema: foreign_key
+  constraint_comments:
+    title: Constraint Comments
+    description: >
+      Comments on the table's primary key, unique, check, foreign key and
+      NOT NULL constraints, by constraint name. An exclusion constraint
+      keeps its comment on itself.
+    type: object
+    additionalProperties:
+      type: string
   exclude_constraints:
     title: Exclusion Constraints
     description: >

@@ -46,6 +46,12 @@ pub struct Table {
     pub foreign_keys: Option<Vec<ForeignKey>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exclude_constraints: Option<Vec<ExcludeConstraint>>,
+    /// Comments on the table's primary key, unique, check, foreign key
+    /// and NOT NULL constraints, by constraint name. An exclusion
+    /// constraint keeps its comment on itself.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub constraint_comments:
+        Option<std::collections::BTreeMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub triggers: Option<Vec<Trigger>>,
     /// Whether row-level security is enabled and forced. Absent means

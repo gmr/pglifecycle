@@ -264,6 +264,7 @@ fn table(repo: &Table, db: &Table) -> Resolution {
         });
         alters.push(Alter::new(format!("{sql};\n")));
     }
+    constraint_comments(&name, repo, db, &mut alters);
     row_security(&name, repo, db, &mut alters);
     policies(&name, repo, db, &mut alters);
     push_comment(&mut alters, "TABLE", &name, &repo.comment, &db.comment);
@@ -286,6 +287,106 @@ fn identity_index_rebuilt(repo: &Table, db: &Table) -> bool {
             .cloned()
     };
     matches!((find(repo), find(db)), (Some(r), Some(d)) if r != d)
+}
+
+/// Comments on the table's other constraints, after the statements
+/// that reconcile the constraints themselves. A constraint those
+/// statements add loses any comment it had, so its comment is set
+/// again. A comment the repo removes is cleared only while the
+/// constraint stays; a dropped constraint takes its comment with it.
+fn constraint_comments(
+    table: &str,
+    repo: &Table,
+    db: &Table,
+    alters: &mut Vec<Alter>,
+) {
+    let wanted = repo.constraint_comments.clone().unwrap_or_default();
+    let existing = db.constraint_comments.clone().unwrap_or_default();
+    let added = |name: &str| {
+        let marker = format!("ADD CONSTRAINT {} ", quote_ident(name));
+        alters.iter().any(|a| a.sql.contains(&marker))
+    };
+    let mut comments = Vec::new();
+    for (name, comment) in &wanted {
+        if existing.get(name) != Some(comment) || added(name) {
+            comments.push(comment_on(
+                "CONSTRAINT",
+                &format!("{} ON {table}", quote_ident(name)),
+                Some(comment),
+            ));
+        }
+    }
+    let kept = constraint_names(repo);
+    for name in existing.keys() {
+        if !wanted.contains_key(name) && kept.contains(name) && !added(name) {
+            comments.push(comment_on(
+                "CONSTRAINT",
+                &format!("{} ON {table}", quote_ident(name)),
+                None,
+            ));
+        }
+    }
+    alters.extend(comments.into_iter().map(Alter::new));
+}
+
+/// The names of a table's primary key, unique, check, foreign key and
+/// NOT NULL constraints, with the ones PostgreSQL generates where the
+/// model records none
+fn constraint_names(table: &Table) -> std::collections::BTreeSet<String> {
+    use crate::models::ConstraintColumns;
+    let mut names = std::collections::BTreeSet::new();
+    let generated = |columns: &[String], suffix: &str| {
+        format!("{}_{}_{suffix}", table.name, columns.join("_"))
+    };
+    let mut columns_constraint = |c: &ConstraintColumns, suffix: &str| {
+        let name = match c {
+            ConstraintColumns::Detailed {
+                name: Some(name), ..
+            } => name.clone(),
+            _ if suffix == "pkey" => format!("{}_pkey", table.name),
+            ConstraintColumns::Name(column) => {
+                generated(std::slice::from_ref(column), suffix)
+            }
+            ConstraintColumns::Columns(columns)
+            | ConstraintColumns::Detailed { columns, .. } => {
+                generated(columns, suffix)
+            }
+        };
+        names.insert(name);
+    };
+    if let Some(pk) = &table.primary_key {
+        columns_constraint(pk, "pkey");
+    }
+    for unique in table.unique_constraints.iter().flatten() {
+        columns_constraint(unique, "key");
+    }
+    names.extend(
+        table
+            .check_constraints
+            .iter()
+            .flatten()
+            .map(|c| c.name.clone()),
+    );
+    names.extend(table.foreign_keys.iter().flatten().map(|f| f.name.clone()));
+    for not_null in table.not_null_constraints.iter().flatten() {
+        names.insert(not_null.name.clone().unwrap_or_else(|| {
+            format!("{}_{}_not_null", table.name, not_null.column)
+        }));
+    }
+    for column in table.columns.iter().flatten() {
+        if column.nullable == Some(false) {
+            names.insert(
+                column
+                    .not_null_constraint
+                    .as_ref()
+                    .and_then(|n| n.name.clone())
+                    .unwrap_or_else(|| {
+                        format!("{}_{}_not_null", table.name, column.name)
+                    }),
+            );
+        }
+    }
+    names
 }
 
 /// Row security reconciliation. A statement that turns protection on
@@ -3323,5 +3424,30 @@ mod tests {
             ]
         );
         assert!(alters.iter().all(|a| !a.destructive));
+    }
+
+    /// A re-added constraint loses its comment, so the comment is set
+    /// again even though it has not changed; one the repo removes is
+    /// cleared while the constraint stays
+    #[test]
+    fn constraint_comments_follow_their_constraints() {
+        let check = |expression: &str| serde_json::json!([{"name": "positive", "expression": expression}]);
+        let mut repo = base_table();
+        repo["check_constraints"] = check("id > 0");
+        repo["constraint_comments"] = serde_json::json!({"positive": "kept"});
+        let mut db = base_table();
+        db["check_constraints"] = check("id >= 0");
+        db["constraint_comments"] =
+            serde_json::json!({"positive": "kept", "users_pkey": "old"});
+        db["primary_key"] = serde_json::json!(["id"]);
+        repo["primary_key"] = serde_json::json!(["id"]);
+        let alters = statements(table(&parse_table(repo), &parse_table(db)));
+        let sql = sql(&alters);
+        assert!(sql.contains(
+            &"COMMENT ON CONSTRAINT positive ON test.users IS $$kept$$;\n"
+        ));
+        assert!(sql.contains(
+            &"COMMENT ON CONSTRAINT users_pkey ON test.users IS NULL;\n"
+        ));
     }
 }

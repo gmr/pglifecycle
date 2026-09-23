@@ -1670,18 +1670,23 @@ impl Builder {
             };
             self.dump_index(index, item, &d.schema, &d.owner, replica)?;
         }
+        // the entry that creates each constraint outside CREATE TABLE,
+        // which its comment has to follow
+        let mut constraint_entries: HashMap<String, i32> = HashMap::new();
         for fk in d.foreign_keys.as_deref().unwrap_or_default() {
-            self.dump_foreign_key(fk, item, d)?;
+            let id = self.dump_foreign_key(fk, item, d)?;
+            constraint_entries.insert(fk.name.clone(), id);
         }
         for check in d.check_constraints.as_deref().unwrap_or_default() {
             if check.not_valid == Some(true) {
-                self.dump_not_valid_constraint(
+                let id = self.dump_not_valid_constraint(
                     "CHECK CONSTRAINT",
                     item,
                     d,
                     &check.name,
                     &render_check_constraint(check),
                 )?;
+                constraint_entries.insert(check.name.clone(), id);
             }
         }
         for not_null in d.not_null_constraints.as_deref().unwrap_or_default() {
@@ -1691,14 +1696,30 @@ impl Builder {
                 let name = not_null.name.clone().unwrap_or_else(|| {
                     format!("{}_{}_not_null", d.name, not_null.column)
                 });
-                self.dump_not_valid_constraint(
+                let id = self.dump_not_valid_constraint(
                     "CONSTRAINT",
                     item,
                     d,
                     &name,
                     &render_not_null_constraint(not_null),
                 )?;
+                constraint_entries.insert(name, id);
             }
+        }
+        for (name, comment) in d.constraint_comments.iter().flatten() {
+            let parent =
+                constraint_entries.get(name).copied().unwrap_or(dump_id);
+            let target =
+                format!("{} ON {}", quote_ident(name), self.item_name(item));
+            self.add_comment(
+                "CONSTRAINT",
+                &d.schema,
+                &format!("{name} ON {}", d.name),
+                &d.owner,
+                parent,
+                comment,
+                Some(target),
+            )?;
         }
         for trigger in d.triggers.as_deref().unwrap_or_default() {
             self.dump_trigger(trigger, item, d)?;
@@ -1864,7 +1885,7 @@ impl Builder {
         fk: &crate::models::ForeignKey,
         parent: &Item,
         table: &Table,
-    ) -> Result<(), String> {
+    ) -> Result<i32, String> {
         let qualified = self.item_name(parent);
         let name = quote_ident(&fk.name);
         let create = vec![format!(
@@ -1875,7 +1896,7 @@ impl Builder {
             "ALTER TABLE ONLY {qualified} DROP CONSTRAINT IF EXISTS {name}"
         )];
         let parent_dump_id = self.dump_id_map[&parent.id];
-        self.add_entry(
+        let dump_id = self.add_entry(
             "FK CONSTRAINT",
             &table.schema,
             &format!("{} {}", table.name, fk.name),
@@ -1885,7 +1906,7 @@ impl Builder {
             &[parent_dump_id],
             None,
         )?;
-        Ok(())
+        Ok(dump_id)
     }
 
     /// A NOT VALID CHECK or NOT NULL constraint, as its own entry after
@@ -1902,7 +1923,7 @@ impl Builder {
         table: &Table,
         name: &str,
         constraint: &str,
-    ) -> Result<(), String> {
+    ) -> Result<i32, String> {
         let qualified = self.item_name(parent);
         let create = vec![format!("ALTER TABLE {qualified} ADD {constraint}")];
         let drop = vec![format!(
@@ -1910,7 +1931,7 @@ impl Builder {
             quote_ident(name)
         )];
         let parent_dump_id = self.dump_id_map[&parent.id];
-        self.add_entry(
+        let dump_id = self.add_entry(
             desc,
             &table.schema,
             &format!("{} {name}", table.name),
@@ -1920,7 +1941,7 @@ impl Builder {
             &[parent_dump_id],
             None,
         )?;
-        Ok(())
+        Ok(dump_id)
     }
 
     /// An index's entry; `then` is a statement that has to follow the
@@ -3662,6 +3683,7 @@ mod tests {
                 unique_constraints: None,
                 foreign_keys: None,
                 exclude_constraints: None,
+                constraint_comments: None,
                 triggers: None,
                 row_level_security: None,
                 replica_identity: None,
@@ -4073,6 +4095,7 @@ mod tests {
             unique_constraints: None,
             foreign_keys: None,
             exclude_constraints: None,
+            constraint_comments: None,
             triggers: None,
             row_level_security: None,
             replica_identity: None,

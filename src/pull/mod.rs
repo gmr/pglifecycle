@@ -1701,9 +1701,9 @@ impl Assembly {
     }
 
     /// `COMMENT ON CONSTRAINT c ON schema.table`, the same two-name
-    /// shape as [`Self::apply_trigger_comment`]. Only an exclusion
-    /// constraint carries a comment in the model; one on another kind
-    /// is left unmatched, so the pull fails rather than drop it.
+    /// shape as [`Self::apply_trigger_comment`]. An exclusion
+    /// constraint keeps its comment on itself; any other kind's goes
+    /// into the table's `constraint_comments`.
     fn apply_constraint_comment(
         &mut self,
         target: &QualifiedName,
@@ -1720,16 +1720,23 @@ impl Assembly {
             schema,
             name: table.to_string(),
         };
-        let Some(constraint) = self.find_table(&relation).and_then(|table| {
-            table
-                .exclude_constraints
-                .iter_mut()
-                .flatten()
-                .find(|c| c.name == target.name)
-        }) else {
+        let Some(table) = self.find_table(&relation) else {
             return false;
         };
-        constraint.comment = Some(comment.to_string());
+        match table
+            .exclude_constraints
+            .iter_mut()
+            .flatten()
+            .find(|c| c.name == target.name)
+        {
+            Some(exclude) => exclude.comment = Some(comment.to_string()),
+            None => {
+                table
+                    .constraint_comments
+                    .get_or_insert_default()
+                    .insert(target.name.clone(), comment.to_string());
+            }
+        }
         true
     }
 
@@ -2582,8 +2589,8 @@ mod tests {
             &mut dump,
             OT::Comment,
             "s",
-            "CONSTRAINT t_pkey ON t",
-            "COMMENT ON CONSTRAINT t_pkey ON s.t IS 'the key';",
+            "RULE r ON t",
+            "COMMENT ON RULE r ON s.t IS 'a rule';",
         );
         let mut assembly = Assembly::default();
         assembly.ingest(&dump).unwrap();
@@ -2683,6 +2690,7 @@ mod tests {
             unique_constraints: None,
             foreign_keys: None,
             exclude_constraints: None,
+            constraint_comments: None,
             triggers: None,
             row_level_security: None,
             replica_identity: None,
