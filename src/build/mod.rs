@@ -2098,15 +2098,13 @@ impl Builder {
                 dictionary.comment.as_deref(),
             )?;
             if let Some(template) = &dictionary.template {
-                self.add_text_search_reference(
-                    dump_id,
-                    TS_TEMPLATE,
-                    &d.schema,
-                    template,
-                );
+                self.add_text_search_reference(dump_id, TS_TEMPLATE, template);
             }
         }
-        for config in d.configurations.as_deref().unwrap_or_default() {
+        for config in copies_after_sources(
+            &d.schema,
+            d.configurations.as_deref().unwrap_or_default(),
+        ) {
             let (create, drop) = if let Some(sql) = &config.sql {
                 (vec![sql.clone()], vec![])
             } else {
@@ -2179,29 +2177,26 @@ impl Builder {
                         .map(|name| (TS_DICTIONARY, name)),
                 );
             for (desc, name) in references {
-                self.add_text_search_reference(dump_id, desc, &d.schema, name);
+                self.add_text_search_reference(dump_id, desc, name);
             }
         }
         Ok(())
     }
 
     /// Record that the text search entry `dump_id` names the `desc`
-    /// object `name`. An unqualified name is in the container's own
-    /// schema.
+    /// object `name`. The name renders as written, and pg_restore runs
+    /// with an empty `search_path`, so an unqualified name is a
+    /// `pg_catalog` object, which the project does not manage.
     fn add_text_search_reference(
         &mut self,
         dump_id: i32,
         desc: &'static str,
-        own_schema: &str,
         name: &str,
     ) {
         let (schema, tag) = split_sql_name(name);
-        let schema = if schema.is_empty() {
-            own_schema.to_string()
-        } else {
-            schema
-        };
-        self.text_search_refs.push((dump_id, desc, schema, tag));
+        if !schema.is_empty() {
+            self.text_search_refs.push((dump_id, desc, schema, tag));
+        }
     }
 
     /// Order each text search entry after the text search objects it
@@ -2514,6 +2509,38 @@ impl Builder {
         let drop = vec!["DROP VIEW IF EXISTS".into(), self.item_name(item)];
         self.add_item(item, create, drop, false)
     }
+}
+
+/// The configurations of the `schema` container, each copy after the
+/// configuration of this container that it copies. The entries of a
+/// container are chained in this order, so a copy listed before its
+/// source would make a cycle with its `COPY` reference. A source cycle
+/// cannot restore, so its configurations keep the order they have.
+fn copies_after_sources<'a>(
+    schema: &str,
+    configs: &'a [crate::models::TextSearchConfig],
+) -> Vec<&'a crate::models::TextSearchConfig> {
+    let local_source = |config: &crate::models::TextSearchConfig| {
+        let (source_schema, name) = split_sql_name(config.source.as_deref()?);
+        (source_schema == schema).then_some(name)
+    };
+    let mut ordered = Vec::with_capacity(configs.len());
+    let mut pending: Vec<_> = configs.iter().collect();
+    while !pending.is_empty() {
+        let (ready, waiting): (Vec<_>, Vec<_>) =
+            pending.iter().copied().partition(|config| {
+                local_source(config).is_none_or(|source| {
+                    !pending.iter().any(|other| other.name == source)
+                })
+            });
+        if ready.is_empty() {
+            ordered.extend(waiting);
+            break;
+        }
+        ordered.extend(ready);
+        pending = waiting;
+    }
+    ordered
 }
 
 /// CREATEDB / NOCREATEDB style option rendering
@@ -4547,8 +4574,10 @@ mod tests {
                     "schema": schema,
                     "templates": [{"name": format!("{schema}_tmpl"),
                                    "lexize_function": "dsimple_lexize"}],
-                    "dictionaries": [{"name": format!("{schema}_dict"),
-                                      "template": format!("{schema}_tmpl")}],
+                    "dictionaries": [{
+                        "name": format!("{schema}_dict"),
+                        "template": format!("{schema}.{schema}_tmpl"),
+                    }],
                     "configurations": [{
                         "name": format!("{schema}_cfg"),
                         "parser": "pg_catalog.default",
@@ -4629,6 +4658,82 @@ mod tests {
             entry("copy").dependencies.contains(&entry("two").dump_id),
             "{:?}",
             entry("copy").dependencies
+        );
+    }
+
+    /// A copy listed before the configuration it copies is emitted
+    /// after it, so the container chain agrees with the COPY reference
+    #[test]
+    fn copied_configurations_follow_their_source() {
+        let item = text_search(
+            0,
+            "s",
+            json!([
+                {"name": "copy", "source": "s.base"},
+                {"name": "base", "parser": "pg_catalog.default"},
+            ]),
+        );
+        let output = assemble(&text_search_project(vec![item])).unwrap();
+        let entry = |tag: &str| {
+            output
+                .dump
+                .entries()
+                .iter()
+                .find(|e| e.tag.as_deref() == Some(tag))
+                .cloned()
+                .expect("a TEXT SEARCH CONFIGURATION entry")
+        };
+        assert!(
+            entry("copy").dependencies.contains(&entry("base").dump_id),
+            "{:?}",
+            entry("copy").dependencies
+        );
+        assert!(
+            !entry("base").dependencies.contains(&entry("copy").dump_id),
+            "{:?}",
+            entry("base").dependencies
+        );
+    }
+
+    /// pg_restore runs with an empty search_path, so an unqualified
+    /// name is a pg_catalog object and orders nothing, even when a
+    /// managed object of another schema has the same name
+    #[test]
+    fn unqualified_text_search_names_order_nothing() {
+        let dictionary = Item {
+            id: 0,
+            desc: ObjectType::TextSearch,
+            definition: Definition::TextSearch(
+                serde_json::from_value(json!({
+                    "schema": "a",
+                    "dictionaries": [{"name": "simple",
+                                      "template": "pg_catalog.simple"}],
+                }))
+                .unwrap(),
+            ),
+            dependencies: BTreeSet::new(),
+        };
+        let config = text_search(
+            1,
+            "b",
+            json!([{"name": "cfg", "parser": "pg_catalog.default",
+                    "mappings": {"asciiword": ["simple"]}}]),
+        );
+        let output =
+            assemble(&text_search_project(vec![dictionary, config])).unwrap();
+        let entry = |tag: &str| {
+            output
+                .dump
+                .entries()
+                .iter()
+                .find(|e| e.tag.as_deref() == Some(tag))
+                .cloned()
+                .expect("a text search entry")
+        };
+        assert!(
+            entry("cfg").dependencies.is_empty(),
+            "{:?}",
+            entry("cfg").dependencies
         );
     }
 }
