@@ -1750,6 +1750,9 @@ impl Builder {
         for trigger in d.triggers.as_deref().unwrap_or_default() {
             self.dump_trigger(trigger, item, d)?;
         }
+        for rule in d.rules.as_deref().unwrap_or_default() {
+            self.dump_rule(rule, item, &d.schema, &d.name, &d.owner)?;
+        }
         for exclude in d.exclude_constraints.as_deref().unwrap_or_default() {
             if let Some(comment) = &exclude.comment {
                 // a constraint is named through its table, as a
@@ -2012,6 +2015,52 @@ impl Builder {
                 dump_id,
                 comment,
                 None,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// A rule's entry after its table or view, with its state and its
+    /// comment
+    fn dump_rule(
+        &mut self,
+        rule: &crate::models::Rule,
+        parent: &Item,
+        schema: &str,
+        relation: &str,
+        owner: &str,
+    ) -> Result<(), String> {
+        let qualified = self.item_name(parent);
+        let mut create = vec![render_rule(rule, &qualified, false)];
+        if let Some(state) = render_rule_state(rule, &qualified) {
+            create[0].push(';');
+            create.push(state);
+        }
+        let drop = vec![format!(
+            "DROP RULE IF EXISTS {} ON {qualified}",
+            quote_ident(&rule.name)
+        )];
+        let parent_dump_id = self.dump_id_map[&parent.id];
+        let dump_id = self.add_entry(
+            "RULE",
+            schema,
+            &format!("{relation} {}", rule.name),
+            owner,
+            &create,
+            &drop,
+            &[parent_dump_id],
+            None,
+        )?;
+        if let Some(comment) = &rule.comment {
+            let target = format!("{} ON {qualified}", quote_ident(&rule.name));
+            self.add_comment(
+                "RULE",
+                schema,
+                &format!("{} ON {relation}", rule.name),
+                owner,
+                dump_id,
+                comment,
+                Some(target),
             )?;
         }
         Ok(())
@@ -2684,7 +2733,11 @@ impl Builder {
         create.push("AS".into());
         create.push(d.query.clone().unwrap_or_default());
         let drop = vec!["DROP VIEW IF EXISTS".into(), self.item_name(item)];
-        self.add_item(item, create, drop, false)
+        self.add_item(item, create, drop, false)?;
+        for rule in d.rules.as_deref().unwrap_or_default() {
+            self.dump_rule(rule, item, &d.schema, &d.name, &d.owner)?;
+        }
+        Ok(())
     }
 }
 
@@ -3062,6 +3115,53 @@ pub(crate) fn render_column_attributes(
         }
     }
     statements
+}
+
+/// CREATE [OR REPLACE] RULE, shared by build and deploy
+pub(crate) fn render_rule(
+    rule: &crate::models::Rule,
+    relation: &str,
+    or_replace: bool,
+) -> String {
+    let mut sql = format!(
+        "CREATE {}RULE {} AS ON {} TO {relation}",
+        if or_replace { "OR REPLACE " } else { "" },
+        quote_ident(&rule.name),
+        rule.event.to_uppercase()
+    );
+    if let Some(condition) = &rule.condition {
+        sql.push_str(&format!(" WHERE {condition}"));
+    }
+    sql.push_str(if rule.instead == Some(true) {
+        " DO INSTEAD"
+    } else {
+        " DO ALSO"
+    });
+    match rule.commands.as_deref() {
+        None | Some([]) => sql.push_str(" NOTHING"),
+        Some([command]) => sql.push_str(&format!(" {command}")),
+        Some(commands) => sql.push_str(&format!(" ({})", commands.join("; "))),
+    }
+    sql
+}
+
+/// `ALTER TABLE ... DISABLE RULE` or `ENABLE REPLICA|ALWAYS RULE` for
+/// a rule that is not in the default state
+pub(crate) fn render_rule_state(
+    rule: &crate::models::Rule,
+    relation: &str,
+) -> Option<String> {
+    let state = match rule.enabled.as_deref()?.to_uppercase().as_str() {
+        "ORIGIN" => return None,
+        "DISABLED" => "DISABLE",
+        "REPLICA" => "ENABLE REPLICA",
+        "ALWAYS" => "ENABLE ALWAYS",
+        _ => return None,
+    };
+    Some(format!(
+        "ALTER TABLE {relation} {state} RULE {}",
+        quote_ident(&rule.name)
+    ))
 }
 
 /// `ALTER TABLE ONLY ... REPLICA IDENTITY ...` for a table whose
@@ -3711,6 +3811,7 @@ mod tests {
                 exclude_constraints: None,
                 constraint_comments: None,
                 triggers: None,
+                rules: None,
                 row_level_security: None,
                 replica_identity: None,
                 policies: None,
@@ -4123,6 +4224,7 @@ mod tests {
             exclude_constraints: None,
             constraint_comments: None,
             triggers: None,
+            rules: None,
             row_level_security: None,
             replica_identity: None,
             policies: None,
@@ -4405,6 +4507,7 @@ mod tests {
                 security_barrier: Some(true),
                 query: Some("SELECT 1".into()),
                 comment: None,
+                rules: None,
             }),
             dependencies: BTreeSet::new(),
         };

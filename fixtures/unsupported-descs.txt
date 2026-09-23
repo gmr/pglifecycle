@@ -1,1 +1,5 @@
-RULE	unsupported.append_only append_only_no_delete
+ACCESS METHOD	pglifecycle_heap
+OPERATOR	unsupported.===
+OPERATOR CLASS	unsupported.int_class
+OPERATOR FAMILY	unsupported.int_family
+PROCEDURE	unsupported.archive(integer)

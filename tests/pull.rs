@@ -368,17 +368,17 @@ fn pull_refuses_existing_destination() {
     );
 }
 
-/// An archive carrying one entry `pull` cannot model (a rule), on top
+/// An archive carrying one entry `pull` cannot model (a procedure), on top
 /// of the otherwise fully-supported fixture archive
-fn archive_with_rule(path: &std::path::Path) {
+fn archive_with_procedure(path: &std::path::Path) {
     fixture_archive(path);
     let mut dump = libpgdump::load(path).expect("load archive");
     common::add(
         &mut dump,
-        libpgdump::ObjectType::Rule,
+        libpgdump::ObjectType::Procedure,
         "test",
-        "users users_no_delete",
-        "CREATE RULE users_no_delete AS ON DELETE TO test.users DO INSTEAD NOTHING;",
+        "archive(integer)",
+        "CREATE PROCEDURE test.archive(days integer) LANGUAGE sql AS $$SELECT 1$$;",
     );
     dump.save(path).expect("save archive");
 }
@@ -387,11 +387,11 @@ fn archive_with_rule(path: &std::path::Path) {
 fn unmodeled_entry_fails_pull_and_is_preserved() {
     let dir = tempfile::tempdir().unwrap();
     let archive = dir.path().join("fixtures.dump");
-    archive_with_rule(&archive);
+    archive_with_procedure(&archive);
     let dest = dir.path().join("project");
     let error = pull::pull(&pull_args(&archive, &dest)).unwrap_err();
     assert!(
-        error.contains("could not be modeled") && error.contains("RULE"),
+        error.contains("could not be modeled") && error.contains("PROCEDURE"),
         "unexpected error: {error}"
     );
     assert!(
@@ -403,7 +403,7 @@ fn unmodeled_entry_fails_pull_and_is_preserved() {
     let remaining =
         std::fs::read_to_string(dest.join("remaining.yaml")).unwrap();
     assert!(
-        remaining.contains("users_no_delete"),
+        remaining.contains("archive(integer)"),
         "remaining.yaml must carry the entry verbatim: {remaining}"
     );
 }
@@ -412,7 +412,7 @@ fn unmodeled_entry_fails_pull_and_is_preserved() {
 fn allow_unsupported_accepts_an_incomplete_project() {
     let dir = tempfile::tempdir().unwrap();
     let archive = dir.path().join("fixtures.dump");
-    archive_with_rule(&archive);
+    archive_with_procedure(&archive);
     let dest = dir.path().join("project");
     pull::pull(&pull_args_with(
         &archive,
@@ -427,7 +427,7 @@ fn allow_unsupported_accepts_an_incomplete_project() {
 fn ignore_file_cannot_suppress_remaining_file() {
     let dir = tempfile::tempdir().unwrap();
     let archive = dir.path().join("fixtures.dump");
-    archive_with_rule(&archive);
+    archive_with_procedure(&archive);
     let ignore = dir.path().join("ignore.txt");
     std::fs::write(&ignore, "remaining.yaml\n").unwrap();
     let dest = dir.path().join("project");
@@ -440,7 +440,7 @@ fn ignore_file_cannot_suppress_remaining_file() {
     let remaining =
         std::fs::read_to_string(dest.join("remaining.yaml")).unwrap();
     assert!(
-        remaining.contains("users_no_delete"),
+        remaining.contains("archive(integer)"),
         "--ignore must not hold back the only copy of the entry: \
          {remaining}"
     );

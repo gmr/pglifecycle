@@ -76,6 +76,12 @@ properties:
     description: |
       A SELECT or VALUES command which will provide the columns and rows of the view.
     type: string
+  rules:
+    title: Rules
+    description: An array of rewrite rules on the view
+    type: array
+    items:
+      $package_schema: rule
   comment:
     title: Comment
     description: An optional comment about the view.

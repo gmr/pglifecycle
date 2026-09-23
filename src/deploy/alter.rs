@@ -16,7 +16,7 @@ use crate::models::{
     CheckConstraint, Column, ColumnDefault, ColumnGenerated, ColumnNotNull,
     Definition, Domain, ExcludeConstraint, Extension, ForeignDataWrapper,
     ForeignKey, Function, Index, NotNullConstraint, Policy, ReplicaIdentity,
-    Schema, Sequence, SequenceOptions, Server, Table, Trigger, Type,
+    Rule, Schema, Sequence, SequenceOptions, Server, Table, Trigger, Type,
     UserMapping, View, ViewColumn,
 };
 use crate::utils::{
@@ -71,7 +71,12 @@ pub(crate) enum Resolution {
     /// `comment` carries the `COMMENT ON` statement to run afterward
     /// when it changed (including the `IS NULL` form on removal); `None`
     /// means the comment is unchanged.
-    OrReplace { comment: Option<String> },
+    /// `then` holds statements to run after it, which reconcile the
+    /// object's children (a view's rules).
+    OrReplace {
+        comment: Option<String>,
+        then: Vec<Alter>,
+    },
     /// No in-place form exists (or is implemented yet): drop and
     /// recreate from the repo definition, gated behind --allow-drop
     Replace,
@@ -109,6 +114,7 @@ pub(crate) fn resolve(repo: &Definition, database: &Definition) -> Resolution {
                         &repo.comment,
                         &db.comment,
                     ),
+                    then: Vec::new(),
                 }
             } else {
                 Resolution::Replace
@@ -169,13 +175,17 @@ fn out_parameters(function: &Function) -> Vec<(String, String, String)> {
 /// here.
 fn view(repo: &View, db: &View) -> Resolution {
     if view_columns_compatible(repo, db) {
+        let name = qualified(&repo.schema, &repo.name);
+        let mut then = Vec::new();
+        rules(
+            &name,
+            repo.rules.as_deref().unwrap_or_default(),
+            db.rules.as_deref().unwrap_or_default(),
+            &mut then,
+        );
         Resolution::OrReplace {
-            comment: comment_delta(
-                "VIEW",
-                &qualified(&repo.schema, &repo.name),
-                &repo.comment,
-                &db.comment,
-            ),
+            comment: comment_delta("VIEW", &name, &repo.comment, &db.comment),
+            then,
         }
     } else {
         Resolution::Replace
@@ -248,6 +258,12 @@ fn table(repo: &Table, db: &Table) -> Resolution {
         return Resolution::Replace;
     }
     indexes(&name, repo, db, &mut alters);
+    rules(
+        &name,
+        repo.rules.as_deref().unwrap_or_default(),
+        db.rules.as_deref().unwrap_or_default(),
+        &mut alters,
+    );
     // after the indexes, which a USING INDEX identity may name. A
     // rebuilt identity index loses its mark, so the identity is set
     // again although both sides name the same index.
@@ -287,6 +303,65 @@ fn identity_index_rebuilt(repo: &Table, db: &Table) -> bool {
             .cloned()
     };
     matches!((find(repo), find(db)), (Some(r), Some(d)) if r != d)
+}
+
+/// Rule reconciliation for a table or view. A changed rule is
+/// replaced in place with CREATE OR REPLACE RULE, which keeps its
+/// state and comment, so those are set only when they differ. A
+/// removed rule is dropped: like a trigger, it holds no data.
+fn rules(
+    relation: &str,
+    wanted: &[Rule],
+    existing: &[Rule],
+    alters: &mut Vec<Alter>,
+) {
+    let body = |rule: &Rule| Rule {
+        enabled: None,
+        comment: None,
+        ..rule.clone()
+    };
+    for old in existing {
+        if !wanted.iter().any(|r| r.name == old.name) {
+            alters.push(Alter::new(format!(
+                "DROP RULE IF EXISTS {} ON {relation};\n",
+                quote_ident(&old.name)
+            )));
+        }
+    }
+    for rule in wanted {
+        let old = existing.iter().find(|r| r.name == rule.name);
+        if old.map(body) != Some(body(rule)) {
+            alters.push(Alter::new(format!(
+                "{};\n",
+                build::render_rule(rule, relation, true)
+            )));
+        }
+        let state = |r: &Rule| {
+            r.enabled
+                .as_deref()
+                .map(str::to_uppercase)
+                .filter(|s| s != "ORIGIN")
+        };
+        if old.and_then(state) != state(rule) {
+            let sql = build::render_rule_state(rule, relation).unwrap_or_else(
+                || {
+                    format!(
+                        "ALTER TABLE {relation} ENABLE RULE {}",
+                        quote_ident(&rule.name)
+                    )
+                },
+            );
+            alters.push(Alter::new(format!("{sql};\n")));
+        }
+        let comment = old.and_then(|r| r.comment.clone());
+        push_comment(
+            alters,
+            "RULE",
+            &format!("{} ON {relation}", quote_ident(&rule.name)),
+            &rule.comment,
+            &comment,
+        );
+    }
 }
 
 /// Comments on the table's other constraints, after the statements
@@ -2627,7 +2702,7 @@ mod tests {
 
     fn or_replace_comment(resolution: Resolution) -> Option<String> {
         match resolution {
-            Resolution::OrReplace { comment } => comment,
+            Resolution::OrReplace { comment, .. } => comment,
             _ => panic!("expected OR REPLACE"),
         }
     }
@@ -3449,5 +3524,32 @@ mod tests {
         assert!(sql.contains(
             &"COMMENT ON CONSTRAINT users_pkey ON test.users IS NULL;\n"
         ));
+    }
+
+    #[test]
+    fn rules_are_replaced_in_place() {
+        let rule = |instead: bool, enabled: Option<&str>| {
+            let mut r = serde_json::json!({"name": "r", "event": "DELETE"});
+            if instead {
+                r["instead"] = serde_json::json!(true);
+            }
+            if let Some(enabled) = enabled {
+                r["enabled"] = serde_json::json!(enabled);
+            }
+            serde_json::json!([r])
+        };
+        let mut repo = base_table();
+        repo["rules"] = rule(true, None);
+        let mut db = base_table();
+        db["rules"] = rule(false, Some("DISABLED"));
+        let alters = statements(table(&parse_table(repo), &parse_table(db)));
+        assert_eq!(
+            sql(&alters),
+            vec![
+                "CREATE OR REPLACE RULE r AS ON DELETE TO test.users DO \
+                 INSTEAD NOTHING;\n",
+                "ALTER TABLE test.users ENABLE RULE r;\n",
+            ]
+        );
     }
 }

@@ -103,6 +103,7 @@ pub(crate) fn create_table(
         exclude_constraints: None,
         constraint_comments: None,
         triggers: None,
+        rules: None,
         row_level_security: None,
         replica_identity: None,
         policies: None,
@@ -418,6 +419,24 @@ pub(crate) fn alter_table(
             statements.push(Statement::ReplicaIdentity {
                 table: table.clone(),
                 identity,
+            });
+        } else if cmd.child_of_kind("kw_rule").is_some() {
+            let enabled = if cmd.child_of_kind("kw_disable").is_some() {
+                Some("DISABLED")
+            } else if cmd.child_of_kind("kw_replica").is_some() {
+                Some("REPLICA")
+            } else if cmd.child_of_kind("kw_always").is_some() {
+                Some("ALWAYS")
+            } else {
+                None
+            };
+            statements.push(Statement::RuleState {
+                relation: table.clone(),
+                name: cmd
+                    .child_of_kind("name")
+                    .map(|n| unquote(n.text(src)))
+                    .unwrap_or_default(),
+                enabled: enabled.map(String::from),
             });
         } else if cmd.child_of_kind("kw_row").is_some()
             && cmd.child_of_kind("kw_security").is_some()

@@ -609,6 +609,7 @@ impl Assembly {
                 | OT::TextSearchTemplate
                 | OT::DefaultAcl
                 | OT::Statistics
+                | OT::Rule
                 | OT::ForeignTable
                 | OT::ForeignDataWrapper
                 | OT::ForeignServer
@@ -1203,6 +1204,26 @@ impl Assembly {
                     }
                 }
             }
+            Statement::CreateRule { relation, rule } => {
+                self.add_rule(relation, rule, entry);
+            }
+            Statement::RuleState {
+                relation,
+                name,
+                enabled,
+            } => {
+                let found = match self.rules_of(&relation) {
+                    Some(rules) => rules.iter_mut().find(|r| r.name == name),
+                    None => None,
+                };
+                match found {
+                    Some(rule) => rule.enabled = enabled,
+                    None => {
+                        log::warn!("State of unknown rule {relation} {name}");
+                        self.push_remaining(entry);
+                    }
+                }
+            }
             Statement::CreatePolicy { table, policy } => {
                 match self.find_table(&table) {
                     Some(table) => {
@@ -1461,6 +1482,7 @@ impl Assembly {
             "FUNCTION" => self.apply_function_comment(&schema, name, &comment),
             "TRIGGER" => self.apply_trigger_comment(target, &comment),
             "POLICY" => self.apply_policy_comment(target, &comment),
+            "RULE" => self.apply_rule_comment(target, &comment),
             "CONSTRAINT" => self.apply_constraint_comment(target, &comment),
             "AGGREGATE" => self
                 .aggregates
@@ -1645,6 +1667,60 @@ impl Assembly {
         true
     }
 
+    /// A rule belongs to its table or view. A view's `_RETURN` rule is
+    /// the view's query: pg_dump writes a view that way when its
+    /// query depends on something that depends on the view, as a
+    /// placeholder view and then the rule, so the rule's SELECT
+    /// replaces the placeholder query and is never kept as a rule.
+    fn add_rule(
+        &mut self,
+        relation: QualifiedName,
+        rule: models::Rule,
+        entry: &libpgdump::Entry,
+    ) {
+        let schema = relation.schema.clone().unwrap_or_default();
+        if rule.name == "_RETURN" && rule.event == "SELECT" {
+            let view = self
+                .views
+                .iter_mut()
+                .find(|v| v.schema == schema && v.name == relation.name);
+            match (view, rule.commands.as_deref()) {
+                (Some(view), Some([query])) => {
+                    view.query = Some(query.clone());
+                }
+                _ => {
+                    log::warn!("Cannot model _RETURN rule on {relation}");
+                    self.push_remaining(entry);
+                }
+            }
+            return;
+        }
+        match self.rules_of(&relation) {
+            Some(rules) => rules.push(rule),
+            None => {
+                log::warn!("Rule on unknown relation {relation}");
+                self.push_remaining(entry);
+            }
+        }
+    }
+
+    /// The rule list of a table or view, created if absent
+    fn rules_of(
+        &mut self,
+        relation: &QualifiedName,
+    ) -> Option<&mut Vec<models::Rule>> {
+        let schema = relation.schema.clone().unwrap_or_default();
+        if self.find_table(relation).is_some() {
+            return self
+                .find_table(relation)
+                .map(|t| t.rules.get_or_insert_default());
+        }
+        self.views
+            .iter_mut()
+            .find(|v| v.schema == schema && v.name == relation.name)
+            .map(|v| v.rules.get_or_insert_default())
+    }
+
     /// File a text search object under its schema's container
     fn add_text_search(
         &mut self,
@@ -1764,6 +1840,33 @@ impl Assembly {
                     .insert(target.name.clone(), comment.to_string());
             }
         }
+        true
+    }
+
+    /// `COMMENT ON RULE r ON schema.relation`, the same two-name shape
+    /// as [`Self::apply_trigger_comment`]
+    fn apply_rule_comment(
+        &mut self,
+        target: &QualifiedName,
+        comment: &str,
+    ) -> bool {
+        let Some(relation) = &target.schema else {
+            return false;
+        };
+        let (schema, name) = match relation.split_once('.') {
+            Some((schema, name)) => (Some(schema.to_string()), name),
+            None => (None, relation.as_str()),
+        };
+        let relation = QualifiedName {
+            schema,
+            name: name.to_string(),
+        };
+        let Some(rule) = self.rules_of(&relation).and_then(|rules| {
+            rules.iter_mut().find(|r| r.name == target.name)
+        }) else {
+            return false;
+        };
+        rule.comment = Some(comment.to_string());
         true
     }
 
@@ -2719,6 +2822,7 @@ mod tests {
             exclude_constraints: None,
             constraint_comments: None,
             triggers: None,
+            rules: None,
             row_level_security: None,
             replica_identity: None,
             policies: None,

@@ -23,6 +23,8 @@ pub struct View {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub query: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub rules: Option<Vec<crate::models::Rule>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
 }
 

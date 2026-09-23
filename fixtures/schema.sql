@@ -568,3 +568,20 @@ COMMENT ON STATISTICS test.measurements_all IS 'Every kind';
 CREATE STATISTICS test.measurements_expr (mcv)
     ON (a + b), lower(label) FROM test.measurements;
 CREATE STATISTICS test.user_states_stats ON state, total FROM test.user_states;
+
+-- Rules: DO INSTEAD NOTHING with a comment, a conditional DO ALSO with
+-- two commands, a disabled one, and one on a view
+CREATE TABLE test.ledger (id INTEGER, amount NUMERIC);
+CREATE TABLE test.ledger_audit (id INTEGER);
+CREATE RULE ledger_no_delete AS ON DELETE TO test.ledger DO INSTEAD NOTHING;
+COMMENT ON RULE ledger_no_delete ON test.ledger IS 'Append only';
+CREATE RULE ledger_audit_insert AS ON INSERT TO test.ledger
+    WHERE new.amount > 0
+    DO ALSO (INSERT INTO test.ledger_audit VALUES (new.id);
+             INSERT INTO test.ledger_audit VALUES (- new.id));
+CREATE RULE ledger_redirect AS ON UPDATE TO test.ledger
+    DO INSTEAD UPDATE test.ledger_audit SET id = new.id WHERE ledger_audit.id = old.id;
+ALTER TABLE test.ledger DISABLE RULE ledger_redirect;
+CREATE VIEW test.ledger_view AS SELECT id, amount FROM test.ledger;
+CREATE RULE ledger_view_insert AS ON INSERT TO test.ledger_view
+    DO INSTEAD INSERT INTO test.ledger (id, amount) VALUES (new.id, new.amount);

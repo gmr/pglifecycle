@@ -130,6 +130,18 @@ pub enum Statement {
         name: QualifiedName,
         target: i64,
     },
+    /// CREATE RULE on a table or view
+    CreateRule {
+        relation: QualifiedName,
+        rule: models::Rule,
+    },
+    /// ALTER TABLE ... ENABLE [REPLICA | ALWAYS] / DISABLE RULE;
+    /// `enabled` is `None` for the default state
+    RuleState {
+        relation: QualifiedName,
+        name: String,
+        enabled: Option<String>,
+    },
     CreatePolicy {
         table: QualifiedName,
         policy: models::Policy,
@@ -372,6 +384,7 @@ fn dispatch(node: &Node, src: &str) -> Result<Vec<Statement>, String> {
         }
         "CreateStatsStmt" => Ok(vec![misc::create_statistics(node, src)?]),
         "AlterStatsStmt" => Ok(vec![misc::alter_statistics(node, src)?]),
+        "RuleStmt" => Ok(vec![misc::create_rule(node, src)?]),
         "CreatePolicyStmt" => Ok(vec![policy::create_policy(node, src)?]),
         "CommentStmt" => Ok(vec![object::comment(node, src)?]),
         "GrantStmt" => Ok(vec![acl::grant(node, src, false)?]),

@@ -21,7 +21,15 @@ SET search_path = unsupported, public, pg_catalog;
 
 CREATE ROLE pglifecycle_coverage_reader;
 
--- Rule
-CREATE TABLE append_only (id INT);
-CREATE RULE append_only_no_delete AS
-    ON DELETE TO append_only DO INSTEAD NOTHING;
+-- Procedures and operators: build and models support them, but pull
+-- cannot parse them yet
+CREATE PROCEDURE archive(days INT) LANGUAGE sql AS 'SELECT 1';
+CREATE OPERATOR === (LEFTARG = INT, RIGHTARG = INT, FUNCTION = int4eq);
+
+-- Operator classes and families, and access methods: no model yet
+CREATE FUNCTION compare_ints(INT, INT) RETURNS INT LANGUAGE sql IMMUTABLE
+    AS 'SELECT $1 - $2';
+CREATE OPERATOR FAMILY int_family USING btree;
+CREATE OPERATOR CLASS int_class FOR TYPE INT USING btree FAMILY int_family
+    AS OPERATOR 1 <, FUNCTION 1 compare_ints(INT, INT);
+CREATE ACCESS METHOD pglifecycle_heap TYPE TABLE HANDLER heap_tableam_handler;

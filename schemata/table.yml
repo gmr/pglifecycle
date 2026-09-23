@@ -448,6 +448,12 @@ properties:
     type: array
     items:
       $package_schema: trigger
+  rules:
+    title: Rules
+    description: An array of rewrite rules on the table
+    type: array
+    items:
+      $package_schema: rule
   row_level_security:
     title: Row-Level Security
     description: >

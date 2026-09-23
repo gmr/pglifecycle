@@ -133,6 +133,7 @@ pub(crate) fn create_foreign_table(
         exclude_constraints: None,
         constraint_comments: None,
         triggers: None,
+        rules: None,
         row_level_security: None,
         replica_identity: None,
         policies: None,

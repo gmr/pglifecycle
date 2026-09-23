@@ -54,6 +54,8 @@ pub struct Table {
         Option<std::collections::BTreeMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub triggers: Option<Vec<Trigger>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rules: Option<Vec<Rule>>,
     /// Whether row-level security is enabled and forced. Absent means
     /// the project does not manage it: deploy then leaves the table's
     /// row security, and its policies unless `policies` is given, as
@@ -729,6 +731,29 @@ impl Policy {
             ..self.clone()
         }
     }
+}
+
+/// A rewrite rule on a table or view (CREATE RULE)
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Rule {
+    pub name: String,
+    /// SELECT, INSERT, UPDATE or DELETE
+    pub event: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub condition: Option<String>,
+    /// DO INSTEAD; the default is DO ALSO
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instead: Option<bool>,
+    /// The commands the rule runs; absent for NOTHING
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commands: Option<Vec<String>>,
+    /// DISABLED, REPLICA or ALWAYS (ALTER TABLE ... RULE); absent is
+    /// the default, ORIGIN
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
 }
 
 /// Table Triggers
