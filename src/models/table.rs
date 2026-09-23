@@ -190,6 +190,10 @@ impl Table {
             }
             other => other,
         };
+        // pg_dump always writes the method, and btree is the default
+        for exclude in table.exclude_constraints.iter_mut().flatten() {
+            exclude.method.get_or_insert_with(|| String::from("btree"));
+        }
         table.with_canonical_policies()
     }
 

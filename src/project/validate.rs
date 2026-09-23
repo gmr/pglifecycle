@@ -141,6 +141,38 @@ mod tests {
         assert!(!fk(None, Some("valid")));
     }
 
+    /// REVOKE GRANT OPTION FOR is not supported, and a plain REVOKE
+    /// would take away the privilege itself
+    #[test]
+    fn revocation_cannot_set_with_grant_option() {
+        let defaults = |grant_option: Option<bool>| {
+            let mut declaration = json!({
+                "object_type": "TABLES", "grantee": "PUBLIC",
+                "privileges": ["SELECT"],
+            });
+            if let Some(value) = grant_option {
+                declaration["with_grant_option"] = json!(value);
+            }
+            let data = json!({
+                "name": "app",
+                "grants": [declaration.clone()],
+                "revocations": [declaration],
+            });
+            validate_object("default_privileges", "app", &data)
+        };
+        assert!(defaults(None));
+        assert!(defaults(Some(false)));
+        assert!(!defaults(Some(true)));
+        // a grant may still carry the option
+        let grant = json!({
+            "name": "app",
+            "grants": [{"object_type": "TABLES", "grantee": "PUBLIC",
+                        "privileges": ["SELECT"],
+                        "with_grant_option": true}],
+        });
+        assert!(validate_object("default_privileges", "app", &grant));
+    }
+
     #[test]
     fn merges_package_schemas() {
         // casts.yml composes cast.yml via $package_schema

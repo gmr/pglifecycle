@@ -738,6 +738,22 @@ impl Assembly {
                             defn: None,
                         });
                     }
+                    // a partition keeps its own replica identity, which
+                    // would be lost in the same way
+                    if child.replica_identity.is_some() {
+                        log::warn!(
+                            "Cannot model replica identity of partition \
+                             {}.{}",
+                            partition.schema,
+                            partition.name
+                        );
+                        self.remaining.push(Remaining {
+                            desc: String::from("REPLICA IDENTITY"),
+                            namespace: Some(partition.schema.clone()),
+                            tag: Some(partition.name.clone()),
+                            defn: None,
+                        });
+                    }
                     removed.insert(key);
                 }
                 None => log::warn!(
@@ -2828,6 +2844,55 @@ mod tests {
         assert_eq!(partitions[0].for_values_to, Some(json!("2025-01-01")));
         // a comment on the child carries onto the partition
         assert_eq!(partitions[0].comment.as_deref(), Some("The 2024 slice"));
+    }
+
+    #[test]
+    fn partition_replica_identity_is_recorded_as_remaining() {
+        // a partition keeps its own replica identity; the model cannot
+        // hold it, so the pull must record it and fail, not drop it
+        let mut dump = libpgdump::new("fixtures", "UTF8", "18.0").unwrap();
+        add(&mut dump, OT::Schema, "", "test", "CREATE SCHEMA test;");
+        add(
+            &mut dump,
+            OT::Table,
+            "test",
+            "events",
+            "CREATE TABLE test.events (id bigint, ts timestamp) \
+             PARTITION BY RANGE (ts);",
+        );
+        add(
+            &mut dump,
+            OT::Table,
+            "test",
+            "events_2024",
+            "CREATE TABLE test.events_2024 (id bigint, ts timestamp);\n\
+             ALTER TABLE ONLY test.events_2024 REPLICA IDENTITY FULL;",
+        );
+        add(
+            &mut dump,
+            OT::TableAttach,
+            "test",
+            "events_2024",
+            "ALTER TABLE ONLY test.events ATTACH PARTITION \
+             test.events_2024 FOR VALUES FROM ('2024-01-01') \
+             TO ('2025-01-01');",
+        );
+        let mut assembly = Assembly::default();
+        assembly.ingest(&dump).unwrap();
+        assert_eq!(assembly.tables.len(), 1);
+        assert!(
+            assembly
+                .remaining
+                .iter()
+                .any(|r| r.desc == "REPLICA IDENTITY"
+                    && r.tag.as_deref() == Some("events_2024")),
+            "{:?}",
+            assembly
+                .remaining
+                .iter()
+                .map(|r| (&r.desc, &r.tag))
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

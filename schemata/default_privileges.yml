@@ -47,9 +47,15 @@ properties:
     title: Revocations
     description: >
       Privileges taken away from the built-in defaults, such as EXECUTE on
-      functions from PUBLIC
+      functions from PUBLIC. REVOKE GRANT OPTION FOR is not supported, so
+      a revocation cannot set with_grant_option to true.
     type: array
     items:
       $ref: '#/$defs/declaration'
+      not:
+        properties:
+          with_grant_option:
+            const: true
+        required: [with_grant_option]
 required: [name]
 additionalProperties: false

@@ -15,9 +15,9 @@ use crate::deploy::diff::canonical_type;
 use crate::models::{
     CheckConstraint, Column, ColumnDefault, ColumnGenerated, ColumnNotNull,
     Definition, Domain, ExcludeConstraint, Extension, ForeignDataWrapper,
-    ForeignKey, Function, Index, NotNullConstraint, Policy, Schema, Sequence,
-    SequenceOptions, Server, Table, Trigger, Type, UserMapping, View,
-    ViewColumn,
+    ForeignKey, Function, Index, NotNullConstraint, Policy, ReplicaIdentity,
+    Schema, Sequence, SequenceOptions, Server, Table, Trigger, Type,
+    UserMapping, View, ViewColumn,
 };
 use crate::utils::{
     dollar_quote, postgres_value, quote_ident, user_mapping_subject,
@@ -248,8 +248,12 @@ fn table(repo: &Table, db: &Table) -> Resolution {
         return Resolution::Replace;
     }
     indexes(&name, repo, db, &mut alters);
-    // after the indexes, which a USING INDEX identity may name
-    if repo.replica_identity != db.replica_identity {
+    // after the indexes, which a USING INDEX identity may name. A
+    // rebuilt identity index loses its mark, so the identity is set
+    // again although both sides name the same index.
+    if repo.replica_identity != db.replica_identity
+        || identity_index_rebuilt(repo, db)
+    {
         let sql = build::render_replica_identity(
             repo.replica_identity.as_ref(),
             &name,
@@ -264,6 +268,24 @@ fn table(repo: &Table, db: &Table) -> Resolution {
     policies(&name, repo, db, &mut alters);
     push_comment(&mut alters, "TABLE", &name, &repo.comment, &db.comment);
     Resolution::Statements(alters)
+}
+
+/// True when [`indexes`] drops and creates the index that the repo's
+/// USING INDEX replica identity names. PostgreSQL clears the identity
+/// mark when it drops the index, and the new index does not get it.
+fn identity_index_rebuilt(repo: &Table, db: &Table) -> bool {
+    let Some(ReplicaIdentity::Index { index }) = &repo.replica_identity else {
+        return false;
+    };
+    let find = |table: &Table| {
+        table
+            .indexes
+            .iter()
+            .flatten()
+            .find(|i| &i.name == index)
+            .cloned()
+    };
+    matches!((find(repo), find(db)), (Some(r), Some(d)) if r != d)
 }
 
 /// Row security reconciliation. A statement that turns protection on
@@ -3171,5 +3193,49 @@ mod tests {
         let written =
             with_key("replica_identity", serde_json::json!("default"));
         assert!(sql(&statements(table(&written, &default))).is_empty());
+    }
+
+    #[test]
+    fn rebuilt_identity_index_sets_the_identity_again() {
+        let indexed = |unique: bool| {
+            let mut table = base_table();
+            table["indexes"] = serde_json::json!([{
+                "name": "users_email", "unique": unique,
+                "columns": [{"name": "email"}],
+            }]);
+            table["replica_identity"] =
+                serde_json::json!({"index": "users_email"});
+            parse_table(table)
+        };
+        let (repo, db) = (indexed(true), indexed(false));
+        let alters = statements(table(&repo, &db));
+        let rendered = sql(&alters);
+        assert_eq!(rendered.len(), 3, "{rendered:?}");
+        assert!(rendered[0].starts_with("DROP INDEX"));
+        assert!(rendered[1].starts_with("CREATE UNIQUE INDEX"));
+        assert_eq!(
+            rendered[2],
+            "ALTER TABLE ONLY test.users REPLICA IDENTITY USING INDEX \
+             users_email;\n"
+        );
+        // an unchanged identity index is left alone
+        assert!(sql(&statements(table(&repo, &repo))).is_empty());
+    }
+
+    #[test]
+    fn exclude_constraint_without_method_is_btree() {
+        let constraint = |method: Option<&str>| {
+            let mut c = serde_json::json!({
+                "name": "no_overlap",
+                "elements": [{"name": "email", "operator": "="}],
+            });
+            if let Some(method) = method {
+                c["method"] = serde_json::json!(method);
+            }
+            serde_json::json!([c])
+        };
+        let db = with_key("exclude_constraints", constraint(Some("btree")));
+        let repo = with_key("exclude_constraints", constraint(None));
+        assert!(sql(&statements(table(&repo, &db))).is_empty());
     }
 }
