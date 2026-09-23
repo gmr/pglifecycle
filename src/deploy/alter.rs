@@ -447,9 +447,14 @@ fn constraints(
         },
         |check| {
             format!(
-                "ALTER TABLE {table} ADD CONSTRAINT {} CHECK ({});\n",
+                "ALTER TABLE {table} ADD CONSTRAINT {} CHECK ({}){};\n",
                 quote_ident(&check.name),
-                check.expression
+                check.expression,
+                if check.enforced == Some(false) {
+                    " NOT ENFORCED"
+                } else {
+                    ""
+                }
             )
         },
     );
@@ -1230,6 +1235,30 @@ mod tests {
                 "ALTER TABLE test.users DROP CONSTRAINT email_has_at;\n",
                 "ALTER TABLE test.users ADD CONSTRAINT email_has_at CHECK \
                  (email ~ '@');\n",
+            ]
+        );
+    }
+
+    /// A change of enforcement alone drops and re-adds the check; the
+    /// re-add must keep NOT ENFORCED, or deploy never converges
+    #[test]
+    fn not_enforced_check_keeps_its_clause() {
+        let mut repo = base_table();
+        repo["check_constraints"] = serde_json::json!([
+            {"name": "email_has_at", "expression": "email ~ '@'",
+             "enforced": false},
+        ]);
+        let mut db = base_table();
+        db["check_constraints"] = serde_json::json!([
+            {"name": "email_has_at", "expression": "email ~ '@'"},
+        ]);
+        let alters = statements(table(&parse_table(repo), &parse_table(db)));
+        assert_eq!(
+            sql(&alters),
+            vec![
+                "ALTER TABLE test.users DROP CONSTRAINT email_has_at;\n",
+                "ALTER TABLE test.users ADD CONSTRAINT email_has_at CHECK \
+                 (email ~ '@') NOT ENFORCED;\n",
             ]
         );
     }
