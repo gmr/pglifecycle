@@ -32,6 +32,18 @@ properties:
           title: Source Config
           description: The name of an existing text search configuration to copy.
           type: string
+        mappings:
+          title: Mappings
+          description: >
+            Each token type the configuration maps, with the dictionaries a
+            token of that type is looked up in, in order (ALTER TEXT SEARCH
+            CONFIGURATION ... ADD MAPPING).
+          type: object
+          additionalProperties:
+            type: array
+            items:
+              type: string
+            minItems: 1
         comment:
           title: Comment
           type: string

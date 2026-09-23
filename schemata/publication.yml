@@ -13,15 +13,43 @@ properties:
     type: string
   tables:
     title: Tables for Replication
+    description: >
+      The tables to publish, each exactly the table named: an inheritance
+      child is listed on its own, as pg_dump writes it. A table is its
+      qualified name, or an object that also limits the columns or rows
+      published.
     type: array
     items:
-      title: Table Name
-      description: >
-        Specifies a list of tables to add to the publication. If ONLY is
-        specified before the table name, only that table is added to the
-        publication. If ONLY is not specified, the table and all its descendant
-        tables (if any) are added. Optionally, * can be specified after the
-        table name to explicitly indicate that descendant tables are included.
+      oneOf:
+        - title: Table Name
+          type: string
+        - title: Filtered Table
+          type: object
+          properties:
+            name:
+              title: Table Name
+              type: string
+            columns:
+              title: Columns
+              description: The columns to publish
+              type: array
+              items:
+                type: string
+              minItems: 1
+            where:
+              title: Row Filter
+              description: The rows to publish, a boolean expression
+              type: string
+          required: [name]
+          additionalProperties: false
+    minItems: 1
+  schemas:
+    title: Schemas for Replication
+    description: >
+      Publish every table in these schemas, including tables created
+      later (FOR TABLES IN SCHEMA).
+    type: array
+    items:
       type: string
     minItems: 1
   all_tables:
@@ -42,8 +70,17 @@ properties:
           title: Operation
           type: string
           enum: [insert, update, delete, truncate]
-    required:
-      - publish
+      publish_via_partition_root:
+        title: Publish Via Partition Root
+        description: >
+          Publish changes to a partition as changes to its partitioned
+          root table.
+        type: boolean
+      publish_generated_columns:
+        title: Publish Generated Columns
+        description: >
+          Whether stored generated columns are published (PostgreSQL 18).
+        enum: [none, stored]
     additionalProperties: false
   comment:
     title: Comment
@@ -52,8 +89,10 @@ properties:
 required:
   - name
 additionalProperties: false
-oneOf:
-  - required: [tables]
-    not: {required: [all_tables]}
-  - required: [all_tables]
-    not: {required: [tables]}
+# FOR ALL TABLES excludes naming tables or schemas; a publication with
+# neither publishes nothing until tables are added
+not:
+  required: [all_tables]
+  anyOf:
+    - required: [tables]
+    - required: [schemas]

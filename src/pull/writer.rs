@@ -85,6 +85,7 @@ pub fn render(
     }
     writer.write_functions(assembly)?;
     writer.write_types(assembly)?;
+    writer.write_catalog_objects(assembly)?;
     for server in &assembly.servers {
         writer.save(top_level("servers", &server.name)?, server)?;
     }
@@ -213,30 +214,101 @@ impl Writer {
     /// another function's real name (e.g. `fn`, `fn`, `fn_1`), so the
     /// real `fn_1` is never displaced into `fn_1_1.yaml`
     fn write_functions(&mut self, assembly: &Assembly) -> Result<(), String> {
-        let reserved: HashSet<(String, String)> = assembly
+        let names: Vec<(&str, &str)> = assembly
             .functions
             .iter()
-            .map(|f| (f.schema.clone(), f.name.clone()))
+            .map(|f| (f.schema.as_str(), f.name.as_str()))
             .collect();
-        let mut used: BTreeSet<(String, String)> = BTreeSet::new();
-        for function in &assembly.functions {
-            let mut filename = function.name.clone();
-            let mut counter = 1;
-            while used.contains(&(function.schema.clone(), filename.clone()))
-                || (filename != function.name
-                    && reserved.contains(&(
-                        function.schema.clone(),
-                        filename.clone(),
-                    )))
-            {
-                filename = format!("{}_{counter}", function.name);
-                counter += 1;
-            }
-            used.insert((function.schema.clone(), filename.clone()));
+        for (function, filename) in
+            assembly.functions.iter().zip(overload_file_names(&names))
+        {
             self.save(
                 nested("functions", &function.schema, &filename)?,
                 function,
             )?;
+        }
+        Ok(())
+    }
+
+    /// Aggregates, casts, collations, conversions, event triggers,
+    /// publications and text search objects, each in the layout the
+    /// loader reads
+    fn write_catalog_objects(
+        &mut self,
+        assembly: &Assembly,
+    ) -> Result<(), String> {
+        let names: Vec<(&str, &str)> = assembly
+            .aggregates
+            .iter()
+            .map(|a| (a.schema.as_str(), a.name.as_str()))
+            .collect();
+        for (aggregate, filename) in
+            assembly.aggregates.iter().zip(overload_file_names(&names))
+        {
+            self.save(
+                nested("aggregates", &aggregate.schema, &filename)?,
+                aggregate,
+            )?;
+        }
+        for collation in &assembly.collations {
+            self.save(
+                nested("collations", &collation.schema, &collation.name)?,
+                collation,
+            )?;
+        }
+        // a cast has no owner, so the key is left out rather than
+        // written empty
+        let casts: Vec<Value> = assembly
+            .casts
+            .iter()
+            .map(|cast| {
+                let mut value = serialize(cast)?;
+                if let Some(map) = value.as_object_mut() {
+                    map.shift_remove("owner");
+                }
+                Ok(value)
+            })
+            .collect::<Result<_, String>>()?;
+        self.write_container("casts", &casts)?;
+        let conversions: Vec<Value> = assembly
+            .conversions
+            .iter()
+            .map(serialize)
+            .collect::<Result<_, String>>()?;
+        self.write_container("conversions", &conversions)?;
+        for trigger in &assembly.event_triggers {
+            self.save(top_level("event_triggers", &trigger.name)?, trigger)?;
+        }
+        for publication in &assembly.publications {
+            self.save(
+                top_level("publications", &publication.name)?,
+                publication,
+            )?;
+        }
+        for container in &assembly.text_search {
+            self.save(
+                top_level("text_search", &container.schema)?,
+                container,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Per-schema container files (`<key>/<schema>.yaml` holding a
+    /// `<key>` list), grouping `entries` by their `schema` field
+    fn write_container(
+        &mut self,
+        key: &str,
+        entries: &[Value],
+    ) -> Result<(), String> {
+        let mut schemas: BTreeMap<&str, Vec<&Value>> = BTreeMap::new();
+        for entry in entries {
+            let schema = entry["schema"].as_str().unwrap_or_default();
+            schemas.entry(schema).or_default().push(entry);
+        }
+        for (schema, entries) in schemas {
+            let container = json!({"schema": schema, key: entries});
+            self.save_value(top_level(key, schema)?, &container)?;
         }
         Ok(())
     }
@@ -591,6 +663,30 @@ fn nested(
     Ok(Path::new(directory)
         .join(safe_component(schema)?)
         .join(format!("{}.yaml", safe_component(name)?)))
+}
+
+/// A file name for each `(schema, name)`: the name itself, or for a
+/// second object of the same name (an overload) the name with a
+/// counter, skipping any numbered name another object already has
+fn overload_file_names(names: &[(&str, &str)]) -> Vec<String> {
+    let reserved: HashSet<(&str, &str)> = names.iter().copied().collect();
+    let mut used: BTreeSet<(String, String)> = BTreeSet::new();
+    names
+        .iter()
+        .map(|&(schema, name)| {
+            let mut filename = name.to_string();
+            let mut counter = 1;
+            while used.contains(&(schema.to_string(), filename.clone()))
+                || (filename != name
+                    && reserved.contains(&(schema, filename.as_str())))
+            {
+                filename = format!("{name}_{counter}");
+                counter += 1;
+            }
+            used.insert((schema.to_string(), filename.clone()));
+            filename
+        })
+        .collect()
 }
 
 /// A `directory/name.yaml` path with the name validated as a safe path

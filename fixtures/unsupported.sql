@@ -52,24 +52,3 @@ CREATE RULE append_only_no_delete AS
 -- Default privileges
 ALTER DEFAULT PRIVILEGES IN SCHEMA unsupported
     GRANT SELECT ON TABLES TO pglifecycle_coverage_reader;
-
--- Object types `build` and `models` already support, which only `pull`
--- cannot parse
-CREATE COLLATION case_insensitive
-    (provider = icu, locale = 'und-u-ks-level2', deterministic = false);
-
-CREATE AGGREGATE sum_int (INT) (sfunc = int4pl, stype = INT, initcond = '0');
-
-CREATE CAST (INT AS TEXT) WITH INOUT AS IMPLICIT;
-
-CREATE CONVERSION latin1_to_utf8 FOR 'LATIN1' TO 'UTF8'
-    FROM iso8859_1_to_utf8;
-
-CREATE TEXT SEARCH CONFIGURATION simple_copy (COPY = simple);
-
-CREATE PUBLICATION measurements_pub FOR TABLE measurements;
-
-CREATE FUNCTION log_ddl() RETURNS EVENT_TRIGGER LANGUAGE plpgsql
-    AS $$ BEGIN END $$;
-CREATE EVENT TRIGGER log_ddl_start ON ddl_command_start
-    EXECUTE FUNCTION log_ddl();

@@ -301,47 +301,169 @@ impl Loader {
         }
     }
 
-    /// Order each table after the tables its own definition says it is
-    /// built from: an `INHERITS` parent and a `LIKE` source both have to
-    /// exist before the table is created.
+    /// Order each object after the objects its own definition names,
+    /// which have to exist before it is created: a table's `INHERITS`
+    /// parents and `LIKE` source; the functions an aggregate, cast,
+    /// conversion or event trigger calls; the types an aggregate or
+    /// cast uses; a publication's tables and schemas; and the text
+    /// search objects in other schemas that a text search object uses.
     ///
-    /// A pulled project already carries the INHERITS edge in its
-    /// `dependencies` block, and never has a `LIKE` at all, since pg_dump
-    /// expands one into explicit columns. A hand-written project does,
-    /// and nothing required it to declare the edge as well, so the build
-    /// was free to sort the copy ahead of its source and the restore
-    /// failed. The definition already states the relationship, so it is
-    /// read from there. Neither can form a cycle: a table cannot inherit
-    /// from or copy itself, directly or not.
+    /// A pulled project carries only the INHERITS edge in its
+    /// `dependencies` block, and never has a `LIKE`, since pg_dump
+    /// expands one into explicit columns. Nothing required a
+    /// hand-written project to declare any of these as well, so the
+    /// build was free to sort an object ahead of what it uses, and the
+    /// restore failed. The definition already states the relationship,
+    /// so it is read from there. A name the project does not manage,
+    /// such as a `pg_catalog` function, orders nothing.
     fn apply_structural_dependencies(&mut self) {
         let mut edges = Vec::new();
         for (id, item) in self.project.inventory.iter().enumerate() {
-            let Definition::Table(table) = &item.definition else {
-                continue;
+            let own_schema = item.definition.schema().unwrap_or_default();
+            let mut references: Vec<(ObjectType, String)> = Vec::new();
+            let functions = |names: &[&Option<String>]| {
+                names
+                    .iter()
+                    .filter_map(|name| name.as_deref())
+                    .map(|name| (ObjectType::Function, name.to_string()))
+                    .collect::<Vec<_>>()
             };
-            let sources = table
-                .parents
-                .iter()
-                .flatten()
-                .chain(table.like_table.iter().map(|like| &like.name));
-            for source in sources {
-                let (namespace, tag) = split_sql_name(source);
-                // a source the project does not manage, such as one an
-                // extension owns, orders nothing and is left alone
-                for parent in lookup_items(
-                    &self.index,
-                    ObjectType::Table,
-                    Some(&namespace),
-                    &tag,
-                ) {
+            match &item.definition {
+                Definition::Table(table) => {
+                    let sources =
+                        table.parents.iter().flatten().chain(
+                            table.like_table.iter().map(|like| &like.name),
+                        );
+                    for source in sources {
+                        references.push((ObjectType::Table, source.clone()));
+                    }
+                }
+                Definition::Aggregate(a) => {
+                    references.extend(functions(&[
+                        &Some(a.sfunc.clone()),
+                        &a.ffunc,
+                        &a.combinefunc,
+                        &a.serialfunc,
+                        &a.deserialfunc,
+                        &a.msfunc,
+                        &a.minvfunc,
+                        &a.mffunc,
+                    ]));
+                    let types = a
+                        .arguments
+                        .iter()
+                        .chain(a.order_by.iter().flatten())
+                        .map(|arg| arg.data_type.clone())
+                        .chain([a.state_data_type.clone()])
+                        .chain(a.mstate_data_type.clone());
+                    references.extend(types.flat_map(type_references));
+                }
+                Definition::Cast(c) => {
+                    references.extend(functions(&[&c.function]));
+                    references.extend(
+                        [&c.source_type, &c.target_type]
+                            .into_iter()
+                            .flatten()
+                            .cloned()
+                            .flat_map(type_references),
+                    );
+                }
+                Definition::Conversion(c) => {
+                    references.extend(functions(&[&c.function]));
+                }
+                Definition::EventTrigger(t) => {
+                    references.extend(functions(&[&t.function]));
+                }
+                Definition::Publication(p) => {
+                    for table in p.tables.iter().flatten() {
+                        references.push((
+                            ObjectType::Table,
+                            table.name().to_string(),
+                        ));
+                    }
+                    for schema in p.schemas.iter().flatten() {
+                        references.push((ObjectType::Schema, schema.clone()));
+                    }
+                }
+                Definition::TextSearch(t) => {
+                    // text search objects are keyed by their schema's
+                    // container, so a name in another schema orders this
+                    // container after that one
+                    let names = t
+                        .configurations
+                        .iter()
+                        .flatten()
+                        .flat_map(|c| {
+                            c.parser.iter().chain(c.source.iter()).chain(
+                                c.mappings.iter().flatten().flat_map(
+                                    |(_, dictionaries)| dictionaries.iter(),
+                                ),
+                            )
+                        })
+                        .chain(
+                            t.dictionaries
+                                .iter()
+                                .flatten()
+                                .filter_map(|d| d.template.as_ref()),
+                        );
+                    for name in names {
+                        let (schema, _) = split_sql_name(name);
+                        if !schema.is_empty() {
+                            references.push((ObjectType::TextSearch, schema));
+                        }
+                    }
+                }
+                _ => {}
+            }
+            for (desc, reference) in references {
+                // a function reference may carry its argument list
+                let reference =
+                    reference.split('(').next().unwrap_or_default();
+                let (namespace, tag) = split_sql_name(reference);
+                let (namespace, tag) = match desc {
+                    ObjectType::Schema => {
+                        (String::new(), reference.to_string())
+                    }
+                    ObjectType::TextSearch => (tag.clone(), tag),
+                    _ if namespace.is_empty() => (own_schema.to_string(), tag),
+                    _ => (namespace, tag),
+                };
+                let found =
+                    lookup_items(&self.index, desc, Some(&namespace), &tag)
+                        .into_iter()
+                        .chain(if desc == ObjectType::Type {
+                            lookup_items(
+                                &self.index,
+                                ObjectType::Domain,
+                                Some(&namespace),
+                                &tag,
+                            )
+                        } else {
+                            Vec::new()
+                        });
+                for parent in found {
                     if parent != id {
                         edges.push((id, parent));
                     }
                 }
             }
         }
+        // a text search container stands for a whole schema, so two
+        // schemas that each name an object of the other make a cycle
+        // with no object cycle behind it. libpgdump breaks a cycle by
+        // moving its members ahead of the CREATE SCHEMA they need
+        // (gmr/libpgdump#14), so drop both edges of such a pair.
+        let pairs: std::collections::HashSet<(usize, usize)> =
+            edges.iter().copied().collect();
         for (id, parent) in edges {
-            self.project.inventory[id].dependencies.insert(parent);
+            let inventory = &mut self.project.inventory;
+            if inventory[id].desc == ObjectType::TextSearch
+                && inventory[parent].desc == ObjectType::TextSearch
+                && pairs.contains(&(parent, id))
+            {
+                continue;
+            }
+            inventory[id].dependencies.insert(parent);
         }
     }
 
@@ -662,6 +784,19 @@ fn split_sql_name(value: &str) -> (String, String) {
     (parts.pop().unwrap_or_default(), tag)
 }
 
+/// The type a type name refers to, for ordering: its name without an
+/// array suffix or modifier. Built-in types are not in the project, so
+/// the lookup finds nothing for them.
+fn type_references(data_type: String) -> Option<(ObjectType, String)> {
+    let name = data_type
+        .split(['(', '['])
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    (!name.is_empty()).then_some((ObjectType::Type, name))
+}
+
 /// Drop null-valued keys so explicit YAML nulls compare equal to
 /// omitted optional fields in round-trip verification
 fn strip_nulls(value: Value) -> Value {
@@ -723,6 +858,31 @@ mod tests {
         loader.read_object_files(ObjectType::User).unwrap();
 
         assert_eq!(loader.errors, 1);
+        assert_eq!(loader.project.inventory.len(), 1);
+    }
+
+    /// A value written at its default loads as written. The model
+    /// used to read it as absent, which the round-trip check then
+    /// rejected, so `forced: false` or `command: ALL` failed the load
+    #[test]
+    fn written_defaults_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let tables = dir.path().join("tables").join("public");
+        std::fs::create_dir_all(&tables).unwrap();
+        std::fs::write(
+            tables.join("t.yaml"),
+            "owner: postgres\n\
+             columns:\n  - name: id\n    data_type: integer\n\
+             check_constraints:\n  - name: c\n    expression: id > 0\n\
+             \x20   not_valid: false\n\
+             row_level_security:\n  enabled: true\n  forced: false\n\
+             policies:\n  - name: p\n    restrictive: false\n\
+             \x20   command: ALL\n    roles: [public]\n",
+        )
+        .unwrap();
+        let mut loader = Loader::new(dir.path());
+        loader.read_object_files(ObjectType::Table).unwrap();
+        assert_eq!(loader.errors, 0);
         assert_eq!(loader.project.inventory.len(), 1);
     }
 
@@ -880,6 +1040,38 @@ mod tests {
         assert!(loader.project.inventory[3].dependencies.is_empty());
         // a quoted reference resolves to the unquoted name
         assert_eq!(loader.project.inventory[4].dependencies, [0].into());
+    }
+
+    /// Two text search containers that each name an object of the
+    /// other have no object cycle, but edges both ways make a cycle
+    /// that breaks the restore, so the pair orders nothing. An edge
+    /// with no reverse edge is kept.
+    #[test]
+    fn mutual_text_search_edges_are_dropped() {
+        let mut loader = Loader::new(Path::new("."));
+        for (schema, parser) in
+            [("a", "b.prs"), ("b", "a.prs"), ("c", "a.prs")]
+        {
+            loader.add_definition(
+                ObjectType::TextSearch,
+                json!({
+                    "schema": schema,
+                    "configurations": [{"name": "cfg", "parser": parser}],
+                }),
+                None,
+            );
+        }
+        for (id, schema) in ["a", "b", "c"].into_iter().enumerate() {
+            loader.index.insert(
+                index_key(ObjectType::TextSearch, Some(schema), schema),
+                vec![id],
+            );
+        }
+        loader.apply_structural_dependencies();
+
+        assert!(loader.project.inventory[0].dependencies.is_empty());
+        assert!(loader.project.inventory[1].dependencies.is_empty());
+        assert_eq!(loader.project.inventory[2].dependencies, [0].into());
     }
 
     /// Overloads are distinct objects: pull writes them to `f.yaml`

@@ -164,6 +164,30 @@ policies:
   managed: `deploy` leaves its row security and policies as the
   database has them. Pull the project again to record them.
 
+- A cast has no schema of its own. `pull` files it in the
+  `casts/<schema>.yaml` of the first schema its function or types name,
+  or `public` when they are all built-in.
+
+- A publication lists each table as its qualified name, or as a
+  mapping that also limits the columns or rows published, and names
+  whole schemas under `schemas:`. Each table is exactly the table
+  named: `pull` lists an inheritance child on its own, as `pg_dump`
+  does, and `build` adds every table with `ONLY`.
+
+```yaml
+---
+name: replicated_positive
+tables:
+  - name: test.replicated
+    columns: [id, amount]
+    where: (amount > 0)
+  - test.audit_log
+schemas:
+  - reporting
+parameters:
+  publish: [insert, update]
+```
+
 - Grants on views may be written under either `tables:` or `views:`.
   PostgreSQL grants on views with `TABLE` syntax, so both emit
   `GRANT ... ON TABLE` and coalesce into a single ACL entry; `pull`

@@ -14,13 +14,20 @@ use crate::yamlio;
 /// `--prune`) is confined to these — `dml/` and the other project
 /// directories are never touched
 const MANAGED_DIRS: &[&str] = &[
+    "aggregates",
+    "casts",
+    "collations",
+    "conversions",
     "domains",
+    "event_triggers",
     "functions",
     "materialized_views",
+    "publications",
     "roles",
     "schemata",
     "sequences",
     "tables",
+    "text_search",
     "types",
     "users",
     "views",
@@ -99,11 +106,13 @@ fn roles_extracted(args: &cli::Pull) -> bool {
 /// the file's path under `root`
 fn schema_of(dir: &str, relative: &Path) -> Option<String> {
     match dir {
-        "schemata" | "types" => relative
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned()),
-        "domains" | "functions" | "materialized_views" | "sequences"
-        | "tables" | "views" => relative
+        "casts" | "conversions" | "schemata" | "text_search" | "types" => {
+            relative
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+        }
+        "aggregates" | "collations" | "domains" | "functions"
+        | "materialized_views" | "sequences" | "tables" | "views" => relative
             .strip_prefix(dir)
             .ok()
             .and_then(|rest| rest.iter().next())

@@ -405,3 +405,82 @@ COMMENT ON POLICY tenant_notes_own ON tenant_notes IS 'tenant isolation';
 -- enabled with no policies: every row is hidden from all but the owner
 CREATE TABLE sealed_notes (id INT);
 ALTER TABLE sealed_notes ENABLE ROW LEVEL SECURITY;
+
+-- Aggregates: a plain one with an initial condition, an ordered-set
+-- one, and a comment. The body is in libpgfmt's normalized form (see
+-- touch_last_modified above).
+CREATE FUNCTION test.add_ints(total INTEGER, value INTEGER) RETURNS INTEGER
+    LANGUAGE sql IMMUTABLE AS $$
+ SELECT total + value;
+$$;
+
+CREATE AGGREGATE test.sum_ints(INTEGER) (
+    SFUNC = test.add_ints, STYPE = INTEGER, INITCOND = '0', PARALLEL = SAFE);
+COMMENT ON AGGREGATE test.sum_ints(INTEGER) IS 'Adds integers';
+
+CREATE AGGREGATE test.sum_sorted(INTEGER ORDER BY INTEGER) (
+    SFUNC = test.add_ints, STYPE = INTEGER);
+
+-- Casts: through a function in this schema, and an I/O conversion. A
+-- cast has no schema of its own.
+CREATE TYPE test.point_pair AS (x INTEGER, y INTEGER);
+
+CREATE FUNCTION test.point_pair_x(pair test.point_pair) RETURNS INTEGER
+    LANGUAGE sql IMMUTABLE AS $$
+ SELECT (pair).x;
+$$;
+
+CREATE CAST (test.point_pair AS INTEGER)
+    WITH FUNCTION test.point_pair_x(test.point_pair) AS ASSIGNMENT;
+CREATE CAST (test.point_pair AS TEXT) WITH INOUT;
+COMMENT ON CAST (test.point_pair AS TEXT) IS 'Text form of a pair';
+
+-- Collations: a non-deterministic ICU one, one with ICU rules, and a
+-- libc one
+CREATE COLLATION test.case_insensitive
+    (provider = icu, locale = 'und-u-ks-level2', deterministic = false);
+COMMENT ON COLLATION test.case_insensitive IS 'Ignores case';
+CREATE COLLATION test.b_before_a (provider = icu, locale = 'und', rules = '&b < a');
+CREATE COLLATION test.plain_c (provider = libc, locale = 'C');
+
+CREATE DEFAULT CONVERSION test.latin1_to_utf8 FOR 'LATIN1' TO 'UTF8'
+    FROM iso8859_1_to_utf8;
+
+-- Text search: a dictionary, and a configuration with one mapping
+-- changed from the copy it starts as
+CREATE TEXT SEARCH DICTIONARY test.english_simple
+    (TEMPLATE = pg_catalog.simple, stopwords = english);
+COMMENT ON TEXT SEARCH DICTIONARY test.english_simple IS 'Simple, no stopwords';
+CREATE TEXT SEARCH CONFIGURATION test.english_urls (COPY = pg_catalog.english);
+ALTER TEXT SEARCH CONFIGURATION test.english_urls
+    ALTER MAPPING FOR url WITH test.english_simple;
+
+-- Publications: tables with a column list and a row filter, a schema,
+-- and every table. pg_dump writes each table as its own entry.
+CREATE TABLE test.replicated (id INTEGER PRIMARY KEY, amount INTEGER, note TEXT);
+CREATE PUBLICATION pglifecycle_some
+    FOR TABLE test.replicated (id, amount) WHERE (amount > 0)
+    WITH (publish = 'insert, update', publish_via_partition_root = true);
+COMMENT ON PUBLICATION pglifecycle_some IS 'Positive amounts only';
+CREATE PUBLICATION pglifecycle_schema FOR TABLES IN SCHEMA test;
+CREATE PUBLICATION pglifecycle_all FOR ALL TABLES;
+
+-- Event triggers: filtered, disabled, and replica-only. The function
+-- does nothing, so they are harmless to the DDL the gates run.
+CREATE FUNCTION test.note_ddl() RETURNS event_trigger
+    LANGUAGE plpgsql AS $$
+BEGIN
+  NULL;
+END;
+$$;
+
+CREATE EVENT TRIGGER pglifecycle_ddl_start ON ddl_command_start
+    WHEN TAG IN ('CREATE TABLE', 'DROP TABLE')
+    EXECUTE FUNCTION test.note_ddl();
+COMMENT ON EVENT TRIGGER pglifecycle_ddl_start IS 'Notes table DDL';
+CREATE EVENT TRIGGER pglifecycle_drops ON sql_drop
+    EXECUTE FUNCTION test.note_ddl();
+ALTER EVENT TRIGGER pglifecycle_drops DISABLE;
+CREATE EVENT TRIGGER pglifecycle_replica ON ddl_command_end
+    EXECUTE FUNCTION test.note_ddl();
+ALTER EVENT TRIGGER pglifecycle_replica ENABLE REPLICA;

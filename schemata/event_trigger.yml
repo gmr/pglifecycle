@@ -37,6 +37,14 @@ properties:
     title: Trigger Function
     description: The trigger function to execute
     type: string
+  enabled:
+    title: Enabled
+    description: >
+      When the trigger fires (ALTER EVENT TRIGGER). ORIGIN, the default,
+      fires it in a normal session; REPLICA only when
+      session_replication_role is replica; ALWAYS in both; DISABLED
+      never.
+    enum: [ORIGIN, REPLICA, ALWAYS, DISABLED]
   comment:
     title: Comment
     description: An optional comment about the table

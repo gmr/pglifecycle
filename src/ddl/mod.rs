@@ -9,12 +9,14 @@
 mod acl;
 mod foreign;
 mod function;
+mod misc;
 mod object;
 mod policy;
 mod table;
 mod trigger;
 mod view;
 
+pub use misc::TextSearchObject;
 pub(crate) use table::apply_constraint;
 
 use tree_sitter::Node;
@@ -85,6 +87,35 @@ pub enum Statement {
     CreateTrigger {
         table: QualifiedName,
         trigger: models::Trigger,
+    },
+    CreateAggregate(Box<models::Aggregate>),
+    CreateCast(models::Cast),
+    CreateCollation(models::Collation),
+    CreateConversion(models::Conversion),
+    CreateEventTrigger(models::EventTrigger),
+    /// ALTER EVENT TRIGGER ... ENABLE/DISABLE; `enabled` is `None` for
+    /// the default state
+    AlterEventTrigger {
+        name: String,
+        enabled: Option<String>,
+    },
+    CreatePublication(models::Publication),
+    /// ALTER PUBLICATION ... ADD TABLE / ADD TABLES IN SCHEMA
+    AddToPublication {
+        name: String,
+        tables: Vec<models::PublicationTable>,
+        schemas: Vec<String>,
+    },
+    CreateTextSearch {
+        schema: String,
+        object: misc::TextSearchObject,
+    },
+    /// ALTER TEXT SEARCH CONFIGURATION ... ADD MAPPING FOR `tokens`
+    /// WITH `dictionaries`
+    AddTextSearchMapping {
+        configuration: QualifiedName,
+        tokens: Vec<String>,
+        dictionaries: Vec<String>,
     },
     CreatePolicy {
         table: QualifiedName,
@@ -252,6 +283,9 @@ fn dispatch(node: &Node, src: &str) -> Result<Vec<Statement>, String> {
         "AlterTableStmt" => table::alter_table(node, src),
         "CreateSchemaStmt" => Ok(vec![object::create_schema(node, src)?]),
         "CreateDomainStmt" => Ok(vec![object::create_domain(node, src)?]),
+        "DefineStmt" if let Some(statement) = misc::define(node, src) => {
+            Ok(vec![statement?])
+        }
         "DefineStmt" if node.has("kw_type") => {
             Ok(vec![object::create_type(node, src)?])
         }
@@ -276,6 +310,25 @@ fn dispatch(node: &Node, src: &str) -> Result<Vec<Statement>, String> {
             Ok(vec![foreign::create_user_mapping(node, src)?])
         }
         "CreateTrigStmt" => Ok(vec![trigger::create_trigger(node, src)?]),
+        "CreateCastStmt" => Ok(vec![misc::create_cast(node, src)?]),
+        "CreateConversionStmt" => {
+            Ok(vec![misc::create_conversion(node, src)?])
+        }
+        "CreateEventTrigStmt" => {
+            Ok(vec![misc::create_event_trigger(node, src)?])
+        }
+        "AlterEventTrigStmt" => {
+            Ok(vec![misc::alter_event_trigger(node, src)?])
+        }
+        "CreatePublicationStmt" => {
+            Ok(vec![misc::create_publication(node, src)?])
+        }
+        "AlterPublicationStmt" => {
+            Ok(vec![misc::alter_publication(node, src)?])
+        }
+        "AlterTSConfigurationStmt" => {
+            Ok(vec![misc::alter_text_search_configuration(node, src)?])
+        }
         "CreatePolicyStmt" => Ok(vec![policy::create_policy(node, src)?]),
         "CommentStmt" => Ok(vec![object::comment(node, src)?]),
         "GrantStmt" => Ok(vec![acl::grant(node, src, false)?]),

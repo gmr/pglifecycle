@@ -1,5 +1,7 @@
 //! Text search configurations, dictionaries, parsers, and templates
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -31,6 +33,10 @@ pub struct TextSearchConfig {
     pub parser: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    /// Token type → the dictionaries it is looked up in, in order
+    /// (ALTER TEXT SEARCH CONFIGURATION ... ADD MAPPING)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mappings: Option<BTreeMap<String, Vec<String>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
 }

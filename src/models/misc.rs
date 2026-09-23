@@ -13,6 +13,10 @@ pub struct Aggregate {
     pub schema: String,
     pub owner: String,
     pub arguments: Vec<Argument>,
+    /// The aggregated arguments of an ordered-set aggregate, after
+    /// ORDER BY; `arguments` then holds its direct arguments
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub order_by: Option<Vec<Argument>>,
     pub sfunc: String,
     pub state_data_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -115,6 +119,9 @@ pub struct Collation {
     pub deterministic: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    /// ICU tailoring rules (PostgreSQL 16+)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rules: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub copy_from: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -188,6 +195,10 @@ pub struct EventTrigger {
     pub filter: Option<EventTriggerFilter>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub function: Option<String>,
+    /// When the trigger fires: DISABLED, REPLICA or ALWAYS (ALTER EVENT
+    /// TRIGGER). Absent is the default, ORIGIN.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
 }
@@ -285,13 +296,46 @@ pub struct Operator {
 pub struct Publication {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tables: Option<Vec<String>>,
+    pub tables: Option<Vec<PublicationTable>>,
+    /// FOR TABLES IN SCHEMA: every table in these schemas, now and
+    /// later
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schemas: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub all_tables: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parameters: Option<Map<String, Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
+}
+
+/// A table in a publication: its qualified name, or the name with the
+/// columns and row filter the publication limits it to
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum PublicationTable {
+    Name(String),
+    Filtered(FilteredPublicationTable),
+}
+
+impl PublicationTable {
+    pub fn name(&self) -> &str {
+        match self {
+            PublicationTable::Name(name) => name,
+            PublicationTable::Filtered(table) => &table.name,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FilteredPublicationTable {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub columns: Option<Vec<String>>,
+    /// The row filter, a WHERE expression
+    #[serde(rename = "where", skip_serializing_if = "Option::is_none")]
+    pub row_filter: Option<String>,
 }
 
 /// Represents a schema/namespace

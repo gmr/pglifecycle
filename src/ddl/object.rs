@@ -348,6 +348,18 @@ pub(crate) fn comment(node: &Node, src: &str) -> Result<Statement, String> {
             _ if kind.starts_with("object_type") && past_on => {
                 collect_keywords(&child, &mut object_type);
             }
+            // a cast is named by its two types: `(source AS target)`
+            "Typename" if past_on && object_type == ["CAST"] => {
+                in_target = true;
+                let text = child.text(src);
+                target = Some(QualifiedName {
+                    schema: None,
+                    name: match target.take() {
+                        Some(source) => format!("({} AS {text})", source.name),
+                        None => text.to_string(),
+                    },
+                });
+            }
             "any_name" | "qualified_name" | "Typename" if past_on => {
                 in_target = true;
                 let qualifier = match kind {
@@ -365,6 +377,23 @@ pub(crate) fn comment(node: &Node, src: &str) -> Result<Statement, String> {
                 } else {
                     qualifier
                 });
+                pending_first_name = false;
+            }
+            // the signature is the text between the parentheses, as
+            // pg_dump writes it in the CREATE: `(integer ORDER BY
+            // integer)`, or `(*)`
+            "aggregate_with_argtypes" if past_on => {
+                in_target = true;
+                let mut name = child
+                    .find("func_name")
+                    .map(|n| any_name(&n, src))
+                    .unwrap_or_default();
+                let args = child
+                    .child_of_kind("aggr_args")
+                    .map(|n| n.text(src))
+                    .unwrap_or("()");
+                name.name = format!("{}{args}", name.name);
+                target = Some(name);
                 pending_first_name = false;
             }
             "function_with_argtypes" if past_on => {

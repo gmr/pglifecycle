@@ -214,11 +214,8 @@ fn table(repo: &Table, db: &Table) -> Resolution {
     let name = qualified(&repo.schema, &repo.name);
     let mut validations = Vec::new();
     let db = &validate_local_not_nulls(&name, repo, db, &mut validations);
-    // reconcile canonical forms; see Table::with_canonical_not_nulls
-    let (repo, db) = (
-        &repo.with_canonical_not_nulls().with_canonical_policies(),
-        &db.with_canonical_not_nulls().with_canonical_policies(),
-    );
+    // reconcile canonical forms; see Table::canonical
+    let (repo, db) = (&repo.canonical(), &db.canonical());
     // foreign tables (a `server` on either side) reconcile through a
     // dedicated path: only OPTIONS and the comment are alterable in
     // place, everything else rebuilds
@@ -444,7 +441,7 @@ fn validate_local_not_nulls(
     db: &Table,
     alters: &mut Vec<Alter>,
 ) -> Table {
-    let wanted = repo.with_canonical_not_nulls();
+    let wanted = repo.canonical();
     let mut db = db.clone();
     for not_null in db.not_null_constraints.iter_mut().flatten() {
         if not_null.not_valid != Some(true) {

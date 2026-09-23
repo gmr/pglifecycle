@@ -53,6 +53,12 @@ properties:
       should be omitted, which causes the version to be computed from the
       actual version of the collation as provided by the operating system.
     type: string
+  rules:
+    title: ICU Rules
+    description: >
+      Tailoring rules for an ICU collation, in ICU's rule syntax
+      (PostgreSQL 16 and later).
+    type: string
   deterministic:
     title: Deterministic Comparisons
     description: >

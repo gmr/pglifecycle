@@ -425,6 +425,14 @@ pub struct Assembly {
     pub foreign_data_wrappers: Vec<models::ForeignDataWrapper>,
     pub servers: Vec<models::Server>,
     pub user_mappings: Vec<models::UserMapping>,
+    pub aggregates: Vec<models::Aggregate>,
+    pub casts: Vec<models::Cast>,
+    pub collations: Vec<models::Collation>,
+    pub conversions: Vec<models::Conversion>,
+    pub event_triggers: Vec<models::EventTrigger>,
+    pub publications: Vec<models::Publication>,
+    /// One per schema, as the project stores them
+    pub text_search: Vec<models::TextSearch>,
     pub roles: BTreeMap<String, RoleState>,
     pub remaining: Vec<Remaining>,
     /// Indexes whose target relation had not yet been ingested when the
@@ -491,6 +499,24 @@ impl Assembly {
             ("views", self.views.len()),
             ("materialized views", self.materialized_views.len()),
             ("functions", self.functions.len()),
+            ("aggregates", self.aggregates.len()),
+            ("casts", self.casts.len()),
+            ("collations", self.collations.len()),
+            ("conversions", self.conversions.len()),
+            (
+                "text search objects",
+                self.text_search
+                    .iter()
+                    .map(|t| {
+                        t.configurations.as_ref().map_or(0, Vec::len)
+                            + t.dictionaries.as_ref().map_or(0, Vec::len)
+                            + t.parsers.as_ref().map_or(0, Vec::len)
+                            + t.templates.as_ref().map_or(0, Vec::len)
+                    })
+                    .sum(),
+            ),
+            ("publications", self.publications.len()),
+            ("event triggers", self.event_triggers.len()),
             ("foreign data wrappers", self.foreign_data_wrappers.len()),
             ("servers", self.servers.len()),
             ("user mappings", self.user_mappings.len()),
@@ -565,6 +591,18 @@ impl Assembly {
                 | OT::Trigger
                 | OT::Policy
                 | OT::RowSecurity
+                | OT::Aggregate
+                | OT::Cast
+                | OT::Collation
+                | OT::Conversion
+                | OT::EventTrigger
+                | OT::Publication
+                | OT::PublicationTable
+                | OT::PublicationTablesInSchema
+                | OT::TextSearchConfiguration
+                | OT::TextSearchDictionary
+                | OT::TextSearchParser
+                | OT::TextSearchTemplate
                 | OT::ForeignTable
                 | OT::ForeignDataWrapper
                 | OT::ForeignServer
@@ -940,6 +978,94 @@ impl Assembly {
                     None => log::warn!("Trigger on unknown table {table}"),
                 }
             }
+            Statement::CreateAggregate(mut aggregate) => {
+                aggregate.owner = owner;
+                self.aggregates.push(*aggregate);
+            }
+            // a cast has no owner of its own
+            Statement::CreateCast(cast) => self.casts.push(cast),
+            Statement::CreateCollation(mut collation) => {
+                collation.owner = owner;
+                self.collations.push(collation);
+            }
+            Statement::CreateConversion(mut conversion) => {
+                conversion.owner = owner;
+                self.conversions.push(conversion);
+            }
+            Statement::CreateEventTrigger(trigger) => {
+                self.event_triggers.push(trigger);
+            }
+            Statement::AlterEventTrigger { name, enabled } => {
+                match self.event_triggers.iter_mut().find(|t| t.name == name) {
+                    Some(trigger) => trigger.enabled = enabled,
+                    None => {
+                        log::warn!("State of unknown event trigger {name}");
+                        self.push_remaining(entry);
+                    }
+                }
+            }
+            Statement::CreatePublication(publication) => {
+                self.publications.push(publication);
+            }
+            Statement::AddToPublication {
+                name,
+                tables,
+                schemas,
+            } => match self.publications.iter_mut().find(|p| p.name == name) {
+                Some(publication) => {
+                    if !tables.is_empty() {
+                        publication
+                            .tables
+                            .get_or_insert_default()
+                            .extend(tables);
+                    }
+                    if !schemas.is_empty() {
+                        publication
+                            .schemas
+                            .get_or_insert_default()
+                            .extend(schemas);
+                    }
+                }
+                None => {
+                    log::warn!("Tables added to unknown publication {name}");
+                    self.push_remaining(entry);
+                }
+            },
+            Statement::CreateTextSearch { schema, object } => {
+                self.add_text_search(schema, object);
+            }
+            Statement::AddTextSearchMapping {
+                configuration,
+                tokens,
+                dictionaries,
+            } => {
+                let schema = configuration.schema.clone().unwrap_or_default();
+                let found = self
+                    .text_search
+                    .iter_mut()
+                    .find(|t| t.schema == schema)
+                    .and_then(|t| {
+                        t.configurations
+                            .iter_mut()
+                            .flatten()
+                            .find(|c| c.name == configuration.name)
+                    });
+                match found {
+                    Some(config) => {
+                        let mappings = config.mappings.get_or_insert_default();
+                        for token in tokens {
+                            mappings.insert(token, dictionaries.clone());
+                        }
+                    }
+                    None => {
+                        log::warn!(
+                            "Mapping for unknown text search configuration \
+                             {configuration}"
+                        );
+                        self.push_remaining(entry);
+                    }
+                }
+            }
             Statement::CreatePolicy { table, policy } => {
                 match self.find_table(&table) {
                     Some(table) => {
@@ -1179,6 +1305,52 @@ impl Assembly {
             "FUNCTION" => self.apply_function_comment(&schema, name, &comment),
             "TRIGGER" => self.apply_trigger_comment(target, &comment),
             "POLICY" => self.apply_policy_comment(target, &comment),
+            "AGGREGATE" => self
+                .aggregates
+                .iter_mut()
+                .find(|a| {
+                    a.schema == schema
+                        && format!("{}{}", a.name, aggregate_signature(a))
+                            == *name
+                })
+                .map(|a| a.comment = Some(comment.clone()))
+                .is_some(),
+            "CAST" => self
+                .casts
+                .iter_mut()
+                .find(|c| {
+                    models::Definition::Cast((*c).clone()).name() == *name
+                })
+                .map(|c| c.comment = Some(comment.clone()))
+                .is_some(),
+            "COLLATION" => self
+                .collations
+                .iter_mut()
+                .find(|c| c.schema == schema && c.name == *name)
+                .map(|c| c.comment = Some(comment.clone()))
+                .is_some(),
+            "CONVERSION" => self
+                .conversions
+                .iter_mut()
+                .find(|c| c.schema == schema && c.name == *name)
+                .map(|c| c.comment = Some(comment.clone()))
+                .is_some(),
+            "EVENT TRIGGER" => self
+                .event_triggers
+                .iter_mut()
+                .find(|t| t.name == *name)
+                .map(|t| t.comment = Some(comment.clone()))
+                .is_some(),
+            "PUBLICATION" => self
+                .publications
+                .iter_mut()
+                .find(|p| p.name == *name)
+                .map(|p| p.comment = Some(comment.clone()))
+                .is_some(),
+            kind if kind.starts_with("TEXT SEARCH ") => {
+                let kind = kind.trim_start_matches("TEXT SEARCH ");
+                self.apply_text_search_comment(kind, &schema, name, &comment)
+            }
             "INDEX" => {
                 match self.index_location.get(&(schema, name.clone())) {
                     Some(&IndexLocation::Table(idx)) => self.tables[idx]
@@ -1307,6 +1479,88 @@ impl Assembly {
         };
         trigger.comment = Some(comment.to_string());
         true
+    }
+
+    /// File a text search object under its schema's container
+    fn add_text_search(
+        &mut self,
+        schema: String,
+        object: ddl::TextSearchObject,
+    ) {
+        let index =
+            match self.text_search.iter().position(|t| t.schema == schema) {
+                Some(index) => index,
+                None => {
+                    self.text_search.push(models::TextSearch {
+                        schema,
+                        sql: None,
+                        configurations: None,
+                        dictionaries: None,
+                        parsers: None,
+                        templates: None,
+                    });
+                    self.text_search.len() - 1
+                }
+            };
+        let container = &mut self.text_search[index];
+        match object {
+            ddl::TextSearchObject::Configuration(o) => {
+                container.configurations.get_or_insert_default().push(o);
+            }
+            ddl::TextSearchObject::Dictionary(o) => {
+                container.dictionaries.get_or_insert_default().push(o);
+            }
+            ddl::TextSearchObject::Parser(o) => {
+                container.parsers.get_or_insert_default().push(o);
+            }
+            ddl::TextSearchObject::Template(o) => {
+                container.templates.get_or_insert_default().push(o);
+            }
+        }
+    }
+
+    /// Set the comment of a text search object, which pull files under
+    /// its schema's container
+    fn apply_text_search_comment(
+        &mut self,
+        kind: &str,
+        schema: &str,
+        name: &str,
+        comment: &str,
+    ) -> bool {
+        let Some(container) =
+            self.text_search.iter_mut().find(|t| t.schema == schema)
+        else {
+            return false;
+        };
+        let slot = match kind {
+            "CONFIGURATION" => container
+                .configurations
+                .iter_mut()
+                .flatten()
+                .find(|o| o.name == name)
+                .map(|o| &mut o.comment),
+            "DICTIONARY" => container
+                .dictionaries
+                .iter_mut()
+                .flatten()
+                .find(|o| o.name == name)
+                .map(|o| &mut o.comment),
+            "PARSER" => container
+                .parsers
+                .iter_mut()
+                .flatten()
+                .find(|o| o.name == name)
+                .map(|o| &mut o.comment),
+            "TEMPLATE" => container
+                .templates
+                .iter_mut()
+                .flatten()
+                .find(|o| o.name == name)
+                .map(|o| &mut o.comment),
+            _ => None,
+        };
+        slot.map(|slot| *slot = Some(comment.to_string())).is_some()
     }
 
     /// `COMMENT ON POLICY p ON schema.table`, the same two-name shape
@@ -1459,6 +1713,36 @@ impl Assembly {
             tag: entry.tag.clone(),
             defn: entry.defn.clone(),
         });
+    }
+}
+
+/// An aggregate's arguments as pg_dump writes them in `COMMENT ON
+/// AGGREGATE`: `(integer)`, `(x integer ORDER BY integer)` or `(*)`.
+/// pg_dump uses the identity arguments, which include the argument
+/// names, so each argument is its mode, its name and its type.
+fn aggregate_signature(aggregate: &models::Aggregate) -> String {
+    let types = |args: &[models::Argument]| {
+        args.iter()
+            .map(|a| {
+                a.mode
+                    .iter()
+                    .cloned()
+                    .chain(a.name.as_deref().map(crate::utils::quote_ident))
+                    .chain([a.data_type.clone()])
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let direct = types(&aggregate.arguments);
+    match aggregate.order_by.as_deref() {
+        Some(order_by) if direct.is_empty() => {
+            format!("(ORDER BY {})", types(order_by))
+        }
+        Some(order_by) => format!("({direct} ORDER BY {})", types(order_by)),
+        None if direct.is_empty() => String::from("(*)"),
+        None => format!("({direct})"),
     }
 }
 
@@ -2010,6 +2294,110 @@ mod tests {
         assert_eq!(
             table("plain").row_level_security,
             Some(models::RowLevelSecurity::default())
+        );
+    }
+
+    #[test]
+    fn catalog_objects_fold_their_alters_and_comments() {
+        let mut dump = libpgdump::new("fixtures", "UTF8", "18.0").unwrap();
+        add(&mut dump, OT::Schema, "", "s", "CREATE SCHEMA s;");
+        let entries = [
+            (
+                OT::Aggregate,
+                "s",
+                "total(integer)",
+                "CREATE AGGREGATE s.total(integer) (SFUNC = int4pl, \
+                 STYPE = integer);",
+            ),
+            (
+                OT::Comment,
+                "s",
+                "AGGREGATE total(integer)",
+                "COMMENT ON AGGREGATE s.total(integer) IS 'sums';",
+            ),
+            (
+                OT::Aggregate,
+                "s",
+                "named(integer, integer)",
+                "CREATE AGGREGATE s.named(\"Weird Name\" integer, \
+                 other integer) (SFUNC = s.f, STYPE = integer);",
+            ),
+            (
+                OT::Comment,
+                "s",
+                "AGGREGATE named(\"Weird Name\" integer, other integer)",
+                "COMMENT ON AGGREGATE s.named(\"Weird Name\" integer, \
+                 other integer) IS 'named';",
+            ),
+            (
+                OT::Cast,
+                "",
+                "CAST (s.pair AS text)",
+                "CREATE CAST (s.pair AS text) WITH INOUT;",
+            ),
+            (
+                OT::Comment,
+                "",
+                "CAST (s.pair AS text)",
+                "COMMENT ON CAST (s.pair AS text) IS 'as text';",
+            ),
+            (
+                OT::EventTrigger,
+                "",
+                "et",
+                "CREATE EVENT TRIGGER et ON sql_drop EXECUTE FUNCTION f();\n\n\
+                 ALTER EVENT TRIGGER et DISABLE;",
+            ),
+            (
+                OT::Publication,
+                "",
+                "pub",
+                "CREATE PUBLICATION pub WITH (publish = 'insert');",
+            ),
+            (
+                OT::PublicationTable,
+                "s",
+                "pub t",
+                "ALTER PUBLICATION pub ADD TABLE ONLY s.t;",
+            ),
+            (
+                OT::PublicationTablesInSchema,
+                "s",
+                "pub s",
+                "ALTER PUBLICATION pub ADD TABLES IN SCHEMA s;",
+            ),
+            (
+                OT::TextSearchConfiguration,
+                "s",
+                "cfg",
+                "CREATE TEXT SEARCH CONFIGURATION s.cfg (\n    \
+                 PARSER = pg_catalog.\"default\" );\n\n\
+                 ALTER TEXT SEARCH CONFIGURATION s.cfg\n    \
+                 ADD MAPPING FOR word WITH simple;",
+            ),
+        ];
+        for (desc, namespace, tag, defn) in entries {
+            add(&mut dump, desc, namespace, tag, defn);
+        }
+        let mut assembly = Assembly::default();
+        assembly.ingest(&dump).unwrap();
+        assert!(assembly.remaining.is_empty(), "{:?}", assembly.remaining);
+        assert_eq!(assembly.aggregates[0].comment.as_deref(), Some("sums"));
+        // pg_dump names the arguments in the comment's signature
+        assert_eq!(assembly.aggregates[1].comment.as_deref(), Some("named"));
+        assert_eq!(assembly.casts[0].comment.as_deref(), Some("as text"));
+        assert_eq!(
+            assembly.event_triggers[0].enabled.as_deref(),
+            Some("DISABLED")
+        );
+        let publication = &assembly.publications[0];
+        assert_eq!(publication.tables.as_ref().unwrap()[0].name(), "s.t");
+        assert_eq!(publication.schemas, Some(vec![String::from("s")]));
+        let configuration =
+            &assembly.text_search[0].configurations.as_ref().unwrap()[0];
+        assert_eq!(
+            configuration.mappings.as_ref().unwrap()["word"],
+            vec![String::from("simple")]
         );
     }
 

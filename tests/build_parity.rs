@@ -41,6 +41,9 @@ const DEVIATIONS: &[(&str, &str, &str)] = &[
         "test",
         "utf8_to_latin1(integer, integer, cstring, internal, integer)",
     ),
+    // deviation 23: Python rendered the locale and the encodings bare
+    ("COLLATION", "test", "french"),
+    ("CONVERSION", "test", "myconv"),
     // Python emitted OPTIONS without the required parentheses, which
     // does not parse
     ("SERVER", "", "localhost"),
@@ -191,7 +194,14 @@ const CORRECTED: &[(&str, &str, &str, &str)] = &[
         "TEXT SEARCH CONFIGURATION",
         "test",
         "custom_german",
-        "(SOURCE = german)",
+        "(COPY = german)",
+    ),
+    ("COLLATION", "test", "french", "(LOCALE = 'fr_FR.utf8')"),
+    (
+        "CONVERSION",
+        "test",
+        "myconv",
+        "FOR 'UTF8' TO 'LATIN1' FROM utf8_to_latin1",
     ),
     (
         "TEXT SEARCH DICTIONARY",
@@ -523,6 +533,10 @@ fn records_inventory_dependency_edges() {
     // these to order the archive). A foreign key needs no edge to the
     // table it references: FK CONSTRAINT is a post-data desc, so it
     // already sorts after every table.
+    //
+    // The text search objects of one schema's container are chained,
+    // each after the one before, in the order they depend on each
+    // other: parser, template, dictionary, configuration.
     assert_eq!(
         edges,
         vec![
@@ -536,6 +550,14 @@ fn records_inventory_dependency_edges() {
             "TABLE:addresses -> TYPE:address_type",
             "TABLE:users -> DOMAIN:bcp47_locale, DOMAIN:email_address, \
              TYPE:user_state",
+            "TEXT SEARCH CONFIGURATION:custom_english -> \
+             TEXT SEARCH DICTIONARY:custom_simple",
+            "TEXT SEARCH CONFIGURATION:custom_german -> \
+             TEXT SEARCH CONFIGURATION:custom_english",
+            "TEXT SEARCH DICTIONARY:custom_simple -> \
+             TEXT SEARCH TEMPLATE:custom_snowball",
+            "TEXT SEARCH TEMPLATE:custom_snowball -> \
+             TEXT SEARCH PARSER:custom_default",
             "VIEW:user_addresses -> TABLE:addresses, TABLE:users",
         ]
     );

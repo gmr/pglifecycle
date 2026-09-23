@@ -1,18 +1,14 @@
 //! Tables and their child objects (columns, constraints, indexes,
 //! triggers, partitioning)
 
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-/// Read a flag whose only non-default value is `true`, keeping an
-/// explicit `false` as absent. Absent and `false` then compare equal
-/// to the value pulled from the database, which records only `true`,
-/// and deploy sees no change where there is none.
-fn true_or_none<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    Ok(Option::<bool>::deserialize(deserializer)?.filter(|value| *value))
+/// A flag whose only non-default value is `true`, with an explicit
+/// `false` as absent. Pull records only `true`, so the two then
+/// compare equal.
+fn true_only(value: Option<bool>) -> Option<bool> {
+    value.filter(|value| *value)
 }
 
 /// Represents a table
@@ -143,12 +139,50 @@ impl Table {
         table
     }
 
-    /// The same table with its policies in name order, and an empty
-    /// list as none: policies are matched by name, so neither the order
-    /// nor an empty list is a difference
+    /// The same table in the form deploy compares: the NOT NULLs moved
+    /// as [`Self::with_canonical_not_nulls`] moves them, and every value
+    /// written at its default read as absent. A file may state a
+    /// default (`forced: false`, `command: ALL`), which pull never
+    /// writes, and the two have to compare equal.
+    pub fn canonical(&self) -> Table {
+        let mut table = self.with_canonical_not_nulls();
+        for column in table.columns.iter_mut().flatten() {
+            if let Some(options) = column
+                .generated
+                .as_mut()
+                .and_then(|g| g.sequence_options.as_mut())
+            {
+                options.cycle = true_only(options.cycle);
+            }
+            if let Some(generated) = column.generated.as_mut() {
+                generated.sequence_options = generated
+                    .sequence_options
+                    .take()
+                    .filter(|options| *options != SequenceOptions::default());
+            }
+        }
+        for check in table.check_constraints.iter_mut().flatten() {
+            check.not_valid = true_only(check.not_valid);
+        }
+        for not_null in table.not_null_constraints.iter_mut().flatten() {
+            not_null.not_valid = true_only(not_null.not_valid);
+        }
+        for foreign_key in table.foreign_keys.iter_mut().flatten() {
+            foreign_key.not_valid = true_only(foreign_key.not_valid);
+        }
+        if let Some(state) = table.row_level_security.as_mut() {
+            state.forced = true_only(state.forced);
+        }
+        table.with_canonical_policies()
+    }
+
+    /// The same table with each policy canonical, in name order, and an
+    /// empty list as none: policies are matched by name, so neither the
+    /// order nor an empty list is a difference
     pub fn with_canonical_policies(&self) -> Table {
         let mut table = self.clone();
         if let Some(policies) = &mut table.policies {
+            *policies = policies.iter().map(Policy::canonical).collect();
             policies.sort_by(|a, b| a.name.cmp(&b.name));
         }
         table.policies = table.policies.filter(|p| !p.is_empty());
@@ -261,11 +295,7 @@ pub struct SequenceOptions {
     pub max_value: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache: Option<i64>,
-    #[serde(
-        default,
-        deserialize_with = "true_or_none",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub cycle: Option<bool>,
 }
 
@@ -301,11 +331,7 @@ pub struct CheckConstraint {
     pub enforced: Option<bool>,
     /// `true` renders `NOT VALID`: rows already in the table were never
     /// checked, and only new ones are. See [`ForeignKey::not_valid`].
-    #[serde(
-        default,
-        deserialize_with = "true_or_none",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub not_valid: Option<bool>,
 }
 
@@ -326,11 +352,7 @@ pub struct NotNullConstraint {
     /// `true` renders `NOT VALID`; see [`ForeignKey::not_valid`]. Only
     /// the table-level form carries it: a column's own `NOT NULL NOT
     /// VALID` is a syntax error.
-    #[serde(
-        default,
-        deserialize_with = "true_or_none",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub not_valid: Option<bool>,
 }
 
@@ -399,11 +421,7 @@ pub struct ForeignKey {
     /// not-valid constraint as its own entry. pg_dump writes only `NOT
     /// ENFORCED` for a constraint that is not enforced, since that
     /// implies not validated, so the two do not appear together.
-    #[serde(
-        default,
-        deserialize_with = "true_or_none",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub not_valid: Option<bool>,
 }
 
@@ -547,11 +565,7 @@ pub struct RowLevelSecurity {
     pub enabled: bool,
     /// FORCE ROW LEVEL SECURITY: the policies apply to the table owner
     /// too
-    #[serde(
-        default,
-        deserialize_with = "true_or_none",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub forced: Option<bool>,
 }
 
@@ -564,25 +578,13 @@ pub struct RowLevelSecurity {
 pub struct Policy {
     pub name: String,
     /// AS RESTRICTIVE; the default is PERMISSIVE
-    #[serde(
-        default,
-        deserialize_with = "true_or_none",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub restrictive: Option<bool>,
     /// SELECT, INSERT, UPDATE or DELETE; the default is ALL
-    #[serde(
-        default,
-        deserialize_with = "policy_command",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
     /// The roles the policy applies to; the default is PUBLIC
-    #[serde(
-        default,
-        deserialize_with = "policy_roles",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub roles: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub using: Option<String>,
@@ -592,38 +594,33 @@ pub struct Policy {
     pub comment: Option<String>,
 }
 
-/// Read a policy command in upper case, keeping ALL as absent
-fn policy_command<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    Ok(Option::<String>::deserialize(deserializer)?
-        .map(|command| command.to_uppercase())
-        .filter(|command| command != "ALL"))
-}
-
-/// Read a policy's roles with PUBLIC in upper case, as the parser
-/// reads it, keeping PUBLIC alone as absent
-fn policy_roles<'de, D>(
-    deserializer: D,
-) -> Result<Option<Vec<String>>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    Ok(Option::<Vec<String>>::deserialize(deserializer)?
-        .map(|roles| {
+impl Policy {
+    /// The same policy with each field at its default as absent, and
+    /// the command and PUBLIC in upper case, as pull reads them
+    pub fn canonical(&self) -> Policy {
+        let roles = self.roles.as_ref().map(|roles| {
             roles
-                .into_iter()
+                .iter()
                 .map(|role| {
                     if role.eq_ignore_ascii_case("public") {
                         String::from("PUBLIC")
                     } else {
-                        role
+                        role.clone()
                     }
                 })
                 .collect::<Vec<_>>()
-        })
-        .filter(|roles| roles != &["PUBLIC"]))
+        });
+        Policy {
+            restrictive: true_only(self.restrictive),
+            command: self
+                .command
+                .as_ref()
+                .map(|command| command.to_uppercase())
+                .filter(|command| command != "ALL"),
+            roles: roles.filter(|roles| roles != &["PUBLIC"]),
+            ..self.clone()
+        }
+    }
 }
 
 /// Table Triggers
@@ -661,45 +658,52 @@ pub struct Trigger {
 mod tests {
     use super::*;
 
-    /// An explicit `false` reads as absent, which is what pull records,
-    /// so deploy does not see a change on every run
+    /// A value written at its default compares equal to the absent
+    /// value pull records, so deploy does not see a change on every
+    /// run; the file itself keeps what it says
     #[test]
-    fn false_flags_read_as_absent() {
-        let check: CheckConstraint =
-            serde_json::from_value(serde_json::json!(
+    fn written_defaults_are_canonically_absent() {
+        let table: Table = serde_json::from_value(serde_json::json!({
+            "name": "t", "schema": "s", "owner": "o",
+            "columns": [{"name": "id", "data_type": "integer",
+                         "generated": {"sequence_behavior": "ALWAYS",
+                                       "sequence_options": {"cycle": false}}}],
+            "check_constraints": [
                 {"name": "c", "expression": "a > 0", "not_valid": false}
-            ))
-            .unwrap();
-        assert_eq!(check.not_valid, None);
-        let options: SequenceOptions =
-            serde_json::from_value(serde_json::json!({"cycle": false}))
-                .unwrap();
-        assert_eq!(options, SequenceOptions::default());
-        let options: SequenceOptions =
-            serde_json::from_value(serde_json::json!({"cycle": true}))
-                .unwrap();
-        assert_eq!(options.cycle, Some(true));
-    }
-
-    /// PUBLIC reads in upper case in any role list, as the parser reads
-    /// it, so deploy does not see a change on every run
-    #[test]
-    fn policy_roles_normalize_public() {
-        let roles = |value: serde_json::Value| -> Option<Vec<String>> {
-            serde_json::from_value::<Policy>(
-                serde_json::json!({"name": "p", "roles": value}),
-            )
-            .unwrap()
-            .roles
-        };
-        assert_eq!(roles(serde_json::json!(["public"])), None);
+            ],
+            "row_level_security": {"enabled": true, "forced": false},
+            "policies": [
+                {"name": "p", "restrictive": false, "command": "all",
+                 "roles": ["public"]},
+                {"name": "o", "command": "select",
+                 "roles": ["alice", "public"]},
+            ],
+        }))
+        .unwrap();
         assert_eq!(
-            roles(serde_json::json!(["alice", "public"])),
+            table.row_level_security.as_ref().unwrap().forced,
+            Some(false)
+        );
+        let canonical = table.canonical();
+        let generated =
+            canonical.columns.as_ref().unwrap()[0].generated.as_ref();
+        assert_eq!(generated.unwrap().sequence_options, None);
+        assert_eq!(canonical.check_constraints.unwrap()[0].not_valid, None);
+        assert_eq!(canonical.row_level_security.unwrap().forced, None);
+        let policies = canonical.policies.unwrap();
+        assert_eq!(policies[0].name, "o");
+        assert_eq!(policies[0].command.as_deref(), Some("SELECT"));
+        assert_eq!(
+            policies[0].roles,
             Some(vec![String::from("alice"), String::from("PUBLIC")])
         );
         assert_eq!(
-            roles(serde_json::json!(["alice"])),
-            Some(vec![String::from("alice")])
+            (
+                &policies[1].restrictive,
+                &policies[1].command,
+                &policies[1].roles
+            ),
+            (&None, &None, &None)
         );
     }
 
