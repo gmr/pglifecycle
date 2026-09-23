@@ -13,10 +13,10 @@ use serde_json::{Map, Value};
 use crate::build;
 use crate::deploy::diff::canonical_type;
 use crate::models::{
-    CheckConstraint, Column, ColumnDefault, ColumnNotNull, Definition, Domain,
-    Extension, ForeignDataWrapper, ForeignKey, Function, Index,
-    NotNullConstraint, Schema, Sequence, Server, Table, Trigger, Type,
-    UserMapping, View, ViewColumn,
+    CheckConstraint, Column, ColumnDefault, ColumnGenerated, ColumnNotNull,
+    Definition, Domain, Extension, ForeignDataWrapper, ForeignKey, Function,
+    Index, NotNullConstraint, Schema, Sequence, SequenceOptions, Server,
+    Table, Trigger, Type, UserMapping, View, ViewColumn,
 };
 use crate::utils::{
     dollar_quote, postgres_value, quote_ident, user_mapping_subject,
@@ -302,10 +302,14 @@ fn alter_column(
     db: &Column,
     alters: &mut Vec<Alter>,
 ) -> bool {
-    // collation, generation, and inline check changes require a
-    // rebuild
+    // collation, expression generation, and inline check changes
+    // require a rebuild. An identity reconciles in place at the end of
+    // this function: falling back to a rebuild there would drop and
+    // recreate the table, and its rows, to change a sequence option.
+    let identities = is_identity_or_none(&repo.generated)
+        && is_identity_or_none(&db.generated);
     if repo.collation != db.collation
-        || repo.generated != db.generated
+        || (!identities && repo.generated != db.generated)
         || repo.check_constraint != db.check_constraint
     {
         return false;
@@ -391,6 +395,11 @@ fn alter_column(
             )));
         }
     }
+    // last, because ADD GENERATED needs the column NOT NULL and free of
+    // a default, which the statements above may be what establishes
+    if identities && !identity(table, &column, repo, db, alters) {
+        return false;
+    }
     push_comment(
         alters,
         "COLUMN",
@@ -399,6 +408,123 @@ fn alter_column(
         &db.comment,
     );
     true
+}
+
+/// Whether a column's generation is absent or an identity, the two
+/// states [`identity`] reconciles in place. A pulled identity carries
+/// only its behavior; an older project file names a separate sequence
+/// instead.
+fn is_identity_or_none(generated: &Option<ColumnGenerated>) -> bool {
+    generated.as_ref().is_none_or(|g| {
+        g.expression.is_none()
+            && (g.sequence_behavior.is_some() || g.sequence.is_some())
+    })
+}
+
+/// Reconcile an identity column in place: add it, drop it, or change
+/// its behavior and sequence options. Returns false only for a change
+/// of sequence name, which ALTER COLUMN cannot express.
+fn identity(
+    table: &str,
+    column: &str,
+    repo: &Column,
+    db: &Column,
+    alters: &mut Vec<Alter>,
+) -> bool {
+    let default = SequenceOptions::default();
+    match (&repo.generated, &db.generated) {
+        (None, None) => true,
+        (Some(repo), None) => {
+            alters.push(Alter::new(format!(
+                "ALTER TABLE {table} ALTER COLUMN {column} ADD {};\n",
+                build::render_identity(repo)
+            )));
+            true
+        }
+        // Gated even though it keeps every row: the sequence and its
+        // position go with it, so adding the identity back restarts the
+        // numbering and collides with existing keys. A project pulled
+        // before identity columns were modeled has none on any column,
+        // so this is also what keeps a deploy of such a project from
+        // stripping every identity in the database.
+        (None, Some(_)) => {
+            alters.push(Alter::destructive(format!(
+                "ALTER TABLE {table} ALTER COLUMN {column} DROP IDENTITY;\n"
+            )));
+            true
+        }
+        (Some(repo), Some(db)) => {
+            let repo_options =
+                repo.sequence_options.as_ref().unwrap_or(&default);
+            let db_options = db.sequence_options.as_ref().unwrap_or(&default);
+            if repo_options.name != db_options.name {
+                return false;
+            }
+            let mut sets = Vec::new();
+            if let Some(behavior) = &repo.sequence_behavior
+                && repo.sequence_behavior != db.sequence_behavior
+            {
+                sets.push(format!("SET GENERATED {behavior}"));
+            }
+            sets.extend(sequence_option_changes(repo_options, db_options));
+            if !sets.is_empty() {
+                alters.push(Alter::new(format!(
+                    "ALTER TABLE {table} ALTER COLUMN {column} {};\n",
+                    sets.join(" ")
+                )));
+            }
+            true
+        }
+    }
+}
+
+/// `SET` clauses taking a sequence from `db` to `repo`. An option the
+/// repo leaves out is PostgreSQL's default, so it is set back to that
+/// explicitly rather than skipped; START WITH changes only the value a
+/// RESTART uses, so no existing key is renumbered.
+fn sequence_option_changes(
+    repo: &SequenceOptions,
+    db: &SequenceOptions,
+) -> Vec<String> {
+    let mut sets = Vec::new();
+    let ascending = repo.increment_by.is_none_or(|by| by > 0);
+    if repo.start_with != db.start_with {
+        let start = repo.start_with.unwrap_or(if ascending {
+            repo.min_value.unwrap_or(1)
+        } else {
+            repo.max_value.unwrap_or(-1)
+        });
+        sets.push(format!("SET START WITH {start}"));
+    }
+    if repo.increment_by != db.increment_by {
+        sets.push(format!(
+            "SET INCREMENT BY {}",
+            repo.increment_by.unwrap_or(1)
+        ));
+    }
+    if repo.min_value != db.min_value {
+        sets.push(match repo.min_value {
+            Some(min) => format!("SET MINVALUE {min}"),
+            None => String::from("SET NO MINVALUE"),
+        });
+    }
+    if repo.max_value != db.max_value {
+        sets.push(match repo.max_value {
+            Some(max) => format!("SET MAXVALUE {max}"),
+            None => String::from("SET NO MAXVALUE"),
+        });
+    }
+    if repo.cache != db.cache {
+        sets.push(format!("SET CACHE {}", repo.cache.unwrap_or(1)));
+    }
+    if repo.cycle != db.cycle {
+        sets.push(if repo.cycle == Some(true) {
+            String::from("SET CYCLE")
+        } else {
+            String::from("SET NO CYCLE")
+        });
+    }
+    sets
 }
 
 /// Constraint reconciliation. Check constraints and foreign keys are
@@ -1261,6 +1387,117 @@ mod tests {
                  (email ~ '@') NOT ENFORCED;\n",
             ]
         );
+    }
+
+    /// `base_table` with its `id` column's generation set, or cleared
+    /// when `generated` is null
+    fn with_id_generation(generated: serde_json::Value) -> Table {
+        let mut t = base_table();
+        let mut id = serde_json::json!(
+            {"name": "id", "data_type": "integer", "nullable": false}
+        );
+        if !generated.is_null() {
+            id["generated"] = generated;
+        }
+        t["columns"] = serde_json::json!([id]);
+        parse_table(t)
+    }
+
+    /// An identity changes in place. Before this, any difference in
+    /// `generated` rebuilt the table, which drops its rows to change a
+    /// sequence option.
+    #[test]
+    fn identity_changes_in_place() {
+        let repo = with_id_generation(serde_json::json!({
+            "sequence_behavior": "BY DEFAULT",
+            "sequence_options": {"start_with": 100, "increment_by": 5,
+                                 "cycle": true},
+        }));
+        let db = with_id_generation(
+            serde_json::json!({"sequence_behavior": "ALWAYS"}),
+        );
+        let alters = statements(table(&repo, &db));
+        assert_eq!(
+            sql(&alters),
+            vec![
+                "ALTER TABLE test.users ALTER COLUMN id SET GENERATED BY \
+                 DEFAULT SET START WITH 100 SET INCREMENT BY 5 SET CYCLE;\n"
+            ]
+        );
+        assert!(!alters[0].destructive);
+    }
+
+    /// An option the repo leaves out is PostgreSQL's default, so it is
+    /// set back explicitly rather than left as the database has it
+    #[test]
+    fn identity_resets_an_omitted_option_to_its_default() {
+        let repo = with_id_generation(
+            serde_json::json!({"sequence_behavior": "ALWAYS"}),
+        );
+        let db = with_id_generation(serde_json::json!({
+            "sequence_behavior": "ALWAYS",
+            "sequence_options": {"start_with": 100, "max_value": 900,
+                                 "cache": 20, "cycle": true},
+        }));
+        assert_eq!(
+            sql(&statements(table(&repo, &db))),
+            vec![
+                "ALTER TABLE test.users ALTER COLUMN id SET START WITH 1 SET \
+                 NO MAXVALUE SET CACHE 1 SET NO CYCLE;\n"
+            ]
+        );
+    }
+
+    #[test]
+    fn identity_is_added_in_place() {
+        let repo = with_id_generation(serde_json::json!({
+            "sequence_behavior": "ALWAYS",
+            "sequence_options": {"start_with": 10},
+        }));
+        let db = with_id_generation(serde_json::Value::Null);
+        let alters = statements(table(&repo, &db));
+        assert_eq!(
+            sql(&alters),
+            vec![
+                "ALTER TABLE test.users ALTER COLUMN id ADD GENERATED ALWAYS \
+                 AS IDENTITY (START WITH 10);\n"
+            ]
+        );
+        assert!(!alters[0].destructive);
+    }
+
+    /// Dropping an identity keeps every row but loses the sequence and
+    /// its position, so it is gated. It is also what a project pulled
+    /// before identity columns were modeled asks for on every one of
+    /// them, and the gate is what stops a deploy of such a project from
+    /// stripping them all.
+    #[test]
+    fn identity_drop_is_gated() {
+        let repo = with_id_generation(serde_json::Value::Null);
+        let db = with_id_generation(
+            serde_json::json!({"sequence_behavior": "ALWAYS"}),
+        );
+        let alters = statements(table(&repo, &db));
+        assert_eq!(
+            sql(&alters),
+            vec!["ALTER TABLE test.users ALTER COLUMN id DROP IDENTITY;\n"]
+        );
+        assert!(alters[0].destructive);
+    }
+
+    /// An older project file names a separately managed sequence in
+    /// `sequence` and never renders it, so it matches a pulled identity
+    /// with the same behavior
+    #[test]
+    fn legacy_identity_sequence_name_is_not_a_change() {
+        let repo = with_id_generation(serde_json::json!({
+            "sequence": "users_id",
+            "sequence_behavior": "ALWAYS",
+        }));
+        let db = with_id_generation(
+            serde_json::json!({"sequence_behavior": "ALWAYS"}),
+        );
+        assert!(statements(table(&repo, &db)).is_empty());
     }
 
     /// A NOT NULL rename reconciles even though nullability itself is

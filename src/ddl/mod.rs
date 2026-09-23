@@ -60,6 +60,14 @@ pub enum Statement {
         column: String,
         default: serde_json::Value,
     },
+    /// ALTER TABLE ... ALTER COLUMN ... ADD GENERATED ... AS IDENTITY —
+    /// how pg_dump writes an identity column, as a SEQUENCE entry of its
+    /// own after the table; folded onto the table's column during pull
+    AddIdentity {
+        table: QualifiedName,
+        column: String,
+        generated: models::ColumnGenerated,
+    },
     CreateSchema(models::Schema),
     CreateDomain(models::Domain),
     CreateType(Box<models::Type>),

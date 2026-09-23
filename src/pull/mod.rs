@@ -876,6 +876,28 @@ impl Assembly {
                     self.deferred_defaults.push((table, column, default));
                 }
             },
+            Statement::AddIdentity {
+                table,
+                column,
+                generated,
+            } => {
+                let found = self.find_table(&table).and_then(|t| {
+                    t.columns.iter_mut().flatten().find(|c| c.name == column)
+                });
+                match found {
+                    Some(c) => c.generated = Some(generated),
+                    // pg_dump writes the identity after its table, so a
+                    // miss means something upstream went wrong. Keep the
+                    // entry rather than drop the identity, so the pull
+                    // fails instead of losing it silently.
+                    None => {
+                        log::warn!(
+                            "Identity on unknown column {table}.{column}"
+                        );
+                        self.push_remaining(entry);
+                    }
+                }
+            }
             Statement::CreateTrigger { table, trigger } => {
                 match self.find_table(&table) {
                     Some(table) => {

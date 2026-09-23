@@ -273,7 +273,11 @@ pub(crate) fn create_sequence(
     Ok(Statement::CreateSequence(sequence))
 }
 
-fn apply_seq_options(sequence: &mut Sequence, node: &Node, src: &str) {
+pub(crate) fn apply_seq_options(
+    sequence: &mut Sequence,
+    node: &Node,
+    src: &str,
+) {
     for elem in node.find_all("SeqOptElem") {
         let number = elem
             .find("NumericOnly")

@@ -134,6 +134,42 @@ pub struct ColumnGenerated {
     pub sequence: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sequence_behavior: Option<String>,
+    /// The options of an identity column's own sequence. pg_dump writes
+    /// them in `ALTER TABLE ... ADD GENERATED ... AS IDENTITY (...)`,
+    /// and they are what makes one identity column differ from another:
+    /// without them an identity that starts at 100 or cycles rebuilt as
+    /// a plain one that starts at 1.
+    ///
+    /// Separate from `sequence`, which older project files use to name
+    /// a sequence managed as its own object. The build never renders
+    /// that name, so rendering it as `SEQUENCE NAME` would create the
+    /// sequence a second time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sequence_options: Option<SequenceOptions>,
+}
+
+/// An identity column's sequence options. Each is absent when it holds
+/// PostgreSQL's default, which is also what a hand-written identity
+/// omits, so the two compare equal instead of forcing a rebuild.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SequenceOptions {
+    /// Kept only when it is not the `<table>_<column>_seq` PostgreSQL
+    /// generates in the table's schema
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_with: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub increment_by: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_value: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_value: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cycle: Option<bool>,
 }
 
 /// How a generated column's expression is materialized

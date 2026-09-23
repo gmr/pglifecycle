@@ -292,8 +292,8 @@ takes arguments.
 
 **Done:** A1 (`enforced`), A4 (`nulls_not_distinct`), A5
 (`without_overlaps`) and A6 (`period`), plus constraint names, which
-the fixture for A5 exposed as a separate loss. **Left:** A2 and A3
-(`not_valid`), and identity columns.
+the fixture for A5 exposed as a separate loss; and identity columns
+(item 2). **Left:** A2 and A3 (`not_valid`), and the `LIKE` edge.
 
 `not_valid` is split out because it cannot be tested the way the
 others can. Verified against 18.4: an inline `CHECK ... NOT VALID` in
@@ -315,18 +315,34 @@ up once it round-trips.
 
 1. `not_valid: Option<bool>` on `CheckConstraint`, `ForeignKey` and
    `NotNullConstraint` (A2, A3).
-2. Identity columns: add `Statement::AddIdentity { table, column,
-   behavior, sequence_options }` plus an `alter_table_cmd` arm for `ADD
-   GENERATED ... AS IDENTITY (...)`, merged onto the already-ingested
-   column the way `SetColumnDefault` is, including the `deferred_*`
-   replay path, and suppress the standalone `Sequence` object pg_dump
-   emits for it. Extract the option fields shared with
-   `models::Sequence` (`data_type`, `increment_by`, `min_value`,
-   `max_value`, `start_with`, `cache`, `cycle`) into a
-   `SequenceOptions` struct and nest it under `ColumnGenerated` — the
-   two existing string fields cannot carry them. A merge whose table or
-   column was never assembled must fail loudly, not fall through to
-   `remaining`.
+2. **Identity columns — done.** Since Phase 0 `pull` failed on any
+   database with even one identity column, which is most modern
+   schemas. `Statement::AddIdentity` parses pg_dump's `ALTER TABLE ...
+   ADD GENERATED ... AS IDENTITY (...)` and folds it onto the column;
+   `ColumnGenerated.sequence_options` holds a `SequenceOptions` with
+   only the non-default values, and the generated `<table>_<column>_seq`
+   name is dropped. Four deviations from the plan above, each for a
+   reason:
+   - no `deferred_*` replay: pg_dump writes an identity after its
+     table, so a miss means something upstream is wrong, and the entry
+     goes to `remaining` so the pull fails instead of losing it
+   - there is no standalone `Sequence` to suppress: pg_dump's entry is
+     an `ALTER TABLE`, not a `CREATE SEQUENCE`
+   - `models::Sequence` is not restructured: `deny_unknown_fields` does
+     not combine with `#[serde(flatten)]`, so `SequenceOptions` is its
+     own struct and the parse reuses `apply_seq_options`
+   - the sequence name lives in `SequenceOptions`, not in the existing
+     `sequence` field. `test-project` uses `sequence` to name a
+     separately managed sequence that the build never renders; reading
+     it as `SEQUENCE NAME` would create that sequence twice
+   The deploy side was required, not optional. `alter_column` rebuilt a
+   table on any `generated` difference, so a project pulled before this
+   change — every identity missing — would drop and recreate each such
+   table under `--allow-drop`, rows included. Identity now reconciles
+   in place: `ADD GENERATED`, `SET GENERATED`, and `SET` sequence
+   options, all ungated; `DROP IDENTITY` is gated, since the sequence
+   and its position go with it. A sequence rename still falls back to
+   a rebuild.
 3. Nothing records a dependency edge for `LIKE`. `CREATE TABLE x (LIKE
    y ...)` needs `y` to exist first, exactly as `INHERITS` does, and
    the build renders the clause inline (`src/build/mod.rs`, the

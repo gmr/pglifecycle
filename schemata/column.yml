@@ -96,10 +96,52 @@ properties:
         enum:
           - ALWAYS
           - BY DEFAULT
+      sequence_options:
+        title: Identity Sequence Options
+        description: >
+          The options of an identity column's own sequence. Each is omitted
+          when it holds PostgreSQL's default, so an identity that states none
+          is an ordinary one starting at 1. Distinct from sequence, which names
+          a sequence managed as its own object and is not rendered.
+        type: object
+        properties:
+          name:
+            title: Sequence Name
+            description: >
+              The sequence's schema-qualified name, present only when it is not
+              the <table>_<column>_seq PostgreSQL generates.
+            type: string
+          start_with:
+            title: Start With
+            type: integer
+          increment_by:
+            title: Increment By
+            type: integer
+          min_value:
+            title: Minimum Value
+            type: integer
+          max_value:
+            title: Maximum Value
+            type: integer
+          cache:
+            title: Cache
+            type: integer
+          cycle:
+            title: Cycle
+            description: Wrap around at the limit instead of raising an error.
+            type: boolean
+        additionalProperties: false
     oneOf:
       - required: [expression]
-        not: {required: [sequence, sequence_behavior]}
-      - required: [sequence]
+        not:
+          anyOf:
+            - required: [sequence, sequence_behavior]
+            - required: [sequence_options]
+      # An identity column: a pulled one carries only the behavior,
+      # while older project files name a separate sequence
+      - anyOf:
+          - required: [sequence]
+          - required: [sequence_behavior]
         # `kind` selects how an expression is materialized, so an
         # identity column has no use for it and the build ignores it.
         # Reject the pair instead of accepting a value that does
