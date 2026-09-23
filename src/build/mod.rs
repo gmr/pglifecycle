@@ -99,7 +99,9 @@
 //!     the only one that changes behavior.
 //! 24. A text search configuration copied from another renders `COPY
 //!     = source`. The Python rendered `SOURCE = source`, which is not
-//!     an option.
+//!     an option. The mappings of a copied configuration render `ALTER
+//!     MAPPING FOR`, because the copy already maps its tokens and `ADD
+//!     MAPPING FOR` fails on a token that has a mapping.
 //! 25. Text search objects render qualified with their schema. The
 //!     Python rendered bare names, and pg_restore runs with an empty
 //!     `search_path`, so the restore failed with "no schema has been
@@ -186,10 +188,19 @@ pub fn assemble(project: &Project) -> Result<BuildOutput, String> {
         if item.dependencies.is_empty() {
             continue;
         }
+        // a text search container is several entries, and an object
+        // that depends on it waits for the last of them, since the
+        // object it names can be any one of them
         let deps: Vec<i32> = item
             .dependencies
             .iter()
-            .filter_map(|dep| builder.dump_id_map.get(dep).copied())
+            .filter_map(|dep| {
+                builder
+                    .text_search_last
+                    .get(dep)
+                    .or_else(|| builder.dump_id_map.get(dep))
+                    .copied()
+            })
             .collect();
         if let Some(dump_id) = builder.dump_id_map.get(&item.id)
             && let Some(entry) = builder.dump.get_entry_mut(*dump_id)
@@ -2096,12 +2107,20 @@ impl Builder {
                     qualified(&config.name),
                     format!("({value})"),
                 ];
+                // a copy already maps its tokens, and ADD fails on a
+                // mapped token; ALTER sets the mapping either way
+                // (deviation 24)
+                let verb = if config.parser.is_some() {
+                    "ADD"
+                } else {
+                    "ALTER"
+                };
                 for (token, dictionaries) in config.mappings.iter().flatten() {
                     let last = create.len() - 1;
                     create[last].push(';');
                     create.push(format!(
-                        "ALTER TEXT SEARCH CONFIGURATION {} ADD MAPPING FOR \
-                         {} WITH {}",
+                        "ALTER TEXT SEARCH CONFIGURATION {} {verb} MAPPING \
+                         FOR {} WITH {}",
                         qualified(&config.name),
                         quote_ident(token),
                         dictionaries.join(", ")
@@ -4355,6 +4374,100 @@ mod tests {
         );
         assert!(
             render_row_security(&RowLevelSecurity::default(), "t").is_empty()
+        );
+    }
+
+    fn text_search(id: usize, schema: &str, configurations: Value) -> Item {
+        Item {
+            id,
+            desc: ObjectType::TextSearch,
+            definition: Definition::TextSearch(
+                serde_json::from_value(json!({
+                    "schema": schema,
+                    "configurations": configurations,
+                }))
+                .unwrap(),
+            ),
+            dependencies: BTreeSet::new(),
+        }
+    }
+
+    fn text_search_project(inventory: Vec<Item>) -> Project {
+        Project {
+            name: "t".into(),
+            encoding: "UTF8".into(),
+            stdstrings: true,
+            superuser: "postgres".into(),
+            default_schema: "public".into(),
+            path: std::path::PathBuf::new(),
+            inventory,
+        }
+    }
+
+    #[test]
+    fn renders_copied_configuration_mappings_as_alter() {
+        let item = text_search(
+            0,
+            "s",
+            json!([
+                {"name": "copied", "source": "pg_catalog.english",
+                 "mappings": {"asciiword": ["simple"]}},
+                {"name": "parsed", "parser": "pg_catalog.default",
+                 "mappings": {"asciiword": ["simple"]}},
+            ]),
+        );
+        let output = assemble(&text_search_project(vec![item])).unwrap();
+        let defn = |tag: &str| {
+            output
+                .dump
+                .entries()
+                .iter()
+                .find(|e| e.tag.as_deref() == Some(tag))
+                .and_then(|e| e.defn.clone())
+                .expect("a TEXT SEARCH CONFIGURATION entry")
+        };
+        // the copy already maps asciiword, so ADD would fail
+        assert!(
+            defn("copied").contains("ALTER MAPPING FOR asciiword"),
+            "{}",
+            defn("copied")
+        );
+        assert!(
+            defn("parsed").contains("ADD MAPPING FOR asciiword"),
+            "{}",
+            defn("parsed")
+        );
+    }
+
+    #[test]
+    fn dependents_wait_for_the_whole_text_search_container() {
+        let source = text_search(
+            0,
+            "z",
+            json!([
+                {"name": "one", "parser": "pg_catalog.default"},
+                {"name": "two", "parser": "pg_catalog.default"},
+            ]),
+        );
+        let mut copy =
+            text_search(1, "a", json!([{"name": "copy", "source": "z.two"}]));
+        copy.dependencies.insert(0);
+        let output =
+            assemble(&text_search_project(vec![source, copy])).unwrap();
+        let entry = |tag: &str| {
+            output
+                .dump
+                .entries()
+                .iter()
+                .find(|e| e.tag.as_deref() == Some(tag))
+                .cloned()
+                .expect("a TEXT SEARCH CONFIGURATION entry")
+        };
+        // z.two is the last entry of its container, not the first
+        assert!(
+            entry("copy").dependencies.contains(&entry("two").dump_id),
+            "{:?}",
+            entry("copy").dependencies
         );
     }
 }
