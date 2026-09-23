@@ -296,3 +296,44 @@ CREATE TRIGGER searchable_documents_fulltext
     BEFORE INSERT OR UPDATE ON searchable_documents
     FOR EACH ROW EXECUTE FUNCTION
         tsvector_update_trigger(fulltext, 'pg_catalog.english', title, body);
+
+-- btree_gist supplies the GiST operator class a temporal key needs for
+-- its non-range columns; without it PostgreSQL rejects `room INT` in
+-- the WITHOUT OVERLAPS key below.
+CREATE EXTENSION btree_gist;
+
+-- Constraint modifiers PostgreSQL 15 and 18 added. Each changes what
+-- the constraint means, and each was silently dropped on pull before,
+-- so the table round-tripped as a different object.
+CREATE TABLE booking_slots (
+    room     INT NOT NULL,
+    during   DATERANGE NOT NULL,
+    -- WITHOUT OVERLAPS makes the key temporal: two rows may share a
+    -- room as long as their ranges do not overlap
+    CONSTRAINT booking_slots_pkey PRIMARY KEY (room, during WITHOUT OVERLAPS)
+);
+
+CREATE TABLE booking_holds (
+    room     INT,
+    during   DATERANGE,
+    tag_a    INT,
+    tag_b    INT,
+    -- one null equals another here, so at most one (null, null) row
+    CONSTRAINT booking_holds_tags UNIQUE NULLS NOT DISTINCT (tag_a, tag_b),
+    CONSTRAINT booking_holds_span UNIQUE (room, during WITHOUT OVERLAPS),
+    -- a temporal foreign key names its range column on both sides
+    CONSTRAINT booking_holds_slot FOREIGN KEY (room, PERIOD during)
+        REFERENCES booking_slots (room, PERIOD during)
+);
+
+CREATE TABLE ledger_entries (
+    id     INT PRIMARY KEY,
+    amount NUMERIC(12,2),
+    -- NOT ENFORCED records the rule without checking it. PostgreSQL
+    -- marks such a constraint not validated too, and pg_dump writes
+    -- only this clause for it.
+    CONSTRAINT ledger_entries_positive CHECK (amount > 0) NOT ENFORCED
+);
+
+CREATE UNIQUE INDEX booking_holds_room_tag
+    ON booking_holds (room, tag_a) NULLS NOT DISTINCT;

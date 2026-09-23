@@ -160,6 +160,12 @@ impl GeneratedKind {
 pub struct CheckConstraint {
     pub name: String,
     pub expression: String,
+    /// `false` renders `NOT ENFORCED` (PostgreSQL 18+). PostgreSQL
+    /// records a not-enforced constraint as not validated as well, and
+    /// pg_dump writes only the `NOT ENFORCED` clause for it, so this
+    /// one field covers both. Absent means enforced, the default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enforced: Option<bool>,
 }
 
 /// A table-level `NOT NULL <column>` constraint (PostgreSQL 18+).
@@ -187,9 +193,29 @@ pub enum ConstraintColumns {
     Name(String),
     Columns(Vec<String>),
     Detailed {
+        /// The constraint name, kept only when it differs from the one
+        /// PostgreSQL generates, which is also when pg_dump writes it.
+        /// Without it a named unique or primary key constraint rebuilt
+        /// under a generated name, and `deploy` could not reconcile it
+        /// in place, because it matches a constraint by name.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
         columns: Vec<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         include: Option<Vec<String>>,
+        /// `UNIQUE NULLS NOT DISTINCT`, where one null equals another
+        /// (PostgreSQL 15+). PostgreSQL rejects the clause on a
+        /// primary key, whose columns cannot be null.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        nulls_not_distinct: Option<bool>,
+        /// `WITHOUT OVERLAPS` on the last column, which makes the
+        /// constraint temporal (PostgreSQL 18+). The grammar attaches
+        /// it to the column list rather than to a named column, so it
+        /// is a flag: it always applies to the last column, which must
+        /// be a range or multirange. Legal on a primary key and on a
+        /// unique constraint.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        without_overlaps: Option<bool>,
     },
 }
 
@@ -210,6 +236,13 @@ pub struct ForeignKey {
     pub deferrable: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub initially_deferred: Option<bool>,
+    /// The referencing side's range column in a temporal foreign key,
+    /// `FOREIGN KEY (parent, PERIOD valid_at)` (PostgreSQL 18+)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub period: Option<String>,
+    /// `false` renders `NOT ENFORCED`; see [`CheckConstraint::enforced`]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enforced: Option<bool>,
 }
 
 /// Represents the table a Foreign Key references
@@ -218,6 +251,10 @@ pub struct ForeignKey {
 pub struct ForeignKeyReference {
     pub name: String,
     pub columns: Vec<String>,
+    /// The referenced side's range column in a temporal foreign key,
+    /// `REFERENCES t (id, PERIOD valid_at)` (PostgreSQL 18+)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub period: Option<String>,
 }
 
 /// Represents an Index on a table
@@ -241,6 +278,9 @@ pub struct Index {
     pub include: Option<Vec<String>>,
     #[serde(rename = "where", skip_serializing_if = "Option::is_none")]
     pub where_clause: Option<String>,
+    /// `NULLS NOT DISTINCT` on a unique index (PostgreSQL 15+)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nulls_not_distinct: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub storage_parameters: Option<Map<String, Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]

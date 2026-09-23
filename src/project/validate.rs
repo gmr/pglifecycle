@@ -119,6 +119,28 @@ mod tests {
         assert!(!validate_object("schema", "bad", &data));
     }
 
+    /// PostgreSQL rejects PERIOD on one side of a foreign key only
+    #[test]
+    fn foreign_key_period_needs_both_sides() {
+        let fk = |period: Option<&str>, ref_period: Option<&str>| {
+            let mut data = json!({
+                "columns": ["id", "valid"],
+                "references": {"name": "public.p", "columns": ["id"]},
+            });
+            if let Some(p) = period {
+                data["period"] = json!(p);
+            }
+            if let Some(p) = ref_period {
+                data["references"]["period"] = json!(p);
+            }
+            validate_object("foreign_key", "fk", &data)
+        };
+        assert!(fk(None, None));
+        assert!(fk(Some("valid"), Some("valid")));
+        assert!(!fk(Some("valid"), None));
+        assert!(!fk(None, Some("valid")));
+    }
+
     #[test]
     fn merges_package_schemas() {
         // casts.yml composes cast.yml via $package_schema

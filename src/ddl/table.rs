@@ -316,6 +316,10 @@ pub(crate) fn create_index(
             .map(|n| unquote(n.text(src))),
         columns: (!columns.is_empty()).then_some(columns),
         include: node.find("opt_c_include").map(|n| column_elems(&n, src)),
+        nulls_not_distinct: node
+            .child_of_kind("opt_unique_null_treatment")
+            .map(|n| n.has("kw_not"))
+            .filter(|not_distinct| *not_distinct),
         where_clause: node
             .child_of_kind("where_clause")
             .and_then(|n| n.find("a_expr"))
@@ -465,17 +469,17 @@ pub(crate) fn table_constraint(
             name.clone().unwrap_or_default(),
         )?),
         Some("kw_primary") => {
-            TableConstraint::PrimaryKey(constraint_columns(&elem, src))
+            TableConstraint::PrimaryKey(constraint_columns(&elem, src, &name))
         }
         Some("kw_unique") => {
-            TableConstraint::Unique(constraint_columns(&elem, src))
+            TableConstraint::Unique(constraint_columns(&elem, src, &name))
         }
         Some("kw_check") => {
             let expression = elem
                 .child_of_kind("a_expr")
                 .map(|n| n.text(src).to_string())
                 .ok_or_else(|| String::from("CHECK without an expression"))?;
-            TableConstraint::Check(expression)
+            TableConstraint::Check(expression, enforced(&elem))
         }
         Some("kw_not") => {
             let column = elem
@@ -498,18 +502,51 @@ pub(crate) fn table_constraint(
     Ok((name, constraint))
 }
 
-fn constraint_columns(elem: &Node, src: &str) -> ConstraintColumns {
+/// `ENFORCED` / `NOT ENFORCED` from a constraint's attribute spec.
+/// `None` means the clause is absent, which is enforced, the default.
+/// PostgreSQL accepts the clause on CHECK and FOREIGN KEY only, so no
+/// other constraint reads it.
+fn enforced(elem: &Node) -> Option<bool> {
+    elem.child_of_kind("ConstraintAttributeSpec")?
+        .find_all("ConstraintAttributeElem")
+        .iter()
+        .find(|e| e.has("kw_enforced"))
+        .map(|e| !e.has("kw_not"))
+}
+
+fn constraint_columns(
+    elem: &Node,
+    src: &str,
+    name: &Option<String>,
+) -> ConstraintColumns {
     let columns = column_list(elem, src);
     let include: Vec<String> = elem
         .find("opt_c_include")
         .map(|n| column_elems(&n, src))
         .unwrap_or_default();
-    if include.is_empty() {
+    // the grammar gives NULLS NOT DISTINCT its own node holding the
+    // keywords, so the clause is present either way and only `kw_not`
+    // distinguishes it from the default NULLS DISTINCT
+    let nulls_not_distinct = elem
+        .child_of_kind("opt_unique_null_treatment")
+        .map(|n| n.has("kw_not"))
+        .filter(|not_distinct| *not_distinct);
+    // WITHOUT OVERLAPS carries no column of its own: it always applies
+    // to the last column of the list
+    let without_overlaps = elem.has("opt_without_overlaps").then_some(true);
+    if name.is_none()
+        && include.is_empty()
+        && nulls_not_distinct.is_none()
+        && without_overlaps.is_none()
+    {
         ConstraintColumns::Columns(columns)
     } else {
         ConstraintColumns::Detailed {
+            name: name.clone(),
             columns,
-            include: Some(include),
+            include: (!include.is_empty()).then_some(include),
+            nulls_not_distinct,
+            without_overlaps,
         }
     }
 }
@@ -526,12 +563,27 @@ fn foreign_key(
     name: String,
 ) -> Result<ForeignKey, String> {
     let columns = column_list(elem, src);
+    // a temporal foreign key names its range column after PERIOD on
+    // both sides. The grammar keeps each in its own optionalPeriodName
+    // node, so reading the referenced side with column_elems alone
+    // swept the period column into the ordinary column list and left
+    // the two sides with different arities, which does not restore
+    let period = elem
+        .child_of_kind("optionalPeriodName")
+        .and_then(|n| n.child_of_kind("columnElem"))
+        .map(|n| unquote(n.text(src)));
     let references = elem
         .find("qualified_name")
         .ok_or_else(|| String::from("FOREIGN KEY without a reference"))?;
     let references = qualified_name(&references, src)?;
+    let ref_period = elem
+        .child_of_kind("opt_column_and_period_list")
+        .and_then(|n| n.child_of_kind("optionalPeriodName"))
+        .and_then(|n| n.child_of_kind("columnElem"))
+        .map(|n| unquote(n.text(src)));
     let ref_columns: Vec<String> = elem
         .child_of_kind("opt_column_and_period_list")
+        .and_then(|n| n.child_of_kind("columnList"))
         .map(|n| column_elems(&n, src))
         .unwrap_or_default();
     let spec = elem.child_of_kind("ConstraintAttributeSpec");
@@ -567,6 +619,7 @@ fn foreign_key(
         references: ForeignKeyReference {
             name: references.to_string(),
             columns: ref_columns,
+            period: ref_period,
         },
         match_type: elem.find("key_match").map(|n| {
             if n.has("kw_full") {
@@ -582,7 +635,52 @@ fn foreign_key(
         on_update,
         deferrable,
         initially_deferred,
+        period,
+        enforced: enforced(elem),
     })
+}
+
+/// Drop a primary key or unique constraint's name when it is the one
+/// PostgreSQL generates, `<table>_pkey` or `<table>_<columns>_key`.
+///
+/// pg_dump always writes the name in `ALTER TABLE ... ADD CONSTRAINT`,
+/// unlike a NOT NULL constraint where it writes one only when it is
+/// not the default. Keeping every generated name would put a value in
+/// the project for something nobody chose, and it would churn the
+/// file whenever a column is renamed. The name is then written only
+/// when someone picked it.
+fn drop_generated_name(
+    columns: &mut ConstraintColumns,
+    table: &str,
+    suffix: &str,
+) {
+    let ConstraintColumns::Detailed {
+        name,
+        columns: cols,
+        include,
+        nulls_not_distinct,
+        without_overlaps,
+    } = columns
+    else {
+        return;
+    };
+    let generated = if suffix == "pkey" {
+        format!("{table}_pkey")
+    } else {
+        format!("{table}_{}_key", cols.join("_"))
+    };
+    if name.as_deref() == Some(generated.as_str()) {
+        *name = None;
+    }
+    // with nothing left that the plain list cannot say, collapse back
+    // to it so the file keeps its simpler shape
+    if name.is_none()
+        && include.is_none()
+        && nulls_not_distinct.is_none()
+        && without_overlaps.is_none()
+    {
+        *columns = ConstraintColumns::Columns(std::mem::take(cols));
+    }
 }
 
 /// Merge a parsed constraint into a table model
@@ -592,20 +690,23 @@ pub(crate) fn apply_constraint(
     constraint: TableConstraint,
 ) {
     match constraint {
-        TableConstraint::PrimaryKey(columns) => {
+        TableConstraint::PrimaryKey(mut columns) => {
+            drop_generated_name(&mut columns, &table.name, "pkey");
             table.primary_key = Some(columns);
         }
-        TableConstraint::Unique(columns) => {
+        TableConstraint::Unique(mut columns) => {
+            drop_generated_name(&mut columns, &table.name, "key");
             table
                 .unique_constraints
                 .get_or_insert_default()
                 .push(columns);
         }
-        TableConstraint::Check(expression) => {
+        TableConstraint::Check(expression, enforced) => {
             table.check_constraints.get_or_insert_default().push(
                 CheckConstraint {
                     name: name.unwrap_or_default(),
                     expression,
+                    enforced,
                 },
             );
         }
@@ -1002,6 +1103,55 @@ mod tests {
         assert_eq!(index.where_clause, Some("deleted_at IS NULL".into()));
     }
 
+    /// A generated constraint name is nobody's choice, so it stays out
+    /// of the project file; a chosen one is kept, since rebuilding
+    /// under a different name loses it and `deploy` matches by name.
+    #[test]
+    fn apply_constraint_drops_only_generated_names() {
+        let detailed =
+            |name: &str, columns: &[&str]| ConstraintColumns::Detailed {
+                name: Some(name.into()),
+                columns: columns.iter().map(|c| (*c).to_string()).collect(),
+                include: None,
+                nulls_not_distinct: None,
+                without_overlaps: None,
+            };
+        // the parser's own product, so the shape stays in step with
+        // the model rather than being spelled out again here
+        let Statement::CreateTable(mut table) =
+            parse_one("CREATE TABLE test.users (id integer, email text);")
+        else {
+            panic!("expected CreateTable")
+        };
+        apply_constraint(
+            &mut table,
+            Some("users_pkey".into()),
+            TableConstraint::PrimaryKey(detailed("users_pkey", &["id"])),
+        );
+        assert_eq!(
+            table.primary_key,
+            Some(ConstraintColumns::Columns(vec!["id".into()]))
+        );
+
+        apply_constraint(
+            &mut table,
+            Some("users_email_key".into()),
+            TableConstraint::Unique(detailed("users_email_key", &["email"])),
+        );
+        apply_constraint(
+            &mut table,
+            Some("users_one_email".into()),
+            TableConstraint::Unique(detailed("users_one_email", &["email"])),
+        );
+        assert_eq!(
+            table.unique_constraints,
+            Some(vec![
+                ConstraintColumns::Columns(vec!["email".into()]),
+                detailed("users_one_email", &["email"]),
+            ])
+        );
+    }
+
     #[test]
     fn parses_alter_table_primary_key() {
         let statement = parse_one(
@@ -1018,11 +1168,17 @@ mod tests {
         };
         assert_eq!(table.to_string(), "test.users");
         assert_eq!(name, Some("users_pkey".into()));
+        // the parse keeps the name; apply_constraint drops it when it
+        // is the one PostgreSQL generates, which needs the table
         assert_eq!(
             constraint,
-            TableConstraint::PrimaryKey(ConstraintColumns::Columns(vec![
-                "id".into()
-            ]))
+            TableConstraint::PrimaryKey(ConstraintColumns::Detailed {
+                name: Some("users_pkey".into()),
+                columns: vec!["id".into()],
+                include: None,
+                nulls_not_distinct: None,
+                without_overlaps: None,
+            })
         );
     }
 
@@ -1083,7 +1239,10 @@ mod tests {
             panic!("expected AddConstraint")
         };
         assert_eq!(name, Some("positive".into()));
-        assert_eq!(constraint, TableConstraint::Check("value > 0".into()));
+        assert_eq!(
+            constraint,
+            TableConstraint::Check("value > 0".into(), None)
+        );
     }
 
     /// PostgreSQL 18 dumps a child's NOT NULL on an inherited column
