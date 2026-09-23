@@ -847,6 +847,31 @@ mod tests {
         assert_eq!(loader.project.inventory.len(), 1);
     }
 
+    /// A value written at its default loads as written. The model
+    /// used to read it as absent, which the round-trip check then
+    /// rejected, so `forced: false` or `command: ALL` failed the load
+    #[test]
+    fn written_defaults_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let tables = dir.path().join("tables").join("public");
+        std::fs::create_dir_all(&tables).unwrap();
+        std::fs::write(
+            tables.join("t.yaml"),
+            "owner: postgres\n\
+             columns:\n  - name: id\n    data_type: integer\n\
+             check_constraints:\n  - name: c\n    expression: id > 0\n\
+             \x20   not_valid: false\n\
+             row_level_security:\n  enabled: true\n  forced: false\n\
+             policies:\n  - name: p\n    restrictive: false\n\
+             \x20   command: ALL\n    roles: [public]\n",
+        )
+        .unwrap();
+        let mut loader = Loader::new(dir.path());
+        loader.read_object_files(ObjectType::Table).unwrap();
+        assert_eq!(loader.errors, 0);
+        assert_eq!(loader.project.inventory.len(), 1);
+    }
+
     /// L7: a cast's `dependencies` block is cached under the same tag
     /// `Definition::name()` computes for it, so the edge resolves
     /// instead of being dropped as "missing"

@@ -352,15 +352,13 @@ fn existence_key(
 /// A definition as a JSON value with the fields deploy does not
 /// manage removed and type aliases canonicalized
 fn normalized(definition: &Definition) -> Value {
-    // a table compares in its canonical NOT NULL and policy forms, so
-    // the same constraint written two ways, or the same policies in
-    // another order, is not a change
+    // a table compares in its canonical form, so the same constraint
+    // written two ways, the same policies in another order, or a value
+    // written at its default, is not a change
     let canonical;
     let definition = match definition {
         Definition::Table(table) => {
-            canonical = Definition::Table(
-                table.with_canonical_not_nulls().with_canonical_policies(),
-            );
+            canonical = Definition::Table(table.canonical());
             &canonical
         }
         other => other,

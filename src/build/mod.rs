@@ -795,7 +795,12 @@ impl Builder {
         create.push(d.function.clone().unwrap_or_default());
         // a trigger that is not in the default state is created and then
         // altered, as pg_dump writes it
-        if let Some(state) = &d.enabled {
+        let state = d
+            .enabled
+            .as_deref()
+            .map(str::to_uppercase)
+            .filter(|state| state != "ORIGIN");
+        if let Some(state) = state {
             let state = match state.as_str() {
                 "DISABLED" => "DISABLE",
                 "REPLICA" => "ENABLE REPLICA",
@@ -2749,7 +2754,7 @@ pub(crate) fn render_policy(policy: &Policy, table_name: &str) -> String {
         sql.push_str(" AS RESTRICTIVE");
     }
     if let Some(command) = &policy.command {
-        sql.push_str(&format!(" FOR {command}"));
+        sql.push_str(&format!(" FOR {}", command.to_uppercase()));
     }
     if let Some(roles) = &policy.roles {
         let roles: Vec<String> =

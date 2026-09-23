@@ -197,27 +197,10 @@ pub struct EventTrigger {
     pub function: Option<String>,
     /// When the trigger fires: DISABLED, REPLICA or ALWAYS (ALTER EVENT
     /// TRIGGER). Absent is the default, ORIGIN.
-    #[serde(
-        default,
-        deserialize_with = "event_trigger_enabled",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub enabled: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
-}
-
-/// Read an event trigger state in upper case, keeping ORIGIN, the
-/// default, as absent
-fn event_trigger_enabled<'de, D>(
-    deserializer: D,
-) -> Result<Option<String>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    Ok(Option::<String>::deserialize(deserializer)?
-        .map(|state| state.to_uppercase())
-        .filter(|state| state != "ORIGIN"))
 }
 
 /// An event trigger filter
