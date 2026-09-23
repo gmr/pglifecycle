@@ -2707,7 +2707,11 @@ impl Builder {
             unreachable!()
         };
         if let Some(sql) = &d.sql {
-            return self.add_item(item, vec![sql.clone()], vec![], false);
+            self.add_item(item, vec![sql.clone()], vec![], false)?;
+            for rule in d.rules.as_deref().unwrap_or_default() {
+                self.dump_rule(rule, item, &d.schema, &d.name, &d.owner)?;
+            }
+            return Ok(());
         }
         let mut create = vec!["CREATE".into()];
         if d.recursive == Some(true) {
@@ -4533,6 +4537,57 @@ mod tests {
             "CREATE VIEW public.active_orders WITH (check_option = \
              local, security_barrier = true) AS SELECT 1;\n"
         );
+    }
+
+    /// A view that keeps its definition as raw SQL still gets its rules
+    #[test]
+    fn raw_sql_view_emits_rules() {
+        let item = Item {
+            id: 1,
+            desc: ObjectType::View,
+            definition: Definition::View(View {
+                name: "active_orders".into(),
+                schema: "public".into(),
+                owner: "app".into(),
+                sql: Some(
+                    "CREATE VIEW public.active_orders AS SELECT 1;".into(),
+                ),
+                recursive: None,
+                columns: None,
+                check_option: None,
+                security_barrier: None,
+                query: None,
+                comment: None,
+                rules: Some(vec![crate::models::Rule {
+                    name: "no_delete".into(),
+                    event: "DELETE".into(),
+                    condition: None,
+                    instead: Some(true),
+                    commands: None,
+                    enabled: None,
+                    comment: None,
+                }]),
+            }),
+            dependencies: BTreeSet::new(),
+        };
+        let dump = libpgdump::new("t", "UTF-8", "18.0").unwrap();
+        let mut builder = Builder {
+            dump,
+            dump_id_map: HashMap::new(),
+            text_search_last: HashMap::new(),
+            text_search_ids: HashMap::new(),
+            text_search_refs: Vec::new(),
+            superuser: "postgres".into(),
+        };
+        builder.dump_item(&item).unwrap();
+        let rules: Vec<_> = builder
+            .dump
+            .entries()
+            .iter()
+            .filter(|e| e.desc == libpgdump::ObjectType::Rule)
+            .filter_map(|e| e.tag.clone())
+            .collect();
+        assert_eq!(rules, vec!["active_orders no_delete".to_string()]);
     }
 
     #[test]
