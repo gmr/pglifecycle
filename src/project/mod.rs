@@ -1,6 +1,7 @@
 //! Project loading and validation (ports project.py)
 
 mod load;
+pub(crate) use load::split_sql_name;
 pub mod validate;
 
 use std::path::PathBuf;

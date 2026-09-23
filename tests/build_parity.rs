@@ -536,7 +536,9 @@ fn records_inventory_dependency_edges() {
     //
     // The text search objects of one schema's container are chained,
     // each after the one before, in the order they depend on each
-    // other: parser, template, dictionary, configuration.
+    // other: parser, template, dictionary, configuration. Each one
+    // also waits for the text search objects it names, so
+    // custom_english waits for its parser as well.
     assert_eq!(
         edges,
         vec![
@@ -551,7 +553,8 @@ fn records_inventory_dependency_edges() {
             "TABLE:users -> DOMAIN:bcp47_locale, DOMAIN:email_address, \
              TYPE:user_state",
             "TEXT SEARCH CONFIGURATION:custom_english -> \
-             TEXT SEARCH DICTIONARY:custom_simple",
+             TEXT SEARCH DICTIONARY:custom_simple, \
+             TEXT SEARCH PARSER:custom_default",
             "TEXT SEARCH CONFIGURATION:custom_german -> \
              TEXT SEARCH CONFIGURATION:custom_english",
             "TEXT SEARCH DICTIONARY:custom_simple -> \

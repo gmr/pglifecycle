@@ -305,8 +305,9 @@ impl Loader {
     /// which have to exist before it is created: a table's `INHERITS`
     /// parents and `LIKE` source; the functions an aggregate, cast,
     /// conversion or event trigger calls; the types an aggregate or
-    /// cast uses; a publication's tables and schemas; and the text
-    /// search objects in other schemas that a text search object uses.
+    /// cast uses; and a publication's tables and schemas. Text search
+    /// objects are ordered one by one in the build instead, because a
+    /// container stands for a whole schema and is too coarse to order.
     ///
     /// A pulled project carries only the INHERITS edge in its
     /// `dependencies` block, and never has a `LIKE`, since pg_dump
@@ -385,34 +386,6 @@ impl Loader {
                         references.push((ObjectType::Schema, schema.clone()));
                     }
                 }
-                Definition::TextSearch(t) => {
-                    // text search objects are keyed by their schema's
-                    // container, so a name in another schema orders this
-                    // container after that one
-                    let names = t
-                        .configurations
-                        .iter()
-                        .flatten()
-                        .flat_map(|c| {
-                            c.parser.iter().chain(c.source.iter()).chain(
-                                c.mappings.iter().flatten().flat_map(
-                                    |(_, dictionaries)| dictionaries.iter(),
-                                ),
-                            )
-                        })
-                        .chain(
-                            t.dictionaries
-                                .iter()
-                                .flatten()
-                                .filter_map(|d| d.template.as_ref()),
-                        );
-                    for name in names {
-                        let (schema, _) = split_sql_name(name);
-                        if !schema.is_empty() {
-                            references.push((ObjectType::TextSearch, schema));
-                        }
-                    }
-                }
                 _ => {}
             }
             for (desc, reference) in references {
@@ -424,7 +397,6 @@ impl Loader {
                     ObjectType::Schema => {
                         (String::new(), reference.to_string())
                     }
-                    ObjectType::TextSearch => (tag.clone(), tag),
                     _ if namespace.is_empty() => (own_schema.to_string(), tag),
                     _ => (namespace, tag),
                 };
@@ -448,22 +420,8 @@ impl Loader {
                 }
             }
         }
-        // a text search container stands for a whole schema, so two
-        // schemas that each name an object of the other make a cycle
-        // with no object cycle behind it. libpgdump breaks a cycle by
-        // moving its members ahead of the CREATE SCHEMA they need
-        // (gmr/libpgdump#14), so drop both edges of such a pair.
-        let pairs: std::collections::HashSet<(usize, usize)> =
-            edges.iter().copied().collect();
         for (id, parent) in edges {
-            let inventory = &mut self.project.inventory;
-            if inventory[id].desc == ObjectType::TextSearch
-                && inventory[parent].desc == ObjectType::TextSearch
-                && pairs.contains(&(parent, id))
-            {
-                continue;
-            }
-            inventory[id].dependencies.insert(parent);
+            self.project.inventory[id].dependencies.insert(parent);
         }
     }
 
@@ -765,7 +723,7 @@ fn split_name(value: &str) -> (String, String) {
 /// it, into the names the index keys on. A quoted part loses its
 /// quotes and may contain a dot; an unquoted part is kept as written,
 /// as [`split_name`] keeps it.
-fn split_sql_name(value: &str) -> (String, String) {
+pub(crate) fn split_sql_name(value: &str) -> (String, String) {
     let mut parts = vec![String::new()];
     let mut quoted = false;
     let mut chars = value.chars().peekable();
@@ -1040,38 +998,6 @@ mod tests {
         assert!(loader.project.inventory[3].dependencies.is_empty());
         // a quoted reference resolves to the unquoted name
         assert_eq!(loader.project.inventory[4].dependencies, [0].into());
-    }
-
-    /// Two text search containers that each name an object of the
-    /// other have no object cycle, but edges both ways make a cycle
-    /// that breaks the restore, so the pair orders nothing. An edge
-    /// with no reverse edge is kept.
-    #[test]
-    fn mutual_text_search_edges_are_dropped() {
-        let mut loader = Loader::new(Path::new("."));
-        for (schema, parser) in
-            [("a", "b.prs"), ("b", "a.prs"), ("c", "a.prs")]
-        {
-            loader.add_definition(
-                ObjectType::TextSearch,
-                json!({
-                    "schema": schema,
-                    "configurations": [{"name": "cfg", "parser": parser}],
-                }),
-                None,
-            );
-        }
-        for (id, schema) in ["a", "b", "c"].into_iter().enumerate() {
-            loader.index.insert(
-                index_key(ObjectType::TextSearch, Some(schema), schema),
-                vec![id],
-            );
-        }
-        loader.apply_structural_dependencies();
-
-        assert!(loader.project.inventory[0].dependencies.is_empty());
-        assert!(loader.project.inventory[1].dependencies.is_empty());
-        assert_eq!(loader.project.inventory[2].dependencies, [0].into());
     }
 
     /// Overloads are distinct objects: pull writes them to `f.yaml`
