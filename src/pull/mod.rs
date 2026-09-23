@@ -1494,18 +1494,9 @@ impl Assembly {
                 .map(|v| v.comment = Some(comment.clone()))
                 .is_some(),
             "FUNCTION" => self.apply_function_comment(&schema, name, &comment),
-            // pg_dump writes a procedure's IN modes, which the identity
-            // signature leaves out, as it does for a function
-            "PROCEDURE" => self
-                .procedures
-                .iter_mut()
-                .find(|p| {
-                    p.schema == schema
-                        && p.identity()
-                            == name.replace("(IN ", "(").replace(", IN ", ", ")
-                })
-                .map(|p| p.comment = Some(comment.clone()))
-                .is_some(),
+            "PROCEDURE" => {
+                self.apply_procedure_comment(&schema, name, &comment)
+            }
             "OPERATOR" => self
                 .operators
                 .iter_mut()
@@ -1637,6 +1628,38 @@ impl Assembly {
         }
         first
             .map(|f| f.comment = Some(comment.to_string()))
+            .is_some()
+    }
+
+    /// As [`Self::apply_function_comment`], for a procedure. pg_dump
+    /// writes a procedure's IN modes, which the identity signature
+    /// leaves out, as it does for a function.
+    fn apply_procedure_comment(
+        &mut self,
+        schema: &str,
+        name: &str,
+        comment: &str,
+    ) -> bool {
+        let signature = name.replace("(IN ", "(").replace(", IN ", ", ");
+        if let Some(procedure) = self
+            .procedures
+            .iter_mut()
+            .find(|p| p.schema == schema && p.identity() == signature)
+        {
+            procedure.comment = Some(comment.to_string());
+            return true;
+        }
+        let base = name.split('(').next().unwrap_or(name);
+        let mut candidates = self
+            .procedures
+            .iter_mut()
+            .filter(|p| p.schema == schema && p.name == base);
+        let first = candidates.next();
+        if candidates.next().is_some() {
+            return false;
+        }
+        first
+            .map(|p| p.comment = Some(comment.to_string()))
             .is_some()
     }
 
@@ -2537,6 +2560,38 @@ mod tests {
                 other => panic!("unexpected parameter type {other}"),
             }
         }
+    }
+
+    #[test]
+    fn procedure_comments_fall_back_to_the_name() {
+        let mut dump = libpgdump::new("fixtures", "UTF8", "18.0").unwrap();
+        add(&mut dump, OT::Schema, "", "test", "CREATE SCHEMA test;");
+        add(
+            &mut dump,
+            OT::Procedure,
+            "test",
+            "archive(IN \"Days\" integer)",
+            "CREATE PROCEDURE test.archive(IN \"Days\" integer) \
+             LANGUAGE sql AS $$ SELECT 1 $$;",
+        );
+        // the quoted parameter name does not match the identity
+        // signature, so the unambiguous name match applies
+        add(
+            &mut dump,
+            OT::Comment,
+            "test",
+            "PROCEDURE archive(IN \"Days\" integer)",
+            "COMMENT ON PROCEDURE test.archive(IN \"Days\" integer) \
+             IS 'archives rows';",
+        );
+        let mut assembly = Assembly::default();
+        assembly.ingest(&dump).unwrap();
+        assert_eq!(assembly.procedures.len(), 1);
+        assert_eq!(assembly.procedures[0].identity(), "archive(Days integer)");
+        assert_eq!(
+            assembly.procedures[0].comment.as_deref(),
+            Some("archives rows")
+        );
     }
 
     #[test]
