@@ -147,7 +147,7 @@ mod tests {
     fn revocation_cannot_set_with_grant_option() {
         let defaults = |grant_option: Option<bool>| {
             let mut declaration = json!({
-                "object_type": "TABLES", "grantee": "PUBLIC",
+                "object_type": "TABLES", "grantee": "reader",
                 "privileges": ["SELECT"],
             });
             if let Some(value) = grant_option {
@@ -163,14 +163,32 @@ mod tests {
         assert!(defaults(None));
         assert!(defaults(Some(false)));
         assert!(!defaults(Some(true)));
-        // a grant may still carry the option
+        // a grant to a role may still carry the option
         let grant = json!({
             "name": "app",
-            "grants": [{"object_type": "TABLES", "grantee": "PUBLIC",
+            "grants": [{"object_type": "TABLES", "grantee": "reader",
                         "privileges": ["SELECT"],
                         "with_grant_option": true}],
         });
         assert!(validate_object("default_privileges", "app", &grant));
+    }
+
+    /// PostgreSQL does not give grant options to PUBLIC
+    #[test]
+    fn public_cannot_get_grant_option() {
+        let grant = |grantee: &str, grant_option: bool| {
+            let data = json!({
+                "name": "app",
+                "grants": [{"object_type": "TABLES", "grantee": grantee,
+                            "privileges": ["SELECT"],
+                            "with_grant_option": grant_option}],
+            });
+            validate_object("default_privileges", "app", &data)
+        };
+        assert!(grant("PUBLIC", false));
+        assert!(!grant("PUBLIC", true));
+        assert!(!grant("public", true));
+        assert!(grant("reader", true));
     }
 
     #[test]

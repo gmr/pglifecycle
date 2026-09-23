@@ -29,9 +29,17 @@ $defs:
         minItems: 1
       with_grant_option:
         title: With Grant Option
+        description: PostgreSQL does not give grant options to PUBLIC
         type: boolean
     required: [object_type, grantee, privileges]
     additionalProperties: false
+    not:
+      properties:
+        grantee:
+          pattern: '^[Pp][Uu][Bb][Ll][Ii][Cc]$'
+        with_grant_option:
+          const: true
+      required: [grantee, with_grant_option]
 type: object
 properties:
   name:

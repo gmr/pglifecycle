@@ -739,8 +739,16 @@ impl Assembly {
                         });
                     }
                     // a partition keeps its own replica identity, which
-                    // would be lost in the same way
-                    if child.replica_identity.is_some() {
+                    // would be lost in the same way; keep its statement
+                    if let Some(sql) = crate::build::render_replica_identity(
+                        child.replica_identity.as_ref(),
+                        &format!(
+                            "{}.{}",
+                            crate::utils::quote_ident(&partition.schema),
+                            crate::utils::quote_ident(&partition.name)
+                        ),
+                        |_| true,
+                    ) {
                         log::warn!(
                             "Cannot model replica identity of partition \
                              {}.{}",
@@ -751,7 +759,7 @@ impl Assembly {
                             desc: String::from("REPLICA IDENTITY"),
                             namespace: Some(partition.schema.clone()),
                             tag: Some(partition.name.clone()),
-                            defn: None,
+                            defn: Some(format!("{sql};")),
                         });
                     }
                     removed.insert(key);
@@ -2880,18 +2888,27 @@ mod tests {
         let mut assembly = Assembly::default();
         assembly.ingest(&dump).unwrap();
         assert_eq!(assembly.tables.len(), 1);
-        assert!(
-            assembly
-                .remaining
-                .iter()
-                .any(|r| r.desc == "REPLICA IDENTITY"
-                    && r.tag.as_deref() == Some("events_2024")),
-            "{:?}",
-            assembly
-                .remaining
-                .iter()
-                .map(|r| (&r.desc, &r.tag))
-                .collect::<Vec<_>>()
+        let entry = assembly
+            .remaining
+            .iter()
+            .find(|r| {
+                r.desc == "REPLICA IDENTITY"
+                    && r.tag.as_deref() == Some("events_2024")
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "{:?}",
+                    assembly
+                        .remaining
+                        .iter()
+                        .map(|r| (&r.desc, &r.tag))
+                        .collect::<Vec<_>>()
+                )
+            });
+        // the statement is kept, so the mode is not lost
+        assert_eq!(
+            entry.defn.as_deref(),
+            Some("ALTER TABLE ONLY test.events_2024 REPLICA IDENTITY FULL;")
         );
     }
 
