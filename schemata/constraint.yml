@@ -16,3 +16,11 @@ properties:
       being checked. PostgreSQL records a not-enforced constraint as not
       validated as well. Absent means enforced, the default.
     type: boolean
+  not_valid:
+    title: Not Valid
+    description: >
+      true renders NOT VALID: rows already in the table were never
+      checked, only new ones are. The state holds only when the
+      constraint is added with ALTER TABLE, so the build writes it
+      that way. Absent means valid, the default.
+    type: boolean

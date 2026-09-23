@@ -1,7 +1,6 @@
 # Coverage plan: silent schema loss, RLS, and PostgreSQL 18
 
-Status: Phases 0, 1 and 2 complete, Phase 3 partly. Phases 4-8
-proposed.
+Status: Phases 0 to 3 complete. Phases 4-8 proposed.
 Written 2026-09-21.
 
 Every claim below was verified against PostgreSQL 18.4 (the version
@@ -288,23 +287,25 @@ takes arguments.
    because of it — see Phase 8. This also restores the constraint
    name, which the inline form dropped.
 
-### Phase 3 — Silent semantic corruption (~2 days, partly done)
+### Phase 3 — Silent semantic corruption — **DONE**
 
 **Done:** A1 (`enforced`), A4 (`nulls_not_distinct`), A5
 (`without_overlaps`) and A6 (`period`), plus constraint names, which
-the fixture for A5 exposed as a separate loss. **Left:** A2 and A3
-(`not_valid`), and identity columns.
+the fixture for A5 exposed as a separate loss; identity columns (item
+2); A2 and A3, `not_valid` (item 1); and the `LIKE` edge (item 3).
 
-`not_valid` is split out because it cannot be tested the way the
-others can. Verified against 18.4: an inline `CHECK ... NOT VALID` in
-`CREATE TABLE` is *silently validated* (`convalidated = t`), and
-pg_dump correctly omits the clause, so a schema-only fixture cannot
-carry one. A real `NOT VALID` constraint needs rows that violate it,
-which makes it a different kind of fixture change. Also verified: an
-inline `NOT NULL NOT VALID` and a column-level `REFERENCES ... NOT
-VALID` are both syntax errors, so `not_valid` belongs only on the
-table-level forms — `CheckConstraint`, `ForeignKey` and
-`NotNullConstraint`, and not on `ColumnNotNull`.
+**Correction.** An earlier version of this section, and the #75
+description, said a `NOT VALID` fixture needs rows that violate the
+constraint. That is wrong. Verified against 18.4: `ALTER TABLE ... ADD
+CONSTRAINT ... NOT VALID` records `convalidated = f` on an *empty*
+table. What loses the state is the inline form — `CREATE TABLE` checks
+the new table, finds nothing, and records the constraint valid, for
+CHECK and for a table-level NOT NULL alike. So the fixture needs no
+rows, only ALTERs, and the build has to emit these constraints the same
+way (deviation 19). Still true: an inline `NOT NULL NOT VALID` and a
+column-level `REFERENCES ... NOT VALID` are syntax errors, so
+`not_valid` is on `CheckConstraint`, `ForeignKey` and
+`NotNullConstraint` only.
 
 
 One commit per row. Each touches `src/ddl/table.rs`,
@@ -313,21 +314,63 @@ and `fixtures/schema.sql`. `deploy` needs no new comparison logic: the
 diff normalizes `Definition` to JSON, so a new optional field is picked
 up once it round-trips.
 
-1. `not_valid: Option<bool>` on `CheckConstraint`, `ForeignKey` and
-   `NotNullConstraint` (A2, A3).
-2. Identity columns: add `Statement::AddIdentity { table, column,
-   behavior, sequence_options }` plus an `alter_table_cmd` arm for `ADD
-   GENERATED ... AS IDENTITY (...)`, merged onto the already-ingested
-   column the way `SetColumnDefault` is, including the `deferred_*`
-   replay path, and suppress the standalone `Sequence` object pg_dump
-   emits for it. Extract the option fields shared with
-   `models::Sequence` (`data_type`, `increment_by`, `min_value`,
-   `max_value`, `start_with`, `cache`, `cycle`) into a
-   `SequenceOptions` struct and nest it under `ColumnGenerated` — the
-   two existing string fields cannot carry them. A merge whose table or
-   column was never assembled must fail loudly, not fall through to
-   `remaining`.
-3. Nothing records a dependency edge for `LIKE`. `CREATE TABLE x (LIKE
+1. **`not_valid` — done.** On `CheckConstraint`, `ForeignKey` and
+   `NotNullConstraint`. The build writes a NOT VALID CHECK or NOT NULL
+   as its own `CHECK CONSTRAINT` or `CONSTRAINT` entry, as pg_dump does,
+   and a foreign key already had one. Three things the deploy side
+   needed:
+   - **`VALIDATE CONSTRAINT`**, not drop and re-add, when the repo
+     clears `not_valid`. NOT VALID exists so a large table need not be
+     scanned and locked at once, and the ADD would do exactly that.
+   - **One renderer each** for a CHECK and a NOT NULL constraint,
+     shared by CREATE TABLE, the separate entry and deploy. Deploy kept
+     its own copies, which is how it once lost `NOT ENFORCED`.
+   - **A canonical NOT NULL form.** A valid NOT NULL on a local column
+     is written on the column; pg_dump uses the table-level form only
+     for an inherited column or a NOT VALID one. Clearing `not_valid`
+     in a pulled project left the table-level form on a local column,
+     which never compared equal to the database once validated, so
+     deploy dropped and re-added it on every run. Deploy now compares
+     `Table::with_canonical_not_nulls`, and a NOT VALID one on a local
+     column is validated before the two sides are made canonical,
+     since that is the one transition that changes how it is written.
+2. **Identity columns — done.** Since Phase 0 `pull` failed on any
+   database with even one identity column, which is most modern
+   schemas. `Statement::AddIdentity` parses pg_dump's `ALTER TABLE ...
+   ADD GENERATED ... AS IDENTITY (...)` and folds it onto the column;
+   `ColumnGenerated.sequence_options` holds a `SequenceOptions` with
+   only the non-default values, and the generated `<table>_<column>_seq`
+   name is dropped. Four deviations from the plan above, each for a
+   reason:
+   - no `deferred_*` replay: pg_dump writes an identity after its
+     table, so a miss means something upstream is wrong, and the entry
+     goes to `remaining` so the pull fails instead of losing it
+   - there is no standalone `Sequence` to suppress: pg_dump's entry is
+     an `ALTER TABLE`, not a `CREATE SEQUENCE`
+   - `models::Sequence` is not restructured: `deny_unknown_fields` does
+     not combine with `#[serde(flatten)]`, so `SequenceOptions` is its
+     own struct and the parse reuses `apply_seq_options`
+   - the sequence name lives in `SequenceOptions`, not in the existing
+     `sequence` field. `test-project` uses `sequence` to name a
+     separately managed sequence that the build never renders; reading
+     it as `SEQUENCE NAME` would create that sequence twice
+   The deploy side was required, not optional. `alter_column` rebuilt a
+   table on any `generated` difference, so a project pulled before this
+   change — every identity missing — would drop and recreate each such
+   table under `--allow-drop`, rows included. Identity now reconciles
+   in place: `ADD GENERATED`, `SET GENERATED`, and `SET` sequence
+   options, all ungated; `DROP IDENTITY` is gated, since the sequence
+   and its position go with it. A sequence rename still falls back to
+   a rebuild.
+3. **Done**, but not where this item said. Adding `like_table` to
+   `table_dependencies` in the pull writer would change nothing, since
+   pull never produces a `like_table`. The project loader now derives
+   the edge from the definition, `apply_structural_dependencies`, for
+   `LIKE` and for `INHERITS` alike: a hand-written INHERITS without a
+   `dependencies` block failed the same way. Measured: the copy sorted
+   ahead of its source and the restore failed; it now restores clean.
+   The original note follows. Nothing records a dependency edge for
+   `LIKE`. `CREATE TABLE x (LIKE
    y ...)` needs `y` to exist first, exactly as `INHERITS` does, and
    the build renders the clause inline (`src/build/mod.rs`, the
    `like_table` arm), but `table_dependencies` in

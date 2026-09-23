@@ -13,10 +13,10 @@ use serde_json::{Map, Value};
 use crate::build;
 use crate::deploy::diff::canonical_type;
 use crate::models::{
-    CheckConstraint, Column, ColumnDefault, ColumnNotNull, Definition, Domain,
-    Extension, ForeignDataWrapper, ForeignKey, Function, Index,
-    NotNullConstraint, Schema, Sequence, Server, Table, Trigger, Type,
-    UserMapping, View, ViewColumn,
+    CheckConstraint, Column, ColumnDefault, ColumnGenerated, ColumnNotNull,
+    Definition, Domain, Extension, ForeignDataWrapper, ForeignKey, Function,
+    Index, NotNullConstraint, Schema, Sequence, SequenceOptions, Server,
+    Table, Trigger, Type, UserMapping, View, ViewColumn,
 };
 use crate::utils::{
     dollar_quote, postgres_value, quote_ident, user_mapping_subject,
@@ -191,6 +191,18 @@ fn view_columns_compatible(repo: &View, db: &View) -> bool {
 }
 
 fn table(repo: &Table, db: &Table) -> Resolution {
+    // Validating a NOT NULL on a local column changes how it is
+    // written, not only its state, so it is found before the two sides
+    // are made canonical: afterwards the repo's copy has moved onto the
+    // column while the database's NOT VALID copy has not
+    let name = qualified(&repo.schema, &repo.name);
+    let mut validations = Vec::new();
+    let db = &validate_local_not_nulls(&name, repo, db, &mut validations);
+    // reconcile canonical forms; see Table::with_canonical_not_nulls
+    let (repo, db) = (
+        &repo.with_canonical_not_nulls(),
+        &db.with_canonical_not_nulls(),
+    );
     // foreign tables (a `server` on either side) reconcile through a
     // dedicated path: only OPTIONS and the comment are alterable in
     // place, everything else rebuilds
@@ -214,8 +226,7 @@ fn table(repo: &Table, db: &Table) -> Resolution {
     {
         return Resolution::Replace;
     }
-    let name = qualified(&repo.schema, &repo.name);
-    let mut alters = Vec::new();
+    let mut alters = validations;
     if !columns(&name, repo, db, &mut alters)
         || !constraints(&name, repo, db, &mut alters)
         || !triggers(&name, repo, db, &mut alters)
@@ -225,6 +236,56 @@ fn table(repo: &Table, db: &Table) -> Resolution {
     indexes(&name, repo, db, &mut alters);
     push_comment(&mut alters, "TABLE", &name, &repo.comment, &db.comment);
     Resolution::Statements(alters)
+}
+
+/// `VALIDATE CONSTRAINT` each NOT VALID table-level NOT NULL on one of
+/// the table's own columns where the repo has the same constraint,
+/// valid; return the database side as it will be once validated.
+///
+/// A valid NOT NULL on a local column is written on the column, so the
+/// repo's copy is compared there, against a database copy that is
+/// still table-level because it is NOT VALID. Left to the comparison,
+/// that pair reads as a new constraint plus a dropped one, and the ADD
+/// collides with the name the existing constraint already holds.
+fn validate_local_not_nulls(
+    table: &str,
+    repo: &Table,
+    db: &Table,
+    alters: &mut Vec<Alter>,
+) -> Table {
+    let wanted = repo.with_canonical_not_nulls();
+    let mut db = db.clone();
+    for not_null in db.not_null_constraints.iter_mut().flatten() {
+        if not_null.not_valid != Some(true) {
+            continue;
+        }
+        let matches = wanted
+            .columns
+            .iter()
+            .flatten()
+            .find(|c| c.name == not_null.column)
+            .is_some_and(|c| {
+                let constraint =
+                    c.not_null_constraint.clone().unwrap_or(ColumnNotNull {
+                        name: None,
+                        no_inherit: None,
+                    });
+                c.nullable == Some(false)
+                    && constraint.name == not_null.name
+                    && constraint.no_inherit == not_null.no_inherit
+            });
+        if matches {
+            let name = not_null.name.clone().unwrap_or_else(|| {
+                format!("{}_{}_not_null", db.name, not_null.column)
+            });
+            alters.push(Alter::new(format!(
+                "ALTER TABLE {table} VALIDATE CONSTRAINT {};\n",
+                quote_ident(&name)
+            )));
+            not_null.not_valid = None;
+        }
+    }
+    db
 }
 
 /// Column reconciliation; returns false where only a rebuild works
@@ -302,15 +363,43 @@ fn alter_column(
     db: &Column,
     alters: &mut Vec<Alter>,
 ) -> bool {
-    // collation, generation, and inline check changes require a
-    // rebuild
+    // collation, expression generation, and inline check changes
+    // require a rebuild. An identity reconciles in place at the end of
+    // this function: falling back to a rebuild there would drop and
+    // recreate the table, and its rows, to change a sequence option.
+    let identities = is_identity_or_none(&repo.generated)
+        && is_identity_or_none(&db.generated);
     if repo.collation != db.collation
-        || repo.generated != db.generated
+        || (!identities && repo.generated != db.generated)
         || repo.check_constraint != db.check_constraint
     {
         return false;
     }
     let column = quote_ident(&repo.name);
+    // DROP IDENTITY goes first: PostgreSQL rejects SET DEFAULT and DROP
+    // NOT NULL on a column that is still an identity. The statements
+    // that depend on the drop are gated with it, so a script without
+    // --allow-drop does not keep them and fail.
+    let drops_identity =
+        identities && repo.generated.is_none() && db.generated.is_some();
+    let dependent = |sql: String| {
+        if drops_identity {
+            Alter::destructive(sql)
+        } else {
+            Alter::new(sql)
+        }
+    };
+    if drops_identity {
+        // Gated even though it keeps every row: the sequence and its
+        // position go with it, so adding the identity back restarts the
+        // numbering and collides with existing keys. A project pulled
+        // before identity columns were modeled has none on any column,
+        // so this is also what keeps a deploy of such a project from
+        // stripping every identity in the database.
+        alters.push(Alter::destructive(format!(
+            "ALTER TABLE {table} ALTER COLUMN {column} DROP IDENTITY;\n"
+        )));
+    }
     if canonical_type(&repo.data_type) != canonical_type(&db.data_type) {
         // a type change may rewrite the table (and can fail outright
         // without a USING clause), so it is gated
@@ -320,7 +409,7 @@ fn alter_column(
         )));
     }
     if repo.default != db.default {
-        alters.push(Alter::new(match &repo.default {
+        alters.push(dependent(match &repo.default {
             Some(default) => format!(
                 "ALTER TABLE {table} ALTER COLUMN {column} SET DEFAULT \
                  {};\n",
@@ -340,7 +429,7 @@ fn alter_column(
     let db_not_null = db.nullable == Some(false);
     if repo_not_null != db_not_null {
         if db_not_null {
-            alters.push(Alter::new(format!(
+            alters.push(dependent(format!(
                 "ALTER TABLE {table} ALTER COLUMN {column} DROP NOT \
                  NULL;\n"
             )));
@@ -391,6 +480,11 @@ fn alter_column(
             )));
         }
     }
+    // last, because ADD GENERATED needs the column NOT NULL and free of
+    // a default, which the statements above may be what establishes
+    if identities && !identity(table, &column, repo, db, alters) {
+        return false;
+    }
     push_comment(
         alters,
         "COLUMN",
@@ -399,6 +493,115 @@ fn alter_column(
         &db.comment,
     );
     true
+}
+
+/// Whether a column's generation is absent or an identity, the two
+/// states [`identity`] reconciles in place. A pulled identity carries
+/// only its behavior; an older project file names a separate sequence
+/// instead.
+fn is_identity_or_none(generated: &Option<ColumnGenerated>) -> bool {
+    generated.as_ref().is_none_or(|g| {
+        g.expression.is_none()
+            && (g.sequence_behavior.is_some() || g.sequence.is_some())
+    })
+}
+
+/// Reconcile an identity column in place: add it, drop it, or change
+/// its behavior and sequence options. Returns false only for a change
+/// of sequence name, which ALTER COLUMN cannot express.
+fn identity(
+    table: &str,
+    column: &str,
+    repo: &Column,
+    db: &Column,
+    alters: &mut Vec<Alter>,
+) -> bool {
+    let default = SequenceOptions::default();
+    match (&repo.generated, &db.generated) {
+        (None, None) => true,
+        (Some(repo), None) => {
+            alters.push(Alter::new(format!(
+                "ALTER TABLE {table} ALTER COLUMN {column} ADD {};\n",
+                build::render_identity(repo)
+            )));
+            true
+        }
+        // alter_column emits the DROP IDENTITY ahead of the default
+        // and nullability statements, which PostgreSQL rejects on an
+        // identity column
+        (None, Some(_)) => true,
+        (Some(repo), Some(db)) => {
+            let repo_options =
+                repo.sequence_options.as_ref().unwrap_or(&default);
+            let db_options = db.sequence_options.as_ref().unwrap_or(&default);
+            if repo_options.name != db_options.name {
+                return false;
+            }
+            let mut sets = Vec::new();
+            if let Some(behavior) = &repo.sequence_behavior
+                && repo.sequence_behavior != db.sequence_behavior
+            {
+                sets.push(format!("SET GENERATED {behavior}"));
+            }
+            sets.extend(sequence_option_changes(repo_options, db_options));
+            if !sets.is_empty() {
+                alters.push(Alter::new(format!(
+                    "ALTER TABLE {table} ALTER COLUMN {column} {};\n",
+                    sets.join(" ")
+                )));
+            }
+            true
+        }
+    }
+}
+
+/// `SET` clauses taking a sequence from `db` to `repo`. An option the
+/// repo leaves out is PostgreSQL's default, so it is set back to that
+/// explicitly rather than skipped; START WITH changes only the value a
+/// RESTART uses, so no existing key is renumbered.
+fn sequence_option_changes(
+    repo: &SequenceOptions,
+    db: &SequenceOptions,
+) -> Vec<String> {
+    let mut sets = Vec::new();
+    let ascending = repo.increment_by.is_none_or(|by| by > 0);
+    if repo.start_with != db.start_with {
+        let start = repo.start_with.unwrap_or(if ascending {
+            repo.min_value.unwrap_or(1)
+        } else {
+            repo.max_value.unwrap_or(-1)
+        });
+        sets.push(format!("SET START WITH {start}"));
+    }
+    if repo.increment_by != db.increment_by {
+        sets.push(format!(
+            "SET INCREMENT BY {}",
+            repo.increment_by.unwrap_or(1)
+        ));
+    }
+    if repo.min_value != db.min_value {
+        sets.push(match repo.min_value {
+            Some(min) => format!("SET MINVALUE {min}"),
+            None => String::from("SET NO MINVALUE"),
+        });
+    }
+    if repo.max_value != db.max_value {
+        sets.push(match repo.max_value {
+            Some(max) => format!("SET MAXVALUE {max}"),
+            None => String::from("SET NO MAXVALUE"),
+        });
+    }
+    if repo.cache != db.cache {
+        sets.push(format!("SET CACHE {}", repo.cache.unwrap_or(1)));
+    }
+    if repo.cycle != db.cycle {
+        sets.push(if repo.cycle == Some(true) {
+            String::from("SET CYCLE")
+        } else {
+            String::from("SET NO CYCLE")
+        });
+    }
+    sets
 }
 
 /// Constraint reconciliation. Check constraints and foreign keys are
@@ -433,10 +636,22 @@ fn constraints(
         }
     }
     let repo_checks = repo.check_constraints.as_deref().unwrap_or_default();
-    let db_checks = db.check_constraints.as_deref().unwrap_or_default();
+    let db_checks = validations(
+        table,
+        db.check_constraints.as_deref().unwrap_or_default(),
+        repo_checks,
+        |check: &CheckConstraint| check.name.clone(),
+        |check| check.not_valid == Some(true),
+        |check| CheckConstraint {
+            not_valid: None,
+            ..check.clone()
+        },
+        |check| check.name.clone(),
+        alters,
+    );
     named_pairs(
         alters,
-        db_checks,
+        &db_checks,
         repo_checks,
         |check: &CheckConstraint| check.name.clone(),
         |check| {
@@ -447,14 +662,8 @@ fn constraints(
         },
         |check| {
             format!(
-                "ALTER TABLE {table} ADD CONSTRAINT {} CHECK ({}){};\n",
-                quote_ident(&check.name),
-                check.expression,
-                if check.enforced == Some(false) {
-                    " NOT ENFORCED"
-                } else {
-                    ""
-                }
+                "ALTER TABLE {table} ADD {};\n",
+                build::render_check_constraint(check)
             )
         },
     );
@@ -464,10 +673,27 @@ fn constraints(
     // goes through ALTER COLUMN for the same reason — it needs no name
     let repo_not_null =
         repo.not_null_constraints.as_deref().unwrap_or_default();
-    let db_not_null = db.not_null_constraints.as_deref().unwrap_or_default();
+    let db_not_null = validations(
+        table,
+        db.not_null_constraints.as_deref().unwrap_or_default(),
+        repo_not_null,
+        |not_null: &NotNullConstraint| not_null.column.clone(),
+        |not_null| not_null.not_valid == Some(true),
+        |not_null| NotNullConstraint {
+            not_valid: None,
+            ..not_null.clone()
+        },
+        // an unnamed one carries the name PostgreSQL generates
+        |not_null| {
+            not_null.name.clone().unwrap_or_else(|| {
+                format!("{}_{}_not_null", repo.name, not_null.column)
+            })
+        },
+        alters,
+    );
     named_pairs(
         alters,
-        db_not_null,
+        &db_not_null,
         repo_not_null,
         |not_null: &NotNullConstraint| not_null.column.clone(),
         |not_null| {
@@ -478,17 +704,8 @@ fn constraints(
         },
         |not_null| {
             format!(
-                "ALTER TABLE {table} ADD {}NOT NULL {}{};\n",
-                match &not_null.name {
-                    Some(name) => format!("CONSTRAINT {} ", quote_ident(name)),
-                    None => String::new(),
-                },
-                quote_ident(&not_null.column),
-                if not_null.no_inherit == Some(true) {
-                    " NO INHERIT"
-                } else {
-                    ""
-                }
+                "ALTER TABLE {table} ADD {};\n",
+                build::render_not_null_constraint(not_null)
             )
         },
     );
@@ -516,10 +733,22 @@ fn constraints(
         },
     );
     let repo_fks = repo.foreign_keys.as_deref().unwrap_or_default();
-    let db_fks = db.foreign_keys.as_deref().unwrap_or_default();
+    let db_fks = validations(
+        table,
+        db.foreign_keys.as_deref().unwrap_or_default(),
+        repo_fks,
+        |fk: &ForeignKey| fk.name.clone(),
+        |fk| fk.not_valid == Some(true),
+        |fk| ForeignKey {
+            not_valid: None,
+            ..fk.clone()
+        },
+        |fk| fk.name.clone(),
+        alters,
+    );
     named_pairs(
         alters,
-        db_fks,
+        &db_fks,
         repo_fks,
         |fk: &ForeignKey| fk.name.clone(),
         |fk| {
@@ -537,6 +766,46 @@ fn constraints(
         },
     );
     true
+}
+
+/// Emit `VALIDATE CONSTRAINT` for each database constraint that is NOT
+/// VALID where the repo's is otherwise identical and valid, and return
+/// the database side with those counted as matching, so the pairing
+/// that follows leaves them alone.
+///
+/// Dropping and re-adding would reach the same state, but a NOT VALID
+/// constraint exists so a large table need not be scanned and locked
+/// all at once. The ADD rescans the whole table under a heavier lock
+/// than VALIDATE takes, which is the cost the NOT VALID was avoiding.
+#[allow(clippy::too_many_arguments)]
+fn validations<T: Clone + PartialEq>(
+    table: &str,
+    db: &[T],
+    repo: &[T],
+    key: impl Fn(&T) -> String,
+    is_not_valid: impl Fn(&T) -> bool,
+    as_valid: impl Fn(&T) -> T,
+    name: impl Fn(&T) -> String,
+    alters: &mut Vec<Alter>,
+) -> Vec<T> {
+    db.iter()
+        .map(|existing| {
+            let target = is_not_valid(existing)
+                .then(|| repo.iter().find(|r| key(r) == key(existing)))
+                .flatten()
+                .filter(|r| !is_not_valid(r) && **r == as_valid(existing));
+            match target {
+                Some(target) => {
+                    alters.push(Alter::new(format!(
+                        "ALTER TABLE {table} VALIDATE CONSTRAINT {};\n",
+                        quote_ident(&name(existing))
+                    )));
+                    target.clone()
+                }
+                None => existing.clone(),
+            }
+        })
+        .collect()
 }
 
 /// Reconcile named child objects: drop database-side entries that are
@@ -1261,6 +1530,223 @@ mod tests {
                  (email ~ '@') NOT ENFORCED;\n",
             ]
         );
+    }
+
+    /// Validating a NOT VALID constraint keeps it and runs VALIDATE,
+    /// rather than dropping and re-adding it, which rescans the whole
+    /// table under a heavier lock than VALIDATE takes
+    #[test]
+    fn not_valid_constraints_validate_in_place() {
+        let tables = |not_valid: Option<bool>| {
+            let mut t = base_table();
+            t["columns"] = serde_json::json!([
+                {"name": "id", "data_type": "uuid", "nullable": false},
+                {"name": "email", "data_type": "text"},
+                {"name": "owner", "data_type": "uuid"},
+            ]);
+            t["check_constraints"] = serde_json::json!([
+                {"name": "email_has_at", "expression": "email ~ '@'",
+                 "not_valid": not_valid},
+            ]);
+            t["foreign_keys"] = serde_json::json!([
+                {"name": "users_owner", "columns": ["owner"],
+                 "references": {"name": "test.users", "columns": ["id"]},
+                 "not_valid": not_valid},
+            ]);
+            // a local column's NOT NULL: table-level only while NOT VALID
+            if not_valid == Some(true) {
+                t["not_null_constraints"] = serde_json::json!([
+                    {"name": "users_email_nn", "column": "email",
+                     "not_valid": true},
+                ]);
+            } else {
+                t["columns"][1]["nullable"] = serde_json::json!(false);
+                t["columns"][1]["not_null_constraint"] =
+                    serde_json::json!({"name": "users_email_nn"});
+            }
+            // null not_valid means absent, as a pull writes it
+            let mut value = t;
+            for key in ["check_constraints", "foreign_keys"] {
+                for c in value[key].as_array_mut().unwrap() {
+                    if c["not_valid"].is_null() {
+                        c.as_object_mut().unwrap().remove("not_valid");
+                    }
+                }
+            }
+            parse_table(value)
+        };
+        let alters = statements(table(&tables(None), &tables(Some(true))));
+        let mut got = sql(&alters);
+        got.sort_unstable();
+        assert_eq!(
+            got,
+            vec![
+                "ALTER TABLE test.users VALIDATE CONSTRAINT email_has_at;\n",
+                "ALTER TABLE test.users VALIDATE CONSTRAINT users_email_nn;\n",
+                "ALTER TABLE test.users VALIDATE CONSTRAINT users_owner;\n",
+            ]
+        );
+        assert!(alters.iter().all(|a| !a.destructive));
+    }
+
+    /// A valid table-level NOT NULL on a local column is the constraint
+    /// the database reports on the column, written the other way, so
+    /// the two are not a change
+    #[test]
+    fn local_not_null_written_either_way_is_not_a_change() {
+        let mut repo = base_table();
+        repo["columns"] = serde_json::json!([
+            {"name": "id", "data_type": "uuid", "nullable": false},
+            {"name": "email", "data_type": "text"},
+        ]);
+        repo["not_null_constraints"] = serde_json::json!([
+            {"name": "users_email_nn", "column": "email"},
+        ]);
+        let mut db = base_table();
+        db["columns"] = serde_json::json!([
+            {"name": "id", "data_type": "uuid", "nullable": false},
+            {"name": "email", "data_type": "text", "nullable": false,
+             "not_null_constraint": {"name": "users_email_nn"}},
+        ]);
+        assert!(
+            statements(table(&parse_table(repo), &parse_table(db))).is_empty()
+        );
+    }
+
+    /// `base_table` with its `id` column's generation set, or cleared
+    /// when `generated` is null
+    fn with_id_generation(generated: serde_json::Value) -> Table {
+        let mut t = base_table();
+        let mut id = serde_json::json!(
+            {"name": "id", "data_type": "integer", "nullable": false}
+        );
+        if !generated.is_null() {
+            id["generated"] = generated;
+        }
+        t["columns"] = serde_json::json!([id]);
+        parse_table(t)
+    }
+
+    /// An identity changes in place. Before this, any difference in
+    /// `generated` rebuilt the table, which drops its rows to change a
+    /// sequence option.
+    #[test]
+    fn identity_changes_in_place() {
+        let repo = with_id_generation(serde_json::json!({
+            "sequence_behavior": "BY DEFAULT",
+            "sequence_options": {"start_with": 100, "increment_by": 5,
+                                 "cycle": true},
+        }));
+        let db = with_id_generation(
+            serde_json::json!({"sequence_behavior": "ALWAYS"}),
+        );
+        let alters = statements(table(&repo, &db));
+        assert_eq!(
+            sql(&alters),
+            vec![
+                "ALTER TABLE test.users ALTER COLUMN id SET GENERATED BY \
+                 DEFAULT SET START WITH 100 SET INCREMENT BY 5 SET CYCLE;\n"
+            ]
+        );
+        assert!(!alters[0].destructive);
+    }
+
+    /// An option the repo leaves out is PostgreSQL's default, so it is
+    /// set back explicitly rather than left as the database has it
+    #[test]
+    fn identity_resets_an_omitted_option_to_its_default() {
+        let repo = with_id_generation(
+            serde_json::json!({"sequence_behavior": "ALWAYS"}),
+        );
+        let db = with_id_generation(serde_json::json!({
+            "sequence_behavior": "ALWAYS",
+            "sequence_options": {"start_with": 100, "max_value": 900,
+                                 "cache": 20, "cycle": true},
+        }));
+        assert_eq!(
+            sql(&statements(table(&repo, &db))),
+            vec![
+                "ALTER TABLE test.users ALTER COLUMN id SET START WITH 1 SET \
+                 NO MAXVALUE SET CACHE 1 SET NO CYCLE;\n"
+            ]
+        );
+    }
+
+    #[test]
+    fn identity_is_added_in_place() {
+        let repo = with_id_generation(serde_json::json!({
+            "sequence_behavior": "ALWAYS",
+            "sequence_options": {"start_with": 10},
+        }));
+        let db = with_id_generation(serde_json::Value::Null);
+        let alters = statements(table(&repo, &db));
+        assert_eq!(
+            sql(&alters),
+            vec![
+                "ALTER TABLE test.users ALTER COLUMN id ADD GENERATED ALWAYS \
+                 AS IDENTITY (START WITH 10);\n"
+            ]
+        );
+        assert!(!alters[0].destructive);
+    }
+
+    /// Dropping an identity keeps every row but loses the sequence and
+    /// its position, so it is gated. It is also what a project pulled
+    /// before identity columns were modeled asks for on every one of
+    /// them, and the gate is what stops a deploy of such a project from
+    /// stripping them all.
+    #[test]
+    fn identity_drop_is_gated() {
+        let repo = with_id_generation(serde_json::Value::Null);
+        let db = with_id_generation(
+            serde_json::json!({"sequence_behavior": "ALWAYS"}),
+        );
+        let alters = statements(table(&repo, &db));
+        assert_eq!(
+            sql(&alters),
+            vec!["ALTER TABLE test.users ALTER COLUMN id DROP IDENTITY;\n"]
+        );
+        assert!(alters[0].destructive);
+    }
+
+    /// PostgreSQL rejects SET DEFAULT and DROP NOT NULL on an identity
+    /// column, so the drop comes first, and both are gated with it
+    #[test]
+    fn identity_drop_precedes_default_and_nullability() {
+        let mut repo = with_id_generation(serde_json::Value::Null);
+        let column = &mut repo.columns.as_mut().unwrap()[0];
+        column.nullable = None;
+        column.default =
+            Some(serde_json::json!("nextval('test.users_id'::regclass)"));
+        let db = with_id_generation(
+            serde_json::json!({"sequence_behavior": "ALWAYS"}),
+        );
+        let alters = statements(table(&repo, &db));
+        assert_eq!(
+            sql(&alters),
+            vec![
+                "ALTER TABLE test.users ALTER COLUMN id DROP IDENTITY;\n",
+                "ALTER TABLE test.users ALTER COLUMN id SET DEFAULT \
+                 nextval('test.users_id'::regclass);\n",
+                "ALTER TABLE test.users ALTER COLUMN id DROP NOT NULL;\n",
+            ]
+        );
+        assert!(alters.iter().all(|alter| alter.destructive));
+    }
+
+    /// An older project file names a separately managed sequence in
+    /// `sequence` and never renders it, so it matches a pulled identity
+    /// with the same behavior
+    #[test]
+    fn legacy_identity_sequence_name_is_not_a_change() {
+        let repo = with_id_generation(serde_json::json!({
+            "sequence": "users_id",
+            "sequence_behavior": "ALWAYS",
+        }));
+        let db = with_id_generation(
+            serde_json::json!({"sequence_behavior": "ALWAYS"}),
+        );
+        assert!(statements(table(&repo, &db)).is_empty());
     }
 
     /// A NOT NULL rename reconciles even though nullability itself is

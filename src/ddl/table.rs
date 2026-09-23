@@ -5,14 +5,14 @@ use tree_sitter::Node;
 
 use crate::ddl::object::{reloptions, string_value};
 use crate::ddl::{
-    NodeExt, Statement, TableConstraint, any_name, column_elems,
-    qualified_name, unquote,
+    NodeExt, QualifiedName, Statement, TableConstraint, any_name,
+    column_elems, qualified_name, unquote,
 };
 use crate::models::{
     CheckConstraint, Column, ColumnGenerated, ColumnNotNull,
     ConstraintColumns, ForeignKey, ForeignKeyReference, GeneratedKind, Index,
-    IndexColumn, LikeTable, NotNullConstraint, Table, TablePartition,
-    TablePartitionBehavior, TablePartitionColumn,
+    IndexColumn, LikeTable, NotNullConstraint, Sequence, SequenceOptions,
+    Table, TablePartition, TablePartitionBehavior, TablePartitionColumn,
 };
 use crate::utils::quote_ident;
 
@@ -225,19 +225,12 @@ pub(crate) fn column(node: &Node, src: &str) -> Column {
                 column.check_constraint = Some(expr.text(src).to_string());
             }
         } else if constraint.has("kw_identity") {
-            column.generated = Some(ColumnGenerated {
-                expression: None,
-                kind: None,
-                sequence: None,
-                sequence_behavior: Some(
-                    if constraint.has("kw_always") {
-                        "ALWAYS"
-                    } else {
-                        "BY DEFAULT"
-                    }
-                    .to_string(),
-                ),
-            });
+            // the column parser has no table, so a sequence name here
+            // is kept as written rather than compared with the one
+            // PostgreSQL would generate. pg_dump never writes this
+            // inline form; it writes the ALTER TABLE handled below.
+            column.generated =
+                Some(identity(&constraint, src, None, &column.name));
         } else if constraint.has("kw_generated")
             && let Some(expr) = constraint.find("a_expr")
         {
@@ -253,6 +246,7 @@ pub(crate) fn column(node: &Node, src: &str) -> Column {
                 }),
                 sequence: None,
                 sequence_behavior: None,
+                sequence_options: None,
             });
         }
     }
@@ -380,7 +374,25 @@ pub(crate) fn alter_table(
     let table = qualified_name(&table, src)?;
     let mut statements = Vec::new();
     for cmd in node.find_all("alter_table_cmd") {
-        if cmd.has("kw_add") {
+        // ADD GENERATED ... AS IDENTITY carries kw_add too, so it has to
+        // be recognised before the ADD CONSTRAINT arm, which skips any
+        // ADD without a TableConstraint. That skip is how every identity
+        // column used to vanish from a pulled project.
+        if cmd.has("kw_add")
+            && cmd.has("kw_generated")
+            && cmd.has("kw_identity")
+        {
+            let column = cmd
+                .child_of_kind("ColId")
+                .map(|n| unquote(n.text(src)))
+                .unwrap_or_default();
+            let generated = identity(&cmd, src, Some(&table), &column);
+            statements.push(Statement::AddIdentity {
+                table: table.clone(),
+                column,
+                generated,
+            });
+        } else if cmd.has("kw_add") {
             let Some(constraint) = cmd.find("TableConstraint") else {
                 continue;
             };
@@ -442,6 +454,115 @@ pub(crate) fn alter_table(
     Ok(statements)
 }
 
+/// An identity column's generation and sequence options, from either
+/// the inline `GENERATED ... AS IDENTITY (...)` column constraint or the
+/// `ALTER TABLE ... ADD GENERATED ... AS IDENTITY (...)` pg_dump writes.
+/// `table` is known only for the ALTER form, and it lets a sequence name
+/// PostgreSQL generated be dropped.
+fn identity(
+    node: &Node,
+    src: &str,
+    table: Option<&QualifiedName>,
+    column: &str,
+) -> ColumnGenerated {
+    let behavior = if node
+        .child_of_kind("generated_when")
+        .is_some_and(|g| g.has("kw_always"))
+    {
+        "ALWAYS"
+    } else {
+        "BY DEFAULT"
+    };
+    let options = node
+        .child_of_kind("OptParenthesizedSeqOptList")
+        .map(|list| sequence_options(&list, src, table, column))
+        .filter(|options| *options != SequenceOptions::default());
+    ColumnGenerated {
+        expression: None,
+        kind: None,
+        sequence: None,
+        sequence_behavior: Some(behavior.to_string()),
+        sequence_options: options,
+    }
+}
+
+/// The non-default options of an identity column's sequence.
+///
+/// pg_dump writes every option, defaults included — `START WITH 1`,
+/// `INCREMENT BY 1`, `NO MINVALUE`, `NO MAXVALUE`, `CACHE 1` — so
+/// keeping them all would put five values nobody chose into every
+/// identity column, and a hand-written identity that states none would
+/// never compare equal to the one pulled from the database. Only a
+/// value that differs from PostgreSQL's default is kept.
+fn sequence_options(
+    list: &Node,
+    src: &str,
+    table: Option<&QualifiedName>,
+    column: &str,
+) -> SequenceOptions {
+    let mut parsed = Sequence {
+        name: String::new(),
+        schema: String::new(),
+        owner: String::new(),
+        sql: None,
+        data_type: None,
+        increment_by: None,
+        min_value: None,
+        max_value: None,
+        start_with: None,
+        cache: None,
+        cycle: None,
+        owned_by: None,
+        comment: None,
+    };
+    crate::ddl::object::apply_seq_options(&mut parsed, list, src);
+    let name = list
+        .find_all("SeqOptElem")
+        .into_iter()
+        .find(|e| e.has("kw_name"))
+        .and_then(|e| e.child_of_kind("any_name"))
+        .filter(|n| {
+            let name = crate::ddl::any_name(n, src);
+            !is_generated_sequence_name(&name, table, column)
+        })
+        .map(|n| n.text(src).to_string());
+    // an ascending sequence starts at its minimum and a descending one
+    // at its maximum, which default to 1 and -1
+    let ascending = parsed.increment_by.is_none_or(|by| by > 0);
+    let default_start = if ascending {
+        parsed.min_value.unwrap_or(1)
+    } else {
+        parsed.max_value.unwrap_or(-1)
+    };
+    SequenceOptions {
+        name,
+        start_with: parsed.start_with.filter(|start| *start != default_start),
+        increment_by: parsed.increment_by.filter(|by| *by != 1),
+        min_value: parsed.min_value,
+        max_value: parsed.max_value,
+        cache: parsed.cache.filter(|cache| *cache != 1),
+        cycle: parsed.cycle.filter(|cycle| *cycle),
+    }
+}
+
+/// Whether `name` is the `<table>_<column>_seq` PostgreSQL gives an
+/// identity column's sequence, in the table's own schema. Both names
+/// are unquoted, so a quoted `"Orders_id_seq"` matches table `Orders`.
+fn is_generated_sequence_name(
+    name: &QualifiedName,
+    table: Option<&QualifiedName>,
+    column: &str,
+) -> bool {
+    let Some(table) = table else {
+        return false;
+    };
+    name.name == format!("{}_{column}_seq", table.name)
+        && name
+            .schema
+            .as_ref()
+            .is_none_or(|schema| Some(schema) == table.schema.as_ref())
+}
+
 /// Parse a TableConstraint node into (name, constraint)
 pub(crate) fn table_constraint(
     node: &Node,
@@ -479,7 +600,12 @@ pub(crate) fn table_constraint(
                 .child_of_kind("a_expr")
                 .map(|n| n.text(src).to_string())
                 .ok_or_else(|| String::from("CHECK without an expression"))?;
-            TableConstraint::Check(expression, enforced(&elem))
+            TableConstraint::Check(CheckConstraint {
+                name: String::new(),
+                expression,
+                enforced: enforced(&elem),
+                not_valid: not_valid(&elem),
+            })
         }
         Some("kw_not") => {
             let column = elem
@@ -490,6 +616,7 @@ pub(crate) fn table_constraint(
                 name: name.clone(),
                 column,
                 no_inherit: elem.has("kw_inherit").then_some(true),
+                not_valid: not_valid(&elem),
             })
         }
         _ => {
@@ -512,6 +639,16 @@ fn enforced(elem: &Node) -> Option<bool> {
         .iter()
         .find(|e| e.has("kw_enforced"))
         .map(|e| !e.has("kw_not"))
+}
+
+/// `NOT VALID` from a constraint's attribute spec. `None` means valid,
+/// the default; there is no `VALID` keyword to make it `Some(false)`.
+fn not_valid(elem: &Node) -> Option<bool> {
+    elem.child_of_kind("ConstraintAttributeSpec")?
+        .find_all("ConstraintAttributeElem")
+        .iter()
+        .any(|e| e.has("kw_valid") && e.has("kw_not"))
+        .then_some(true)
 }
 
 fn constraint_columns(
@@ -637,6 +774,7 @@ fn foreign_key(
         initially_deferred,
         period,
         enforced: enforced(elem),
+        not_valid: not_valid(elem),
     })
 }
 
@@ -701,19 +839,26 @@ pub(crate) fn apply_constraint(
                 .get_or_insert_default()
                 .push(columns);
         }
-        TableConstraint::Check(expression, enforced) => {
+        TableConstraint::Check(check) => {
             table.check_constraints.get_or_insert_default().push(
                 CheckConstraint {
                     name: name.unwrap_or_default(),
-                    expression,
-                    enforced,
+                    ..check
                 },
             );
         }
         TableConstraint::ForeignKey(fk) => {
             table.foreign_keys.get_or_insert_default().push(fk);
         }
-        TableConstraint::NotNull(not_null) => {
+        TableConstraint::NotNull(mut not_null) => {
+            // pg_dump names a NOT VALID one it adds with ALTER TABLE
+            // even when the name is the generated one, which the model
+            // records as none, as it does inline in CREATE TABLE
+            let generated =
+                format!("{}_{}_not_null", table.name, not_null.column);
+            if not_null.name.as_deref() == Some(generated.as_str()) {
+                not_null.name = None;
+            }
             table
                 .not_null_constraints
                 .get_or_insert_default()
@@ -1045,6 +1190,7 @@ mod tests {
                 kind: None,
                 sequence: None,
                 sequence_behavior: Some("ALWAYS".into()),
+                sequence_options: None,
             })
         );
         assert_eq!(columns[1].check_constraint, Some("total > 0".into()));
@@ -1103,6 +1249,135 @@ mod tests {
         assert_eq!(index.where_clause, Some("deleted_at IS NULL".into()));
     }
 
+    /// pg_dump writes a NOT VALID constraint as its own ALTER TABLE, for
+    /// each of the three kinds that accept the clause
+    #[test]
+    fn parses_not_valid_constraints() {
+        let constraint = |sql: &str| {
+            let Statement::AddConstraint { constraint, .. } = parse_one(sql)
+            else {
+                panic!("expected AddConstraint for {sql}")
+            };
+            constraint
+        };
+        let TableConstraint::Check(check) = constraint(
+            "ALTER TABLE public.t ADD CONSTRAINT t_pos CHECK ((a > 0)) \
+             NOT VALID;",
+        ) else {
+            panic!("expected a CHECK")
+        };
+        assert_eq!(check.not_valid, Some(true));
+        let TableConstraint::ForeignKey(fk) = constraint(
+            "ALTER TABLE ONLY public.t ADD CONSTRAINT t_fk FOREIGN KEY (p) \
+             REFERENCES public.r(id) NOT VALID;",
+        ) else {
+            panic!("expected a FOREIGN KEY")
+        };
+        assert_eq!(fk.not_valid, Some(true));
+        let TableConstraint::NotNull(not_null) = constraint(
+            "ALTER TABLE public.t ADD CONSTRAINT t_nn NOT NULL b NOT VALID;",
+        ) else {
+            panic!("expected a NOT NULL")
+        };
+        assert_eq!(not_null.not_valid, Some(true));
+        // a valid constraint carries no field at all
+        let TableConstraint::Check(valid) = constraint(
+            "ALTER TABLE public.t ADD CONSTRAINT t_pos CHECK ((a > 0));",
+        ) else {
+            panic!("expected a CHECK")
+        };
+        assert_eq!(valid.not_valid, None);
+    }
+
+    /// The statement pg_dump writes for an identity column, which spells
+    /// out every option. Parse it into the column's generation, keeping
+    /// only what differs from PostgreSQL's defaults.
+    fn identity_of(sql: &str) -> ColumnGenerated {
+        let Statement::AddIdentity { generated, .. } = parse_one(sql) else {
+            panic!("expected AddIdentity for {sql}")
+        };
+        generated
+    }
+
+    #[test]
+    fn identity_drops_every_default_pg_dump_spells_out() {
+        let generated = identity_of(
+            "ALTER TABLE public.t ALTER COLUMN id ADD GENERATED ALWAYS AS \
+             IDENTITY (SEQUENCE NAME public.t_id_seq START WITH 1 \
+             INCREMENT BY 1 NO MINVALUE NO MAXVALUE CACHE 1);",
+        );
+        assert_eq!(generated.sequence_behavior, Some("ALWAYS".into()));
+        // the generated name and all five defaults are dropped, so this
+        // equals a hand-written identity that states none of them
+        assert_eq!(generated.sequence_options, None);
+        assert_eq!(generated.sequence, None);
+    }
+
+    #[test]
+    fn identity_keeps_non_default_options() {
+        let generated = identity_of(
+            "ALTER TABLE public.t ALTER COLUMN id ADD GENERATED BY DEFAULT \
+             AS IDENTITY (SEQUENCE NAME public.t_id_seq START WITH 100 \
+             INCREMENT BY 5 NO MINVALUE MAXVALUE 900 CACHE 20 CYCLE);",
+        );
+        assert_eq!(generated.sequence_behavior, Some("BY DEFAULT".into()));
+        assert_eq!(
+            generated.sequence_options,
+            Some(SequenceOptions {
+                name: None,
+                start_with: Some(100),
+                increment_by: Some(5),
+                min_value: None,
+                max_value: Some(900),
+                cache: Some(20),
+                cycle: Some(true),
+            })
+        );
+    }
+
+    #[test]
+    fn identity_keeps_a_chosen_sequence_name() {
+        let generated = identity_of(
+            "ALTER TABLE public.t ALTER COLUMN id ADD GENERATED ALWAYS AS \
+             IDENTITY (SEQUENCE NAME public.custom_ids START WITH 1 \
+             INCREMENT BY 1 NO MINVALUE NO MAXVALUE CACHE 1);",
+        );
+        assert_eq!(
+            generated.sequence_options.and_then(|o| o.name),
+            Some("public.custom_ids".into())
+        );
+    }
+
+    /// A quoted table gives a quoted sequence name, which is still the
+    /// generated one once both names are unquoted
+    #[test]
+    fn identity_drops_a_quoted_generated_name() {
+        let generated = identity_of(
+            "ALTER TABLE public.\"Orders\" ALTER COLUMN id ADD GENERATED \
+             ALWAYS AS IDENTITY (SEQUENCE NAME public.\"Orders_id_seq\" \
+             START WITH 1 INCREMENT BY 1 NO MINVALUE NO MAXVALUE CACHE 1);",
+        );
+        assert_eq!(generated.sequence_options, None);
+    }
+
+    /// A descending sequence starts at its maximum, -1 by default, so
+    /// `START WITH -1` is the default there and `START WITH 1` is not
+    #[test]
+    fn identity_default_start_follows_the_direction() {
+        let generated = identity_of(
+            "ALTER TABLE public.t ALTER COLUMN id ADD GENERATED ALWAYS AS \
+             IDENTITY (SEQUENCE NAME public.t_id_seq START WITH -1 \
+             INCREMENT BY -1 NO MINVALUE NO MAXVALUE CACHE 1);",
+        );
+        assert_eq!(
+            generated.sequence_options,
+            Some(SequenceOptions {
+                increment_by: Some(-1),
+                ..Default::default()
+            })
+        );
+    }
+
     /// A generated constraint name is nobody's choice, so it stays out
     /// of the project file; a chosen one is kept, since rebuilding
     /// under a different name loses it and `deploy` matches by name.
@@ -1148,6 +1423,31 @@ mod tests {
             Some(vec![
                 ConstraintColumns::Columns(vec!["email".into()]),
                 detailed("users_one_email", &["email"]),
+            ])
+        );
+
+        // pg_dump names a NOT VALID NOT NULL it adds with ALTER TABLE
+        let not_null = |name: &str| NotNullConstraint {
+            name: Some(name.into()),
+            column: "email".into(),
+            no_inherit: None,
+            not_valid: Some(true),
+        };
+        for name in ["users_email_not_null", "email_required"] {
+            apply_constraint(
+                &mut table,
+                Some(name.into()),
+                TableConstraint::NotNull(not_null(name)),
+            );
+        }
+        assert_eq!(
+            table.not_null_constraints,
+            Some(vec![
+                NotNullConstraint {
+                    name: None,
+                    ..not_null("users_email_not_null")
+                },
+                not_null("email_required"),
             ])
         );
     }
@@ -1241,7 +1541,12 @@ mod tests {
         assert_eq!(name, Some("positive".into()));
         assert_eq!(
             constraint,
-            TableConstraint::Check("value > 0".into(), None)
+            TableConstraint::Check(CheckConstraint {
+                name: String::new(),
+                expression: "value > 0".into(),
+                enforced: None,
+                not_valid: None,
+            })
         );
     }
 
@@ -1265,11 +1570,13 @@ mod tests {
                     name: None,
                     column: "ts".into(),
                     no_inherit: None,
+                    not_valid: None,
                 },
                 NotNullConstraint {
                     name: Some("ts_nn".into()),
                     column: "sid".into(),
                     no_inherit: None,
+                    not_valid: None,
                 },
             ])
         );
@@ -1289,6 +1596,7 @@ mod tests {
                 name: Some("ts_ni".into()),
                 column: "ts".into(),
                 no_inherit: Some(true),
+                not_valid: None,
             }])
         );
     }

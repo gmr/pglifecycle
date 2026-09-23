@@ -60,6 +60,14 @@ pub enum Statement {
         column: String,
         default: serde_json::Value,
     },
+    /// ALTER TABLE ... ALTER COLUMN ... ADD GENERATED ... AS IDENTITY —
+    /// how pg_dump writes an identity column, as a SEQUENCE entry of its
+    /// own after the table; folded onto the table's column during pull
+    AddIdentity {
+        table: QualifiedName,
+        column: String,
+        generated: models::ColumnGenerated,
+    },
     CreateSchema(models::Schema),
     CreateDomain(models::Domain),
     CreateType(Box<models::Type>),
@@ -163,9 +171,9 @@ pub struct RoleDef {
 pub enum TableConstraint {
     PrimaryKey(models::ConstraintColumns),
     Unique(models::ConstraintColumns),
-    /// A CHECK expression and its `ENFORCED` state, where `None` is
-    /// the default, enforced
-    Check(String, Option<bool>),
+    /// A CHECK constraint; its `name` is filled in when it is applied
+    /// to a table, from the name the statement carries
+    Check(models::CheckConstraint),
     ForeignKey(models::ForeignKey),
     /// `NOT NULL <column>` as a table constraint (PostgreSQL 18+),
     /// which pg_dump emits only for a column the table inherits rather

@@ -92,6 +92,7 @@ impl Loader {
             self.read_object_files(ot)?;
         }
         self.apply_cached_dependencies()?;
+        self.apply_structural_dependencies();
         if self.errors > 0 {
             log::error!("Project load failed with {} errors", self.errors);
             return Err(String::from("Project load failure"));
@@ -297,6 +298,50 @@ impl Loader {
         }
         if let Value::Object(map) = defn {
             map.remove(DEPENDENCIES);
+        }
+    }
+
+    /// Order each table after the tables its own definition says it is
+    /// built from: an `INHERITS` parent and a `LIKE` source both have to
+    /// exist before the table is created.
+    ///
+    /// A pulled project already carries the INHERITS edge in its
+    /// `dependencies` block, and never has a `LIKE` at all, since pg_dump
+    /// expands one into explicit columns. A hand-written project does,
+    /// and nothing required it to declare the edge as well, so the build
+    /// was free to sort the copy ahead of its source and the restore
+    /// failed. The definition already states the relationship, so it is
+    /// read from there. Neither can form a cycle: a table cannot inherit
+    /// from or copy itself, directly or not.
+    fn apply_structural_dependencies(&mut self) {
+        let mut edges = Vec::new();
+        for (id, item) in self.project.inventory.iter().enumerate() {
+            let Definition::Table(table) = &item.definition else {
+                continue;
+            };
+            let sources = table
+                .parents
+                .iter()
+                .flatten()
+                .chain(table.like_table.iter().map(|like| &like.name));
+            for source in sources {
+                let (namespace, tag) = split_sql_name(source);
+                // a source the project does not manage, such as one an
+                // extension owns, orders nothing and is left alone
+                for parent in lookup_items(
+                    &self.index,
+                    ObjectType::Table,
+                    Some(&namespace),
+                    &tag,
+                ) {
+                    if parent != id {
+                        edges.push((id, parent));
+                    }
+                }
+            }
+        }
+        for (id, parent) in edges {
+            self.project.inventory[id].dependencies.insert(parent);
         }
     }
 
@@ -594,6 +639,29 @@ fn split_name(value: &str) -> (String, String) {
     }
 }
 
+/// Split a `schema.table` SQL reference, as INHERITS and LIKE state
+/// it, into the names the index keys on. A quoted part loses its
+/// quotes and may contain a dot; an unquoted part is kept as written,
+/// as [`split_name`] keeps it.
+fn split_sql_name(value: &str) -> (String, String) {
+    let mut parts = vec![String::new()];
+    let mut quoted = false;
+    let mut chars = value.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' if quoted && chars.peek() == Some(&'"') => {
+                chars.next();
+                parts.last_mut().unwrap().push('"');
+            }
+            '"' => quoted = !quoted,
+            '.' if !quoted => parts.push(String::new()),
+            _ => parts.last_mut().unwrap().push(c),
+        }
+    }
+    let tag = parts.pop().unwrap_or_default();
+    (parts.pop().unwrap_or_default(), tag)
+}
+
 /// Drop null-valued keys so explicit YAML nulls compare equal to
 /// omitted optional fields in round-trip verification
 fn strip_nulls(value: Value) -> Value {
@@ -762,6 +830,56 @@ mod tests {
         assert_eq!(loader.project.inventory[2].dependencies, [1].into());
         // `copy` keeps only the LIKE edge on `test.parent`
         assert_eq!(loader.project.inventory[3].dependencies, [1].into());
+    }
+
+    /// A hand-written project that states INHERITS or LIKE and declares
+    /// no `dependencies` block is ordered from the definition itself; a
+    /// source outside the project orders nothing
+    #[test]
+    fn structural_sources_order_their_tables() {
+        let mut loader = Loader::new(Path::new("."));
+        let table = |name: &str, extra: Value| {
+            let mut entry = json!({
+                "name": name, "schema": "test", "owner": "postgres",
+            });
+            for (key, value) in extra.as_object().unwrap() {
+                entry[key] = value.clone();
+            }
+            entry
+        };
+        let columns = json!({"columns": [{"name": "id", "data_type": "int"}]});
+        for entry in [
+            table("source", columns.clone()),
+            table(
+                "child",
+                json!({"parents": ["test.source"],
+                                  "columns": columns["columns"]}),
+            ),
+            table("copy", json!({"like_table": {"name": "test.source"}})),
+            table("elsewhere", json!({"like_table": {"name": "ext.table"}})),
+            table(
+                "quoted",
+                json!({"like_table": {"name": "\"test\".\"Source\""}}),
+            ),
+        ] {
+            loader.add_definition(ObjectType::Table, entry, None);
+        }
+        loader.index.insert(
+            index_key(ObjectType::Table, Some("test"), "source"),
+            vec![0],
+        );
+        loader.index.insert(
+            index_key(ObjectType::Table, Some("test"), "Source"),
+            vec![0],
+        );
+        loader.apply_structural_dependencies();
+
+        assert!(loader.project.inventory[0].dependencies.is_empty());
+        assert_eq!(loader.project.inventory[1].dependencies, [0].into());
+        assert_eq!(loader.project.inventory[2].dependencies, [0].into());
+        assert!(loader.project.inventory[3].dependencies.is_empty());
+        // a quoted reference resolves to the unquoted name
+        assert_eq!(loader.project.inventory[4].dependencies, [0].into());
     }
 
     /// Overloads are distinct objects: pull writes them to `f.yaml`

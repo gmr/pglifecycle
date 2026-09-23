@@ -11,7 +11,6 @@ PUBLICATION	measurements_pub
 PUBLICATION TABLE	unsupported.measurements_pub measurements
 ROW SECURITY	unsupported.documents
 RULE	unsupported.append_only append_only_no_delete
-SEQUENCE	unsupported.documents_id_seq
 STATISTICS	unsupported.measurements_stats
 TABLE	unsupported.documents
 TABLE	unsupported.payloads

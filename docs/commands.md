@@ -82,8 +82,14 @@ reconciled in place where PostgreSQL can express it:
 - **Tables** — add column, set/drop default, set/drop not-null,
   add/drop check constraints and foreign keys, primary-key and unique
   additions, index and trigger create/drop, and comment changes.
-  Dropping a column, changing a column type, reordering columns, and
-  partitioning/storage changes fall back to drop+recreate.
+  Identity columns are added, and their `ALWAYS`/`BY DEFAULT` behavior
+  and sequence options changed, with `ALTER COLUMN`; renaming an
+  identity's sequence falls back. A `NOT VALID` check, foreign key or
+  NOT NULL constraint that the project marks valid is validated with
+  `VALIDATE CONSTRAINT`, which avoids the full scan under a heavy lock
+  that dropping and re-adding it would take. Dropping a column, changing a column
+  type, reordering columns, and partitioning/storage changes fall back
+  to drop+recreate.
 - **Functions and views** — `CREATE OR REPLACE` (a function whose
   return type changed must be dropped first, so it falls back).
 - **Sequences** — a single `ALTER SEQUENCE` of the changed options.
@@ -114,6 +120,14 @@ on stderr and counted in the script header, and `--apply` refuses while
 any are pending. Index, trigger, and constraint drops issued while
 reconciling a table are *not* gated: they lose no data and the project
 is authoritative.
+
+`DROP IDENTITY` is gated although it keeps every row: the sequence goes
+with it, so adding the identity back restarts the numbering and
+collides with existing keys. A project pulled with a version of
+pglifecycle that did not model identity columns has none on any
+column, so deploying it asks for exactly this on each one; the gate is
+what stops that from stripping them. Pull the project again to record
+them.
 
 Ownership is not managed (the script behaves like
 `pg_restore --no-owner`), and roles, users, groups, and tablespaces are

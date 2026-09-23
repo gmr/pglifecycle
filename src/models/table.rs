@@ -1,8 +1,19 @@
 //! Tables and their child objects (columns, constraints, indexes,
 //! triggers, partitioning)
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
+
+/// Read a flag whose only non-default value is `true`, keeping an
+/// explicit `false` as absent. Absent and `false` then compare equal
+/// to the value pulled from the database, which records only `true`,
+/// and deploy sees no change where there is none.
+fn true_or_none<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Option::<bool>::deserialize(deserializer)?.filter(|value| *value))
+}
 
 /// Represents a table
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -61,6 +72,49 @@ pub struct Table {
     pub options: Option<Map<String, Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
+}
+
+impl Table {
+    /// The same table with each *valid* table-level NOT NULL on one of
+    /// its own columns moved onto that column.
+    ///
+    /// The two are one constraint written two ways. pg_dump writes a
+    /// valid NOT NULL on a local column inline on the column, and the
+    /// table-level form only for an inherited column, or for a NOT
+    /// VALID one, which it has to add with ALTER TABLE. Clearing
+    /// `not_valid` in a pulled project leaves the table-level form on a
+    /// local column, which then never compares equal to what the
+    /// database reports once validated, so deploy dropped and re-added
+    /// it on every run. Comparing canonical forms removes that.
+    pub fn with_canonical_not_nulls(&self) -> Table {
+        let mut table = self.clone();
+        let Some(not_nulls) = table.not_null_constraints.take() else {
+            return table;
+        };
+        let mut kept = Vec::new();
+        for not_null in not_nulls {
+            let column = table
+                .columns
+                .iter_mut()
+                .flatten()
+                .find(|c| c.name == not_null.column);
+            match column {
+                Some(column) if not_null.not_valid != Some(true) => {
+                    column.nullable = Some(false);
+                    if not_null.name.is_some() || not_null.no_inherit.is_some()
+                    {
+                        column.not_null_constraint = Some(ColumnNotNull {
+                            name: not_null.name,
+                            no_inherit: not_null.no_inherit,
+                        });
+                    }
+                }
+                _ => kept.push(not_null),
+            }
+        }
+        table.not_null_constraints = (!kept.is_empty()).then_some(kept);
+        table
+    }
 }
 
 /// Represents a column in a table
@@ -134,6 +188,46 @@ pub struct ColumnGenerated {
     pub sequence: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sequence_behavior: Option<String>,
+    /// The options of an identity column's own sequence. pg_dump writes
+    /// them in `ALTER TABLE ... ADD GENERATED ... AS IDENTITY (...)`,
+    /// and they are what makes one identity column differ from another:
+    /// without them an identity that starts at 100 or cycles rebuilt as
+    /// a plain one that starts at 1.
+    ///
+    /// Separate from `sequence`, which older project files use to name
+    /// a sequence managed as its own object. The build never renders
+    /// that name, so rendering it as `SEQUENCE NAME` would create the
+    /// sequence a second time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sequence_options: Option<SequenceOptions>,
+}
+
+/// An identity column's sequence options. Each is absent when it holds
+/// PostgreSQL's default, which is also what a hand-written identity
+/// omits, so the two compare equal instead of forcing a rebuild.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SequenceOptions {
+    /// Kept only when it is not the `<table>_<column>_seq` PostgreSQL
+    /// generates in the table's schema
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_with: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub increment_by: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_value: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_value: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache: Option<i64>,
+    #[serde(
+        default,
+        deserialize_with = "true_or_none",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub cycle: Option<bool>,
 }
 
 /// How a generated column's expression is materialized
@@ -166,6 +260,14 @@ pub struct CheckConstraint {
     /// one field covers both. Absent means enforced, the default.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enforced: Option<bool>,
+    /// `true` renders `NOT VALID`: rows already in the table were never
+    /// checked, and only new ones are. See [`ForeignKey::not_valid`].
+    #[serde(
+        default,
+        deserialize_with = "true_or_none",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub not_valid: Option<bool>,
 }
 
 /// A table-level `NOT NULL <column>` constraint (PostgreSQL 18+).
@@ -182,6 +284,15 @@ pub struct NotNullConstraint {
     pub column: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub no_inherit: Option<bool>,
+    /// `true` renders `NOT VALID`; see [`ForeignKey::not_valid`]. Only
+    /// the table-level form carries it: a column's own `NOT NULL NOT
+    /// VALID` is a syntax error.
+    #[serde(
+        default,
+        deserialize_with = "true_or_none",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub not_valid: Option<bool>,
 }
 
 /// Constraint columns for primary keys and unique constraints. The YAML
@@ -243,6 +354,18 @@ pub struct ForeignKey {
     /// `false` renders `NOT ENFORCED`; see [`CheckConstraint::enforced`]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enforced: Option<bool>,
+    /// `true` renders `NOT VALID`. A constraint keeps that state only
+    /// when added with ALTER TABLE: in CREATE TABLE, PostgreSQL checks
+    /// the (empty) table and records it valid, so the build emits a
+    /// not-valid constraint as its own entry. pg_dump writes only `NOT
+    /// ENFORCED` for a constraint that is not enforced, since that
+    /// implies not validated, so the two do not appear together.
+    #[serde(
+        default,
+        deserialize_with = "true_or_none",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub not_valid: Option<bool>,
 }
 
 /// Represents the table a Foreign Key references
@@ -407,4 +530,29 @@ pub struct Trigger {
     pub arguments: Option<Vec<Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An explicit `false` reads as absent, which is what pull records,
+    /// so deploy does not see a change on every run
+    #[test]
+    fn false_flags_read_as_absent() {
+        let check: CheckConstraint =
+            serde_json::from_value(serde_json::json!(
+                {"name": "c", "expression": "a > 0", "not_valid": false}
+            ))
+            .unwrap();
+        assert_eq!(check.not_valid, None);
+        let options: SequenceOptions =
+            serde_json::from_value(serde_json::json!({"cycle": false}))
+                .unwrap();
+        assert_eq!(options, SequenceOptions::default());
+        let options: SequenceOptions =
+            serde_json::from_value(serde_json::json!({"cycle": true}))
+                .unwrap();
+        assert_eq!(options.cycle, Some(true));
+    }
 }
