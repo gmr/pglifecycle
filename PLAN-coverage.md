@@ -521,7 +521,10 @@ their own bugs:
   those edges from each definition, as it already did for `INHERITS`
   and `LIKE`. A text search container's entries are chained in
   dependency order and the first stands for the item, so deploy can
-  find them.
+  find them. Text search objects are ordered one by one in the build,
+  each after the objects it names: a schema's container is too coarse,
+  since two schemas that use each other's dictionaries make a cycle of
+  containers but not of objects.
 - **Deploy** matches these types by existence only, as it did while
   they were unmodeled; comparing their definitions is later work.
 

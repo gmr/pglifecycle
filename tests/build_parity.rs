@@ -536,7 +536,10 @@ fn records_inventory_dependency_edges() {
     //
     // The text search objects of one schema's container are chained,
     // each after the one before, in the order they depend on each
-    // other: parser, template, dictionary, configuration.
+    // other: parser, template, dictionary, configuration. Each one
+    // also waits for the text search objects it names qualified; the
+    // test project names them bare, and pg_restore resolves a bare
+    // name in pg_catalog, so those names order nothing.
     assert_eq!(
         edges,
         vec![

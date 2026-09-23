@@ -127,7 +127,7 @@ use crate::models::{
     ViewColumn,
 };
 use crate::progress;
-use crate::project::Project;
+use crate::project::{Project, split_sql_name};
 use crate::utils::{
     dollar_quote, postgres_value, quote_ident, raw_value, user_mapping_subject,
 };
@@ -165,6 +165,8 @@ pub fn assemble(project: &Project) -> Result<BuildOutput, String> {
         dump,
         dump_id_map: HashMap::new(),
         text_search_last: HashMap::new(),
+        text_search_ids: HashMap::new(),
+        text_search_refs: Vec::new(),
         superuser: project.superuser.clone(),
     };
     let task =
@@ -208,6 +210,7 @@ pub fn assemble(project: &Project) -> Result<BuildOutput, String> {
             entry.dependencies.extend(deps);
         }
     }
+    builder.apply_text_search_references();
     builder.split_column_defaults(project)?;
     let item_ids = builder
         .dump_id_map
@@ -220,12 +223,23 @@ pub fn assemble(project: &Project) -> Result<BuildOutput, String> {
     })
 }
 
+const TS_PARSER: &str = "TEXT SEARCH PARSER";
+const TS_TEMPLATE: &str = "TEXT SEARCH TEMPLATE";
+const TS_DICTIONARY: &str = "TEXT SEARCH DICTIONARY";
+const TS_CONFIGURATION: &str = "TEXT SEARCH CONFIGURATION";
+
 struct Builder {
     dump: libpgdump::Dump,
     dump_id_map: HashMap<usize, i32>,
     /// The last entry each text search container added (see
     /// `add_text_search_item`)
     text_search_last: HashMap<usize, i32>,
+    /// The entry of each text search object, by its kind, schema and
+    /// name
+    text_search_ids: HashMap<(&'static str, String, String), i32>,
+    /// The text search objects each text search entry names, as
+    /// (entry, kind, schema, name)
+    text_search_refs: Vec<(i32, &'static str, String, String)>,
     superuser: String,
 }
 
@@ -2006,7 +2020,7 @@ impl Builder {
             self.add_text_search_item(
                 item,
                 d,
-                "TEXT SEARCH PARSER",
+                TS_PARSER,
                 &parser.name,
                 create,
                 drop,
@@ -2041,7 +2055,7 @@ impl Builder {
             self.add_text_search_item(
                 item,
                 d,
-                "TEXT SEARCH TEMPLATE",
+                TS_TEMPLATE,
                 &template.name,
                 create,
                 drop,
@@ -2074,17 +2088,23 @@ impl Builder {
                     ],
                 )
             };
-            self.add_text_search_item(
+            let dump_id = self.add_text_search_item(
                 item,
                 d,
-                "TEXT SEARCH DICTIONARY",
+                TS_DICTIONARY,
                 &dictionary.name,
                 create,
                 drop,
                 dictionary.comment.as_deref(),
             )?;
+            if let Some(template) = &dictionary.template {
+                self.add_text_search_reference(dump_id, TS_TEMPLATE, template);
+            }
         }
-        for config in d.configurations.as_deref().unwrap_or_default() {
+        for config in copies_after_sources(
+            &d.schema,
+            d.configurations.as_deref().unwrap_or_default(),
+        ) {
             let (create, drop) = if let Some(sql) = &config.sql {
                 (vec![sql.clone()], vec![])
             } else {
@@ -2134,17 +2154,74 @@ impl Builder {
                     ],
                 )
             };
-            self.add_text_search_item(
+            let dump_id = self.add_text_search_item(
                 item,
                 d,
-                "TEXT SEARCH CONFIGURATION",
+                TS_CONFIGURATION,
                 &config.name,
                 create,
                 drop,
                 config.comment.as_deref(),
             )?;
+            let references = config
+                .parser
+                .iter()
+                .map(|name| (TS_PARSER, name))
+                .chain(config.source.iter().map(|n| (TS_CONFIGURATION, n)))
+                .chain(
+                    config
+                        .mappings
+                        .iter()
+                        .flatten()
+                        .flat_map(|(_, dictionaries)| dictionaries)
+                        .map(|name| (TS_DICTIONARY, name)),
+                );
+            for (desc, name) in references {
+                self.add_text_search_reference(dump_id, desc, name);
+            }
         }
         Ok(())
+    }
+
+    /// Record that the text search entry `dump_id` names the `desc`
+    /// object `name`. The name renders as written, and pg_restore runs
+    /// with an empty `search_path`, so an unqualified name is a
+    /// `pg_catalog` object, which the project does not manage.
+    fn add_text_search_reference(
+        &mut self,
+        dump_id: i32,
+        desc: &'static str,
+        name: &str,
+    ) {
+        let (schema, tag) = split_sql_name(name);
+        if !schema.is_empty() {
+            self.text_search_refs.push((dump_id, desc, schema, tag));
+        }
+    }
+
+    /// Order each text search entry after the text search objects it
+    /// names. The container of a schema is too coarse to order: two
+    /// schemas whose configurations use a dictionary of the other make
+    /// a cycle of containers, but no cycle of objects, because a
+    /// configuration names parsers and dictionaries and a dictionary
+    /// names a template, never the reverse. A name the project does
+    /// not manage, such as a `pg_catalog` dictionary, orders nothing.
+    fn apply_text_search_references(&mut self) {
+        for (dump_id, desc, schema, name) in
+            std::mem::take(&mut self.text_search_refs)
+        {
+            let Some(&parent) =
+                self.text_search_ids.get(&(desc, schema, name))
+            else {
+                continue;
+            };
+            if parent != dump_id
+                && let Some(entry) = self.dump.get_entry_mut(dump_id)
+                && !entry.dependencies.contains(&parent)
+            {
+                entry.dependencies.push(parent);
+            }
+        }
     }
 
     /// One text search object's entry. A container holds several, so
@@ -2156,16 +2233,16 @@ impl Builder {
         &mut self,
         item: &Item,
         parent: &crate::models::TextSearch,
-        desc: &str,
+        desc: &'static str,
         name: &str,
         defn: Vec<String>,
         drop_stmt: Vec<String>,
         comment: Option<&str>,
-    ) -> Result<(), String> {
+    ) -> Result<i32, String> {
         // a parser or template has no owner, and pg_restore fails on an
         // owner it cannot set (deviation 25)
         let owner = match desc {
-            "TEXT SEARCH PARSER" | "TEXT SEARCH TEMPLATE" => String::new(),
+            TS_PARSER | TS_TEMPLATE => String::new(),
             _ => self.superuser.clone(),
         };
         let previous = self.text_search_last.get(&item.id).copied();
@@ -2181,6 +2258,8 @@ impl Builder {
         )?;
         self.dump_id_map.entry(item.id).or_insert(dump_id);
         self.text_search_last.insert(item.id, dump_id);
+        self.text_search_ids
+            .insert((desc, parent.schema.clone(), name.to_string()), dump_id);
         if let Some(comment) = comment {
             self.add_comment(
                 desc,
@@ -2192,7 +2271,7 @@ impl Builder {
                 None,
             )?;
         }
-        Ok(())
+        Ok(dump_id)
     }
 
     fn dump_type(&mut self, item: &Item) -> Result<(), String> {
@@ -2430,6 +2509,38 @@ impl Builder {
         let drop = vec!["DROP VIEW IF EXISTS".into(), self.item_name(item)];
         self.add_item(item, create, drop, false)
     }
+}
+
+/// The configurations of the `schema` container, each copy after the
+/// configuration of this container that it copies. The entries of a
+/// container are chained in this order, so a copy listed before its
+/// source would make a cycle with its `COPY` reference. A source cycle
+/// cannot restore, so its configurations keep the order they have.
+fn copies_after_sources<'a>(
+    schema: &str,
+    configs: &'a [crate::models::TextSearchConfig],
+) -> Vec<&'a crate::models::TextSearchConfig> {
+    let local_source = |config: &crate::models::TextSearchConfig| {
+        let (source_schema, name) = split_sql_name(config.source.as_deref()?);
+        (source_schema == schema).then_some(name)
+    };
+    let mut ordered = Vec::with_capacity(configs.len());
+    let mut pending: Vec<_> = configs.iter().collect();
+    while !pending.is_empty() {
+        let (ready, waiting): (Vec<_>, Vec<_>) =
+            pending.iter().copied().partition(|config| {
+                local_source(config).is_none_or(|source| {
+                    !pending.iter().any(|other| other.name == source)
+                })
+            });
+        if ready.is_empty() {
+            ordered.extend(waiting);
+            break;
+        }
+        ordered.extend(ready);
+        pending = waiting;
+    }
+    ordered
 }
 
 /// CREATEDB / NOCREATEDB style option rendering
@@ -3343,6 +3454,8 @@ mod tests {
             dump,
             dump_id_map: HashMap::new(),
             text_search_last: HashMap::new(),
+            text_search_ids: HashMap::new(),
+            text_search_refs: Vec::new(),
             superuser: "postgres".into(),
         };
         builder.dump_item(item).unwrap();
@@ -3762,6 +3875,8 @@ mod tests {
             dump,
             dump_id_map: HashMap::new(),
             text_search_last: HashMap::new(),
+            text_search_ids: HashMap::new(),
+            text_search_refs: Vec::new(),
             superuser: "postgres".into(),
         };
         builder.dump_item(item).unwrap();
@@ -3781,6 +3896,8 @@ mod tests {
             dump,
             dump_id_map: HashMap::new(),
             text_search_last: HashMap::new(),
+            text_search_ids: HashMap::new(),
+            text_search_refs: Vec::new(),
             superuser: "postgres".into(),
         };
         builder.dump_item(item).unwrap();
@@ -4012,6 +4129,8 @@ mod tests {
             dump,
             dump_id_map: HashMap::new(),
             text_search_last: HashMap::new(),
+            text_search_ids: HashMap::new(),
+            text_search_refs: Vec::new(),
             superuser: "postgres".into(),
         };
         builder.dump_item(&item).unwrap();
@@ -4208,6 +4327,8 @@ mod tests {
             dump,
             dump_id_map: HashMap::new(),
             text_search_last: HashMap::new(),
+            text_search_ids: HashMap::new(),
+            text_search_refs: Vec::new(),
             superuser: "postgres".into(),
         };
         builder.dump_item(item).unwrap();
@@ -4439,6 +4560,75 @@ mod tests {
         );
     }
 
+    /// Two schemas whose configurations use a dictionary of the other
+    /// make a cycle of containers but not of objects, so each
+    /// configuration waits for the dictionary it maps to, and each
+    /// dictionary for its template
+    #[test]
+    fn text_search_objects_wait_for_the_objects_they_name() {
+        let container = |id: usize, schema: &str, other: &str| Item {
+            id,
+            desc: ObjectType::TextSearch,
+            definition: Definition::TextSearch(
+                serde_json::from_value(json!({
+                    "schema": schema,
+                    "templates": [{"name": format!("{schema}_tmpl"),
+                                   "lexize_function": "dsimple_lexize"}],
+                    "dictionaries": [{
+                        "name": format!("{schema}_dict"),
+                        "template": format!("{schema}.{schema}_tmpl"),
+                    }],
+                    "configurations": [{
+                        "name": format!("{schema}_cfg"),
+                        "parser": "pg_catalog.default",
+                        "mappings": {"asciiword": [
+                            format!("{other}.{other}_dict"),
+                            "pg_catalog.simple",
+                        ]},
+                    }],
+                }))
+                .unwrap(),
+            ),
+            dependencies: BTreeSet::new(),
+        };
+        let output = assemble(&text_search_project(vec![
+            container(0, "a", "b"),
+            container(1, "b", "a"),
+        ]))
+        .unwrap();
+        let entry = |tag: &str| {
+            output
+                .dump
+                .entries()
+                .iter()
+                .find(|e| e.tag.as_deref() == Some(tag))
+                .cloned()
+                .expect("a text search entry")
+        };
+        for (config, dictionary) in [("a_cfg", "b_dict"), ("b_cfg", "a_dict")]
+        {
+            assert!(
+                entry(config)
+                    .dependencies
+                    .contains(&entry(dictionary).dump_id),
+                "{config}: {:?}",
+                entry(config).dependencies
+            );
+        }
+        for (dictionary, template) in
+            [("a_dict", "a_tmpl"), ("b_dict", "b_tmpl")]
+        {
+            assert!(
+                entry(dictionary)
+                    .dependencies
+                    .contains(&entry(template).dump_id)
+            );
+        }
+        // an unmanaged name orders nothing: a_cfg waits for the entry
+        // before it in its container and for b_dict only
+        assert_eq!(entry("a_cfg").dependencies.len(), 2);
+    }
+
     #[test]
     fn dependents_wait_for_the_whole_text_search_container() {
         let source = text_search(
@@ -4468,6 +4658,82 @@ mod tests {
             entry("copy").dependencies.contains(&entry("two").dump_id),
             "{:?}",
             entry("copy").dependencies
+        );
+    }
+
+    /// A copy listed before the configuration it copies is emitted
+    /// after it, so the container chain agrees with the COPY reference
+    #[test]
+    fn copied_configurations_follow_their_source() {
+        let item = text_search(
+            0,
+            "s",
+            json!([
+                {"name": "copy", "source": "s.base"},
+                {"name": "base", "parser": "pg_catalog.default"},
+            ]),
+        );
+        let output = assemble(&text_search_project(vec![item])).unwrap();
+        let entry = |tag: &str| {
+            output
+                .dump
+                .entries()
+                .iter()
+                .find(|e| e.tag.as_deref() == Some(tag))
+                .cloned()
+                .expect("a TEXT SEARCH CONFIGURATION entry")
+        };
+        assert!(
+            entry("copy").dependencies.contains(&entry("base").dump_id),
+            "{:?}",
+            entry("copy").dependencies
+        );
+        assert!(
+            !entry("base").dependencies.contains(&entry("copy").dump_id),
+            "{:?}",
+            entry("base").dependencies
+        );
+    }
+
+    /// pg_restore runs with an empty search_path, so an unqualified
+    /// name is a pg_catalog object and orders nothing, even when a
+    /// managed object of another schema has the same name
+    #[test]
+    fn unqualified_text_search_names_order_nothing() {
+        let dictionary = Item {
+            id: 0,
+            desc: ObjectType::TextSearch,
+            definition: Definition::TextSearch(
+                serde_json::from_value(json!({
+                    "schema": "a",
+                    "dictionaries": [{"name": "simple",
+                                      "template": "pg_catalog.simple"}],
+                }))
+                .unwrap(),
+            ),
+            dependencies: BTreeSet::new(),
+        };
+        let config = text_search(
+            1,
+            "b",
+            json!([{"name": "cfg", "parser": "pg_catalog.default",
+                    "mappings": {"asciiword": ["simple"]}}]),
+        );
+        let output =
+            assemble(&text_search_project(vec![dictionary, config])).unwrap();
+        let entry = |tag: &str| {
+            output
+                .dump
+                .entries()
+                .iter()
+                .find(|e| e.tag.as_deref() == Some(tag))
+                .cloned()
+                .expect("a text search entry")
+        };
+        assert!(
+            entry("cfg").dependencies.is_empty(),
+            "{:?}",
+            entry("cfg").dependencies
         );
     }
 }
