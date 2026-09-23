@@ -1,6 +1,7 @@
 # Coverage plan: silent schema loss, RLS, and PostgreSQL 18
 
-Status: Phases 0 to 5 complete. Phases 6-8 proposed.
+Status: Phases 0 to 5 complete, and Phase 6 items 1 to 3. The rest of
+Phase 6, and Phases 7 and 8, proposed.
 Written 2026-09-21.
 
 Every claim below was verified against PostgreSQL 18.4 (the version
@@ -547,7 +548,37 @@ enabled state.
 → verify: pull a database containing all seven; `remaining.yaml` is
 absent, and `just round-trip` passes with them in `fixtures/schema.sql`.
 
-### Phase 6 — New object models (~4 days, ranked)
+### Phase 6 — New object models (~4 days, ranked) — items 1 to 3 **DONE**
+
+**Done:** `EXCLUDE` constraints (item 1), `REPLICA IDENTITY` (item 2)
+and default privileges (item 3), each pulled, built, deployed and in
+`fixtures/schema.sql`. The coverage gate list is down from 5 entries
+to 4. Items 4 to 7 are still open.
+
+Where the work departs from the items below:
+
+- **An unmatched comment now fails the pull.** Pull logged a warning
+  for a comment it could not attach and dropped it, which the
+  governing invariant forbids. It now keeps the entry in
+  `remaining.yaml`. The model has a comment for an exclusion
+  constraint only, so a comment on a primary key, unique, check or
+  foreign key constraint now fails the pull, and the coverage fixture
+  records that gap.
+- **Default privileges are a new top-level object type**,
+  `default_privileges/<role>.yaml`, not part of `src/build/acls.rs`:
+  they are keyed by the role the defaults are `FOR`, and the role files
+  are not written for a pull from `--dump`. Deploy matches them by
+  existence, like the Phase 5 types. `REVOKE GRANT OPTION FOR` does not
+  parse into the model; pg_dump folds a grant and a revoke of its
+  option into a plain grant, so the fixture could not produce one.
+- **`USING INDEX` is written with its index.** pg_dump puts `REPLICA
+  IDENTITY USING INDEX` in the index's entry, and build does the same,
+  since the index has to exist first.
+- **Deviation 27.** The shared index column renderer now writes
+  `COLLATE`, where the Python wrote `COLLATION`, and quotes column
+  names.
+
+The original items follow.
 
 Do now, in this order:
 

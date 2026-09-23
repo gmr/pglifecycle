@@ -164,6 +164,45 @@ policies:
   managed: `deploy` leaves its row security and policies as the
   database has them. Pull the project again to record them.
 
+- An exclusion constraint lists each element as an index column (a
+  `name` or an `expression`, with its `collation`, `opclass`,
+  `direction` and `null_placement`) and the `operator` two rows are
+  compared with. `replica_identity` is `FULL`, `NOTHING`, or
+  `{index: name}`; absent is `DEFAULT`, the primary key.
+
+```yaml
+exclude_constraints:
+  - name: room_bookings_no_overlap
+    method: gist
+    elements:
+      - name: room
+        operator: =
+      - name: during
+        operator: '&&'
+    where: (status <> 'cancelled'::text)
+replica_identity: FULL
+```
+
+- Default privileges live in `default_privileges/<role>.yaml`, one file
+  for each role whose new objects they apply to (`ALTER DEFAULT
+  PRIVILEGES FOR ROLE`). Global and per-schema declarations compose in
+  PostgreSQL, so each is kept as written; `build` emits the
+  revocations first, then the grants, as `pg_dump` does.
+
+```yaml
+---
+name: app_owner
+grants:
+  - schema: reporting
+    object_type: TABLES
+    grantee: analyst
+    privileges: [SELECT]
+revocations:
+  - object_type: FUNCTIONS
+    grantee: PUBLIC
+    privileges: [EXECUTE]
+```
+
 - A cast has no schema of its own. `pull` files it in the
   `casts/<schema>.yaml` of the first schema its function or types name,
   or `public` when they are all built-in.

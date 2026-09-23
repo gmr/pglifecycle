@@ -45,6 +45,8 @@ pub struct Table {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub foreign_keys: Option<Vec<ForeignKey>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub exclude_constraints: Option<Vec<ExcludeConstraint>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub triggers: Option<Vec<Trigger>>,
     /// Whether row-level security is enabled and forced. Absent means
     /// the project does not manage it: deploy then leaves the table's
@@ -52,6 +54,10 @@ pub struct Table {
     /// the database has them. Pull always writes it for a table.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub row_level_security: Option<RowLevelSecurity>,
+    /// What logical replication records to identify an updated or
+    /// deleted row. Absent is DEFAULT, the primary key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replica_identity: Option<ReplicaIdentity>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub policies: Option<Vec<Policy>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -172,6 +178,21 @@ impl Table {
         }
         if let Some(state) = table.row_level_security.as_mut() {
             state.forced = true_only(state.forced);
+        }
+        table.replica_identity = match table.replica_identity.take() {
+            Some(ReplicaIdentity::Mode(mode))
+                if mode.eq_ignore_ascii_case("default") =>
+            {
+                None
+            }
+            Some(ReplicaIdentity::Mode(mode)) => {
+                Some(ReplicaIdentity::Mode(mode.to_uppercase()))
+            }
+            other => other,
+        };
+        // pg_dump always writes the method, and btree is the default
+        for exclude in table.exclude_constraints.iter_mut().flatten() {
+            exclude.method.get_or_insert_with(|| String::from("btree"));
         }
         table.with_canonical_policies()
     }
@@ -425,6 +446,65 @@ pub struct ForeignKey {
     pub not_valid: Option<bool>,
 }
 
+/// An exclusion constraint (EXCLUDE USING method (element WITH
+/// operator, ...)): no two rows may have every element compare true
+/// under its operator
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExcludeConstraint {
+    pub name: String,
+    /// The index access method; PostgreSQL's default is btree, and
+    /// pg_dump always writes it
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
+    pub elements: Vec<ExcludeElement>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub include: Option<Vec<String>>,
+    #[serde(rename = "where", skip_serializing_if = "Option::is_none")]
+    pub where_clause: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deferrable: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub initially_deferred: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+}
+
+/// One element of an exclusion constraint: an index column (a column
+/// or an expression, with its collation, operator class and order)
+/// and the operator it is compared with
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExcludeElement {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expression: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub collation: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub opclass: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub direction: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub null_placement: Option<String>,
+    pub operator: String,
+}
+
+impl ExcludeElement {
+    /// The index column part of the element
+    pub fn column(&self) -> IndexColumn {
+        IndexColumn {
+            name: self.name.clone(),
+            expression: self.expression.clone(),
+            collation: self.collation.clone(),
+            opclass: self.opclass.clone(),
+            direction: self.direction.clone(),
+            null_placement: self.null_placement.clone(),
+        }
+    }
+}
+
 /// Represents the table a Foreign Key references
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -556,6 +636,15 @@ pub enum TablePartitionColumn {
         #[serde(skip_serializing_if = "Option::is_none")]
         opclass: Option<String>,
     },
+}
+
+/// A table's replica identity other than DEFAULT: `FULL` (the whole
+/// row), `NOTHING`, or a unique index
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ReplicaIdentity {
+    Mode(String),
+    Index { index: String },
 }
 
 /// A table's row-level security state

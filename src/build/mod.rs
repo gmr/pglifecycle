@@ -113,18 +113,22 @@
 //!     in its last pass and moves a comment there only by that tag, so
 //!     with the bare name the comment ran first and failed. The
 //!     test-project event trigger has no comment.
+//! 27. An index column's collation renders `COLLATE`, and a column
+//!     name is quoted. The Python rendered `COLLATION`, which does not
+//!     parse, and the bare name, which fails for a name that needs
+//!     quoting. No test-project index has a collation or such a name.
 
 mod acls;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use serde_json::{Map, Value};
 
 use crate::models::{
-    Column, ConstraintColumns, Definition, Index, Item, Policy, RoleOptions,
-    RowLevelSecurity, Table, TablePartition, TablePartitionColumn, Trigger,
-    ViewColumn,
+    Column, ConstraintColumns, Definition, Index, Item, Policy,
+    ReplicaIdentity, RoleOptions, RowLevelSecurity, Table, TablePartition,
+    TablePartitionColumn, Trigger, ViewColumn,
 };
 use crate::progress;
 use crate::project::{Project, split_sql_name};
@@ -250,6 +254,9 @@ impl Builder {
             Definition::Cast(_) => self.dump_cast(item),
             Definition::Collation(_) => self.dump_collation(item),
             Definition::Conversion(_) => self.dump_conversion(item),
+            Definition::DefaultPrivileges(_) => {
+                self.dump_default_privileges(item)
+            }
             Definition::Domain(_) => self.dump_domain(item),
             Definition::EventTrigger(_) => self.dump_event_trigger(item),
             Definition::Extension(_) => self.dump_extension(item),
@@ -748,6 +755,71 @@ impl Builder {
         self.add_item(item, create, drop, false)
     }
 
+    /// One `DEFAULT ACL` entry per schema and object type, as pg_dump
+    /// writes them: the revocations, then the grants. Like a text search
+    /// container's objects, the first entry stands for the item and each
+    /// later one depends on the one before.
+    fn dump_default_privileges(&mut self, item: &Item) -> Result<(), String> {
+        let Definition::DefaultPrivileges(d) = &item.definition else {
+            unreachable!()
+        };
+        let mut groups: BTreeMap<(String, String), Vec<String>> =
+            BTreeMap::new();
+        let declarations = d
+            .revocations
+            .iter()
+            .flatten()
+            .map(|p| (true, p))
+            .chain(d.grants.iter().flatten().map(|p| (false, p)));
+        for (revoke, privilege) in declarations {
+            let object_type = privilege.object_type.to_uppercase();
+            let mut sql = format!(
+                "ALTER DEFAULT PRIVILEGES FOR ROLE {}",
+                quote_ident(&d.name)
+            );
+            if let Some(schema) = &privilege.schema {
+                sql.push_str(&format!(" IN SCHEMA {}", quote_ident(schema)));
+            }
+            let privileges = privilege.privileges.join(",");
+            let grantee = user_mapping_subject(&privilege.grantee);
+            if revoke {
+                sql.push_str(&format!(
+                    " REVOKE {privileges} ON {object_type} FROM {grantee}"
+                ));
+            } else {
+                sql.push_str(&format!(
+                    " GRANT {privileges} ON {object_type} TO {grantee}"
+                ));
+                if privilege.with_grant_option == Some(true) {
+                    sql.push_str(" WITH GRANT OPTION");
+                }
+            }
+            groups
+                .entry((
+                    privilege.schema.clone().unwrap_or_default(),
+                    object_type,
+                ))
+                .or_default()
+                .push(sql);
+        }
+        let mut previous: Option<i32> = None;
+        for ((schema, object_type), statements) in groups {
+            let dump_id = self.add_entry(
+                "DEFAULT ACL",
+                &schema,
+                &format!("DEFAULT PRIVILEGES FOR {object_type}"),
+                &d.name,
+                &[statements.join(";\n")],
+                &[],
+                &previous.into_iter().collect::<Vec<_>>(),
+                None,
+            )?;
+            self.dump_id_map.entry(item.id).or_insert(dump_id);
+            previous = Some(dump_id);
+        }
+        Ok(())
+    }
+
     fn dump_domain(&mut self, item: &Item) -> Result<(), String> {
         let Definition::Domain(d) = &item.definition else {
             unreachable!()
@@ -1159,7 +1231,7 @@ impl Builder {
         ];
         self.add_item(item, create, drop, false)?;
         for index in d.indexes.as_deref().unwrap_or_default() {
-            self.dump_index(index, item, &d.schema, &d.owner)?;
+            self.dump_index(index, item, &d.schema, &d.owner, None)?;
         }
         Ok(())
     }
@@ -1541,6 +1613,17 @@ impl Builder {
                 create.push("TABLESPACE".into());
                 create.push(tablespace.clone());
             }
+            // FULL and NOTHING follow the CREATE, as pg_dump writes
+            // them; USING INDEX has to wait for its index
+            if let Some(sql) = render_replica_identity(
+                d.replica_identity.as_ref(),
+                &self.item_name(item),
+                |index| d.indexes.iter().flatten().all(|i| i.name != index),
+            ) {
+                let last = create.len() - 1;
+                create[last].push(';');
+                create.push(sql);
+            }
             let drop =
                 vec!["DROP TABLE IF EXISTS".into(), self.item_name(item)];
             self.add_item(item, create, drop, false)?;
@@ -1566,7 +1649,19 @@ impl Builder {
             }
         }
         for index in d.indexes.as_deref().unwrap_or_default() {
-            self.dump_index(index, item, &d.schema, &d.owner)?;
+            let replica = match &d.replica_identity {
+                Some(ReplicaIdentity::Index { index: name })
+                    if *name == index.name =>
+                {
+                    render_replica_identity(
+                        d.replica_identity.as_ref(),
+                        &self.item_name(item),
+                        |_| true,
+                    )
+                }
+                _ => None,
+            };
+            self.dump_index(index, item, &d.schema, &d.owner, replica)?;
         }
         for fk in d.foreign_keys.as_deref().unwrap_or_default() {
             self.dump_foreign_key(fk, item, d)?;
@@ -1600,6 +1695,26 @@ impl Builder {
         }
         for trigger in d.triggers.as_deref().unwrap_or_default() {
             self.dump_trigger(trigger, item, d)?;
+        }
+        for exclude in d.exclude_constraints.as_deref().unwrap_or_default() {
+            if let Some(comment) = &exclude.comment {
+                // a constraint is named through its table, as a
+                // trigger is
+                let target = format!(
+                    "{} ON {}",
+                    quote_ident(&exclude.name),
+                    self.item_name(item)
+                );
+                self.add_comment(
+                    "CONSTRAINT",
+                    &d.schema,
+                    &format!("{} ON {}", exclude.name, d.name),
+                    &d.owner,
+                    dump_id,
+                    comment,
+                    Some(target),
+                )?;
+            }
         }
         if let Some(state) = &d.row_level_security {
             self.dump_row_security(state, item, d)?;
@@ -1801,19 +1916,27 @@ impl Builder {
         Ok(())
     }
 
+    /// An index's entry; `then` is a statement that has to follow the
+    /// index in the same entry (`REPLICA IDENTITY USING INDEX`)
     fn dump_index(
         &mut self,
         index: &Index,
         parent: &Item,
         schema: &str,
         owner: &str,
+        then: Option<String>,
     ) -> Result<(), String> {
         // index names cannot be schema-qualified in CREATE INDEX; the
         // index lives in its relation's schema (deviation 10 — Python
         // emitted `CREATE INDEX schema.name`, which does not parse)
         let qualified =
             format!("{}.{}", quote_ident(schema), quote_ident(&index.name));
-        let create = render_index(index, &self.item_name(parent));
+        let mut create = render_index(index, &self.item_name(parent));
+        if let Some(then) = then {
+            let last = create.len() - 1;
+            create[last].push(';');
+            create.push(then);
+        }
         let drop = vec!["DROP INDEX IF EXISTS".into(), qualified];
         let parent_dump_id = self.dump_id_map[&parent.id];
         let dump_id = self.add_entry(
@@ -2794,29 +2917,7 @@ pub(crate) fn render_index(index: &Index, table_name: &str) -> Vec<String> {
         .as_deref()
         .unwrap_or_default()
         .iter()
-        .map(|c| {
-            let mut sql = vec![
-                c.name
-                    .clone()
-                    .or_else(|| c.expression.clone())
-                    .unwrap_or_default(),
-            ];
-            if let Some(collation) = &c.collation {
-                sql.push("COLLATION".into());
-                sql.push(collation.clone());
-            }
-            if let Some(opclass) = &c.opclass {
-                sql.push(opclass.clone());
-            }
-            if let Some(direction) = &c.direction {
-                sql.push(direction.clone());
-            }
-            if let Some(null_placement) = &c.null_placement {
-                sql.push("NULLS".into());
-                sql.push(null_placement.clone());
-            }
-            sql.join(" ")
-        })
+        .map(render_index_column)
         .collect();
     create.push(columns.join(", "));
     create.push(")".into());
@@ -2845,6 +2946,54 @@ pub(crate) fn render_index(index: &Index, table_name: &str) -> Vec<String> {
         create.push(where_clause.clone());
     }
     create
+}
+
+/// One index column: the column or expression, then its collation,
+/// operator class, order and null placement. The name is quoted and
+/// the keyword is `COLLATE`; the Python wrote the name bare and
+/// `COLLATION`, which does not parse (deviation 27).
+fn render_index_column(column: &crate::models::IndexColumn) -> String {
+    let mut sql = vec![match (&column.name, &column.expression) {
+        (Some(name), _) => quote_ident(name),
+        (None, Some(expression)) => expression.clone(),
+        (None, None) => String::new(),
+    }];
+    if let Some(collation) = &column.collation {
+        sql.push("COLLATE".into());
+        sql.push(collation.clone());
+    }
+    if let Some(opclass) = &column.opclass {
+        sql.push(opclass.clone());
+    }
+    if let Some(direction) = &column.direction {
+        sql.push(direction.clone());
+    }
+    if let Some(null_placement) = &column.null_placement {
+        sql.push("NULLS".into());
+        sql.push(null_placement.clone());
+    }
+    sql.join(" ")
+}
+
+/// `ALTER TABLE ONLY ... REPLICA IDENTITY ...` for a table whose
+/// identity is not DEFAULT, when `here` accepts it: an index identity
+/// is rendered where the index is created, so `here` is given the
+/// index name
+pub(crate) fn render_replica_identity(
+    identity: Option<&ReplicaIdentity>,
+    table_name: &str,
+    here: impl Fn(&str) -> bool,
+) -> Option<String> {
+    let clause = match identity? {
+        ReplicaIdentity::Mode(mode) => mode.to_uppercase(),
+        ReplicaIdentity::Index { index } if here(index) => {
+            format!("USING INDEX {}", quote_ident(index))
+        }
+        ReplicaIdentity::Index { .. } => return None,
+    };
+    Some(format!(
+        "ALTER TABLE ONLY {table_name} REPLICA IDENTITY {clause}"
+    ))
 }
 
 /// The statements that set row-level security from its default
@@ -3122,6 +3271,42 @@ fn push_table_constraints(table: &Table, inner: &mut Vec<String>) {
             inner.push(render_check_constraint(check));
         }
     }
+    for exclude in table.exclude_constraints.as_deref().unwrap_or_default() {
+        inner.push(render_exclude_constraint(exclude));
+    }
+}
+
+/// `CONSTRAINT <name> EXCLUDE ...`, shared by CREATE TABLE and deploy
+pub(crate) fn render_exclude_constraint(
+    exclude: &crate::models::ExcludeConstraint,
+) -> String {
+    let mut sql = format!("CONSTRAINT {} EXCLUDE", quote_ident(&exclude.name));
+    if let Some(method) = &exclude.method {
+        sql.push_str(&format!(" USING {method}"));
+    }
+    let elements: Vec<String> = exclude
+        .elements
+        .iter()
+        .map(|e| {
+            format!("{} WITH {}", render_index_column(&e.column()), e.operator)
+        })
+        .collect();
+    sql.push_str(&format!(" ({})", elements.join(", ")));
+    if let Some(include) = &exclude.include {
+        let include: Vec<String> =
+            include.iter().map(|c| quote_ident(c)).collect();
+        sql.push_str(&format!(" INCLUDE ({})", include.join(", ")));
+    }
+    if let Some(where_clause) = &exclude.where_clause {
+        sql.push_str(&format!(" WHERE ({where_clause})"));
+    }
+    if exclude.deferrable == Some(true) {
+        sql.push_str(" DEFERRABLE");
+    }
+    if exclude.initially_deferred == Some(true) {
+        sql.push_str(" INITIALLY DEFERRED");
+    }
+    sql
 }
 
 /// `CONSTRAINT <name> CHECK (<expr>)` and its attributes, shared by
@@ -3430,8 +3615,10 @@ mod tests {
                 not_null_constraints: None,
                 unique_constraints: None,
                 foreign_keys: None,
+                exclude_constraints: None,
                 triggers: None,
                 row_level_security: None,
+                replica_identity: None,
                 policies: None,
                 partition: None,
                 partitions: None,
@@ -3839,8 +4026,10 @@ mod tests {
             not_null_constraints: None,
             unique_constraints: None,
             foreign_keys: None,
+            exclude_constraints: None,
             triggers: None,
             row_level_security: None,
+            replica_identity: None,
             policies: None,
             partition: None,
             partitions: None,

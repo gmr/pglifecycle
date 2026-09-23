@@ -230,7 +230,12 @@ fn plan(
         .map(|entry| (entry.dump_id, entry))
         .collect();
     for entry in output.dump.entries() {
-        if args.no_privileges && entry.desc == libpgdump::ObjectType::Acl {
+        if args.no_privileges
+            && matches!(
+                entry.desc,
+                libpgdump::ObjectType::Acl | libpgdump::ObjectType::DefaultAcl
+            )
+        {
             continue;
         }
         let direct = output.item_ids.get(&entry.dump_id);

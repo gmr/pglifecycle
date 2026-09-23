@@ -285,6 +285,12 @@ impl Writer {
                 publication,
             )?;
         }
+        for defaults in &assembly.default_privileges {
+            self.save(
+                top_level("default_privileges", &defaults.name)?,
+                defaults,
+            )?;
+        }
         for container in &assembly.text_search {
             self.save(
                 top_level("text_search", &container.schema)?,

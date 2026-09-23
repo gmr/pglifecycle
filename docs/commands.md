@@ -80,8 +80,10 @@ Objects that differ between the project and the database are
 reconciled in place where PostgreSQL can express it:
 
 - **Tables** — add column, set/drop default, set/drop not-null,
-  add/drop check constraints and foreign keys, primary-key and unique
-  additions, index and trigger create/drop, and comment changes.
+  add/drop check constraints, foreign keys and exclusion constraints,
+  primary-key and unique additions, index and trigger create/drop,
+  `REPLICA IDENTITY`, and comment changes. A changed comment on an
+  exclusion constraint is set alone, without rebuilding its index.
   Identity columns are added, and their `ALWAYS`/`BY DEFAULT` behavior
   and sequence options changed, with `ALTER COLUMN`; renaming an
   identity's sequence falls back. A `NOT VALID` check, foreign key or
@@ -159,7 +161,8 @@ Ownership is not managed (the script behaves like
 `pg_restore --no-owner`), and roles, users, groups, and tablespaces are
 skipped entirely — they are cluster-level objects a single-database
 dump cannot capture. Aggregates, casts, collations, conversions, event
-triggers, publications and text search objects are created when
+triggers, publications, text search objects and default privileges are
+created when
 missing but otherwise only existence-checked: `pull` models them, but
 `deploy` does not compare their definitions yet, so a changed one is
 left as the database has it. An aggregate is matched by its name and
@@ -218,6 +221,9 @@ generated project would not reproduce the source database.
 The entries were preserved in ./project/remaining.yaml; re-run with
 --allow-unsupported to accept the project as it is.
 ```
+
+A `COMMENT` entry counts as unmodeled when the model has no place for
+it, such as a comment on a primary key or foreign key constraint.
 
 The project directory is written either way, so `remaining.yaml` is
 there to inspect. `--allow-unsupported` downgrades the failure to a

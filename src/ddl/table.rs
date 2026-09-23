@@ -10,9 +10,10 @@ use crate::ddl::{
 };
 use crate::models::{
     CheckConstraint, Column, ColumnGenerated, ColumnNotNull,
-    ConstraintColumns, ForeignKey, ForeignKeyReference, GeneratedKind, Index,
-    IndexColumn, LikeTable, NotNullConstraint, Sequence, SequenceOptions,
-    Table, TablePartition, TablePartitionBehavior, TablePartitionColumn,
+    ConstraintColumns, ExcludeConstraint, ExcludeElement, ForeignKey,
+    ForeignKeyReference, GeneratedKind, Index, IndexColumn, LikeTable,
+    NotNullConstraint, ReplicaIdentity, Sequence, SequenceOptions, Table,
+    TablePartition, TablePartitionBehavior, TablePartitionColumn,
 };
 use crate::utils::quote_ident;
 
@@ -99,8 +100,10 @@ pub(crate) fn create_table(
         not_null_constraints: None,
         unique_constraints: None,
         foreign_keys: None,
+        exclude_constraints: None,
         triggers: None,
         row_level_security: None,
+        replica_identity: None,
         policies: None,
         partition: table_partition_behavior(node, src),
         partitions: None,
@@ -394,6 +397,23 @@ pub(crate) fn alter_table(
                 column,
                 generated,
             });
+        } else if let Some(identity) = cmd.child_of_kind("replica_identity") {
+            let identity = if identity.child_of_kind("kw_full").is_some() {
+                Some(ReplicaIdentity::Mode(String::from("FULL")))
+            } else if identity.child_of_kind("kw_nothing").is_some() {
+                Some(ReplicaIdentity::Mode(String::from("NOTHING")))
+            } else {
+                // USING INDEX names one; DEFAULT has nothing to keep
+                identity.child_of_kind("name").map(|index| {
+                    ReplicaIdentity::Index {
+                        index: unquote(index.text(src)),
+                    }
+                })
+            };
+            statements.push(Statement::ReplicaIdentity {
+                table: table.clone(),
+                identity,
+            });
         } else if cmd.child_of_kind("kw_row").is_some()
             && cmd.child_of_kind("kw_security").is_some()
         {
@@ -591,9 +611,8 @@ pub(crate) fn table_constraint(
     // separate recursive `has()` walks of the same subtree
     let mut cursor = elem.walk();
     let kind = elem.children(&mut cursor).find_map(|c| match c.kind() {
-        "kw_foreign" | "kw_primary" | "kw_unique" | "kw_check" | "kw_not" => {
-            Some(c.kind())
-        }
+        "kw_foreign" | "kw_primary" | "kw_unique" | "kw_check" | "kw_not"
+        | "kw_exclude" => Some(c.kind()),
         _ => None,
     });
     let constraint = match kind {
@@ -632,6 +651,7 @@ pub(crate) fn table_constraint(
                 not_valid: not_valid(&elem),
             })
         }
+        Some("kw_exclude") => TableConstraint::Exclude(exclude(&elem, src)?),
         _ => {
             return Err(format!(
                 "unsupported constraint: {}",
@@ -640,6 +660,80 @@ pub(crate) fn table_constraint(
         }
     };
     Ok((name, constraint))
+}
+
+/// `EXCLUDE [USING method] (element WITH operator, ...) [INCLUDE
+/// (...)] [WHERE (...)]`, with its deferral. Storage parameters and an
+/// index tablespace have no place in the model, so a constraint with
+/// either fails to parse rather than lose them.
+fn exclude(elem: &Node, src: &str) -> Result<ExcludeConstraint, String> {
+    if elem.child_of_kind("opt_definition").is_some()
+        || elem.child_of_kind("OptConsTableSpace").is_some()
+    {
+        return Err(format!(
+            "EXCLUDE with storage parameters or a tablespace: {}",
+            crate::ddl::truncate(elem.text(src), 80)
+        ));
+    }
+    let elements = elem
+        .find_all("ExclusionConstraintElem")
+        .iter()
+        .map(|element| {
+            let column = element
+                .child_of_kind("index_elem")
+                .map(|n| index_column(&n, src))
+                .ok_or_else(|| {
+                    String::from("EXCLUDE element without a column")
+                })?;
+            let operator = element
+                .child_of_kind("any_operator")
+                .map(|n| n.text(src).to_string())
+                .ok_or_else(|| {
+                    String::from("EXCLUDE element without an operator")
+                })?;
+            Ok(ExcludeElement {
+                name: column.name,
+                expression: column.expression,
+                collation: column.collation,
+                opclass: column.opclass,
+                direction: column.direction,
+                null_placement: column.null_placement,
+                operator,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let include: Vec<String> = elem
+        .child_of_kind("opt_c_include")
+        .map(|n| column_elems(&n, src))
+        .unwrap_or_default();
+    let spec = elem.child_of_kind("ConstraintAttributeSpec");
+    let attribute = |keyword: &str| {
+        spec.and_then(|s| {
+            s.find_all("ConstraintAttributeElem")
+                .into_iter()
+                .find(|e| e.child_of_kind(keyword).is_some())
+        })
+    };
+    Ok(ExcludeConstraint {
+        name: String::new(),
+        method: elem
+            .child_of_kind("access_method_clause")
+            .and_then(|n| n.child_of_kind("name"))
+            .map(|n| unquote(n.text(src))),
+        elements,
+        include: (!include.is_empty()).then_some(include),
+        where_clause: elem
+            .child_of_kind("OptWhereClause")
+            .and_then(|n| n.child_of_kind("a_expr"))
+            .map(|n| n.text(src).to_string()),
+        deferrable: attribute("kw_deferrable")
+            .filter(|e| e.child_of_kind("kw_not").is_none())
+            .map(|_| true),
+        initially_deferred: attribute("kw_initially")
+            .filter(|e| e.child_of_kind("kw_deferred").is_some())
+            .map(|_| true),
+        comment: None,
+    })
 }
 
 /// `ENFORCED` / `NOT ENFORCED` from a constraint's attribute spec.
@@ -862,6 +956,14 @@ pub(crate) fn apply_constraint(
         }
         TableConstraint::ForeignKey(fk) => {
             table.foreign_keys.get_or_insert_default().push(fk);
+        }
+        TableConstraint::Exclude(exclude) => {
+            table.exclude_constraints.get_or_insert_default().push(
+                ExcludeConstraint {
+                    name: name.unwrap_or_default(),
+                    ..exclude
+                },
+            );
         }
         TableConstraint::NotNull(mut not_null) => {
             // pg_dump names a NOT VALID one it adds with ALTER TABLE
@@ -1874,5 +1976,71 @@ mod tests {
         };
         assert_eq!(fk.deferrable, Some(true));
         assert_eq!(fk.initially_deferred, Some(true));
+    }
+
+    #[test]
+    fn parses_exclude_constraints() {
+        let Statement::AddConstraint {
+            name,
+            constraint: TableConstraint::Exclude(exclude),
+            ..
+        } = parse_one(
+            "ALTER TABLE ONLY s.r ADD CONSTRAINT r_x EXCLUDE USING btree \
+             (lower(c) text_pattern_ops DESC NULLS LAST WITH =, room WITH =) \
+             INCLUDE (b) WHERE ((kind <> 'x'::text)) DEFERRABLE INITIALLY \
+             DEFERRED;",
+        )
+        else {
+            panic!("expected an EXCLUDE constraint")
+        };
+        assert_eq!(name.as_deref(), Some("r_x"));
+        assert_eq!(exclude.method.as_deref(), Some("btree"));
+        let [expression, column] = exclude.elements.as_slice() else {
+            panic!("expected two elements")
+        };
+        assert_eq!(expression.expression.as_deref(), Some("lower(c)"));
+        assert_eq!(expression.opclass.as_deref(), Some("text_pattern_ops"));
+        assert_eq!(expression.direction.as_deref(), Some("DESC"));
+        assert_eq!(expression.null_placement.as_deref(), Some("LAST"));
+        assert_eq!(column.name.as_deref(), Some("room"));
+        assert_eq!(column.operator, "=");
+        assert_eq!(exclude.include, Some(vec![String::from("b")]));
+        assert_eq!(
+            exclude.where_clause.as_deref(),
+            Some("(kind <> 'x'::text)")
+        );
+        assert_eq!(
+            (exclude.deferrable, exclude.initially_deferred),
+            (Some(true), Some(true))
+        );
+    }
+
+    #[test]
+    fn parses_replica_identity() {
+        for (sql, identity) in [
+            (
+                "ALTER TABLE ONLY s.t REPLICA IDENTITY FULL;",
+                Some(ReplicaIdentity::Mode(String::from("FULL"))),
+            ),
+            (
+                "ALTER TABLE ONLY s.t REPLICA IDENTITY NOTHING;",
+                Some(ReplicaIdentity::Mode(String::from("NOTHING"))),
+            ),
+            (
+                "ALTER TABLE ONLY s.t REPLICA IDENTITY USING INDEX \"T_idx\";",
+                Some(ReplicaIdentity::Index {
+                    index: String::from("T_idx"),
+                }),
+            ),
+            ("ALTER TABLE s.t REPLICA IDENTITY DEFAULT;", None),
+        ] {
+            let Statement::ReplicaIdentity {
+                identity: parsed, ..
+            } = parse_one(sql)
+            else {
+                panic!("expected ReplicaIdentity for {sql}")
+            };
+            assert_eq!(parsed, identity, "{sql}");
+        }
     }
 }

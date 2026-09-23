@@ -41,6 +41,40 @@ pub struct Acls {
     pub views: Option<Map<String, Value>>,
 }
 
+/// The default privileges of objects a role creates (ALTER DEFAULT
+/// PRIVILEGES FOR ROLE `name`). Global and per-schema defaults
+/// compose, so the declarations are kept as written rather than
+/// resolved to the privileges a new object ends up with.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DefaultPrivileges {
+    /// The role whose new objects the defaults apply to
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub grants: Option<Vec<DefaultPrivilege>>,
+    /// Privileges taken away from the built-in defaults, such as
+    /// EXECUTE on functions from PUBLIC
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revocations: Option<Vec<DefaultPrivilege>>,
+}
+
+/// One default privilege declaration
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DefaultPrivilege {
+    /// The schema the declaration is limited to; absent for every
+    /// schema
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+    /// TABLES, SEQUENCES, FUNCTIONS, ROUTINES, TYPES, SCHEMAS or LARGE
+    /// OBJECTS
+    pub object_type: String,
+    pub grantee: String,
+    pub privileges: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub with_grant_option: Option<bool>,
+}
+
 /// One entry in a role's `roles` or `groups` ACL list: a membership in
 /// that role, written as the bare role name when the membership
 /// behaves the way PostgreSQL would grant it by default, and as a

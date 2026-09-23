@@ -484,3 +484,44 @@ ALTER EVENT TRIGGER pglifecycle_drops DISABLE;
 CREATE EVENT TRIGGER pglifecycle_replica ON ddl_command_end
     EXECUTE FUNCTION test.note_ddl();
 ALTER EVENT TRIGGER pglifecycle_replica ENABLE REPLICA;
+
+-- Exclusion constraints: gist over a range, with a predicate and a
+-- comment, and btree over an expression with its operator class and
+-- order, INCLUDE and deferral. btree_gist, created above, provides =
+-- for integers in gist.
+
+CREATE TABLE test.room_bookings (
+    room   INTEGER,
+    during TSRANGE,
+    status TEXT,
+    CONSTRAINT room_bookings_no_overlap
+        EXCLUDE USING gist (room WITH =, during WITH &&)
+        WHERE (status <> 'cancelled')
+);
+COMMENT ON CONSTRAINT room_bookings_no_overlap ON test.room_bookings IS
+    'One booking per room at a time';
+
+CREATE TABLE test.handles (
+    handle TEXT,
+    owner  INTEGER,
+    CONSTRAINT handles_unique_lower
+        EXCLUDE USING btree (lower(handle) text_pattern_ops DESC NULLS LAST WITH =)
+        INCLUDE (owner) DEFERRABLE INITIALLY DEFERRED
+);
+
+-- Replica identity: the whole row, none, and a unique index. pg_dump
+-- writes the index form in the index's own entry.
+CREATE TABLE test.replica_full (id INTEGER);
+ALTER TABLE test.replica_full REPLICA IDENTITY FULL;
+CREATE TABLE test.replica_nothing (id INTEGER);
+ALTER TABLE test.replica_nothing REPLICA IDENTITY NOTHING;
+CREATE TABLE test.replica_index (id INTEGER NOT NULL);
+CREATE UNIQUE INDEX replica_index_id ON test.replica_index (id);
+ALTER TABLE test.replica_index REPLICA IDENTITY USING INDEX replica_index_id;
+
+-- Default privileges, global and per schema. PUBLIC as the grantee
+-- keeps the fixture free of a cluster-wide role. These come last, so
+-- the objects above are created under the built-in defaults.
+ALTER DEFAULT PRIVILEGES IN SCHEMA test GRANT SELECT ON TABLES TO PUBLIC;
+ALTER DEFAULT PRIVILEGES IN SCHEMA test GRANT USAGE ON SEQUENCES TO PUBLIC;
+ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;

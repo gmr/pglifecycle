@@ -1,0 +1,69 @@
+---
+$schema: https://json-schema.org/draft/2020-12/schema
+$id: https://gmr.github.io/pglifecycle/schemata/default_privileges.json
+title: Default Privileges
+description: >
+  The privileges objects a role creates start with (ALTER DEFAULT
+  PRIVILEGES FOR ROLE). Global and per-schema declarations compose, so
+  they are kept as written.
+$defs:
+  declaration:
+    type: object
+    properties:
+      schema:
+        title: Schema
+        description: The schema the declaration is limited to; absent for every schema
+        type: string
+      object_type:
+        title: Object Type
+        enum: [TABLES, SEQUENCES, FUNCTIONS, ROUTINES, TYPES, SCHEMAS, LARGE OBJECTS]
+      grantee:
+        title: Grantee
+        description: The role given or denied the privileges, or PUBLIC
+        type: string
+      privileges:
+        title: Privileges
+        type: array
+        items:
+          type: string
+        minItems: 1
+      with_grant_option:
+        title: With Grant Option
+        description: PostgreSQL does not give grant options to PUBLIC
+        type: boolean
+    required: [object_type, grantee, privileges]
+    additionalProperties: false
+    not:
+      properties:
+        grantee:
+          pattern: '^[Pp][Uu][Bb][Ll][Ii][Cc]$'
+        with_grant_option:
+          const: true
+      required: [grantee, with_grant_option]
+type: object
+properties:
+  name:
+    title: Role
+    description: The role whose new objects the defaults apply to
+    type: string
+  grants:
+    title: Grants
+    type: array
+    items:
+      $ref: '#/$defs/declaration'
+  revocations:
+    title: Revocations
+    description: >
+      Privileges taken away from the built-in defaults, such as EXECUTE on
+      functions from PUBLIC. REVOKE GRANT OPTION FOR is not supported, so
+      a revocation cannot set with_grant_option to true.
+    type: array
+    items:
+      $ref: '#/$defs/declaration'
+      not:
+        properties:
+          with_grant_option:
+            const: true
+        required: [with_grant_option]
+required: [name]
+additionalProperties: false

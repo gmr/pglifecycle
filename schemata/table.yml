@@ -360,6 +360,79 @@ properties:
     type: array
     items:
       $package_schema: foreign_key
+  exclude_constraints:
+    title: Exclusion Constraints
+    description: >
+      An array of exclusion constraints (EXCLUDE): no two rows may have
+      every element compare true under its operator
+    type: array
+    items:
+      type: object
+      properties:
+        name:
+          title: Name
+          type: string
+        method:
+          title: Index Method
+          description: The index access method, such as gist or btree
+          type: string
+        elements:
+          title: Elements
+          description: >
+            Each column or expression, with the operator it is compared
+            with
+          type: array
+          minItems: 1
+          items:
+            type: object
+            properties:
+              name:
+                title: Column
+                type: string
+              expression:
+                title: Expression
+                type: string
+              collation:
+                title: Collation
+                type: string
+              opclass:
+                title: Operator Class
+                type: string
+              direction:
+                title: Sort Direction
+                enum: [ASC, DESC]
+              null_placement:
+                title: Null Placement
+                enum: [FIRST, LAST]
+              operator:
+                title: Operator
+                description: The operator two rows are compared with
+                type: string
+            required: [operator]
+            oneOf:
+              - required: [name]
+              - required: [expression]
+            additionalProperties: false
+        include:
+          title: Included Columns
+          type: array
+          items:
+            type: string
+        where:
+          title: Predicate
+          description: Only rows that satisfy this expression are compared
+          type: string
+        deferrable:
+          title: Deferrable
+          type: boolean
+        initially_deferred:
+          title: Initially Deferred
+          type: boolean
+        comment:
+          title: Comment
+          type: string
+      required: [name, elements]
+      additionalProperties: false
   triggers:
     title: Triggers
     description: An array of triggers on the table
@@ -388,6 +461,21 @@ properties:
         type: boolean
     additionalProperties: false
     required: [enabled]
+  replica_identity:
+    title: Replica Identity
+    description: >
+      What logical replication records to identify an updated or deleted
+      row: FULL (the whole row), NOTHING, or a unique index given as
+      `{index: name}`. Absent is DEFAULT, the primary key.
+    oneOf:
+      - enum: [DEFAULT, FULL, NOTHING]
+      - type: object
+        properties:
+          index:
+            title: Index
+            type: string
+        required: [index]
+        additionalProperties: false
   policies:
     title: Policies
     description: An array of row-level security policies on the table

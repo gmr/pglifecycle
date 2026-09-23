@@ -8,6 +8,7 @@ pub const PROJECT_DIRS: &[&str] = &[
     "casts",
     "collations",
     "conversions",
+    "default_privileges",
     "dml",
     "domains",
     "event_triggers",
@@ -38,6 +39,7 @@ pub enum ObjectType {
     Cast,
     Collation,
     Conversion,
+    DefaultPrivileges,
     Domain,
     EventTrigger,
     Extension,
@@ -70,6 +72,7 @@ impl ObjectType {
             Self::Cast => "CAST",
             Self::Collation => "COLLATION",
             Self::Conversion => "CONVERSION",
+            Self::DefaultPrivileges => "DEFAULT PRIVILEGES",
             Self::Domain => "DOMAIN",
             Self::EventTrigger => "EVENT TRIGGER",
             Self::Extension => "EXTENSION",
@@ -102,6 +105,7 @@ impl ObjectType {
             Self::Cast => "casts",
             Self::Collation => "collations",
             Self::Conversion => "conversions",
+            Self::DefaultPrivileges => "default_privileges",
             Self::Domain => "domains",
             Self::EventTrigger => "event_triggers",
             Self::Function => "functions",
@@ -140,6 +144,7 @@ impl ObjectType {
             "casts" => Self::Cast,
             "collations" => Self::Collation,
             "conversions" => Self::Conversion,
+            "default_privileges" => Self::DefaultPrivileges,
             "domains" => Self::Domain,
             "event_triggers" => Self::EventTrigger,
             "extensions" => Self::Extension,
@@ -195,7 +200,8 @@ impl ObjectType {
     pub fn is_ownerless(&self) -> bool {
         matches!(
             self,
-            Self::EventTrigger
+            Self::DefaultPrivileges
+                | Self::EventTrigger
                 | Self::Group
                 | Self::Publication
                 | Self::Role
@@ -211,7 +217,8 @@ impl ObjectType {
     pub fn is_schemaless(&self) -> bool {
         matches!(
             self,
-            Self::EventTrigger
+            Self::DefaultPrivileges
+                | Self::EventTrigger
                 | Self::Group
                 | Self::Publication
                 | Self::Role
@@ -246,6 +253,7 @@ pub const READ_ORDER: &[ObjectType] = &[
     ObjectType::EventTrigger,
     ObjectType::Publication,
     ObjectType::Subscription,
+    ObjectType::DefaultPrivileges,
 ];
 
 pub const DEPENDENCIES: &str = "dependencies";

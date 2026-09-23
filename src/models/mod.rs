@@ -32,6 +32,7 @@ pub enum Definition {
     Cast(Cast),
     Collation(Collation),
     Conversion(Conversion),
+    DefaultPrivileges(DefaultPrivileges),
     Domain(Domain),
     EventTrigger(EventTrigger),
     Extension(Extension),
@@ -68,6 +69,7 @@ impl Definition {
             ),
             Definition::Collation(d) => d.name.clone(),
             Definition::Conversion(d) => d.name.clone(),
+            Definition::DefaultPrivileges(d) => d.name.clone(),
             Definition::Domain(d) => d.name.clone(),
             Definition::EventTrigger(d) => d.name.clone(),
             Definition::Extension(d) => d.name.clone(),
@@ -142,7 +144,9 @@ impl Definition {
             Definition::Type(d) => d.comment.as_deref(),
             Definition::User(d) => d.comment.as_deref(),
             Definition::View(d) => d.comment.as_deref(),
-            Definition::TextSearch(_) | Definition::UserMapping(_) => None,
+            Definition::DefaultPrivileges(_)
+            | Definition::TextSearch(_)
+            | Definition::UserMapping(_) => None,
         }
     }
 
