@@ -135,7 +135,10 @@ column_defaults:
   Each policy keeps only what differs from `CREATE POLICY`'s defaults:
   `restrictive: true` for `AS RESTRICTIVE`, a `command` other than
   `ALL`, `roles` other than `PUBLIC`. `using` and `with_check` hold the
-  expressions without their outer parentheses.
+  expression inside the `USING (...)` / `WITH CHECK (...)` clause,
+  written the way PostgreSQL reports it: an operator expression keeps
+  its own parentheses, as in `(tenant = CURRENT_USER)`. Write it that
+  way, or deploy sees a change on every run.
 
 ```yaml
 ---

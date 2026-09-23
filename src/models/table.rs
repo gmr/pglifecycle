@@ -602,16 +602,28 @@ where
         .filter(|command| command != "ALL"))
 }
 
-/// Read a policy's roles, keeping PUBLIC alone as absent
+/// Read a policy's roles with PUBLIC in upper case, as the parser
+/// reads it, keeping PUBLIC alone as absent
 fn policy_roles<'de, D>(
     deserializer: D,
 ) -> Result<Option<Vec<String>>, D::Error>
 where
     D: Deserializer<'de>,
 {
-    Ok(Option::<Vec<String>>::deserialize(deserializer)?.filter(|roles| {
-        !matches!(roles.as_slice(), [role] if role.eq_ignore_ascii_case("public"))
-    }))
+    Ok(Option::<Vec<String>>::deserialize(deserializer)?
+        .map(|roles| {
+            roles
+                .into_iter()
+                .map(|role| {
+                    if role.eq_ignore_ascii_case("public") {
+                        String::from("PUBLIC")
+                    } else {
+                        role
+                    }
+                })
+                .collect::<Vec<_>>()
+        })
+        .filter(|roles| roles != &["PUBLIC"]))
 }
 
 /// Table Triggers
@@ -667,6 +679,28 @@ mod tests {
             serde_json::from_value(serde_json::json!({"cycle": true}))
                 .unwrap();
         assert_eq!(options.cycle, Some(true));
+    }
+
+    /// PUBLIC reads in upper case in any role list, as the parser reads
+    /// it, so deploy does not see a change on every run
+    #[test]
+    fn policy_roles_normalize_public() {
+        let roles = |value: serde_json::Value| -> Option<Vec<String>> {
+            serde_json::from_value::<Policy>(
+                serde_json::json!({"name": "p", "roles": value}),
+            )
+            .unwrap()
+            .roles
+        };
+        assert_eq!(roles(serde_json::json!(["public"])), None);
+        assert_eq!(
+            roles(serde_json::json!(["alice", "public"])),
+            Some(vec![String::from("alice"), String::from("PUBLIC")])
+        );
+        assert_eq!(
+            roles(serde_json::json!(["alice"])),
+            Some(vec![String::from("alice")])
+        );
     }
 
     /// A project written before row security was modeled leaves the
