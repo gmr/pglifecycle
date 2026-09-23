@@ -569,20 +569,21 @@ and the models support, but pull cannot parse), and operator classes,
 operator families and access methods (which have no model).
 
 
-**Done:** `EXCLUDE` constraints (item 1), `REPLICA IDENTITY` (item 2)
-and default privileges (item 3), each pulled, built, deployed and in
-`fixtures/schema.sql`. The coverage gate list is down from 5 entries
-to 4. Items 4 to 7 are still open.
+**Done (items 1 to 3, historical note):** `EXCLUDE` constraints
+(item 1), `REPLICA IDENTITY` (item 2) and default privileges (item 3),
+each pulled, built, deployed and in `fixtures/schema.sql`. When these
+items were done, items 4 to 7 were still open; see the status above
+for their current state.
 
-Where the work departs from the items below:
+Where the work on items 1 to 3 departs from the items below:
 
 - **An unmatched comment now fails the pull.** Pull logged a warning
   for a comment it could not attach and dropped it, which the
   governing invariant forbids. It now keeps the entry in
-  `remaining.yaml`. The model has a comment for an exclusion
-  constraint only, so a comment on a primary key, unique, check or
-  foreign key constraint now fails the pull, and the coverage fixture
-  records that gap.
+  `remaining.yaml`. At that time the model had a comment for an
+  exclusion constraint only, so a comment on another constraint type
+  failed the pull. The `constraint_comments` map on a table (added
+  with items 4 to 6) now closes that gap.
 - **Default privileges are a new top-level object type**,
   `default_privileges/<role>.yaml`, not part of `src/build/acls.rs`:
   they are keyed by the role the defaults are `FOR`, and the role files
