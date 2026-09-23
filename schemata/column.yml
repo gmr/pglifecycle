@@ -152,6 +152,25 @@ properties:
             - required: [expression]
             - required: [kind]
     additionalProperties: false
+  storage:
+    title: Storage
+    description: >
+      How the column's values are stored (SET STORAGE), when it differs
+      from the type's default
+    enum: [PLAIN, EXTERNAL, EXTENDED, MAIN, DEFAULT]
+  compression:
+    title: Compression
+    description: The compression method for the column's values (SET COMPRESSION)
+    type: string
+  statistics:
+    title: Statistics Target
+    description: The column's statistics target (SET STATISTICS)
+    type: integer
+  options:
+    title: Attribute Options
+    description: >
+      Per-column options such as n_distinct (ALTER COLUMN ... SET (...))
+    type: object
   comment:
     title: Comment
     description: An optional comment about the column

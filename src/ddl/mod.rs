@@ -58,6 +58,13 @@ pub enum Statement {
     /// column defaults this way (e.g. `nextval(...)` for SERIAL) rather
     /// than inline on the CREATE TABLE column; folded onto the matching
     /// column of the already-ingested table during pull assembly
+    /// ALTER TABLE ... ALTER COLUMN ... SET STORAGE / COMPRESSION /
+    /// STATISTICS / (options), which pg_dump writes after CREATE TABLE
+    SetColumnAttribute {
+        table: QualifiedName,
+        column: String,
+        attribute: ColumnAttribute,
+    },
     SetColumnDefault {
         table: QualifiedName,
         column: String,
@@ -241,6 +248,15 @@ pub enum TableConstraint {
     /// An EXCLUDE constraint; its `name` is filled in when it is
     /// applied to a table
     Exclude(models::ExcludeConstraint),
+}
+
+/// One column attribute an ALTER COLUMN ... SET sets
+#[derive(Clone, Debug, PartialEq)]
+pub enum ColumnAttribute {
+    Storage(String),
+    Compression(String),
+    Statistics(i64),
+    Options(serde_json::Map<String, serde_json::Value>),
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]

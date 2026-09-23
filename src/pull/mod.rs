@@ -965,6 +965,40 @@ impl Assembly {
                 Some(table) => ddl::apply_constraint(table, name, constraint),
                 None => log::warn!("Constraint on unknown table {table}"),
             },
+            Statement::SetColumnAttribute {
+                table,
+                column,
+                attribute,
+            } => {
+                let found = self.find_table(&table).and_then(|t| {
+                    t.columns.iter_mut().flatten().find(|c| c.name == column)
+                });
+                match found {
+                    Some(c) => match attribute {
+                        ddl::ColumnAttribute::Storage(v) => {
+                            c.storage = Some(v)
+                        }
+                        ddl::ColumnAttribute::Compression(v) => {
+                            c.compression = Some(v);
+                        }
+                        ddl::ColumnAttribute::Statistics(v) => {
+                            c.statistics = Some(v);
+                        }
+                        ddl::ColumnAttribute::Options(v) => {
+                            c.options.get_or_insert_default().extend(v);
+                        }
+                    },
+                    // an inherited column has no entry of its own to
+                    // hold the attribute, so the entry is kept
+                    None => {
+                        log::warn!(
+                            "Column attribute on unknown column \
+                             {table}.{column}"
+                        );
+                        self.push_remaining(entry);
+                    }
+                }
+            }
             Statement::SetColumnDefault {
                 table,
                 column,
@@ -2636,6 +2670,10 @@ mod tests {
                 collation: None,
                 check_constraint: None,
                 generated: None,
+                storage: None,
+                compression: None,
+                statistics: None,
+                options: None,
                 comment: None,
             }]),
             indexes: None,

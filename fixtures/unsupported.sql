@@ -21,12 +21,7 @@ SET search_path = unsupported, public, pg_catalog;
 
 CREATE ROLE pglifecycle_coverage_reader;
 
--- Column storage and compression
-CREATE TABLE payloads (
-    id   INT PRIMARY KEY,
-    body TEXT COMPRESSION lz4
-);
-ALTER TABLE payloads ALTER COLUMN body SET STORAGE EXTERNAL;
+CREATE TABLE payloads (id INT PRIMARY KEY);
 
 -- A comment on a primary key, unique, check or foreign key constraint:
 -- only an exclusion constraint carries one in the model

@@ -5,8 +5,8 @@ use tree_sitter::Node;
 
 use crate::ddl::object::{reloptions, string_value};
 use crate::ddl::{
-    NodeExt, QualifiedName, Statement, TableConstraint, any_name,
-    column_elems, qualified_name, unquote,
+    ColumnAttribute, NodeExt, QualifiedName, Statement, TableConstraint,
+    any_name, column_elems, qualified_name, unquote,
 };
 use crate::models::{
     CheckConstraint, Column, ColumnGenerated, ColumnNotNull,
@@ -215,6 +215,10 @@ pub(crate) fn column(node: &Node, src: &str) -> Column {
         collation: None,
         check_constraint: None,
         generated: None,
+        storage: None,
+        compression: None,
+        statistics: None,
+        options: None,
         comment: None,
     };
     for constraint in node.find_all("ColConstraintElem") {
@@ -435,6 +439,16 @@ pub(crate) fn alter_table(
                 name,
                 constraint: parsed,
             });
+        } else if let Some(attribute) = column_attribute(&cmd, src) {
+            let column = cmd
+                .child_of_kind("ColId")
+                .map(|n| unquote(n.text(src)))
+                .unwrap_or_default();
+            statements.push(Statement::SetColumnAttribute {
+                table: table.clone(),
+                column,
+                attribute,
+            });
         } else if let Some(default) = cmd.child_of_kind("alter_column_default")
             && let Some(expr) = default.child_of_kind("a_expr")
         {
@@ -485,6 +499,35 @@ pub(crate) fn alter_table(
         )));
     }
     Ok(statements)
+}
+
+/// The attribute an `ALTER COLUMN ... SET` command sets, if it is one
+/// the model holds: STORAGE, COMPRESSION, STATISTICS or options
+fn column_attribute(cmd: &Node, src: &str) -> Option<ColumnAttribute> {
+    if cmd.child_of_kind("kw_alter").is_none()
+        || cmd.child_of_kind("kw_set").is_none()
+    {
+        return None;
+    }
+    if let Some(storage) = cmd.child_of_kind("column_storage") {
+        return storage
+            .child_of_kind("ColId")
+            .map(|n| ColumnAttribute::Storage(n.text(src).to_uppercase()));
+    }
+    if let Some(compression) = cmd.child_of_kind("column_compression") {
+        return compression
+            .child_of_kind("ColId")
+            .map(|n| ColumnAttribute::Compression(unquote(n.text(src))));
+    }
+    if cmd.child_of_kind("kw_statistics").is_some() {
+        return cmd
+            .child_of_kind("set_statistics_value")
+            .and_then(|n| n.text(src).trim().parse::<i64>().ok())
+            .map(ColumnAttribute::Statistics);
+    }
+    cmd.child_of_kind("reloptions")
+        .and_then(|n| crate::ddl::object::reloptions(&n, src))
+        .map(ColumnAttribute::Options)
 }
 
 /// An identity column's generation and sequence options, from either

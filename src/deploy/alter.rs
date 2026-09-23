@@ -20,7 +20,7 @@ use crate::models::{
     UserMapping, View, ViewColumn,
 };
 use crate::utils::{
-    dollar_quote, postgres_value, quote_ident, user_mapping_subject,
+    dollar_quote, postgres_value, quote_ident, raw_value, user_mapping_subject,
 };
 
 /// One reconciliation statement
@@ -703,6 +703,7 @@ fn alter_column(
             )));
         }
     }
+    column_attributes(table, &column, repo, db, alters);
     // last, because ADD GENERATED needs the column NOT NULL and free of
     // a default, which the statements above may be what establishes
     if identities && !identity(table, &column, repo, db, alters) {
@@ -722,6 +723,61 @@ fn alter_column(
 /// states [`identity`] reconciles in place. A pulled identity carries
 /// only its behavior; an older project file names a separate sequence
 /// instead.
+/// STATISTICS, STORAGE, COMPRESSION and attribute options, each set in
+/// place. None of them rewrites existing rows: a new compression or
+/// storage applies to values written later. An attribute the repo no
+/// longer states goes back to its default (DEFAULT, or -1 for the
+/// statistics target, and RESET for an option).
+fn column_attributes(
+    table: &str,
+    column: &str,
+    repo: &Column,
+    db: &Column,
+    alters: &mut Vec<Alter>,
+) {
+    let prefix = format!("ALTER TABLE {table} ALTER COLUMN {column}");
+    if repo.statistics != db.statistics {
+        alters.push(Alter::new(format!(
+            "{prefix} SET STATISTICS {};\n",
+            repo.statistics.unwrap_or(-1)
+        )));
+    }
+    if repo.storage != db.storage {
+        alters.push(Alter::new(format!(
+            "{prefix} SET STORAGE {};\n",
+            repo.storage.as_deref().unwrap_or("DEFAULT")
+        )));
+    }
+    if repo.compression != db.compression {
+        alters.push(Alter::new(format!(
+            "{prefix} SET COMPRESSION {};\n",
+            repo.compression.as_deref().unwrap_or("DEFAULT")
+        )));
+    }
+    let wanted = repo.options.clone().unwrap_or_default();
+    let existing = db.options.clone().unwrap_or_default();
+    let reset: Vec<&String> = existing
+        .keys()
+        .filter(|k| !wanted.contains_key(*k))
+        .collect();
+    if !reset.is_empty() {
+        let keys: Vec<&str> = reset.iter().map(|k| k.as_str()).collect();
+        alters.push(Alter::new(format!(
+            "{prefix} RESET ({});\n",
+            keys.join(", ")
+        )));
+    }
+    let set: Vec<String> = wanted
+        .iter()
+        .filter(|(k, v)| existing.get(*k) != Some(*v))
+        .map(|(k, v)| format!("{k}={}", raw_value(v)))
+        .collect();
+    if !set.is_empty() {
+        alters
+            .push(Alter::new(format!("{prefix} SET ({});\n", set.join(", "))));
+    }
+}
+
 fn is_identity_or_none(generated: &Option<ColumnGenerated>) -> bool {
     generated.as_ref().is_none_or(|g| {
         g.expression.is_none()
@@ -2927,6 +2983,10 @@ mod tests {
             collation: None,
             check_constraint: None,
             generated: None,
+            storage: None,
+            compression: None,
+            statistics: None,
+            options: None,
             comment: None,
         }]);
         assert!(matches!(table(&repo, &db), Resolution::Statements(_)));
@@ -3237,5 +3297,31 @@ mod tests {
         let db = with_key("exclude_constraints", constraint(Some("btree")));
         let repo = with_key("exclude_constraints", constraint(None));
         assert!(sql(&statements(table(&repo, &db))).is_empty());
+    }
+
+    #[test]
+    fn column_attributes_are_set_in_place() {
+        let mut repo = base_table();
+        repo["columns"][1]["storage"] = serde_json::json!("EXTERNAL");
+        repo["columns"][1]["compression"] = serde_json::json!("lz4");
+        repo["columns"][1]["options"] =
+            serde_json::json!({"n_distinct": "100"});
+        let mut db = base_table();
+        db["columns"][1]["statistics"] = serde_json::json!(500);
+        db["columns"][1]["options"] =
+            serde_json::json!({"n_distinct_inherited": "-1"});
+        let alters = statements(table(&parse_table(repo), &parse_table(db)));
+        assert_eq!(
+            sql(&alters),
+            vec![
+                "ALTER TABLE test.users ALTER COLUMN email SET STATISTICS -1;\n",
+                "ALTER TABLE test.users ALTER COLUMN email SET STORAGE EXTERNAL;\n",
+                "ALTER TABLE test.users ALTER COLUMN email SET COMPRESSION lz4;\n",
+                "ALTER TABLE test.users ALTER COLUMN email RESET \
+                 (n_distinct_inherited);\n",
+                "ALTER TABLE test.users ALTER COLUMN email SET (n_distinct=100);\n",
+            ]
+        );
+        assert!(alters.iter().all(|a| !a.destructive));
     }
 }

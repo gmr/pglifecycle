@@ -233,6 +233,19 @@ pub struct Column {
     pub check_constraint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub generated: Option<ColumnGenerated>,
+    /// SET STORAGE: PLAIN, EXTERNAL, EXTENDED or MAIN, when it differs
+    /// from the type's default
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub storage: Option<String>,
+    /// SET COMPRESSION: pglz or lz4, when set for the column
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compression: Option<String>,
+    /// SET STATISTICS: the column's statistics target
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub statistics: Option<i64>,
+    /// SET (...): attribute options such as n_distinct
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub options: Option<Map<String, Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
 }

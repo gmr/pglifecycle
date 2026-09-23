@@ -1613,6 +1613,13 @@ impl Builder {
                 create.push("TABLESPACE".into());
                 create.push(tablespace.clone());
             }
+            // column attributes follow the CREATE, as pg_dump writes
+            // them
+            for sql in render_column_attributes(d, &self.item_name(item)) {
+                let last = create.len() - 1;
+                create[last].push(';');
+                create.push(sql);
+            }
             // FULL and NOTHING follow the CREATE, as pg_dump writes
             // them; USING INDEX has to wait for its index
             if let Some(sql) = render_replica_identity(
@@ -2975,6 +2982,41 @@ fn render_index_column(column: &crate::models::IndexColumn) -> String {
     sql.join(" ")
 }
 
+/// `ALTER TABLE ONLY ... ALTER COLUMN ... SET ...` for each column
+/// attribute the table's columns set, in pg_dump's order: statistics,
+/// storage, compression, options
+pub(crate) fn render_column_attributes(
+    table: &Table,
+    table_name: &str,
+) -> Vec<String> {
+    let mut statements = Vec::new();
+    for column in table.columns.iter().flatten() {
+        let prefix = format!(
+            "ALTER TABLE ONLY {table_name} ALTER COLUMN {}",
+            quote_ident(&column.name)
+        );
+        if let Some(statistics) = column.statistics {
+            statements.push(format!("{prefix} SET STATISTICS {statistics}"));
+        }
+        if let Some(storage) = &column.storage {
+            statements.push(format!("{prefix} SET STORAGE {storage}"));
+        }
+        if let Some(compression) = &column.compression {
+            statements.push(format!("{prefix} SET COMPRESSION {compression}"));
+        }
+        if let Some(options) =
+            column.options.as_ref().filter(|o| !o.is_empty())
+        {
+            let options: Vec<String> = options
+                .iter()
+                .map(|(k, v)| format!("{k}={}", raw_value(v)))
+                .collect();
+            statements.push(format!("{prefix} SET ({})", options.join(", ")));
+        }
+    }
+    statements
+}
+
 /// `ALTER TABLE ONLY ... REPLICA IDENTITY ...` for a table whose
 /// identity is not DEFAULT, when `here` accepts it: an index identity
 /// is rendered where the index is created, so `here` is given the
@@ -3570,6 +3612,10 @@ mod tests {
             collation: None,
             check_constraint: None,
             generated: None,
+            storage: None,
+            compression: None,
+            statistics: None,
+            options: None,
             comment: None,
         }
     }
