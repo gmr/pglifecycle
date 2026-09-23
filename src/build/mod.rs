@@ -88,8 +88,9 @@ use std::path::Path;
 use serde_json::{Map, Value};
 
 use crate::models::{
-    Column, ConstraintColumns, Definition, Index, Item, RoleOptions, Table,
-    TablePartition, TablePartitionColumn, Trigger, ViewColumn,
+    Column, ConstraintColumns, Definition, Index, Item, Policy, RoleOptions,
+    RowLevelSecurity, Table, TablePartition, TablePartitionColumn, Trigger,
+    ViewColumn,
 };
 use crate::progress;
 use crate::project::Project;
@@ -1485,6 +1486,12 @@ impl Builder {
         for trigger in d.triggers.as_deref().unwrap_or_default() {
             self.dump_trigger(trigger, item, d)?;
         }
+        if let Some(state) = &d.row_level_security {
+            self.dump_row_security(state, item, d)?;
+        }
+        for policy in d.policies.as_deref().unwrap_or_default() {
+            self.dump_policy(policy, item, d)?;
+        }
         for partition in d.partitions.as_deref().unwrap_or_default() {
             self.dump_partition(item, d, partition)?;
         }
@@ -1749,6 +1756,69 @@ impl Builder {
                 "TRIGGER",
                 &table.schema,
                 &name,
+                &table.owner,
+                dump_id,
+                comment,
+                Some(target),
+            )?;
+        }
+        Ok(())
+    }
+
+    /// ENABLE and FORCE ROW LEVEL SECURITY, as one `ROW SECURITY` entry
+    /// after the table. Disabled and not forced is the state of a new
+    /// table, so it adds no entry.
+    fn dump_row_security(
+        &mut self,
+        state: &RowLevelSecurity,
+        parent: &Item,
+        table: &Table,
+    ) -> Result<(), String> {
+        let create = render_row_security(state, &self.item_name(parent));
+        if create.is_empty() {
+            return Ok(());
+        }
+        let parent_dump_id = self.dump_id_map[&parent.id];
+        self.add_entry(
+            "ROW SECURITY",
+            &table.schema,
+            &table.name,
+            &table.owner,
+            &create,
+            &[],
+            &[parent_dump_id],
+            None,
+        )?;
+        Ok(())
+    }
+
+    fn dump_policy(
+        &mut self,
+        policy: &Policy,
+        parent: &Item,
+        table: &Table,
+    ) -> Result<(), String> {
+        let qualified = self.item_name(parent);
+        let target = format!("{} ON {qualified}", quote_ident(&policy.name));
+        let create = vec![render_policy(policy, &qualified)];
+        let drop = vec![format!("DROP POLICY IF EXISTS {target}")];
+        let parent_dump_id = self.dump_id_map[&parent.id];
+        let dump_id = self.add_entry(
+            "POLICY",
+            &table.schema,
+            &format!("{} {}", table.name, policy.name),
+            &table.owner,
+            &create,
+            &drop,
+            &[parent_dump_id],
+            None,
+        )?;
+        if let Some(comment) = &policy.comment {
+            // like a trigger, a policy is named through its table
+            self.add_comment(
+                "POLICY",
+                &table.schema,
+                &format!("{} ON {}", policy.name, table.name),
                 &table.owner,
                 dump_id,
                 comment,
@@ -2517,6 +2587,59 @@ pub(crate) fn render_index(index: &Index, table_name: &str) -> Vec<String> {
     create
 }
 
+/// The statements that set row-level security from its default
+/// (disabled, not forced), shared by build and deploy; `table_name`
+/// is the quoted, qualified table. No ONLY on ENABLE, matching pg_dump.
+pub(crate) fn render_row_security(
+    state: &RowLevelSecurity,
+    table_name: &str,
+) -> Vec<String> {
+    let mut statements = Vec::new();
+    if state.enabled {
+        statements.push(format!(
+            "ALTER TABLE {table_name} ENABLE ROW LEVEL SECURITY"
+        ));
+    }
+    if state.forced == Some(true) {
+        statements.push(format!(
+            "ALTER TABLE ONLY {table_name} FORCE ROW LEVEL SECURITY"
+        ));
+    }
+    // add_entry joins the parts with a space and ends the last one
+    let last = statements.len().saturating_sub(1);
+    for statement in statements.iter_mut().take(last) {
+        statement.push(';');
+    }
+    statements
+}
+
+/// CREATE POLICY, shared by build and deploy; `table_name` is the
+/// quoted, qualified table
+pub(crate) fn render_policy(policy: &Policy, table_name: &str) -> String {
+    let mut sql = format!(
+        "CREATE POLICY {} ON {table_name}",
+        quote_ident(&policy.name)
+    );
+    if policy.restrictive == Some(true) {
+        sql.push_str(" AS RESTRICTIVE");
+    }
+    if let Some(command) = &policy.command {
+        sql.push_str(&format!(" FOR {command}"));
+    }
+    if let Some(roles) = &policy.roles {
+        let roles: Vec<String> =
+            roles.iter().map(|r| user_mapping_subject(r)).collect();
+        sql.push_str(&format!(" TO {}", roles.join(", ")));
+    }
+    if let Some(using) = &policy.using {
+        sql.push_str(&format!(" USING ({using})"));
+    }
+    if let Some(with_check) = &policy.with_check {
+        sql.push_str(&format!(" WITH CHECK ({with_check})"));
+    }
+    sql
+}
+
 /// CREATE TRIGGER / DROP TRIGGER rendering, shared by build and
 /// deploy; `table_name` is the quoted, qualified table
 pub(crate) fn render_trigger(
@@ -2973,6 +3096,8 @@ mod tests {
                 unique_constraints: None,
                 foreign_keys: None,
                 triggers: None,
+                row_level_security: None,
+                policies: None,
                 partition: None,
                 partitions: None,
                 access_method: None,
@@ -3377,6 +3502,8 @@ mod tests {
             unique_constraints: None,
             foreign_keys: None,
             triggers: None,
+            row_level_security: None,
+            policies: None,
             partition: None,
             partitions: None,
             access_method: None,
@@ -3987,6 +4114,37 @@ mod tests {
                 "COMMENT ON FUNCTION test.bare_zero() IS $$a trigger \
                  fn$$;\n;\n"
             ]
+        );
+    }
+
+    #[test]
+    fn renders_policies_and_row_security() {
+        let policy: Policy = serde_json::from_value(serde_json::json!({
+            "name": "Own Rows",
+            "restrictive": true,
+            "command": "update",
+            "roles": ["alice", "public"],
+            "using": "(owner = CURRENT_USER)",
+            "with_check": "true",
+        }))
+        .unwrap();
+        assert_eq!(
+            render_policy(&policy, "test.notes"),
+            "CREATE POLICY \"Own Rows\" ON test.notes AS RESTRICTIVE FOR \
+             UPDATE TO alice, PUBLIC USING ((owner = CURRENT_USER)) WITH \
+             CHECK (true)"
+        );
+        let state = RowLevelSecurity {
+            enabled: true,
+            forced: Some(true),
+        };
+        assert_eq!(
+            render_row_security(&state, "test.notes").join(" "),
+            "ALTER TABLE test.notes ENABLE ROW LEVEL SECURITY; ALTER TABLE \
+             ONLY test.notes FORCE ROW LEVEL SECURITY"
+        );
+        assert!(
+            render_row_security(&RowLevelSecurity::default(), "t").is_empty()
         );
     }
 }

@@ -90,6 +90,16 @@ reconciled in place where PostgreSQL can express it:
   that dropping and re-adding it would take. Dropping a column, changing a column
   type, reordering columns, and partitioning/storage changes fall back
   to drop+recreate.
+- **Row-level security** — `ENABLE`/`DISABLE` and `[NO] FORCE ROW
+  LEVEL SECURITY`, and one statement per policy, labeled with the
+  policy's own name in the script. A new policy is created. A changed
+  comment is set with `COMMENT ON POLICY`, and a role change that
+  narrows access (fewer roles on a permissive policy, more on a
+  restrictive one) with `ALTER POLICY ... TO`. Every other policy
+  change drops and re-creates the policy. A table file without
+  `row_level_security` or `policies`, such as one pulled before
+  pglifecycle modeled them, leaves the table's row security as the
+  database has it.
 - **Functions and views** — `CREATE OR REPLACE` (a function whose
   return type changed must be dropped first, so it falls back).
 - **Sequences** — a single `ALTER SEQUENCE` of the changed options.
@@ -128,6 +138,22 @@ pglifecycle that did not model identity columns has none on any
 column, so deploying it asks for exactly this on each one; the gate is
 what stops that from stripping them. Pull the project again to record
 them.
+
+Row-security reconciliation is gated when it can give a role access to
+rows it could not see before: `DISABLE` and `NO FORCE ROW LEVEL
+SECURITY`, the drop of a restrictive policy, and every policy change
+except a comment or a role change that narrows access. Whether an
+edited `USING` or `WITH CHECK` expression allows more rows or fewer
+cannot be decided in general, so every such edit is gated. Enabling
+or forcing row security, dropping a permissive policy and adding a
+policy are always included: a new policy is one the project adds
+explicitly, and gating it while `ENABLE` runs would hide every row.
+
+A withheld statement that opens access leaves the database stricter
+than the project. Any other withheld policy change is different: the
+database keeps the old policy, which can allow more than the project
+does. The script header names each one with a `-- WARNING:` line, and
+the stderr report says the same.
 
 Ownership is not managed (the script behaves like
 `pg_restore --no-owner`), and roles, users, groups, and tablespaces are

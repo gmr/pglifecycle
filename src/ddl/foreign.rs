@@ -131,6 +131,8 @@ pub(crate) fn create_foreign_table(
         unique_constraints: None,
         foreign_keys: None,
         triggers: None,
+        row_level_security: None,
+        policies: None,
         partition: None,
         partitions: None,
         access_method: None,

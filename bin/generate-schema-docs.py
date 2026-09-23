@@ -70,6 +70,7 @@ GROUPS: dict[str, list[str]] = {
         'constraint',
         'dependencies',
         'foreign_key',
+        'policy',
         'trigger',
     ],
     'Per-schema container files': [

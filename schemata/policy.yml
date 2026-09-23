@@ -1,0 +1,46 @@
+---
+$schema: https://json-schema.org/draft/2020-12/schema
+$id: https://gmr.github.io/pglifecycle/schemata/policy.json
+title: Policy
+description: Defines a row-level security policy on a table
+type: object
+properties:
+  name:
+    title: Name
+    description: The policy name, unique within its table
+    type: string
+  restrictive:
+    title: Restrictive
+    description: >
+      Create the policy AS RESTRICTIVE. A row must pass every
+      restrictive policy, in addition to at least one permissive
+      policy. The default is PERMISSIVE.
+    type: boolean
+  command:
+    title: Command
+    description: The command the policy applies to. The default is ALL.
+    enum: [ALL, SELECT, INSERT, UPDATE, DELETE]
+  roles:
+    title: Roles
+    description: The roles the policy applies to. The default is PUBLIC.
+    type: array
+    items:
+      type: string
+    minItems: 1
+  using:
+    title: USING Expression
+    description: >
+      The expression that selects the existing rows the policy makes
+      visible or lets a command change
+    type: string
+  with_check:
+    title: WITH CHECK Expression
+    description: >
+      The expression that new or updated rows must satisfy
+    type: string
+  comment:
+    title: Comment
+    description: An optional comment about the policy
+    type: string
+additionalProperties: false
+required: [name]

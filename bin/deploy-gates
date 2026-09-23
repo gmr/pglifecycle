@@ -95,6 +95,8 @@ echo "==> Gate 2: convergence (mutate, deploy --apply, re-deploy is empty)"
 # users.id is a primary-key column, so its renamed NOT NULL constraint
 # has to converge through RENAME CONSTRAINT: PostgreSQL rejects DROP
 # NOT NULL there outright
+# row-security drift: turned off and unforced, one policy dropped, one
+# edited, one database-only, and a changed policy comment
 psql -d "${TARGET_DB}" -q -v ON_ERROR_STOP=1 <<'SQL'
 ALTER TABLE test.users ADD COLUMN scratch text;
 ALTER TABLE test.users ALTER COLUMN display_name SET NOT NULL;
@@ -105,6 +107,13 @@ COMMENT ON VIEW test.deploy_probe IS 'stale, not in repo';
 ALTER FOREIGN DATA WRAPPER gate_fdw OPTIONS (SET debug 'false');
 ALTER SERVER gate_srv OPTIONS (SET host 'changed', DROP dbname);
 ALTER FOREIGN TABLE test.gate_ft OPTIONS (SET table_name 'changed');
+ALTER TABLE test.tenant_notes DISABLE ROW LEVEL SECURITY;
+ALTER TABLE test.tenant_notes NO FORCE ROW LEVEL SECURITY;
+DROP POLICY tenant_notes_read ON test.tenant_notes;
+ALTER POLICY tenant_notes_own ON test.tenant_notes USING (true);
+CREATE POLICY stray ON test.tenant_notes AS RESTRICTIVE USING (true);
+COMMENT ON POLICY tenant_notes_own ON test.tenant_notes IS 'drift';
+ALTER TABLE test.sealed_notes DISABLE ROW LEVEL SECURITY;
 SQL
 ./target/debug/pglifecycle deploy --apply --allow-drop -d "${TARGET_DB}" \
     "${WORKDIR}/project"
@@ -138,6 +147,31 @@ fi
 if ! grep -q "destructive statement(s) are pending" "${APPLY_ERR}"; then
     echo "Safety gate FAILED: --apply failed for an unexpected reason" >&2
     cat "${APPLY_ERR}" >&2
+    exit 1
+fi
+# a policy edit is gated, and withholding it leaves the old, possibly
+# wider policy in place, so the script must name it rather than stay
+# silent; turning row security off is gated too
+psql -d "${TARGET_DB}" -q -v ON_ERROR_STOP=1 \
+    -c "ALTER POLICY tenant_notes_own ON test.tenant_notes USING (true);" \
+    -c "ALTER TABLE test.sealed_notes DISABLE ROW LEVEL SECURITY;"
+./target/debug/pglifecycle deploy -o "${WORKDIR}/gated.sql" \
+    -d "${TARGET_DB}" "${WORKDIR}/project"
+if ! grep -q '^-- WARNING: POLICY test.tenant_notes tenant_notes_own' \
+        "${WORKDIR}/gated.sql"; then
+    echo "Safety gate FAILED: no warning for a withheld policy" >&2
+    cat "${WORKDIR}/gated.sql" >&2
+    exit 1
+fi
+if grep -q 'DROP POLICY' "${WORKDIR}/gated.sql"; then
+    echo "Safety gate FAILED: gated policy change in the script" >&2
+    cat "${WORKDIR}/gated.sql" >&2
+    exit 1
+fi
+if ! grep -q 'sealed_notes ENABLE ROW LEVEL SECURITY' \
+        "${WORKDIR}/gated.sql"; then
+    echo "Safety gate FAILED: ENABLE ROW LEVEL SECURITY was withheld" >&2
+    cat "${WORKDIR}/gated.sql" >&2
     exit 1
 fi
 echo "Safety gate passed: drops excluded and --apply refused"

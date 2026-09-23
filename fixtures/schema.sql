@@ -382,3 +382,26 @@ ALTER TABLE legacy_imports
     FOREIGN KEY (source_id) REFERENCES legacy_imports (id) NOT VALID;
 ALTER TABLE legacy_imports
     ADD CONSTRAINT legacy_imports_reference_nn NOT NULL reference NOT VALID;
+
+-- Row-level security. pg_dump writes FORCE inside the TABLE entry, and
+-- ENABLE, each policy and each policy comment as entries of their own.
+-- CURRENT_USER keeps the fixture free of a cluster-wide role; pg_dump
+-- writes the role it resolves to.
+CREATE TABLE tenant_notes (
+    id     INT PRIMARY KEY,
+    tenant TEXT NOT NULL,
+    body   TEXT
+);
+ALTER TABLE tenant_notes ENABLE ROW LEVEL SECURITY;
+ALTER TABLE tenant_notes FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_notes_own ON tenant_notes
+    USING (tenant = CURRENT_USER) WITH CHECK (tenant = CURRENT_USER);
+CREATE POLICY tenant_notes_read ON tenant_notes FOR SELECT
+    TO CURRENT_USER USING (true);
+CREATE POLICY tenant_notes_no_blank ON tenant_notes AS RESTRICTIVE
+    FOR INSERT WITH CHECK (body <> '');
+COMMENT ON POLICY tenant_notes_own ON tenant_notes IS 'tenant isolation';
+
+-- enabled with no policies: every row is hidden from all but the owner
+CREATE TABLE sealed_notes (id INT);
+ALTER TABLE sealed_notes ENABLE ROW LEVEL SECURITY;

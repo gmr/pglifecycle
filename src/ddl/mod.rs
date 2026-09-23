@@ -10,6 +10,7 @@ mod acl;
 mod foreign;
 mod function;
 mod object;
+mod policy;
 mod table;
 mod trigger;
 mod view;
@@ -84,6 +85,17 @@ pub enum Statement {
     CreateTrigger {
         table: QualifiedName,
         trigger: models::Trigger,
+    },
+    CreatePolicy {
+        table: QualifiedName,
+        policy: models::Policy,
+    },
+    /// ALTER TABLE ... [ENABLE | DISABLE | [NO] FORCE] ROW LEVEL
+    /// SECURITY; each statement sets one of the two
+    RowSecurity {
+        table: QualifiedName,
+        enabled: Option<bool>,
+        forced: Option<bool>,
     },
     /// COMMENT ON `on` `target` IS `comment`
     Comment {
@@ -264,6 +276,7 @@ fn dispatch(node: &Node, src: &str) -> Result<Vec<Statement>, String> {
             Ok(vec![foreign::create_user_mapping(node, src)?])
         }
         "CreateTrigStmt" => Ok(vec![trigger::create_trigger(node, src)?]),
+        "CreatePolicyStmt" => Ok(vec![policy::create_policy(node, src)?]),
         "CommentStmt" => Ok(vec![object::comment(node, src)?]),
         "GrantStmt" => Ok(vec![acl::grant(node, src, false)?]),
         "RevokeStmt" => Ok(vec![acl::grant(node, src, true)?]),

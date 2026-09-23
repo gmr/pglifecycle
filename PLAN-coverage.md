@@ -1,6 +1,6 @@
 # Coverage plan: silent schema loss, RLS, and PostgreSQL 18
 
-Status: Phases 0 to 3 complete. Phases 4-8 proposed.
+Status: Phases 0 to 4 complete. Phases 5-8 proposed.
 Written 2026-09-21.
 
 Every claim below was verified against PostgreSQL 18.4 (the version
@@ -388,7 +388,56 @@ up once it round-trips.
    producer is missing. Pre-existing, found while reviewing the
    Phase 2 foreign-key work.
 
-### Phase 4 — RLS and policies (~3 days)
+### Phase 4 — RLS and policies — **DONE**
+
+**Done:** items 1 to 8. The coverage gate list is down from 17 to 13
+entries (`TABLE`, `ROW SECURITY` and two `POLICY` entries for
+`unsupported.documents`). `fixtures/schema.sql` carries an enabled and
+forced table with permissive, restrictive, role-scoped and commented
+policies, plus an enabled table with none. `bin/deploy-gates` drifts
+all of it and checks both convergence and the gating.
+
+Where the work departs from the items below:
+
+- **Item 8 had the fail-open direction wrong.** Withholding `DISABLE`
+  or `NO FORCE ROW LEVEL SECURITY`, or the drop of a *restrictive*
+  policy, leaves the database *stricter* than the repo, not more
+  permissive. The rule is now "gate reconciliation that can open
+  access; trust an explicit new policy": `DISABLE`, `NO FORCE`, the
+  drop of a restrictive policy, and every policy change other than a
+  comment or a role change that narrows access (fewer roles on a
+  permissive policy, more on a restrictive one). Dropping a permissive
+  policy narrows access and is always included, and so is a new
+  policy, since gating it while `ENABLE` runs would hide every row. A
+  withheld change is flagged fail-open, and named in the script with a
+  `-- WARNING:` header line, unless it provably opens access (open
+  decision 2: `--allow-drop`, with that warning). Rhona reviewed this
+  and caught two cases, now fixed: widening a restrictive policy's
+  roles narrows access, and a withheld change that provably opens
+  access is not fail-open. Declined: her suggestion to change
+  expressions with `ALTER POLICY` rather than drop and re-create.
+  `ALTER POLICY` cannot remove a `USING` or `WITH CHECK`, and the
+  replacement runs in the deploy's one transaction, so no session sees
+  the table without the policy.
+- **`restrictive: true`, not `permissive: false`**, so the field keeps
+  only its non-default value, like `not_valid` and `enforced`.
+- **`row_level_security` manages the policies too.** When it is
+  present, an absent `policies` means none; only when both are absent
+  is the table unmanaged. Otherwise a pulled table with row security
+  enabled and no policies would need an explicit `policies: []` to
+  mean what it says.
+- **No `AlterPolicyStmt` parser.** pg_dump never writes `ALTER
+  POLICY`, so pull never meets one.
+- **No duplicate-name check in `project::validate`.** Two policies
+  with one name fail the restore with a clear error, as two triggers
+  with one name already do.
+- **Partitions.** A partition is modeled by its bounds alone, so row
+  security of its own goes to `remaining.yaml` and fails the pull
+  instead of disappearing with the folded child table.
+- Foreign tables cannot have row security (PostgreSQL rejects it), so
+  pull does not default the state on them.
+
+The original plan follows.
 
 Model policies as **children of `Table`**, following the
 index/trigger/constraint precedent, not as a new top-level object type:
@@ -664,9 +713,10 @@ out to dump identically on both sides.
 
 1. Phase 2.2: is "absent `kind` means `STORED`" the right back-compat
    choice, or should existing projects be migrated to explicit values?
-2. Phase 4.8: should `DROP POLICY` / `DISABLE ROW LEVEL SECURITY` sit
-   behind `--allow-drop` with the rest of the destructive statements,
-   or behind their own flag, given that withholding them fails *open*?
+2. ~~Phase 4.8: should `DROP POLICY` / `DISABLE ROW LEVEL SECURITY`
+   sit behind `--allow-drop` or their own flag?~~ **Decided:
+   `--allow-drop`, with a loud warning for a withheld statement that
+   leaves the database more open.** See Phase 4 for which ones do.
 3. ~~Phase 0.2: confirm that `pull` failing by default on unsupported
    entries is acceptable for 2.0.~~ **Decided: yes, `pull` fails.**
    Shipped.

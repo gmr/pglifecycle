@@ -133,6 +133,9 @@ fn resolutions(
 struct Statement {
     label: String,
     sql: String,
+    /// Withholding it can leave the database allowing access that the
+    /// project does not (see `alter::Alter::fails_open`)
+    fails_open: bool,
 }
 
 /// The ordered script plus the destructive statements excluded from
@@ -196,6 +199,7 @@ fn plan(
                 Statement {
                     label: key.to_string(),
                     sql: drop_sql(key, diff.removed.get(key)),
+                    fails_open: false,
                 },
             );
         }
@@ -210,6 +214,7 @@ fn plan(
                 Statement {
                     label: key.to_string(),
                     sql: drop_sql(key, Some(definition)),
+                    fails_open: false,
                 },
             );
         }
@@ -263,7 +268,14 @@ fn plan(
             continue;
         };
         if changes.iter().all(|c| *c == Change::Added) {
-            push(false, Statement { label, sql: defn });
+            push(
+                false,
+                Statement {
+                    label,
+                    sql: defn,
+                    fails_open: false,
+                },
+            );
             continue;
         }
         if !changes.contains(&Change::Changed)
@@ -283,8 +295,12 @@ fn plan(
                         push(
                             alter.destructive,
                             Statement {
-                                label: label.clone(),
+                                label: alter
+                                    .label
+                                    .clone()
+                                    .unwrap_or_else(|| label.clone()),
                                 sql: alter.sql.clone(),
+                                fails_open: alter.fails_open,
                             },
                         );
                     }
@@ -299,6 +315,7 @@ fn plan(
                                 "CREATE OR REPLACE ",
                                 1,
                             ),
+                            fails_open: false,
                         },
                     );
                     // CREATE OR REPLACE keeps the existing comment, so a
@@ -309,6 +326,7 @@ fn plan(
                             Statement {
                                 label,
                                 sql: comment.clone(),
+                                fails_open: false,
                             },
                         );
                     }
@@ -319,7 +337,14 @@ fn plan(
                         sql.push_str(drop);
                     }
                     sql.push_str(&defn);
-                    push(true, Statement { label, sql });
+                    push(
+                        true,
+                        Statement {
+                            label,
+                            sql,
+                            fails_open: false,
+                        },
+                    );
                 }
             }
             continue;
@@ -334,7 +359,14 @@ fn plan(
                 && matches!(resolutions.get(id), Some(Resolution::Replace))
         });
         if replaced {
-            push(true, Statement { label, sql: defn });
+            push(
+                true,
+                Statement {
+                    label,
+                    sql: defn,
+                    fails_open: false,
+                },
+            );
         }
     }
     Ok(Plan {
@@ -373,11 +405,21 @@ fn report(diff: &Diff, plan: &Plan, assembly: &pull::Assembly) {
         );
     }
     for statement in &plan.excluded {
-        log::warn!(
-            "{}: change requires a destructive statement; re-run with \
-             --allow-drop to include it",
-            statement.label
-        );
+        if statement.fails_open {
+            log::warn!(
+                "{}: change requires a destructive statement and was \
+                 withheld; until it is applied, the database can allow \
+                 access that the project does not. Re-run with \
+                 --allow-drop to include it",
+                statement.label
+            );
+        } else {
+            log::warn!(
+                "{}: change requires a destructive statement; re-run with \
+                 --allow-drop to include it",
+                statement.label
+            );
+        }
     }
     log::info!(
         "Plan: {} statement(s) included, {} excluded",
@@ -398,6 +440,15 @@ fn render_script(plan: &Plan, project: &str, source: &str) -> String {
              --allow-drop)\n",
             plan.excluded.len()
         ));
+        // a withheld policy change is the one exclusion that leaves the
+        // database less protected than the project, so name each one
+        for statement in plan.excluded.iter().filter(|s| s.fails_open) {
+            script.push_str(&format!(
+                "-- WARNING: {} withheld; the database can allow access \
+                 the project does not\n",
+                statement.label
+            ));
+        }
     } else if plan.included_destructive > 0 {
         script.push_str(&format!(
             "-- destructive statements: {} included\n",

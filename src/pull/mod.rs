@@ -563,6 +563,8 @@ impl Assembly {
                 | OT::Default
                 | OT::TableAttach
                 | OT::Trigger
+                | OT::Policy
+                | OT::RowSecurity
                 | OT::ForeignTable
                 | OT::ForeignDataWrapper
                 | OT::ForeignServer
@@ -607,6 +609,7 @@ impl Assembly {
         self.apply_deferred_partitions();
         self.apply_deferred_defaults();
         self.apply_attached_partitions();
+        self.apply_default_row_security();
         task.finish();
         Ok(())
     }
@@ -676,6 +679,24 @@ impl Assembly {
                     if partition.comment.is_none() {
                         partition.comment = child.comment.clone();
                     }
+                    // a partition is modeled by its bounds alone, so
+                    // row security of its own would be lost with the
+                    // child table; record it so the pull fails
+                    if child.row_level_security.is_some()
+                        || child.policies.is_some()
+                    {
+                        log::warn!(
+                            "Cannot model row security of partition {}.{}",
+                            partition.schema,
+                            partition.name
+                        );
+                        self.remaining.push(Remaining {
+                            desc: String::from("ROW SECURITY"),
+                            namespace: Some(partition.schema.clone()),
+                            tag: Some(partition.name.clone()),
+                            defn: None,
+                        });
+                    }
                     removed.insert(key);
                 }
                 None => log::warn!(
@@ -698,6 +719,19 @@ impl Assembly {
                 None => {
                     log::warn!("ATTACH PARTITION to unknown table {parent}")
                 }
+            }
+        }
+    }
+
+    /// Record row security as disabled on each table that has none, so
+    /// every pulled table states it. An absent state tells deploy the
+    /// project does not manage it, which is right for a project written
+    /// before row security was modeled, not for a fresh pull. A foreign
+    /// table keeps its state only when the dump gave one.
+    fn apply_default_row_security(&mut self) {
+        for table in &mut self.tables {
+            if table.server.is_none() {
+                table.row_level_security.get_or_insert_default();
             }
         }
     }
@@ -906,6 +940,40 @@ impl Assembly {
                     None => log::warn!("Trigger on unknown table {table}"),
                 }
             }
+            Statement::CreatePolicy { table, policy } => {
+                match self.find_table(&table) {
+                    Some(table) => {
+                        table.policies.get_or_insert_default().push(policy);
+                    }
+                    // a policy dropped here would leave the rebuilt table
+                    // more open than the source, so keep the entry and
+                    // let the pull fail
+                    None => {
+                        log::warn!("Policy on unknown table {table}");
+                        self.push_remaining(entry);
+                    }
+                }
+            }
+            Statement::RowSecurity {
+                table,
+                enabled,
+                forced,
+            } => match self.find_table(&table) {
+                Some(table) => {
+                    let state =
+                        table.row_level_security.get_or_insert_default();
+                    if let Some(enabled) = enabled {
+                        state.enabled = enabled;
+                    }
+                    if let Some(forced) = forced {
+                        state.forced = forced.then_some(true);
+                    }
+                }
+                None => {
+                    log::warn!("Row security on unknown table {table}");
+                    self.push_remaining(entry);
+                }
+            },
             Statement::Comment {
                 on,
                 target,
@@ -1110,6 +1178,7 @@ impl Assembly {
                 .is_some(),
             "FUNCTION" => self.apply_function_comment(&schema, name, &comment),
             "TRIGGER" => self.apply_trigger_comment(target, &comment),
+            "POLICY" => self.apply_policy_comment(target, &comment),
             "INDEX" => {
                 match self.index_location.get(&(schema, name.clone())) {
                     Some(&IndexLocation::Table(idx)) => self.tables[idx]
@@ -1237,6 +1306,37 @@ impl Assembly {
             return false;
         };
         trigger.comment = Some(comment.to_string());
+        true
+    }
+
+    /// `COMMENT ON POLICY p ON schema.table`, the same two-name shape
+    /// as [`Self::apply_trigger_comment`]
+    fn apply_policy_comment(
+        &mut self,
+        target: &QualifiedName,
+        comment: &str,
+    ) -> bool {
+        let Some(relation) = &target.schema else {
+            return false;
+        };
+        let (schema, table) = match relation.split_once('.') {
+            Some((schema, table)) => (Some(schema.to_string()), table),
+            None => (None, relation.as_str()),
+        };
+        let relation = QualifiedName {
+            schema,
+            name: table.to_string(),
+        };
+        let Some(policy) = self.find_table(&relation).and_then(|table| {
+            table
+                .policies
+                .iter_mut()
+                .flatten()
+                .find(|p| p.name == target.name)
+        }) else {
+            return false;
+        };
+        policy.comment = Some(comment.to_string());
         true
     }
 
@@ -1843,6 +1943,77 @@ mod tests {
     }
 
     #[test]
+    fn row_security_and_policies_fold_into_their_table() {
+        let mut dump = libpgdump::new("fixtures", "UTF8", "18.0").unwrap();
+        add(&mut dump, OT::Schema, "", "test", "CREATE SCHEMA test;");
+        // pg_dump writes FORCE inside the TABLE entry itself
+        add(
+            &mut dump,
+            OT::Table,
+            "test",
+            "notes",
+            "CREATE TABLE test.notes (id int);\n\n\
+             ALTER TABLE ONLY test.notes FORCE ROW LEVEL SECURITY;",
+        );
+        add(
+            &mut dump,
+            OT::Table,
+            "test",
+            "plain",
+            "CREATE TABLE test.plain (id int);",
+        );
+        add(
+            &mut dump,
+            OT::RowSecurity,
+            "test",
+            "notes",
+            "ALTER TABLE test.notes ENABLE ROW LEVEL SECURITY;",
+        );
+        add(
+            &mut dump,
+            OT::Policy,
+            "test",
+            "notes own",
+            "CREATE POLICY own ON test.notes USING ((id = 1));",
+        );
+        add(
+            &mut dump,
+            OT::Comment,
+            "test",
+            "POLICY own ON notes",
+            "COMMENT ON POLICY own ON test.notes IS 'mine';",
+        );
+        let mut assembly = Assembly::default();
+        assembly.ingest(&dump).unwrap();
+        assert!(assembly.remaining.is_empty(), "{:?}", assembly.remaining);
+        let table = |name: &str| {
+            assembly
+                .tables
+                .iter()
+                .find(|t| t.name == name)
+                .expect("table")
+                .clone()
+        };
+        let notes = table("notes");
+        assert_eq!(
+            notes.row_level_security,
+            Some(models::RowLevelSecurity {
+                enabled: true,
+                forced: Some(true),
+            })
+        );
+        let policies = notes.policies.expect("policies");
+        assert_eq!(policies[0].using.as_deref(), Some("(id = 1)"));
+        assert_eq!(policies[0].comment.as_deref(), Some("mine"));
+        // every pulled table states its row security, so deploy manages
+        // it rather than reading the absence as unmanaged
+        assert_eq!(
+            table("plain").row_level_security,
+            Some(models::RowLevelSecurity::default())
+        );
+    }
+
+    #[test]
     fn set_default_attaches_to_existing_column() {
         let mut dump = libpgdump::new("fixtures", "UTF8", "18.0").unwrap();
         add(&mut dump, OT::Schema, "", "test", "CREATE SCHEMA test;");
@@ -1930,6 +2101,8 @@ mod tests {
             unique_constraints: None,
             foreign_keys: None,
             triggers: None,
+            row_level_security: None,
+            policies: None,
             partition: None,
             partitions: None,
             access_method: None,
