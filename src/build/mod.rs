@@ -411,12 +411,13 @@ impl Builder {
     ) -> Result<(), String> {
         // extensions record the schema they install into as their
         // namespace, but COMMENT ON EXTENSION takes an unqualified name.
-        // FUNCTION tags already carry their own (argtypes) signature,
-        // so they pass through unquoted rather than as a plain ident.
+        // FUNCTION and PROCEDURE tags already carry their own
+        // (argtypes) signature, so they pass through unquoted rather
+        // than as a plain ident.
         let name = target.unwrap_or_else(|| {
             if desc == "EXTENSION" {
                 quote_ident(tag)
-            } else if desc == "FUNCTION" {
+            } else if desc == "FUNCTION" || desc == "PROCEDURE" {
                 if namespace.is_empty() {
                     tag.to_string()
                 } else {
@@ -1042,9 +1043,10 @@ impl Builder {
         }
         // `comment_target` is only set when `func_name` diverges from the
         // default comment target (`namespace.d.name`) computed in
-        // `add_comment` — i.e. only for the bare, unparenthesized
+        // `add_comment` — i.e. for the bare, unparenthesized
         // zero-argument case below, where `()` must be appended for a
-        // valid `COMMENT ON FUNCTION`.
+        // valid `COMMENT ON FUNCTION`, and for a procedure with
+        // parameters.
         // the signature without defaults, for the stored drop statement
         let mut drop_name = None;
         let (func_name, comment_target) = match &d.parameters {
@@ -1115,6 +1117,13 @@ impl Builder {
             }
             Some(name) => name.clone(),
             None => qualified.clone(),
+        };
+        // a procedure comment names the full signature, so that it
+        // identifies one overload (functions keep the bare name for
+        // parity)
+        let comment_target = match &drop_name {
+            Some(_) if procedure => Some(drop_target.clone()),
+            _ => comment_target,
         };
         let drop = vec![format!("DROP {kind}"), drop_target];
         if let Some(transform_types) = &d.transform_types {
@@ -4991,6 +5000,38 @@ mod tests {
             vec![
                 "COMMENT ON FUNCTION test.bare_zero() IS $$a trigger \
                  fn$$;\n;\n"
+            ]
+        );
+    }
+
+    #[test]
+    fn comments_procedure_with_signature() {
+        let procedure: crate::models::Procedure =
+            serde_json::from_value(json!({
+                "name": "archive",
+                "schema": "test",
+                "owner": "app",
+                "parameters": [
+                    {"mode": "IN", "name": "days", "data_type": "integer",
+                     "default": 7},
+                ],
+                "language": "sql",
+                "definition": "SELECT 1",
+                "comment": "archives rows",
+            }))
+            .unwrap();
+        let item = Item {
+            id: 1,
+            desc: ObjectType::Procedure,
+            definition: Definition::Procedure(procedure),
+            dependencies: BTreeSet::new(),
+        };
+        // the full signature, without defaults, identifies the overload
+        assert_eq!(
+            comment_defns(&item),
+            vec![
+                "COMMENT ON PROCEDURE test.archive(IN days integer) IS \
+                 $$archives rows$$;\n;\n"
             ]
         );
     }
