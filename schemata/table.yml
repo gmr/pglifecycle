@@ -366,6 +366,34 @@ properties:
     type: array
     items:
       $package_schema: trigger
+  row_level_security:
+    title: Row-Level Security
+    description: >
+      Whether row-level security is enabled and forced on the table.
+      When absent, deploy does not manage the table's row security, and
+      does not manage its policies unless `policies` is given. When
+      present, `policies` is the complete list: an absent list means
+      the table has no policies.
+    type: object
+    properties:
+      enabled:
+        title: Enabled
+        description: ENABLE ROW LEVEL SECURITY
+        type: boolean
+      forced:
+        title: Forced
+        description: >
+          FORCE ROW LEVEL SECURITY: the policies apply to the table
+          owner too
+        type: boolean
+    additionalProperties: false
+    required: [enabled]
+  policies:
+    title: Policies
+    description: An array of row-level security policies on the table
+    type: array
+    items:
+      $package_schema: policy
   partition:
     title: Partition Table
     description: Defines table partitioning behavior

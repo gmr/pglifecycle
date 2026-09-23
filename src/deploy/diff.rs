@@ -151,6 +151,14 @@ pub fn diff(project: &Project, assembly: &Assembly) -> Diff {
             match database.remove(&key) {
                 None => Change::Added,
                 Some(db) => {
+                    let db = match (&item.definition, db) {
+                        (Definition::Table(repo), Definition::Table(db)) => {
+                            Definition::Table(
+                                db.without_unmanaged_security(repo),
+                            )
+                        }
+                        (_, db) => db,
+                    };
                     if normalized(&item.definition) == normalized(&db) {
                         Change::Unchanged
                     } else {
@@ -287,12 +295,15 @@ fn existence_key(
 /// A definition as a JSON value with the fields deploy does not
 /// manage removed and type aliases canonicalized
 fn normalized(definition: &Definition) -> Value {
-    // a table compares in its canonical NOT NULL form, so the same
-    // constraint written two ways is not a change
+    // a table compares in its canonical NOT NULL and policy forms, so
+    // the same constraint written two ways, or the same policies in
+    // another order, is not a change
     let canonical;
     let definition = match definition {
         Definition::Table(table) => {
-            canonical = Definition::Table(table.with_canonical_not_nulls());
+            canonical = Definition::Table(
+                table.with_canonical_not_nulls().with_canonical_policies(),
+            );
             &canonical
         }
         other => other,

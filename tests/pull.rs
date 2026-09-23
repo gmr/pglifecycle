@@ -368,17 +368,17 @@ fn pull_refuses_existing_destination() {
     );
 }
 
-/// An archive carrying one entry `pull` cannot model (a policy), on top
+/// An archive carrying one entry `pull` cannot model (extended statistics), on top
 /// of the otherwise fully-supported fixture archive
-fn archive_with_policy(path: &std::path::Path) {
+fn archive_with_statistics(path: &std::path::Path) {
     fixture_archive(path);
     let mut dump = libpgdump::load(path).expect("load archive");
     common::add(
         &mut dump,
-        libpgdump::ObjectType::Policy,
+        libpgdump::ObjectType::Statistics,
         "test",
-        "users users_own_rows",
-        "CREATE POLICY users_own_rows ON test.users USING (true);",
+        "users_stats",
+        "CREATE STATISTICS test.users_stats ON id, email FROM test.users;",
     );
     dump.save(path).expect("save archive");
 }
@@ -387,11 +387,11 @@ fn archive_with_policy(path: &std::path::Path) {
 fn unmodeled_entry_fails_pull_and_is_preserved() {
     let dir = tempfile::tempdir().unwrap();
     let archive = dir.path().join("fixtures.dump");
-    archive_with_policy(&archive);
+    archive_with_statistics(&archive);
     let dest = dir.path().join("project");
     let error = pull::pull(&pull_args(&archive, &dest)).unwrap_err();
     assert!(
-        error.contains("could not be modeled") && error.contains("POLICY"),
+        error.contains("could not be modeled") && error.contains("STATISTICS"),
         "unexpected error: {error}"
     );
     assert!(
@@ -403,7 +403,7 @@ fn unmodeled_entry_fails_pull_and_is_preserved() {
     let remaining =
         std::fs::read_to_string(dest.join("remaining.yaml")).unwrap();
     assert!(
-        remaining.contains("users_own_rows"),
+        remaining.contains("users_stats"),
         "remaining.yaml must carry the entry verbatim: {remaining}"
     );
 }
@@ -412,7 +412,7 @@ fn unmodeled_entry_fails_pull_and_is_preserved() {
 fn allow_unsupported_accepts_an_incomplete_project() {
     let dir = tempfile::tempdir().unwrap();
     let archive = dir.path().join("fixtures.dump");
-    archive_with_policy(&archive);
+    archive_with_statistics(&archive);
     let dest = dir.path().join("project");
     pull::pull(&pull_args_with(
         &archive,
@@ -427,7 +427,7 @@ fn allow_unsupported_accepts_an_incomplete_project() {
 fn ignore_file_cannot_suppress_remaining_file() {
     let dir = tempfile::tempdir().unwrap();
     let archive = dir.path().join("fixtures.dump");
-    archive_with_policy(&archive);
+    archive_with_statistics(&archive);
     let ignore = dir.path().join("ignore.txt");
     std::fs::write(&ignore, "remaining.yaml\n").unwrap();
     let dest = dir.path().join("project");
@@ -440,7 +440,7 @@ fn ignore_file_cannot_suppress_remaining_file() {
     let remaining =
         std::fs::read_to_string(dest.join("remaining.yaml")).unwrap();
     assert!(
-        remaining.contains("users_own_rows"),
+        remaining.contains("users_stats"),
         "--ignore must not hold back the only copy of the entry: \
          {remaining}"
     );

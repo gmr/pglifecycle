@@ -100,6 +100,8 @@ pub(crate) fn create_table(
         unique_constraints: None,
         foreign_keys: None,
         triggers: None,
+        row_level_security: None,
+        policies: None,
         partition: table_partition_behavior(node, src),
         partitions: None,
         access_method: node
@@ -391,6 +393,17 @@ pub(crate) fn alter_table(
                 table: table.clone(),
                 column,
                 generated,
+            });
+        } else if cmd.child_of_kind("kw_row").is_some()
+            && cmd.child_of_kind("kw_security").is_some()
+        {
+            let negated = cmd.child_of_kind("kw_no").is_some()
+                || cmd.child_of_kind("kw_disable").is_some();
+            let forced = cmd.child_of_kind("kw_force").is_some();
+            statements.push(Statement::RowSecurity {
+                table: table.clone(),
+                enabled: (!forced).then_some(!negated),
+                forced: forced.then_some(!negated),
             });
         } else if cmd.has("kw_add") {
             let Some(constraint) = cmd.find("TableConstraint") else {

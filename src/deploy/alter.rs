@@ -15,8 +15,8 @@ use crate::deploy::diff::canonical_type;
 use crate::models::{
     CheckConstraint, Column, ColumnDefault, ColumnGenerated, ColumnNotNull,
     Definition, Domain, Extension, ForeignDataWrapper, ForeignKey, Function,
-    Index, NotNullConstraint, Schema, Sequence, SequenceOptions, Server,
-    Table, Trigger, Type, UserMapping, View, ViewColumn,
+    Index, NotNullConstraint, Policy, Schema, Sequence, SequenceOptions,
+    Server, Table, Trigger, Type, UserMapping, View, ViewColumn,
 };
 use crate::utils::{
     dollar_quote, postgres_value, quote_ident, user_mapping_subject,
@@ -26,6 +26,13 @@ use crate::utils::{
 pub(crate) struct Alter {
     pub sql: String,
     pub destructive: bool,
+    /// The object the statement reconciles, when it is a child of the
+    /// object being altered that the script names on its own (a
+    /// policy, or the table's row security)
+    pub label: Option<String>,
+    /// Withholding this statement can leave the database allowing
+    /// access that the project does not
+    pub fails_open: bool,
 }
 
 impl Alter {
@@ -33,13 +40,22 @@ impl Alter {
         Self {
             sql,
             destructive: false,
+            label: None,
+            fails_open: false,
         }
     }
 
     fn destructive(sql: String) -> Self {
         Self {
-            sql,
             destructive: true,
+            ..Self::new(sql)
+        }
+    }
+
+    fn labeled(self, label: &str) -> Self {
+        Self {
+            label: Some(label.to_string()),
+            ..self
         }
     }
 }
@@ -200,8 +216,8 @@ fn table(repo: &Table, db: &Table) -> Resolution {
     let db = &validate_local_not_nulls(&name, repo, db, &mut validations);
     // reconcile canonical forms; see Table::with_canonical_not_nulls
     let (repo, db) = (
-        &repo.with_canonical_not_nulls(),
-        &db.with_canonical_not_nulls(),
+        &repo.with_canonical_not_nulls().with_canonical_policies(),
+        &db.with_canonical_not_nulls().with_canonical_policies(),
     );
     // foreign tables (a `server` on either side) reconcile through a
     // dedicated path: only OPTIONS and the comment are alterable in
@@ -234,8 +250,183 @@ fn table(repo: &Table, db: &Table) -> Resolution {
         return Resolution::Replace;
     }
     indexes(&name, repo, db, &mut alters);
+    row_security(&name, repo, db, &mut alters);
+    policies(&name, repo, db, &mut alters);
     push_comment(&mut alters, "TABLE", &name, &repo.comment, &db.comment);
     Resolution::Statements(alters)
+}
+
+/// Row security reconciliation. A statement that turns protection on
+/// is always included; one that turns it off opens the table's rows
+/// to more roles, so it is gated. Withholding it leaves the database
+/// the stricter of the two, so it does not fail open.
+///
+/// The database side has no state when the repo leaves row security
+/// unmanaged (see [`Table::without_unmanaged_security`]).
+fn row_security(
+    table: &str,
+    repo: &Table,
+    db: &Table,
+    alters: &mut Vec<Alter>,
+) {
+    let Some(wanted) = &repo.row_level_security else {
+        return;
+    };
+    let existing = db.row_level_security.clone().unwrap_or_default();
+    let label = format!("ROW SECURITY {}.{}", repo.schema, repo.name);
+    if wanted.enabled != existing.enabled {
+        let sql = format!(
+            "ALTER TABLE {table} {} ROW LEVEL SECURITY;\n",
+            if wanted.enabled { "ENABLE" } else { "DISABLE" }
+        );
+        alters.push(if wanted.enabled {
+            Alter::new(sql).labeled(&label)
+        } else {
+            Alter::destructive(sql).labeled(&label)
+        });
+    }
+    let forced = wanted.forced == Some(true);
+    if forced != (existing.forced == Some(true)) {
+        let sql = format!(
+            "ALTER TABLE ONLY {table} {} ROW LEVEL SECURITY;\n",
+            if forced { "FORCE" } else { "NO FORCE" }
+        );
+        alters.push(if forced {
+            Alter::new(sql).labeled(&label)
+        } else {
+            Alter::destructive(sql).labeled(&label)
+        });
+    }
+}
+
+/// Policy reconciliation, one labeled statement per policy.
+///
+/// Included: a new policy, which the repo adds explicitly; the drop of
+/// a permissive policy; a role change that narrows access (fewer roles
+/// on a permissive policy, more on a restrictive one); and a comment.
+/// Gated, as reconciliation that can open access: the drop of a
+/// restrictive policy and every other change. Whether a changed
+/// expression allows more rows or fewer cannot be decided in general.
+/// A withheld change is marked to fail open unless it provably opens
+/// access, since the old policy stays and can allow more than the
+/// project does.
+fn policies(table: &str, repo: &Table, db: &Table, alters: &mut Vec<Alter>) {
+    let wanted = repo.policies.as_deref().unwrap_or_default();
+    let existing = db.policies.as_deref().unwrap_or_default();
+    let label = |policy: &Policy| {
+        format!("POLICY {}.{} {}", repo.schema, repo.name, policy.name)
+    };
+    let target =
+        |policy: &Policy| format!("{} ON {table}", quote_ident(&policy.name));
+    let drop = |policy: &Policy| {
+        format!("DROP POLICY IF EXISTS {};\n", target(policy))
+    };
+    let create = |policy: &Policy| {
+        let mut sql = format!("{};\n", build::render_policy(policy, table));
+        if let Some(comment) = &policy.comment {
+            sql.push_str(&comment_on(
+                "POLICY",
+                &target(policy),
+                Some(comment),
+            ));
+        }
+        sql
+    };
+    for old in existing {
+        if !wanted.iter().any(|p| p.name == old.name) {
+            let sql = drop(old);
+            alters.push(if old.restrictive == Some(true) {
+                Alter::destructive(sql).labeled(&label(old))
+            } else {
+                Alter::new(sql).labeled(&label(old))
+            });
+        }
+    }
+    for new in wanted {
+        let Some(old) = existing.iter().find(|p| p.name == new.name) else {
+            alters.push(Alter::new(create(new)).labeled(&label(new)));
+            continue;
+        };
+        let without_comment = |p: &Policy| Policy {
+            comment: None,
+            ..p.clone()
+        };
+        if without_comment(new) == without_comment(old) {
+            if new.comment != old.comment {
+                alters.push(
+                    Alter::new(comment_on(
+                        "POLICY",
+                        &target(new),
+                        new.comment.as_deref(),
+                    ))
+                    .labeled(&label(new)),
+                );
+            }
+            continue;
+        }
+        let only_roles = Policy {
+            roles: old.roles.clone(),
+            ..without_comment(new)
+        } == without_comment(old);
+        let restrictive = new.restrictive == Some(true);
+        let fewer = fewer_roles(new.roles.as_deref(), old.roles.as_deref());
+        let more = fewer_roles(old.roles.as_deref(), new.roles.as_deref());
+        // a permissive policy grants access to its roles and a
+        // restrictive one limits them, so fewer roles narrows the first
+        // and more roles narrows the second
+        let narrows = only_roles && if restrictive { more } else { fewer };
+        let opens = (only_roles && if restrictive { fewer } else { more })
+            || Policy {
+                restrictive: old.restrictive,
+                ..without_comment(new)
+            } == without_comment(old)
+                && !restrictive;
+        let mut sql = if narrows {
+            let roles = match new.roles.as_deref() {
+                Some(roles) => {
+                    roles.iter().map(|r| user_mapping_subject(r)).collect()
+                }
+                None => vec![String::from("PUBLIC")],
+            };
+            format!("ALTER POLICY {} TO {};\n", target(new), roles.join(", "))
+        } else {
+            format!("{}{}", drop(old), create(new))
+        };
+        if narrows && new.comment != old.comment {
+            sql.push_str(&comment_on(
+                "POLICY",
+                &target(new),
+                new.comment.as_deref(),
+            ));
+        }
+        // withholding a change that provably opens access leaves the
+        // database stricter; any other withheld change can leave it
+        // more open than the project
+        alters.push(if narrows {
+            Alter::new(sql).labeled(&label(new))
+        } else {
+            Alter {
+                fails_open: !opens,
+                ..Alter::destructive(sql).labeled(&label(new))
+            }
+        });
+    }
+}
+
+/// Whether the `wanted` roles are a strict subset of the `existing`
+/// ones; no roles means PUBLIC, which includes every role
+fn fewer_roles(
+    wanted: Option<&[String]>,
+    existing: Option<&[String]>,
+) -> bool {
+    match (wanted, existing) {
+        (Some(wanted), None) => !wanted.is_empty(),
+        (Some(wanted), Some(existing)) => {
+            wanted.len() < existing.len()
+                && wanted.iter().all(|r| existing.contains(r))
+        }
+        (None, _) => false,
+    }
 }
 
 /// `VALIDATE CONSTRAINT` each NOT VALID table-level NOT NULL on one of
@@ -2651,5 +2842,190 @@ mod tests {
         let mut db = repo.clone();
         db.server = Some("other".into());
         assert!(matches!(table(&repo, &db), Resolution::Replace));
+    }
+
+    fn with_security(
+        state: serde_json::Value,
+        policies: serde_json::Value,
+    ) -> Table {
+        let mut table = base_table();
+        if !state.is_null() {
+            table["row_level_security"] = state;
+        }
+        if !policies.is_null() {
+            table["policies"] = policies;
+        }
+        parse_table(table)
+    }
+
+    fn gated(alters: &[Alter]) -> Vec<bool> {
+        alters.iter().map(|a| a.destructive).collect()
+    }
+
+    #[test]
+    fn enabling_row_security_is_included_and_disabling_is_gated() {
+        let off = with_security(
+            serde_json::json!({"enabled": false}),
+            serde_json::Value::Null,
+        );
+        let on = with_security(
+            serde_json::json!({"enabled": true, "forced": true}),
+            serde_json::Value::Null,
+        );
+        let alters = statements(table(&on, &off));
+        assert_eq!(
+            sql(&alters),
+            vec![
+                "ALTER TABLE test.users ENABLE ROW LEVEL SECURITY;\n",
+                "ALTER TABLE ONLY test.users FORCE ROW LEVEL SECURITY;\n",
+            ]
+        );
+        assert_eq!(gated(&alters), vec![false, false]);
+        assert_eq!(
+            alters[0].label.as_deref(),
+            Some("ROW SECURITY test.users")
+        );
+        let alters = statements(table(&off, &on));
+        assert_eq!(
+            sql(&alters),
+            vec![
+                "ALTER TABLE test.users DISABLE ROW LEVEL SECURITY;\n",
+                "ALTER TABLE ONLY test.users NO FORCE ROW LEVEL SECURITY;\n",
+            ]
+        );
+        assert_eq!(gated(&alters), vec![true, true]);
+        // the stricter state is kept when these are withheld
+        assert!(alters.iter().all(|a| !a.fails_open));
+    }
+
+    #[test]
+    fn policies_reconcile_one_labeled_statement_each() {
+        let on = serde_json::json!({"enabled": true});
+        let db = with_security(
+            on.clone(),
+            serde_json::json!([
+                {"name": "open", "using": "true"},
+                {"name": "only_mine", "restrictive": true,
+                 "using": "(owner = CURRENT_USER)"},
+                {"name": "wide", "using": "true"},
+                {"name": "edited", "using": "(a = 1)"},
+            ]),
+        );
+        let repo = with_security(
+            on,
+            serde_json::json!([
+                {"name": "wide", "roles": ["alice"], "using": "true"},
+                {"name": "edited", "using": "(a = 2)", "comment": "c"},
+                {"name": "fresh", "command": "select", "using": "true"},
+            ]),
+        );
+        let alters = statements(table(&repo, &db));
+        assert_eq!(
+            sql(&alters),
+            vec![
+                "DROP POLICY IF EXISTS only_mine ON test.users;\n",
+                "DROP POLICY IF EXISTS open ON test.users;\n",
+                "DROP POLICY IF EXISTS edited ON test.users;\n\
+                 CREATE POLICY edited ON test.users USING ((a = 2));\n\
+                 COMMENT ON POLICY edited ON test.users IS $$c$$;\n",
+                "CREATE POLICY fresh ON test.users FOR SELECT USING (true);\n",
+                "ALTER POLICY wide ON test.users TO alice;\n",
+            ]
+        );
+        // dropping a permissive policy and narrowing one tighten access;
+        // dropping a restrictive one and editing an expression can open it
+        assert_eq!(gated(&alters), vec![true, false, true, false, false]);
+        let fails_open: Vec<bool> =
+            alters.iter().map(|a| a.fails_open).collect();
+        assert_eq!(fails_open, vec![false, false, true, false, false]);
+        assert_eq!(alters[1].label.as_deref(), Some("POLICY test.users open"));
+    }
+
+    #[test]
+    fn widening_roles_is_gated() {
+        let on = serde_json::json!({"enabled": true});
+        let db = with_security(
+            on.clone(),
+            serde_json::json!([{"name": "p", "roles": ["alice"]}]),
+        );
+        let repo = with_security(
+            on,
+            serde_json::json!([{"name": "p", "roles": ["alice", "bob"]}]),
+        );
+        let alters = statements(table(&repo, &db));
+        assert_eq!(gated(&alters), vec![true]);
+        // withheld, the database keeps the narrower policy
+        assert!(!alters[0].fails_open);
+    }
+
+    #[test]
+    fn widening_a_restrictive_policy_is_included() {
+        let on = serde_json::json!({"enabled": true});
+        let db = with_security(
+            on.clone(),
+            serde_json::json!([
+                {"name": "p", "restrictive": true, "roles": ["alice"]}
+            ]),
+        );
+        let repo = with_security(
+            on,
+            serde_json::json!([{"name": "p", "restrictive": true}]),
+        );
+        let alters = statements(table(&repo, &db));
+        assert_eq!(
+            sql(&alters),
+            vec!["ALTER POLICY p ON test.users TO PUBLIC;\n"]
+        );
+        assert_eq!(gated(&alters), vec![false]);
+    }
+
+    #[test]
+    fn making_a_policy_restrictive_fails_open_when_withheld() {
+        let on = serde_json::json!({"enabled": true});
+        let db = with_security(on.clone(), serde_json::json!([{"name": "p"}]));
+        let repo = with_security(
+            on,
+            serde_json::json!([{"name": "p", "restrictive": true}]),
+        );
+        let alters = statements(table(&repo, &db));
+        assert_eq!(gated(&alters), vec![true]);
+        assert!(alters[0].fails_open);
+        // and the reverse opens access, so withholding it does not
+        let alters = statements(table(&db, &repo));
+        assert!(!alters[0].fails_open);
+    }
+
+    #[test]
+    fn policy_comment_alone_is_altered_in_place() {
+        let on = serde_json::json!({"enabled": true});
+        let db = with_security(
+            on.clone(),
+            serde_json::json!([{"name": "p", "comment": "old"}]),
+        );
+        let repo = with_security(on, serde_json::json!([{"name": "p"}]));
+        let alters = statements(table(&repo, &db));
+        assert_eq!(
+            sql(&alters),
+            vec!["COMMENT ON POLICY p ON test.users IS NULL;\n"]
+        );
+        assert_eq!(gated(&alters), vec![false]);
+    }
+
+    #[test]
+    fn written_defaults_and_order_are_not_a_change() {
+        let on = serde_json::json!({"enabled": true, "forced": false});
+        let repo = with_security(
+            on,
+            serde_json::json!([
+                {"name": "b", "command": "ALL", "roles": ["public"],
+                 "restrictive": false},
+                {"name": "a"},
+            ]),
+        );
+        let db = with_security(
+            serde_json::json!({"enabled": true}),
+            serde_json::json!([{"name": "a"}, {"name": "b"}]),
+        );
+        assert!(sql(&statements(table(&repo, &db))).is_empty());
     }
 }

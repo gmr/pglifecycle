@@ -50,6 +50,14 @@ pub struct Table {
     pub foreign_keys: Option<Vec<ForeignKey>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub triggers: Option<Vec<Trigger>>,
+    /// Whether row-level security is enabled and forced. Absent means
+    /// the project does not manage it: deploy then leaves the table's
+    /// row security, and its policies unless `policies` is given, as
+    /// the database has them. Pull always writes it for a table.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub row_level_security: Option<RowLevelSecurity>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policies: Option<Vec<Policy>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub partition: Option<TablePartitionBehavior>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -113,6 +121,37 @@ impl Table {
             }
         }
         table.not_null_constraints = (!kept.is_empty()).then_some(kept);
+        table
+    }
+
+    /// This table, the database side of a comparison, without the row
+    /// security state and policies that `repo` does not manage.
+    ///
+    /// A project written before row security was modeled has neither
+    /// field. Reading that as "disabled, no policies" would make deploy
+    /// strip every table's protections, so absent means unmanaged
+    /// instead. A `row_level_security` state manages the policies too,
+    /// and there an absent list means none.
+    pub fn without_unmanaged_security(&self, repo: &Table) -> Table {
+        let mut table = self.clone();
+        if repo.row_level_security.is_none() {
+            table.row_level_security = None;
+            if repo.policies.is_none() {
+                table.policies = None;
+            }
+        }
+        table
+    }
+
+    /// The same table with its policies in name order, and an empty
+    /// list as none: policies are matched by name, so neither the order
+    /// nor an empty list is a difference
+    pub fn with_canonical_policies(&self) -> Table {
+        let mut table = self.clone();
+        if let Some(policies) = &mut table.policies {
+            policies.sort_by(|a, b| a.name.cmp(&b.name));
+        }
+        table.policies = table.policies.filter(|p| !p.is_empty());
         table
     }
 }
@@ -501,6 +540,92 @@ pub enum TablePartitionColumn {
     },
 }
 
+/// A table's row-level security state
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RowLevelSecurity {
+    pub enabled: bool,
+    /// FORCE ROW LEVEL SECURITY: the policies apply to the table owner
+    /// too
+    #[serde(
+        default,
+        deserialize_with = "true_or_none",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub forced: Option<bool>,
+}
+
+/// A row-level security policy (CREATE POLICY). Each field that has a
+/// default keeps only a value that differs from it, so a hand-written
+/// `command: ALL` or `roles: [PUBLIC]` compares equal to the policy
+/// pulled from the database, where pg_dump omits both.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Policy {
+    pub name: String,
+    /// AS RESTRICTIVE; the default is PERMISSIVE
+    #[serde(
+        default,
+        deserialize_with = "true_or_none",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub restrictive: Option<bool>,
+    /// SELECT, INSERT, UPDATE or DELETE; the default is ALL
+    #[serde(
+        default,
+        deserialize_with = "policy_command",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub command: Option<String>,
+    /// The roles the policy applies to; the default is PUBLIC
+    #[serde(
+        default,
+        deserialize_with = "policy_roles",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub roles: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub using: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub with_check: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+}
+
+/// Read a policy command in upper case, keeping ALL as absent
+fn policy_command<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Option::<String>::deserialize(deserializer)?
+        .map(|command| command.to_uppercase())
+        .filter(|command| command != "ALL"))
+}
+
+/// Read a policy's roles with PUBLIC in upper case, as the parser
+/// reads it, keeping PUBLIC alone as absent
+fn policy_roles<'de, D>(
+    deserializer: D,
+) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Option::<Vec<String>>::deserialize(deserializer)?
+        .map(|roles| {
+            roles
+                .into_iter()
+                .map(|role| {
+                    if role.eq_ignore_ascii_case("public") {
+                        String::from("PUBLIC")
+                    } else {
+                        role
+                    }
+                })
+                .collect::<Vec<_>>()
+        })
+        .filter(|roles| roles != &["PUBLIC"]))
+}
+
 /// Table Triggers
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -554,5 +679,59 @@ mod tests {
             serde_json::from_value(serde_json::json!({"cycle": true}))
                 .unwrap();
         assert_eq!(options.cycle, Some(true));
+    }
+
+    /// PUBLIC reads in upper case in any role list, as the parser reads
+    /// it, so deploy does not see a change on every run
+    #[test]
+    fn policy_roles_normalize_public() {
+        let roles = |value: serde_json::Value| -> Option<Vec<String>> {
+            serde_json::from_value::<Policy>(
+                serde_json::json!({"name": "p", "roles": value}),
+            )
+            .unwrap()
+            .roles
+        };
+        assert_eq!(roles(serde_json::json!(["public"])), None);
+        assert_eq!(
+            roles(serde_json::json!(["alice", "public"])),
+            Some(vec![String::from("alice"), String::from("PUBLIC")])
+        );
+        assert_eq!(
+            roles(serde_json::json!(["alice"])),
+            Some(vec![String::from("alice")])
+        );
+    }
+
+    /// A project written before row security was modeled leaves the
+    /// database's state and policies alone; a stated state manages the
+    /// policies too
+    #[test]
+    fn absent_row_security_is_unmanaged() {
+        let table = |value: serde_json::Value| -> Table {
+            let mut base = serde_json::json!(
+                {"name": "t", "schema": "s", "owner": "o"}
+            );
+            base.as_object_mut()
+                .unwrap()
+                .extend(value.as_object().unwrap().clone());
+            serde_json::from_value(base).unwrap()
+        };
+        let db = table(serde_json::json!({
+            "row_level_security": {"enabled": true},
+            "policies": [{"name": "p"}],
+        }));
+        let stale = table(serde_json::json!({}));
+        let stripped = db.without_unmanaged_security(&stale);
+        assert_eq!(stripped.row_level_security, None);
+        assert_eq!(stripped.policies, None);
+        let policies_only = table(serde_json::json!({"policies": []}));
+        let stripped = db.without_unmanaged_security(&policies_only);
+        assert_eq!(stripped.row_level_security, None);
+        assert!(stripped.policies.is_some());
+        let managed = table(
+            serde_json::json!({"row_level_security": {"enabled": false}}),
+        );
+        assert_eq!(db.without_unmanaged_security(&managed), db);
     }
 }

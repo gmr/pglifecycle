@@ -23,21 +23,6 @@ SET search_path = unsupported, public, pg_catalog;
 
 CREATE ROLE pglifecycle_coverage_reader;
 
--- Row level security: the enable/force flags and the policies
-CREATE TABLE documents (
-    id        BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    tenant    TEXT NOT NULL,
-    body      TEXT
-);
-ALTER TABLE documents ENABLE ROW LEVEL SECURITY;
-ALTER TABLE documents FORCE ROW LEVEL SECURITY;
-CREATE POLICY documents_tenant ON documents FOR ALL
-    TO pglifecycle_coverage_reader
-    USING (tenant = CURRENT_USER) WITH CHECK (tenant = CURRENT_USER);
-CREATE POLICY documents_read ON documents AS RESTRICTIVE FOR SELECT
-    TO PUBLIC USING (true);
-COMMENT ON POLICY documents_tenant ON documents IS 'tenant isolation';
-
 -- Exclusion constraint
 CREATE TABLE reservations (
     room   INT,

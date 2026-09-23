@@ -130,6 +130,40 @@ column_defaults:
     default: CURRENT_TIMESTAMP
 ```
 
+- Row-level security lives on the table. `row_level_security` states
+  whether it is enabled and forced, and `policies` lists the policies.
+  Each policy keeps only what differs from `CREATE POLICY`'s defaults:
+  `restrictive: true` for `AS RESTRICTIVE`, a `command` other than
+  `ALL`, `roles` other than `PUBLIC`. `using` and `with_check` hold the
+  expression inside the `USING (...)` / `WITH CHECK (...)` clause,
+  written the way PostgreSQL reports it: an operator expression keeps
+  its own parentheses, as in `(tenant = CURRENT_USER)`. Write it that
+  way, or deploy sees a change on every run.
+
+```yaml
+---
+name: tenant_notes
+schema: test
+row_level_security:
+  enabled: true
+  forced: true
+policies:
+  - name: tenant_notes_own
+    using: (tenant = CURRENT_USER)
+    with_check: (tenant = CURRENT_USER)
+    comment: tenant isolation
+  - name: tenant_notes_no_blank
+    restrictive: true
+    command: INSERT
+    with_check: (body <> ''::text)
+```
+
+  `pull` writes `row_level_security` for every table, and a table with
+  that key has exactly the policies listed. A table without either key,
+  such as one pulled before pglifecycle modeled row security, is not
+  managed: `deploy` leaves its row security and policies as the
+  database has them. Pull the project again to record them.
+
 - Grants on views may be written under either `tables:` or `views:`.
   PostgreSQL grants on views with `TABLE` syntax, so both emit
   `GRANT ... ON TABLE` and coalesce into a single ACL entry; `pull`
