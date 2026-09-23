@@ -82,8 +82,11 @@ reconciled in place where PostgreSQL can express it:
 - **Tables** — add column, set/drop default, set/drop not-null,
   add/drop check constraints, foreign keys and exclusion constraints,
   primary-key and unique additions, index and trigger create/drop,
-  `REPLICA IDENTITY`, and comment changes. A changed comment on an
-  exclusion constraint is set alone, without rebuilding its index.
+  `REPLICA IDENTITY`, column storage, compression, statistics target
+  and options, rules (`CREATE OR REPLACE RULE`, their state and
+  comment), and comment changes, including comments on constraints. A
+  changed comment on a constraint is set alone, without rebuilding the
+  constraint; a constraint that is re-added gets its comment again.
   Identity columns are added, and their `ALWAYS`/`BY DEFAULT` behavior
   and sequence options changed, with `ALTER COLUMN`; renaming an
   identity's sequence falls back. A `NOT VALID` check, foreign key or
@@ -103,7 +106,8 @@ reconciled in place where PostgreSQL can express it:
   pglifecycle modeled them, leaves the table's row security as the
   database has it.
 - **Functions and views** — `CREATE OR REPLACE` (a function whose
-  return type changed must be dropped first, so it falls back).
+  return type changed must be dropped first, so it falls back). A
+  view's rules are reconciled after it.
 - **Sequences** — a single `ALTER SEQUENCE` of the changed options.
 - **Domains** — set/drop default; a base-type or constraint change
   falls back.
@@ -161,8 +165,8 @@ Ownership is not managed (the script behaves like
 `pg_restore --no-owner`), and roles, users, groups, and tablespaces are
 skipped entirely — they are cluster-level objects a single-database
 dump cannot capture. Aggregates, casts, collations, conversions, event
-triggers, publications, text search objects and default privileges are
-created when
+triggers, publications, text search objects, default privileges and
+extended statistics are created when
 missing but otherwise only existence-checked: `pull` models them, but
 `deploy` does not compare their definitions yet, so a changed one is
 left as the database has it. An aggregate is matched by its name and

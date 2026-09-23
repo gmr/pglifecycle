@@ -183,6 +183,48 @@ exclude_constraints:
 replica_identity: FULL
 ```
 
+- Columns may carry `storage`, `compression`, `statistics` (the
+  statistics target) and `options` (such as `n_distinct`), which
+  `build` writes as `ALTER COLUMN ... SET` after `CREATE TABLE`, as
+  `pg_dump` does. Comments on a table's primary key, unique, check,
+  foreign key and NOT NULL constraints live in `constraint_comments`,
+  keyed by constraint name.
+
+- Tables and views carry `rules`. A rule's `commands` are absent for
+  `DO INSTEAD NOTHING`. A view's internal `_RETURN` rule is its query,
+  never a rule.
+
+```yaml
+rules:
+  - name: ledger_audit_insert
+    event: INSERT
+    condition: (new.amount > (0)::numeric)
+    commands:
+      - |-
+        INSERT INTO test.ledger_audit (id)
+          VALUES (new.id)
+  - name: ledger_no_delete
+    event: DELETE
+    instead: true
+    comment: Append only
+```
+
+  Conditions and commands keep the form `pg_dump` writes them in.
+
+- Extended statistics live in `statistics/<schema>/<name>.yaml`, not
+  on the table: the name is schema-qualified, and the owner need not
+  own the table.
+
+```yaml
+---
+name: measurements_ab
+schema: test
+owner: postgres
+table: test.measurements
+kinds: [ndistinct, dependencies]
+elements: [a, b]
+```
+
 - Default privileges live in `default_privileges/<role>.yaml`, one file
   for each role whose new objects they apply to (`ALTER DEFAULT
   PRIVILEGES FOR ROLE`). Global and per-schema declarations compose in
