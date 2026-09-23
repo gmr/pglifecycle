@@ -434,6 +434,7 @@ pub struct Assembly {
     /// One per schema, as the project stores them
     pub text_search: Vec<models::TextSearch>,
     pub default_privileges: Vec<models::DefaultPrivileges>,
+    pub statistics: Vec<models::Statistics>,
     pub roles: BTreeMap<String, RoleState>,
     pub remaining: Vec<Remaining>,
     /// Indexes whose target relation had not yet been ingested when the
@@ -519,6 +520,7 @@ impl Assembly {
             ("publications", self.publications.len()),
             ("event triggers", self.event_triggers.len()),
             ("default privileges", self.default_privileges.len()),
+            ("statistics", self.statistics.len()),
             ("foreign data wrappers", self.foreign_data_wrappers.len()),
             ("servers", self.servers.len()),
             ("user mappings", self.user_mappings.len()),
@@ -606,6 +608,7 @@ impl Assembly {
                 | OT::TextSearchParser
                 | OT::TextSearchTemplate
                 | OT::DefaultAcl
+                | OT::Statistics
                 | OT::ForeignTable
                 | OT::ForeignDataWrapper
                 | OT::ForeignServer
@@ -1182,6 +1185,24 @@ impl Assembly {
                     }
                 }
             }
+            Statement::CreateStatistics(mut statistics) => {
+                statistics.owner = owner;
+                self.statistics.push(statistics);
+            }
+            Statement::AlterStatistics { name, target } => {
+                let schema = name.schema.clone().unwrap_or_default();
+                match self
+                    .statistics
+                    .iter_mut()
+                    .find(|s| s.schema == schema && s.name == name.name)
+                {
+                    Some(statistics) => statistics.target = Some(target),
+                    None => {
+                        log::warn!("Target of unknown statistics {name}");
+                        self.push_remaining(entry);
+                    }
+                }
+            }
             Statement::CreatePolicy { table, policy } => {
                 match self.find_table(&table) {
                     Some(table) => {
@@ -1464,6 +1485,12 @@ impl Assembly {
                 .iter_mut()
                 .find(|c| c.schema == schema && c.name == *name)
                 .map(|c| c.comment = Some(comment.clone()))
+                .is_some(),
+            "STATISTICS" => self
+                .statistics
+                .iter_mut()
+                .find(|s| s.schema == schema && s.name == *name)
+                .map(|s| s.comment = Some(comment.clone()))
                 .is_some(),
             "CONVERSION" => self
                 .conversions

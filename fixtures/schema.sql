@@ -556,3 +556,15 @@ COMMENT ON CONSTRAINT invoices_total_positive ON test.invoices IS 'No credits';
 COMMENT ON CONSTRAINT invoices_document ON test.invoices IS 'Its source';
 COMMENT ON CONSTRAINT invoices_number_not_null ON test.invoices IS 'Required';
 COMMENT ON CONSTRAINT invoices_number_short ON test.invoices IS 'Legacy rows';
+
+-- Extended statistics: chosen kinds, every kind with a target and a
+-- comment, expressions, and one on a materialized view
+CREATE TABLE test.measurements (a INTEGER, b INTEGER, label TEXT);
+CREATE STATISTICS test.measurements_ab (ndistinct, dependencies)
+    ON a, b FROM test.measurements;
+CREATE STATISTICS test.measurements_all ON a, b, label FROM test.measurements;
+ALTER STATISTICS test.measurements_all SET STATISTICS 500;
+COMMENT ON STATISTICS test.measurements_all IS 'Every kind';
+CREATE STATISTICS test.measurements_expr (mcv)
+    ON (a + b), lower(label) FROM test.measurements;
+CREATE STATISTICS test.user_states_stats ON state, total FROM test.user_states;

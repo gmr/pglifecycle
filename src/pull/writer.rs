@@ -285,6 +285,12 @@ impl Writer {
                 publication,
             )?;
         }
+        for statistics in &assembly.statistics {
+            self.save(
+                nested("statistics", &statistics.schema, &statistics.name)?,
+                statistics,
+            )?;
+        }
         for defaults in &assembly.default_privileges {
             self.save(
                 top_level("default_privileges", &defaults.name)?,

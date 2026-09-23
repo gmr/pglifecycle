@@ -1,2 +1,1 @@
 RULE	unsupported.append_only append_only_no_delete
-STATISTICS	unsupported.measurements_stats

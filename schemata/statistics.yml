@@ -1,0 +1,50 @@
+---
+$schema: https://json-schema.org/draft/2020-12/schema
+$id: https://gmr.github.io/pglifecycle/schemata/statistics.json
+title: Statistics
+description: >
+  Extended statistics on a table or materialized view (CREATE STATISTICS),
+  which let the planner estimate columns that depend on each other
+type: object
+properties:
+  name:
+    title: Name
+    type: string
+  schema:
+    title: Schema
+    type: string
+  owner:
+    title: Owner
+    description: The role that owns the statistics object
+    type: string
+  table:
+    title: Table
+    description: The table or materialized view, schema-qualified
+    type: string
+  kinds:
+    title: Kinds
+    description: The kinds of statistics to collect; absent for all of them
+    type: array
+    items:
+      enum: [ndistinct, dependencies, mcv]
+    minItems: 1
+  elements:
+    title: Elements
+    description: Each column, or a parenthesized expression, as written
+    type: array
+    items:
+      type: string
+    minItems: 1
+  target:
+    title: Statistics Target
+    description: ALTER STATISTICS ... SET STATISTICS
+    type: integer
+  comment:
+    title: Comment
+    type: string
+  dependencies:
+    title: Dependencies
+    description: Database objects this object is dependent upon
+    $package_schema: dependencies
+required: [name, schema, owner, table, elements]
+additionalProperties: false

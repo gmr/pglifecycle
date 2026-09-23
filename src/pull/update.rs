@@ -27,6 +27,7 @@ const MANAGED_DIRS: &[&str] = &[
     "roles",
     "schemata",
     "sequences",
+    "statistics",
     "tables",
     "text_search",
     "types",
@@ -113,7 +114,8 @@ fn schema_of(dir: &str, relative: &Path) -> Option<String> {
                 .map(|s| s.to_string_lossy().into_owned())
         }
         "aggregates" | "collations" | "domains" | "functions"
-        | "materialized_views" | "sequences" | "tables" | "views" => relative
+        | "statistics" | "materialized_views" | "sequences" | "tables"
+        | "views" => relative
             .strip_prefix(dir)
             .ok()
             .and_then(|rest| rest.iter().next())

@@ -124,6 +124,12 @@ pub enum Statement {
         tokens: Vec<String>,
         dictionaries: Vec<String>,
     },
+    CreateStatistics(models::Statistics),
+    /// ALTER STATISTICS ... SET STATISTICS `target`
+    AlterStatistics {
+        name: QualifiedName,
+        target: i64,
+    },
     CreatePolicy {
         table: QualifiedName,
         policy: models::Policy,
@@ -364,6 +370,8 @@ fn dispatch(node: &Node, src: &str) -> Result<Vec<Statement>, String> {
         "AlterTSConfigurationStmt" => {
             Ok(vec![misc::alter_text_search_configuration(node, src)?])
         }
+        "CreateStatsStmt" => Ok(vec![misc::create_statistics(node, src)?]),
+        "AlterStatsStmt" => Ok(vec![misc::alter_statistics(node, src)?]),
         "CreatePolicyStmt" => Ok(vec![policy::create_policy(node, src)?]),
         "CommentStmt" => Ok(vec![object::comment(node, src)?]),
         "GrantStmt" => Ok(vec![acl::grant(node, src, false)?]),

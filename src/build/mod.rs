@@ -273,6 +273,7 @@ impl Builder {
             Definition::Schema(_) => self.dump_schema(item),
             Definition::Sequence(_) => self.dump_sequence(item),
             Definition::Server(_) => self.dump_server(item),
+            Definition::Statistics(_) => self.dump_statistics(item),
             Definition::Subscription(_) => self.dump_subscription(item),
             Definition::Table(_) => self.dump_table(item),
             Definition::Tablespace(_) => self.dump_tablespace(item),
@@ -818,6 +819,31 @@ impl Builder {
             previous = Some(dump_id);
         }
         Ok(())
+    }
+
+    fn dump_statistics(&mut self, item: &Item) -> Result<(), String> {
+        let Definition::Statistics(d) = &item.definition else {
+            unreachable!()
+        };
+        let name = self.item_name(item);
+        let mut create = format!("CREATE STATISTICS {name}");
+        if let Some(kinds) = &d.kinds {
+            create.push_str(&format!(" ({})", kinds.join(", ")));
+        }
+        create.push_str(&format!(
+            " ON {} FROM {}",
+            d.elements.join(", "),
+            d.table
+        ));
+        let mut defn = vec![create];
+        if let Some(target) = d.target {
+            defn[0].push(';');
+            defn.push(format!(
+                "ALTER STATISTICS {name} SET STATISTICS {target}"
+            ));
+        }
+        let drop = vec![format!("DROP STATISTICS IF EXISTS {name}")];
+        self.add_item(item, defn, drop, false)
     }
 
     fn dump_domain(&mut self, item: &Item) -> Result<(), String> {

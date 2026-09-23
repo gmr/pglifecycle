@@ -21,11 +21,6 @@ SET search_path = unsupported, public, pg_catalog;
 
 CREATE ROLE pglifecycle_coverage_reader;
 
--- Extended statistics
-CREATE TABLE measurements (a INT, b INT);
-CREATE STATISTICS measurements_stats (ndistinct, dependencies)
-    ON a, b FROM measurements;
-
 -- Rule
 CREATE TABLE append_only (id INT);
 CREATE RULE append_only_no_delete AS

@@ -55,6 +55,7 @@ GROUPS: dict[str, list[str]] = {
         'publication',
         'schema',
         'sequence',
+        'statistics',
         'server',
         'subscription',
         'table',
