@@ -311,12 +311,35 @@ fn existence_index(assembly: &Assembly) -> BTreeSet<(String, String, String)> {
 /// need not agree and the key leaves it out. Its name, `(source AS
 /// target)`, is kept whole, since stripping an argument list would
 /// leave every cast the same empty name, and its types canonical, so
-/// `int4` matches the `integer` pg_dump writes.
+/// `int4` matches the `integer` pg_dump writes. An aggregate is
+/// identified by its name and its input types, so its key keeps its
+/// canonical types and one overload does not stand for another.
 fn definition_existence_key(
     desc: ObjectType,
     definition: &Definition,
 ) -> (String, String, String) {
     match definition {
+        Definition::Aggregate(aggregate) => {
+            let types = |args: &[crate::models::Argument]| {
+                args.iter()
+                    .map(|a| canonical_type(&a.data_type))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            let direct = types(&aggregate.arguments);
+            let signature = match aggregate.order_by.as_deref() {
+                Some(order_by) => {
+                    format!("{direct} ORDER BY {}", types(order_by))
+                }
+                None if direct.is_empty() => String::from("*"),
+                None => direct,
+            };
+            (
+                desc.as_str().to_string(),
+                aggregate.schema.clone(),
+                format!("{}({signature})", aggregate.name),
+            )
+        }
         Definition::Cast(cast) => {
             let name = format!(
                 "({} AS {})",
@@ -485,6 +508,30 @@ mod tests {
             name: String::from("test"),
         };
         assert_eq!(key.to_string(), "SCHEMA test");
+    }
+
+    #[test]
+    fn aggregate_existence_key_keeps_input_types() {
+        let aggregate = |data_type: &str| {
+            Definition::Aggregate(
+                serde_json::from_value(serde_json::json!({
+                    "name": "agg",
+                    "schema": "test",
+                    "owner": "postgres",
+                    "arguments": [{"data_type": data_type}],
+                    "sfunc": "f",
+                    "state_data_type": "integer",
+                }))
+                .unwrap(),
+            )
+        };
+        let key = |d: &str| {
+            definition_existence_key(ObjectType::Aggregate, &aggregate(d))
+        };
+        // one overload does not stand for another
+        assert_ne!(key("integer"), key("text"));
+        // a type alias is the same input type
+        assert_eq!(key("int4"), key("integer"));
     }
 
     #[test]

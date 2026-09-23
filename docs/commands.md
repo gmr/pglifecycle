@@ -162,7 +162,11 @@ dump cannot capture. Aggregates, casts, collations, conversions, event
 triggers, publications and text search objects are created when
 missing but otherwise only existence-checked: `pull` models them, but
 `deploy` does not compare their definitions yet, so a changed one is
-left as the database has it. Object types `pull` does not yet model
+left as the database has it. An aggregate is matched by its name and
+input types, so each overload is checked on its own. Text search
+objects are checked per schema: when a schema has any text search
+object in the database, `deploy` creates none of the project's text
+search objects in that schema. Object types `pull` does not yet model
 (operators, rules, extended statistics, …) are handled the same way. Privileges on
 created objects are emitted (unless `-x`); privilege changes on objects
 that already exist are not yet diffed.
