@@ -1868,6 +1868,12 @@ impl Builder {
         {
             create.push(format!("OPTIONS ({})", render_options(options)));
         }
+        // column attributes follow the CREATE, as pg_dump writes them
+        for sql in render_column_attributes(table, &self.item_name(item)) {
+            let last = create.len() - 1;
+            create[last].push(';');
+            create.push(sql);
+        }
         let drop =
             vec!["DROP FOREIGN TABLE IF EXISTS".into(), self.item_name(item)];
         let dump_id = self.add_entry(
@@ -3086,17 +3092,20 @@ fn render_index_column(column: &crate::models::IndexColumn) -> String {
     sql.join(" ")
 }
 
-/// `ALTER TABLE ONLY ... ALTER COLUMN ... SET ...` for each column
-/// attribute the table's columns set, in pg_dump's order: statistics,
-/// storage, compression, options
+/// `ALTER [FOREIGN] TABLE ONLY ... ALTER COLUMN ... SET ...` for each
+/// column attribute the table's columns set, in pg_dump's order:
+/// statistics, storage, compression, options. A foreign table takes
+/// no compression, so its compression is not written.
 pub(crate) fn render_column_attributes(
     table: &Table,
     table_name: &str,
 ) -> Vec<String> {
+    let foreign = table.server.is_some();
+    let kind = if foreign { "FOREIGN TABLE" } else { "TABLE" };
     let mut statements = Vec::new();
     for column in table.columns.iter().flatten() {
         let prefix = format!(
-            "ALTER TABLE ONLY {table_name} ALTER COLUMN {}",
+            "ALTER {kind} ONLY {table_name} ALTER COLUMN {}",
             quote_ident(&column.name)
         );
         if let Some(statistics) = column.statistics {
@@ -3105,7 +3114,9 @@ pub(crate) fn render_column_attributes(
         if let Some(storage) = &column.storage {
             statements.push(format!("{prefix} SET STORAGE {storage}"));
         }
-        if let Some(compression) = &column.compression {
+        if let Some(compression) = column.compression.as_ref()
+            && !foreign
+        {
             statements.push(format!("{prefix} SET COMPRESSION {compression}"));
         }
         if let Some(options) =
@@ -3874,6 +3885,33 @@ mod tests {
             defn,
             "CREATE FOREIGN TABLE fdw_warehouse.orders ( id integer NOT \
              NULL, total numeric ) SERVER warehouse;\n"
+        );
+    }
+
+    /// A foreign table's column attributes follow the CREATE as
+    /// ALTER FOREIGN TABLE statements; compression is not written
+    #[test]
+    fn renders_foreign_table_column_attributes() {
+        let mut item = foreign_table(None);
+        let Definition::Table(table) = &mut item.definition else {
+            panic!("expected a Table definition")
+        };
+        let columns = table.columns.as_mut().unwrap();
+        columns[1].statistics = Some(500);
+        columns[1].storage = Some("MAIN".into());
+        columns[1].compression = Some("lz4".into());
+        let mut options = Map::new();
+        options.insert("n_distinct".into(), json!(100));
+        columns[1].options = Some(options);
+        assert_eq!(
+            foreign_table_defn(&item),
+            "CREATE FOREIGN TABLE fdw_warehouse.orders ( id integer NOT \
+             NULL, total numeric ) SERVER warehouse; ALTER FOREIGN TABLE \
+             ONLY fdw_warehouse.orders ALTER COLUMN total SET STATISTICS \
+             500; ALTER FOREIGN TABLE ONLY fdw_warehouse.orders ALTER \
+             COLUMN total SET STORAGE MAIN; ALTER FOREIGN TABLE ONLY \
+             fdw_warehouse.orders ALTER COLUMN total SET \
+             (n_distinct=100);\n"
         );
     }
 
