@@ -123,14 +123,23 @@ required:
   - name
 oneOf:
   - required: [language, definition]
-    not: {required: [sql, sql_body]}
+    not:
+      anyOf:
+        - required: [sql]
+        - required: [sql_body]
+        - required: [object_file]
   - required: [language, sql_body]
     not:
       anyOf:
         - required: [sql]
         - required: [definition]
+        - required: [object_file]
   - required: [language, object_file]
-    not: {required: [sql, definition, sql_body]}
+    not:
+      anyOf:
+        - required: [sql]
+        - required: [definition]
+        - required: [sql_body]
   - required: [sql]
     not:
       anyOf:

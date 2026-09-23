@@ -234,7 +234,10 @@ required:
   - name
 oneOf:
   - required: [language, returns, definition]
-    not: {required: [sql, object_file, link_symbol]}
+    not:
+      anyOf:
+        - required: [sql, object_file, link_symbol]
+        - required: [sql_body]
   - required: [language, returns, sql_body]
     not:
       anyOf:
