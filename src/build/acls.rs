@@ -298,7 +298,10 @@ fn find_role(
 
 /// The GRANT keyword for an object: a section's own, except that the
 /// functions section holds procedures too, and PostgreSQL rejects ON
-/// FUNCTION for a procedure
+/// FUNCTION for a procedure. Only an exact signature match selects
+/// PROCEDURE. A match on the name alone can be a different overload
+/// of the other kind, so it selects ROUTINE, which PostgreSQL accepts
+/// for both.
 fn object_keyword(
     index: &ObjectIndex,
     key: &str,
@@ -312,8 +315,16 @@ fn object_keyword(
         Some((schema, name)) => (Some(schema), name),
         None => (None, object),
     };
+    if let Some(item) =
+        index.functions_by_identity.get(&(schema, name.to_string()))
+    {
+        return match item.desc {
+            ObjectType::Procedure => "PROCEDURE",
+            _ => keyword,
+        };
+    }
     match find_function(index, schema, name) {
-        Some(item) if item.desc == ObjectType::Procedure => "PROCEDURE",
+        Some(item) if item.desc == ObjectType::Procedure => "ROUTINE",
         _ => keyword,
     }
 }
@@ -653,6 +664,37 @@ mod tests {
             .find(|e| e.desc == libpgdump::ObjectType::Schema)
             .expect("schema entry");
         assert_eq!(acl.dependencies, vec![schema.dump_id]);
+    }
+
+    #[test]
+    fn procedure_keyword_needs_an_exact_signature() {
+        let procedure: models::Procedure = serde_json::from_value(json!({
+            "name": "p", "schema": "s", "owner": "app",
+            "parameters": [{"mode": "IN", "data_type": "integer"}],
+            "language": "sql", "definition": "SELECT 1",
+        }))
+        .unwrap();
+        let project = Project {
+            name: String::from("acls"),
+            encoding: String::from("UTF8"),
+            stdstrings: true,
+            superuser: String::from("postgres"),
+            default_schema: String::from("public"),
+            path: std::path::PathBuf::new(),
+            inventory: vec![Item {
+                id: 0,
+                desc: ObjectType::Procedure,
+                definition: Definition::Procedure(procedure),
+                dependencies: BTreeSet::new(),
+            }],
+        };
+        let index = ObjectIndex::build(&project);
+        let keyword =
+            |object| object_keyword(&index, "functions", "FUNCTION", object);
+        assert_eq!(keyword("s.p(integer)"), "PROCEDURE");
+        // same name, other signature: possibly an untracked function
+        assert_eq!(keyword("s.p(text)"), "ROUTINE");
+        assert_eq!(keyword("s.q(text)"), "FUNCTION");
     }
 
     #[test]
