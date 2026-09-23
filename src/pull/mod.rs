@@ -1716,14 +1716,21 @@ impl Assembly {
     }
 }
 
-/// An aggregate's argument types as pg_dump writes them in `COMMENT
-/// ON AGGREGATE`: `(integer)`, `(integer ORDER BY integer)` or `(*)`
+/// An aggregate's arguments as pg_dump writes them in `COMMENT ON
+/// AGGREGATE`: `(integer)`, `(x integer ORDER BY integer)` or `(*)`.
+/// pg_dump uses the identity arguments, which include the argument
+/// names, so each argument is its mode, its name and its type.
 fn aggregate_signature(aggregate: &models::Aggregate) -> String {
     let types = |args: &[models::Argument]| {
         args.iter()
-            .map(|a| match &a.mode {
-                Some(mode) => format!("{mode} {}", a.data_type),
-                None => a.data_type.clone(),
+            .map(|a| {
+                a.mode
+                    .iter()
+                    .cloned()
+                    .chain(a.name.as_deref().map(crate::utils::quote_ident))
+                    .chain([a.data_type.clone()])
+                    .collect::<Vec<_>>()
+                    .join(" ")
             })
             .collect::<Vec<_>>()
             .join(", ")
@@ -2309,6 +2316,20 @@ mod tests {
                 "COMMENT ON AGGREGATE s.total(integer) IS 'sums';",
             ),
             (
+                OT::Aggregate,
+                "s",
+                "named(integer, integer)",
+                "CREATE AGGREGATE s.named(\"Weird Name\" integer, \
+                 other integer) (SFUNC = s.f, STYPE = integer);",
+            ),
+            (
+                OT::Comment,
+                "s",
+                "AGGREGATE named(\"Weird Name\" integer, other integer)",
+                "COMMENT ON AGGREGATE s.named(\"Weird Name\" integer, \
+                 other integer) IS 'named';",
+            ),
+            (
                 OT::Cast,
                 "",
                 "CAST (s.pair AS text)",
@@ -2362,6 +2383,8 @@ mod tests {
         assembly.ingest(&dump).unwrap();
         assert!(assembly.remaining.is_empty(), "{:?}", assembly.remaining);
         assert_eq!(assembly.aggregates[0].comment.as_deref(), Some("sums"));
+        // pg_dump names the arguments in the comment's signature
+        assert_eq!(assembly.aggregates[1].comment.as_deref(), Some("named"));
         assert_eq!(assembly.casts[0].comment.as_deref(), Some("as text"));
         assert_eq!(
             assembly.event_triggers[0].enabled.as_deref(),
