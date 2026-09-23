@@ -14,9 +14,10 @@ use crate::build;
 use crate::deploy::diff::canonical_type;
 use crate::models::{
     CheckConstraint, Column, ColumnDefault, ColumnGenerated, ColumnNotNull,
-    Definition, Domain, Extension, ForeignDataWrapper, ForeignKey, Function,
-    Index, NotNullConstraint, Policy, Schema, Sequence, SequenceOptions,
-    Server, Table, Trigger, Type, UserMapping, View, ViewColumn,
+    Definition, Domain, ExcludeConstraint, Extension, ForeignDataWrapper,
+    ForeignKey, Function, Index, NotNullConstraint, Policy, Schema, Sequence,
+    SequenceOptions, Server, Table, Trigger, Type, UserMapping, View,
+    ViewColumn,
 };
 use crate::utils::{
     dollar_quote, postgres_value, quote_ident, user_mapping_subject,
@@ -247,6 +248,18 @@ fn table(repo: &Table, db: &Table) -> Resolution {
         return Resolution::Replace;
     }
     indexes(&name, repo, db, &mut alters);
+    // after the indexes, which a USING INDEX identity may name
+    if repo.replica_identity != db.replica_identity {
+        let sql = build::render_replica_identity(
+            repo.replica_identity.as_ref(),
+            &name,
+            |_| true,
+        )
+        .unwrap_or_else(|| {
+            format!("ALTER TABLE ONLY {name} REPLICA IDENTITY DEFAULT")
+        });
+        alters.push(Alter::new(format!("{sql};\n")));
+    }
     row_security(&name, repo, db, &mut alters);
     policies(&name, repo, db, &mut alters);
     push_comment(&mut alters, "TABLE", &name, &repo.comment, &db.comment);
@@ -953,7 +966,74 @@ fn constraints(
             )
         },
     );
+    exclude_constraints(table, repo, db, alters);
     true
+}
+
+/// Exclusion constraint reconciliation. The constraints pair without
+/// their comments, so a changed comment alone is set with COMMENT ON
+/// CONSTRAINT instead of rebuilding the index behind the constraint.
+fn exclude_constraints(
+    table: &str,
+    repo: &Table,
+    db: &Table,
+    alters: &mut Vec<Alter>,
+) {
+    let without_comment = |list: &Option<Vec<ExcludeConstraint>>| {
+        list.iter()
+            .flatten()
+            .map(|c| ExcludeConstraint {
+                comment: None,
+                ..c.clone()
+            })
+            .collect::<Vec<_>>()
+    };
+    let wanted = without_comment(&repo.exclude_constraints);
+    let existing = without_comment(&db.exclude_constraints);
+    named_pairs(
+        alters,
+        &existing,
+        &wanted,
+        |c: &ExcludeConstraint| c.name.clone(),
+        |c| {
+            format!(
+                "ALTER TABLE {table} DROP CONSTRAINT {};\n",
+                quote_ident(&c.name)
+            )
+        },
+        |c| {
+            format!(
+                "ALTER TABLE {table} ADD {};\n",
+                build::render_exclude_constraint(c)
+            )
+        },
+    );
+    // the comment of each repo constraint, against what the database
+    // will have once the pairing above has run: a re-added constraint
+    // has none
+    for constraint in repo.exclude_constraints.iter().flatten() {
+        let bare = ExcludeConstraint {
+            comment: None,
+            ..constraint.clone()
+        };
+        let current = match db
+            .exclude_constraints
+            .iter()
+            .flatten()
+            .find(|c| c.name == constraint.name)
+        {
+            Some(c) if existing.contains(&bare) => c.comment.clone(),
+            _ => None,
+        };
+        let target = format!("{} ON {table}", quote_ident(&constraint.name));
+        push_comment(
+            alters,
+            "CONSTRAINT",
+            &target,
+            &constraint.comment,
+            &current,
+        );
+    }
 }
 
 /// Emit `VALIDATE CONSTRAINT` for each database constraint that is NOT
@@ -3024,5 +3104,72 @@ mod tests {
             serde_json::json!([{"name": "a"}, {"name": "b"}]),
         );
         assert!(sql(&statements(table(&repo, &db))).is_empty());
+    }
+
+    fn with_key(key: &str, value: serde_json::Value) -> Table {
+        let mut table = base_table();
+        table[key] = value;
+        parse_table(table)
+    }
+
+    #[test]
+    fn exclude_constraint_comment_alone_is_set_in_place() {
+        let constraint = |comment: Option<&str>| {
+            let mut c = serde_json::json!({
+                "name": "no_overlap", "method": "gist",
+                "elements": [{"name": "email", "operator": "="}],
+            });
+            if let Some(comment) = comment {
+                c["comment"] = serde_json::json!(comment);
+            }
+            serde_json::json!([c])
+        };
+        let db = with_key("exclude_constraints", constraint(Some("old")));
+        let repo = with_key("exclude_constraints", constraint(Some("new")));
+        assert_eq!(
+            sql(&statements(table(&repo, &db))),
+            vec![
+                "COMMENT ON CONSTRAINT no_overlap ON test.users IS $$new$$;\n"
+            ]
+        );
+        // a changed element rebuilds the constraint, and the comment is
+        // set on the new one
+        let mut changed = constraint(Some("new"));
+        changed[0]["elements"][0]["operator"] = serde_json::json!("<>");
+        let repo = with_key("exclude_constraints", changed);
+        assert_eq!(
+            sql(&statements(table(&repo, &db))),
+            vec![
+                "ALTER TABLE test.users DROP CONSTRAINT no_overlap;\n",
+                "ALTER TABLE test.users ADD CONSTRAINT no_overlap EXCLUDE \
+                 USING gist (email WITH <>);\n",
+                "COMMENT ON CONSTRAINT no_overlap ON test.users IS $$new$$;\n",
+            ]
+        );
+    }
+
+    #[test]
+    fn replica_identity_is_altered_in_place() {
+        let full = with_key("replica_identity", serde_json::json!("FULL"));
+        let index = with_key(
+            "replica_identity",
+            serde_json::json!({"index": "users_email"}),
+        );
+        let default = parse_table(base_table());
+        assert_eq!(
+            sql(&statements(table(&index, &full))),
+            vec![
+                "ALTER TABLE ONLY test.users REPLICA IDENTITY USING INDEX \
+                 users_email;\n"
+            ]
+        );
+        assert_eq!(
+            sql(&statements(table(&default, &full))),
+            vec!["ALTER TABLE ONLY test.users REPLICA IDENTITY DEFAULT;\n"]
+        );
+        // DEFAULT written out is the default
+        let written =
+            with_key("replica_identity", serde_json::json!("default"));
+        assert!(sql(&statements(table(&written, &default))).is_empty());
     }
 }

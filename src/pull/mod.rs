@@ -433,6 +433,7 @@ pub struct Assembly {
     pub publications: Vec<models::Publication>,
     /// One per schema, as the project stores them
     pub text_search: Vec<models::TextSearch>,
+    pub default_privileges: Vec<models::DefaultPrivileges>,
     pub roles: BTreeMap<String, RoleState>,
     pub remaining: Vec<Remaining>,
     /// Indexes whose target relation had not yet been ingested when the
@@ -517,6 +518,7 @@ impl Assembly {
             ),
             ("publications", self.publications.len()),
             ("event triggers", self.event_triggers.len()),
+            ("default privileges", self.default_privileges.len()),
             ("foreign data wrappers", self.foreign_data_wrappers.len()),
             ("servers", self.servers.len()),
             ("user mappings", self.user_mappings.len()),
@@ -603,6 +605,7 @@ impl Assembly {
                 | OT::TextSearchDictionary
                 | OT::TextSearchParser
                 | OT::TextSearchTemplate
+                | OT::DefaultAcl
                 | OT::ForeignTable
                 | OT::ForeignDataWrapper
                 | OT::ForeignServer
@@ -1066,6 +1069,61 @@ impl Assembly {
                     }
                 }
             }
+            Statement::DefaultPrivileges {
+                roles,
+                schemas,
+                revoke,
+                object_type,
+                privileges,
+                grantees,
+                with_grant_option,
+            } => {
+                // pg_dump always names the role; the entry's owner is
+                // the same role, for a statement that does not
+                let roles = if roles.is_empty() { vec![owner] } else { roles };
+                let schemas: Vec<Option<String>> = if schemas.is_empty() {
+                    vec![None]
+                } else {
+                    schemas.into_iter().map(Some).collect()
+                };
+                for role in roles {
+                    let index = match self
+                        .default_privileges
+                        .iter()
+                        .position(|d| d.name == role)
+                    {
+                        Some(index) => index,
+                        None => {
+                            self.default_privileges.push(
+                                models::DefaultPrivileges {
+                                    name: role.clone(),
+                                    grants: None,
+                                    revocations: None,
+                                },
+                            );
+                            self.default_privileges.len() - 1
+                        }
+                    };
+                    let defaults = &mut self.default_privileges[index];
+                    let list = if revoke {
+                        defaults.revocations.get_or_insert_default()
+                    } else {
+                        defaults.grants.get_or_insert_default()
+                    };
+                    for schema in &schemas {
+                        for grantee in &grantees {
+                            list.push(models::DefaultPrivilege {
+                                schema: schema.clone(),
+                                object_type: object_type.clone(),
+                                grantee: grantee.clone(),
+                                privileges: privileges.clone(),
+                                with_grant_option: with_grant_option
+                                    .then_some(true),
+                            });
+                        }
+                    }
+                }
+            }
             Statement::CreatePolicy { table, policy } => {
                 match self.find_table(&table) {
                     Some(table) => {
@@ -1076,6 +1134,17 @@ impl Assembly {
                     // let the pull fail
                     None => {
                         log::warn!("Policy on unknown table {table}");
+                        self.push_remaining(entry);
+                    }
+                }
+            }
+            Statement::ReplicaIdentity { table, identity } => {
+                match self.find_table(&table) {
+                    Some(table) => table.replica_identity = identity,
+                    None => {
+                        log::warn!(
+                            "Replica identity of unknown table {table}"
+                        );
                         self.push_remaining(entry);
                     }
                 }
@@ -1104,7 +1173,13 @@ impl Assembly {
                 on,
                 target,
                 comment,
-            } => self.apply_comment(&on, &target, comment),
+            } => {
+                // a comment with nowhere to go would be lost from the
+                // project, so its entry is kept and the pull fails
+                if !self.apply_comment(&on, &target, comment) {
+                    self.push_remaining(entry);
+                }
+            }
             Statement::Acl(acl) => self.apply_acl(&acl),
             Statement::RoleMembership { .. }
             | Statement::CreateRole(_)
@@ -1246,12 +1321,14 @@ impl Assembly {
         }
     }
 
+    /// Set the comment on the object it names; `false` when no modeled
+    /// object has that name
     fn apply_comment(
         &mut self,
         on: &str,
         target: &QualifiedName,
         comment: String,
-    ) {
+    ) -> bool {
         let schema = target.schema.clone().unwrap_or_default();
         let name = &target.name;
         let found = match on {
@@ -1305,6 +1382,7 @@ impl Assembly {
             "FUNCTION" => self.apply_function_comment(&schema, name, &comment),
             "TRIGGER" => self.apply_trigger_comment(target, &comment),
             "POLICY" => self.apply_policy_comment(target, &comment),
+            "CONSTRAINT" => self.apply_constraint_comment(target, &comment),
             "AGGREGATE" => self
                 .aggregates
                 .iter_mut()
@@ -1381,6 +1459,7 @@ impl Assembly {
         if !found {
             log::warn!("Comment on unmatched object: {on} {target}");
         }
+        found
     }
 
     /// `COMMENT ON FUNCTION schema.fn(args)` — match the full identity
@@ -1561,6 +1640,39 @@ impl Assembly {
             _ => None,
         };
         slot.map(|slot| *slot = Some(comment.to_string())).is_some()
+    }
+
+    /// `COMMENT ON CONSTRAINT c ON schema.table`, the same two-name
+    /// shape as [`Self::apply_trigger_comment`]. Only an exclusion
+    /// constraint carries a comment in the model; one on another kind
+    /// is left unmatched, so the pull fails rather than drop it.
+    fn apply_constraint_comment(
+        &mut self,
+        target: &QualifiedName,
+        comment: &str,
+    ) -> bool {
+        let Some(relation) = &target.schema else {
+            return false;
+        };
+        let (schema, table) = match relation.split_once('.') {
+            Some((schema, table)) => (Some(schema.to_string()), table),
+            None => (None, relation.as_str()),
+        };
+        let relation = QualifiedName {
+            schema,
+            name: table.to_string(),
+        };
+        let Some(constraint) = self.find_table(&relation).and_then(|table| {
+            table
+                .exclude_constraints
+                .iter_mut()
+                .flatten()
+                .find(|c| c.name == target.name)
+        }) else {
+            return false;
+        };
+        constraint.comment = Some(comment.to_string());
+        true
     }
 
     /// `COMMENT ON POLICY p ON schema.table`, the same two-name shape
@@ -2401,6 +2513,26 @@ mod tests {
         );
     }
 
+    /// A comment the model has no place for keeps its entry, so the
+    /// pull fails instead of losing it
+    #[test]
+    fn unmatched_comment_is_kept_as_remaining() {
+        let mut dump = libpgdump::new("fixtures", "UTF8", "18.0").unwrap();
+        add(&mut dump, OT::Schema, "", "s", "CREATE SCHEMA s;");
+        add(&mut dump, OT::Table, "s", "t", "CREATE TABLE s.t (id int);");
+        add(
+            &mut dump,
+            OT::Comment,
+            "s",
+            "CONSTRAINT t_pkey ON t",
+            "COMMENT ON CONSTRAINT t_pkey ON s.t IS 'the key';",
+        );
+        let mut assembly = Assembly::default();
+        assembly.ingest(&dump).unwrap();
+        assert_eq!(assembly.remaining.len(), 1);
+        assert_eq!(assembly.remaining[0].desc, "COMMENT");
+    }
+
     #[test]
     fn set_default_attaches_to_existing_column() {
         let mut dump = libpgdump::new("fixtures", "UTF8", "18.0").unwrap();
@@ -2488,8 +2620,10 @@ mod tests {
             not_null_constraints: None,
             unique_constraints: None,
             foreign_keys: None,
+            exclude_constraints: None,
             triggers: None,
             row_level_security: None,
+            replica_identity: None,
             policies: None,
             partition: None,
             partitions: None,

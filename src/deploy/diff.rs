@@ -302,6 +302,12 @@ fn existence_index(assembly: &Assembly) -> BTreeSet<(String, String, String)> {
         .chain(assembly.text_search.iter().map(|d| {
             (ObjectType::TextSearch, Definition::TextSearch(d.clone()))
         }))
+        .chain(assembly.default_privileges.iter().map(|d| {
+            (
+                ObjectType::DefaultPrivileges,
+                Definition::DefaultPrivileges(d.clone()),
+            )
+        }))
         .map(|(desc, definition)| definition_existence_key(desc, &definition));
     remaining.chain(modeled).collect()
 }

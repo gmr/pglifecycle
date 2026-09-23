@@ -121,6 +121,11 @@ pub enum Statement {
         table: QualifiedName,
         policy: models::Policy,
     },
+    /// ALTER TABLE ... REPLICA IDENTITY; `None` for DEFAULT
+    ReplicaIdentity {
+        table: QualifiedName,
+        identity: Option<models::ReplicaIdentity>,
+    },
     /// ALTER TABLE ... [ENABLE | DISABLE | [NO] FORCE] ROW LEVEL
     /// SECURITY; each statement sets one of the two
     RowSecurity {
@@ -133,6 +138,17 @@ pub enum Statement {
         on: String,
         target: QualifiedName,
         comment: String,
+    },
+    /// ALTER DEFAULT PRIVILEGES. An empty `roles` means the role running
+    /// the statement, and an empty `schemas` every schema.
+    DefaultPrivileges {
+        roles: Vec<String>,
+        schemas: Vec<String>,
+        revoke: bool,
+        object_type: String,
+        privileges: Vec<String>,
+        grantees: Vec<String>,
+        with_grant_option: bool,
     },
     /// GRANT/REVOKE privileges ON objects TO/FROM roles
     Acl(Acl),
@@ -222,6 +238,9 @@ pub enum TableConstraint {
     /// which pg_dump emits only for a column the table inherits rather
     /// than declares
     NotNull(models::NotNullConstraint),
+    /// An EXCLUDE constraint; its `name` is filled in when it is
+    /// applied to a table
+    Exclude(models::ExcludeConstraint),
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -332,6 +351,9 @@ fn dispatch(node: &Node, src: &str) -> Result<Vec<Statement>, String> {
         "CreatePolicyStmt" => Ok(vec![policy::create_policy(node, src)?]),
         "CommentStmt" => Ok(vec![object::comment(node, src)?]),
         "GrantStmt" => Ok(vec![acl::grant(node, src, false)?]),
+        "AlterDefaultPrivilegesStmt" => {
+            Ok(vec![acl::default_privileges(node, src)?])
+        }
         "RevokeStmt" => Ok(vec![acl::grant(node, src, true)?]),
         "GrantRoleStmt" => Ok(vec![acl::grant_role(node, src, false)?]),
         "RevokeRoleStmt" => Ok(vec![acl::grant_role(node, src, true)?]),

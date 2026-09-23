@@ -16,28 +16,21 @@
 -- and no provider ships with the standard server, so the statement
 -- fails on the gate's cluster.
 
-CREATE EXTENSION btree_gist;
-
 CREATE SCHEMA unsupported;
 SET search_path = unsupported, public, pg_catalog;
 
 CREATE ROLE pglifecycle_coverage_reader;
 
--- Exclusion constraint
-CREATE TABLE reservations (
-    room   INT,
-    during DATERANGE,
-    CONSTRAINT reservations_no_overlap
-        EXCLUDE USING gist (room WITH =, during WITH &&)
-);
-
--- Column storage and compression, and the table's replica identity
+-- Column storage and compression
 CREATE TABLE payloads (
     id   INT PRIMARY KEY,
     body TEXT COMPRESSION lz4
 );
 ALTER TABLE payloads ALTER COLUMN body SET STORAGE EXTERNAL;
-ALTER TABLE payloads REPLICA IDENTITY FULL;
+
+-- A comment on a primary key, unique, check or foreign key constraint:
+-- only an exclusion constraint carries one in the model
+COMMENT ON CONSTRAINT payloads_pkey ON payloads IS 'The payload id';
 
 -- Extended statistics
 CREATE TABLE measurements (a INT, b INT);
@@ -48,7 +41,3 @@ CREATE STATISTICS measurements_stats (ndistinct, dependencies)
 CREATE TABLE append_only (id INT);
 CREATE RULE append_only_no_delete AS
     ON DELETE TO append_only DO INSTEAD NOTHING;
-
--- Default privileges
-ALTER DEFAULT PRIVILEGES IN SCHEMA unsupported
-    GRANT SELECT ON TABLES TO pglifecycle_coverage_reader;

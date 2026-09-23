@@ -698,6 +698,9 @@ fn to_definition(
         ObjectType::Cast => Definition::Cast(from(value)?),
         ObjectType::Collation => Definition::Collation(from(value)?),
         ObjectType::Conversion => Definition::Conversion(from(value)?),
+        ObjectType::DefaultPrivileges => {
+            Definition::DefaultPrivileges(from(value)?)
+        }
         ObjectType::Domain => Definition::Domain(from(value)?),
         ObjectType::EventTrigger => Definition::EventTrigger(from(value)?),
         ObjectType::Extension => Definition::Extension(from(value)?),

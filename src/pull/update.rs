@@ -18,6 +18,7 @@ const MANAGED_DIRS: &[&str] = &[
     "casts",
     "collations",
     "conversions",
+    "default_privileges",
     "domains",
     "event_triggers",
     "functions",

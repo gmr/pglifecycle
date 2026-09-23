@@ -46,6 +46,62 @@ pub(crate) fn grant(
     }))
 }
 
+/// ALTER DEFAULT PRIVILEGES [FOR ROLE ...] [IN SCHEMA ...] GRANT or
+/// REVOKE, one declaration per role, schema and grantee
+pub(crate) fn default_privileges(
+    node: &Node,
+    src: &str,
+) -> Result<Statement, String> {
+    let action = node.child_of_kind("DefACLAction").ok_or_else(|| {
+        String::from("ALTER DEFAULT PRIVILEGES without GRANT or REVOKE")
+    })?;
+    // REVOKE GRANT OPTION FOR keeps the privilege and takes away only
+    // the right to grant it, which the model cannot say
+    if action.child_of_kind("kw_revoke").is_some()
+        && action.child_of_kind("kw_option").is_some()
+    {
+        return Ok(Statement::Unsupported(String::from(
+            "ALTER DEFAULT PRIVILEGES REVOKE GRANT OPTION FOR",
+        )));
+    }
+    let mut roles = Vec::new();
+    let mut schemas = Vec::new();
+    for option in node.find_all("DefACLOption") {
+        if option.child_of_kind("kw_schema").is_some() {
+            schemas.extend(
+                option.find_all("name").iter().map(|n| unquote(n.text(src))),
+            );
+        } else {
+            roles.extend(
+                option
+                    .find_all("RoleSpec")
+                    .iter()
+                    .map(|r| unquote_role(r.text(src))),
+            );
+        }
+    }
+    let object_type = action
+        .child_of_kind("defacl_privilege_target")
+        .map(|n| n.text(src).to_uppercase())
+        .ok_or_else(|| {
+            String::from("ALTER DEFAULT PRIVILEGES without an object type")
+        })?;
+    Ok(Statement::DefaultPrivileges {
+        roles,
+        schemas,
+        revoke: action.child_of_kind("kw_revoke").is_some(),
+        object_type,
+        privileges: privileges(&action, src)
+            .into_iter()
+            .map(|p| p.name)
+            .collect(),
+        grantees: role_specs(&action, src),
+        with_grant_option: action
+            .child_of_kind("opt_grant_grant_option")
+            .is_some(),
+    })
+}
+
 /// GRANT role TO role / REVOKE role FROM role
 pub(crate) fn grant_role(
     node: &Node,
@@ -703,5 +759,62 @@ mod tests {
              TO '64MB';",
         );
         assert!(matches!(statement, Statement::Unsupported(_)));
+    }
+
+    #[test]
+    fn parses_default_privileges() {
+        let Statement::DefaultPrivileges {
+            roles,
+            schemas,
+            revoke,
+            object_type,
+            privileges,
+            grantees,
+            with_grant_option,
+        } = parse_one(
+            "ALTER DEFAULT PRIVILEGES FOR ROLE app IN SCHEMA s GRANT \
+             INSERT,UPDATE ON TABLES TO reader WITH GRANT OPTION;",
+        )
+        else {
+            panic!("expected DefaultPrivileges")
+        };
+        assert_eq!(roles, vec![String::from("app")]);
+        assert_eq!(schemas, vec![String::from("s")]);
+        assert!(!revoke && with_grant_option);
+        assert_eq!(object_type, "TABLES");
+        assert_eq!(
+            privileges,
+            vec![String::from("INSERT"), String::from("UPDATE")]
+        );
+        assert_eq!(grantees, vec![String::from("reader")]);
+        let Statement::DefaultPrivileges {
+            revoke,
+            privileges,
+            grantees,
+            schemas,
+            ..
+        } = parse_one(
+            "ALTER DEFAULT PRIVILEGES FOR ROLE app REVOKE ALL ON FUNCTIONS \
+             FROM PUBLIC;",
+        )
+        else {
+            panic!("expected DefaultPrivileges")
+        };
+        assert!(revoke && schemas.is_empty());
+        assert_eq!(privileges, vec![String::from("ALL")]);
+        assert_eq!(grantees, vec![String::from("PUBLIC")]);
+    }
+
+    /// Taking away only the grant option keeps the privilege, which a
+    /// revocation in the model cannot say
+    #[test]
+    fn revoking_a_grant_option_is_unsupported() {
+        assert!(matches!(
+            parse_one(
+                "ALTER DEFAULT PRIVILEGES REVOKE GRANT OPTION FOR SELECT ON \
+                 TABLES FROM reader;"
+            ),
+            Statement::Unsupported(_)
+        ));
     }
 }

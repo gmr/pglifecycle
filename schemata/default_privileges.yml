@@ -1,0 +1,55 @@
+---
+$schema: https://json-schema.org/draft/2020-12/schema
+$id: https://gmr.github.io/pglifecycle/schemata/default_privileges.json
+title: Default Privileges
+description: >
+  The privileges objects a role creates start with (ALTER DEFAULT
+  PRIVILEGES FOR ROLE). Global and per-schema declarations compose, so
+  they are kept as written.
+$defs:
+  declaration:
+    type: object
+    properties:
+      schema:
+        title: Schema
+        description: The schema the declaration is limited to; absent for every schema
+        type: string
+      object_type:
+        title: Object Type
+        enum: [TABLES, SEQUENCES, FUNCTIONS, ROUTINES, TYPES, SCHEMAS, LARGE OBJECTS]
+      grantee:
+        title: Grantee
+        description: The role given or denied the privileges, or PUBLIC
+        type: string
+      privileges:
+        title: Privileges
+        type: array
+        items:
+          type: string
+        minItems: 1
+      with_grant_option:
+        title: With Grant Option
+        type: boolean
+    required: [object_type, grantee, privileges]
+    additionalProperties: false
+type: object
+properties:
+  name:
+    title: Role
+    description: The role whose new objects the defaults apply to
+    type: string
+  grants:
+    title: Grants
+    type: array
+    items:
+      $ref: '#/$defs/declaration'
+  revocations:
+    title: Revocations
+    description: >
+      Privileges taken away from the built-in defaults, such as EXECUTE on
+      functions from PUBLIC
+    type: array
+    items:
+      $ref: '#/$defs/declaration'
+required: [name]
+additionalProperties: false

@@ -1,5 +1,4 @@
-CONSTRAINT	unsupported.reservations reservations_no_overlap
-DEFAULT ACL	unsupported.DEFAULT PRIVILEGES FOR TABLES
+COMMENT	unsupported.CONSTRAINT payloads_pkey ON payloads
 RULE	unsupported.append_only append_only_no_delete
 STATISTICS	unsupported.measurements_stats
 TABLE	unsupported.payloads

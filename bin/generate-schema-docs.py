@@ -63,7 +63,14 @@ GROUPS: dict[str, list[str]] = {
         'type',
         'view',
     ],
-    'Roles and privileges': ['acls', 'group', 'role', 'user', 'user_mapping'],
+    'Roles and privileges': [
+        'acls',
+        'default_privileges',
+        'group',
+        'role',
+        'user',
+        'user_mapping',
+    ],
     'Shared definitions': [
         'argument',
         'column',
