@@ -597,7 +597,12 @@ pub(crate) fn table_constraint(
                 .child_of_kind("a_expr")
                 .map(|n| n.text(src).to_string())
                 .ok_or_else(|| String::from("CHECK without an expression"))?;
-            TableConstraint::Check(expression, enforced(&elem))
+            TableConstraint::Check(CheckConstraint {
+                name: String::new(),
+                expression,
+                enforced: enforced(&elem),
+                not_valid: not_valid(&elem),
+            })
         }
         Some("kw_not") => {
             let column = elem
@@ -608,6 +613,7 @@ pub(crate) fn table_constraint(
                 name: name.clone(),
                 column,
                 no_inherit: elem.has("kw_inherit").then_some(true),
+                not_valid: not_valid(&elem),
             })
         }
         _ => {
@@ -630,6 +636,16 @@ fn enforced(elem: &Node) -> Option<bool> {
         .iter()
         .find(|e| e.has("kw_enforced"))
         .map(|e| !e.has("kw_not"))
+}
+
+/// `NOT VALID` from a constraint's attribute spec. `None` means valid,
+/// the default; there is no `VALID` keyword to make it `Some(false)`.
+fn not_valid(elem: &Node) -> Option<bool> {
+    elem.child_of_kind("ConstraintAttributeSpec")?
+        .find_all("ConstraintAttributeElem")
+        .iter()
+        .any(|e| e.has("kw_valid") && e.has("kw_not"))
+        .then_some(true)
 }
 
 fn constraint_columns(
@@ -755,6 +771,7 @@ fn foreign_key(
         initially_deferred,
         period,
         enforced: enforced(elem),
+        not_valid: not_valid(elem),
     })
 }
 
@@ -819,12 +836,11 @@ pub(crate) fn apply_constraint(
                 .get_or_insert_default()
                 .push(columns);
         }
-        TableConstraint::Check(expression, enforced) => {
+        TableConstraint::Check(check) => {
             table.check_constraints.get_or_insert_default().push(
                 CheckConstraint {
                     name: name.unwrap_or_default(),
-                    expression,
-                    enforced,
+                    ..check
                 },
             );
         }
@@ -1222,6 +1238,46 @@ mod tests {
         assert_eq!(index.where_clause, Some("deleted_at IS NULL".into()));
     }
 
+    /// pg_dump writes a NOT VALID constraint as its own ALTER TABLE, for
+    /// each of the three kinds that accept the clause
+    #[test]
+    fn parses_not_valid_constraints() {
+        let constraint = |sql: &str| {
+            let Statement::AddConstraint { constraint, .. } = parse_one(sql)
+            else {
+                panic!("expected AddConstraint for {sql}")
+            };
+            constraint
+        };
+        let TableConstraint::Check(check) = constraint(
+            "ALTER TABLE public.t ADD CONSTRAINT t_pos CHECK ((a > 0)) \
+             NOT VALID;",
+        ) else {
+            panic!("expected a CHECK")
+        };
+        assert_eq!(check.not_valid, Some(true));
+        let TableConstraint::ForeignKey(fk) = constraint(
+            "ALTER TABLE ONLY public.t ADD CONSTRAINT t_fk FOREIGN KEY (p) \
+             REFERENCES public.r(id) NOT VALID;",
+        ) else {
+            panic!("expected a FOREIGN KEY")
+        };
+        assert_eq!(fk.not_valid, Some(true));
+        let TableConstraint::NotNull(not_null) = constraint(
+            "ALTER TABLE public.t ADD CONSTRAINT t_nn NOT NULL b NOT VALID;",
+        ) else {
+            panic!("expected a NOT NULL")
+        };
+        assert_eq!(not_null.not_valid, Some(true));
+        // a valid constraint carries no field at all
+        let TableConstraint::Check(valid) = constraint(
+            "ALTER TABLE public.t ADD CONSTRAINT t_pos CHECK ((a > 0));",
+        ) else {
+            panic!("expected a CHECK")
+        };
+        assert_eq!(valid.not_valid, None);
+    }
+
     /// The statement pg_dump writes for an identity column, which spells
     /// out every option. Parse it into the column's generation, keeping
     /// only what differs from PostgreSQL's defaults.
@@ -1437,7 +1493,12 @@ mod tests {
         assert_eq!(name, Some("positive".into()));
         assert_eq!(
             constraint,
-            TableConstraint::Check("value > 0".into(), None)
+            TableConstraint::Check(CheckConstraint {
+                name: String::new(),
+                expression: "value > 0".into(),
+                enforced: None,
+                not_valid: None,
+            })
         );
     }
 
@@ -1461,11 +1522,13 @@ mod tests {
                     name: None,
                     column: "ts".into(),
                     no_inherit: None,
+                    not_valid: None,
                 },
                 NotNullConstraint {
                     name: Some("ts_nn".into()),
                     column: "sid".into(),
                     no_inherit: None,
+                    not_valid: None,
                 },
             ])
         );
@@ -1485,6 +1548,7 @@ mod tests {
                 name: Some("ts_ni".into()),
                 column: "ts".into(),
                 no_inherit: Some(true),
+                not_valid: None,
             }])
         );
     }

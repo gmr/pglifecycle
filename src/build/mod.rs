@@ -68,6 +68,12 @@
 //!     bare `";"` on every COMMENT entry made a restore with owners
 //!     applied fail with `don't know how to set owner for object type
 //!     "COMMENT"`.
+//! 19. NOT VALID CHECK and NOT NULL constraints render as their own
+//!     `ALTER TABLE ... ADD CONSTRAINT ... NOT VALID` entries, as
+//!     pg_dump writes them, instead of inline in CREATE TABLE, where
+//!     PostgreSQL checks the new, empty table and records them valid.
+//!     No test-project constraint is NOT VALID, so this has no parity
+//!     entry to exclude.
 
 mod acls;
 
@@ -1444,6 +1450,33 @@ impl Builder {
         for fk in d.foreign_keys.as_deref().unwrap_or_default() {
             self.dump_foreign_key(fk, item, d)?;
         }
+        for check in d.check_constraints.as_deref().unwrap_or_default() {
+            if check.not_valid == Some(true) {
+                self.dump_not_valid_constraint(
+                    "CHECK CONSTRAINT",
+                    item,
+                    d,
+                    &check.name,
+                    &render_check_constraint(check),
+                )?;
+            }
+        }
+        for not_null in d.not_null_constraints.as_deref().unwrap_or_default() {
+            if not_null.not_valid == Some(true) {
+                // an unnamed one has the name PostgreSQL generates, and
+                // the entry's tag and DROP both need a name
+                let name = not_null.name.clone().unwrap_or_else(|| {
+                    format!("{}_{}_not_null", d.name, not_null.column)
+                });
+                self.dump_not_valid_constraint(
+                    "CONSTRAINT",
+                    item,
+                    d,
+                    &name,
+                    &render_not_null_constraint(not_null),
+                )?;
+            }
+        }
         for trigger in d.triggers.as_deref().unwrap_or_default() {
             self.dump_trigger(trigger, item, d)?;
         }
@@ -1597,6 +1630,41 @@ impl Builder {
             "FK CONSTRAINT",
             &table.schema,
             &format!("{} {}", table.name, fk.name),
+            &table.owner,
+            &create,
+            &drop,
+            &[parent_dump_id],
+            None,
+        )?;
+        Ok(())
+    }
+
+    /// A NOT VALID CHECK or NOT NULL constraint, as its own entry after
+    /// the table (deviation 19). Written inline in CREATE TABLE,
+    /// PostgreSQL checks the table, finds it empty, and records the
+    /// constraint valid, so the state would be lost on every restore.
+    /// Added with ALTER TABLE it stays not valid, which is how pg_dump
+    /// writes it. No ONLY, matching pg_dump: a CHECK added with ONLY is
+    /// refused on a table that has children.
+    fn dump_not_valid_constraint(
+        &mut self,
+        desc: &str,
+        parent: &Item,
+        table: &Table,
+        name: &str,
+        constraint: &str,
+    ) -> Result<(), String> {
+        let qualified = self.item_name(parent);
+        let create = vec![format!("ALTER TABLE {qualified} ADD {constraint}")];
+        let drop = vec![format!(
+            "ALTER TABLE {qualified} DROP CONSTRAINT IF EXISTS {}",
+            quote_ident(name)
+        )];
+        let parent_dump_id = self.dump_id_map[&parent.id];
+        self.add_entry(
+            desc,
+            &table.schema,
+            &format!("{} {name}", table.name),
             &table.owner,
             &create,
             &drop,
@@ -2553,6 +2621,9 @@ pub(crate) fn render_foreign_key(fk: &crate::models::ForeignKey) -> String {
     if fk.enforced == Some(false) {
         fk_sql.push("NOT ENFORCED".into());
     }
+    if fk.not_valid == Some(true) {
+        fk_sql.push("NOT VALID".into());
+    }
     fk_sql.join(" ")
 }
 
@@ -2639,29 +2710,59 @@ fn push_table_constraints(table: &Table, inner: &mut Vec<String>) {
         inner.push(sql);
     }
     // PostgreSQL 18+ table-level NOT NULL, which pg_dump writes ahead
-    // of the CHECK constraints
+    // of the CHECK constraints. A NOT VALID one is left out here and
+    // emitted as its own entry (deviation 19).
     for not_null in table.not_null_constraints.as_deref().unwrap_or_default() {
-        let mut sql = match &not_null.name {
-            Some(name) => {
-                format!("CONSTRAINT {} NOT NULL", quote_ident(name))
-            }
-            None => String::from("NOT NULL"),
-        };
-        sql.push(' ');
-        sql.push_str(&quote_ident(&not_null.column));
-        if not_null.no_inherit == Some(true) {
-            sql.push_str(" NO INHERIT");
+        if not_null.not_valid != Some(true) {
+            inner.push(render_not_null_constraint(not_null));
         }
-        inner.push(sql);
     }
     for check in table.check_constraints.as_deref().unwrap_or_default() {
-        let mut sql =
-            format!("CONSTRAINT {} CHECK ({})", check.name, check.expression);
-        if check.enforced == Some(false) {
-            sql.push_str(" NOT ENFORCED");
+        if check.not_valid != Some(true) {
+            inner.push(render_check_constraint(check));
         }
-        inner.push(sql);
     }
+}
+
+/// `CONSTRAINT <name> CHECK (<expr>)` and its attributes, shared by
+/// CREATE TABLE, the build's separate NOT VALID entry, and deploy. One
+/// renderer, because deploy once kept its own copy and dropped `NOT
+/// ENFORCED` from it, so a changed check never converged.
+pub(crate) fn render_check_constraint(
+    check: &crate::models::CheckConstraint,
+) -> String {
+    let mut sql = format!(
+        "CONSTRAINT {} CHECK ({})",
+        quote_ident(&check.name),
+        check.expression
+    );
+    if check.enforced == Some(false) {
+        sql.push_str(" NOT ENFORCED");
+    }
+    if check.not_valid == Some(true) {
+        sql.push_str(" NOT VALID");
+    }
+    sql
+}
+
+/// `[CONSTRAINT <name>] NOT NULL <column>` and its attributes, shared
+/// the same way as [`render_check_constraint`]
+pub(crate) fn render_not_null_constraint(
+    not_null: &crate::models::NotNullConstraint,
+) -> String {
+    let mut sql = match &not_null.name {
+        Some(name) => format!("CONSTRAINT {} NOT NULL", quote_ident(name)),
+        None => String::from("NOT NULL"),
+    };
+    sql.push(' ');
+    sql.push_str(&quote_ident(&not_null.column));
+    if not_null.no_inherit == Some(true) {
+        sql.push_str(" NO INHERIT");
+    }
+    if not_null.not_valid == Some(true) {
+        sql.push_str(" NOT VALID");
+    }
+    sql
 }
 
 /// A typed table (`CREATE TABLE ... OF type`) column: the data type
@@ -2924,6 +3025,7 @@ mod tests {
             name: "orders_id_check".into(),
             expression: "id > 0".into(),
             enforced: None,
+            not_valid: None,
         }]);
         assert_eq!(
             foreign_table_defn(&item),
@@ -2954,6 +3056,7 @@ mod tests {
             initially_deferred: None,
             period: None,
             enforced: None,
+            not_valid: None,
         }]);
         let item = table_item(1, table);
         // the CREATE TABLE carries no FOREIGN KEY clause; a circular
@@ -2973,6 +3076,52 @@ mod tests {
             "ALTER TABLE ONLY test.orders ADD CONSTRAINT orders_customer \
              FOREIGN KEY (customer_id) REFERENCES test.customers (id) ON \
              DELETE CASCADE;\n"
+        );
+    }
+
+    /// Inline in CREATE TABLE, PostgreSQL checks the new empty table and
+    /// records a NOT VALID constraint valid, so it goes out as its own
+    /// ALTER TABLE entry, as pg_dump writes it (deviation 19)
+    #[test]
+    fn renders_not_valid_constraints_as_their_own_entries() {
+        let mut table = base_table("imports");
+        table.columns = Some(vec![column("amount", "numeric", false)]);
+        table.check_constraints = Some(vec![CheckConstraint {
+            name: "imports_positive".into(),
+            expression: "amount > 0".into(),
+            enforced: None,
+            not_valid: Some(true),
+        }]);
+        table.not_null_constraints = Some(vec![NotNullConstraint {
+            name: None,
+            column: "amount".into(),
+            no_inherit: None,
+            not_valid: Some(true),
+        }]);
+        let item = table_item(1, table);
+        let create =
+            table_defn(&item, libpgdump::ObjectType::Table, "imports");
+        assert!(
+            !create.contains("CHECK") && !create.contains("NOT NULL"),
+            "not-valid constraint rendered inline: {create}"
+        );
+        assert_eq!(
+            table_defn(
+                &item,
+                libpgdump::ObjectType::CheckConstraint,
+                "imports imports_positive"
+            ),
+            "ALTER TABLE test.imports ADD CONSTRAINT imports_positive \
+             CHECK (amount > 0) NOT VALID;\n"
+        );
+        // an unnamed one is tagged with the name PostgreSQL generates
+        assert_eq!(
+            table_defn(
+                &item,
+                libpgdump::ObjectType::Constraint,
+                "imports imports_amount_not_null"
+            ),
+            "ALTER TABLE test.imports ADD NOT NULL amount NOT VALID;\n"
         );
     }
 
@@ -3287,6 +3436,7 @@ mod tests {
             name: "ck_positive".into(),
             expression: "qty > 0".into(),
             enforced: None,
+            not_valid: None,
         }]);
         assert_eq!(
             table_defn(
@@ -3372,11 +3522,13 @@ mod tests {
                 name: None,
                 column: "qty".into(),
                 no_inherit: None,
+                not_valid: None,
             },
             NotNullConstraint {
                 name: Some("sku_nn".into()),
                 column: "sku".into(),
                 no_inherit: Some(true),
+                not_valid: None,
             },
         ]);
         assert_eq!(
@@ -3401,6 +3553,7 @@ mod tests {
             name: Some("Sku NN".into()),
             column: "Sku".into(),
             no_inherit: None,
+            not_valid: None,
         }]);
         assert_eq!(
             table_defn(

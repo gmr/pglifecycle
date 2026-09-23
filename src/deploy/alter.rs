@@ -191,6 +191,18 @@ fn view_columns_compatible(repo: &View, db: &View) -> bool {
 }
 
 fn table(repo: &Table, db: &Table) -> Resolution {
+    // Validating a NOT NULL on a local column changes how it is
+    // written, not only its state, so it is found before the two sides
+    // are made canonical: afterwards the repo's copy has moved onto the
+    // column while the database's NOT VALID copy has not
+    let name = qualified(&repo.schema, &repo.name);
+    let mut validations = Vec::new();
+    let db = &validate_local_not_nulls(&name, repo, db, &mut validations);
+    // reconcile canonical forms; see Table::with_canonical_not_nulls
+    let (repo, db) = (
+        &repo.with_canonical_not_nulls(),
+        &db.with_canonical_not_nulls(),
+    );
     // foreign tables (a `server` on either side) reconcile through a
     // dedicated path: only OPTIONS and the comment are alterable in
     // place, everything else rebuilds
@@ -214,8 +226,7 @@ fn table(repo: &Table, db: &Table) -> Resolution {
     {
         return Resolution::Replace;
     }
-    let name = qualified(&repo.schema, &repo.name);
-    let mut alters = Vec::new();
+    let mut alters = validations;
     if !columns(&name, repo, db, &mut alters)
         || !constraints(&name, repo, db, &mut alters)
         || !triggers(&name, repo, db, &mut alters)
@@ -225,6 +236,56 @@ fn table(repo: &Table, db: &Table) -> Resolution {
     indexes(&name, repo, db, &mut alters);
     push_comment(&mut alters, "TABLE", &name, &repo.comment, &db.comment);
     Resolution::Statements(alters)
+}
+
+/// `VALIDATE CONSTRAINT` each NOT VALID table-level NOT NULL on one of
+/// the table's own columns where the repo has the same constraint,
+/// valid; return the database side as it will be once validated.
+///
+/// A valid NOT NULL on a local column is written on the column, so the
+/// repo's copy is compared there, against a database copy that is
+/// still table-level because it is NOT VALID. Left to the comparison,
+/// that pair reads as a new constraint plus a dropped one, and the ADD
+/// collides with the name the existing constraint already holds.
+fn validate_local_not_nulls(
+    table: &str,
+    repo: &Table,
+    db: &Table,
+    alters: &mut Vec<Alter>,
+) -> Table {
+    let wanted = repo.with_canonical_not_nulls();
+    let mut db = db.clone();
+    for not_null in db.not_null_constraints.iter_mut().flatten() {
+        if not_null.not_valid != Some(true) {
+            continue;
+        }
+        let matches = wanted
+            .columns
+            .iter()
+            .flatten()
+            .find(|c| c.name == not_null.column)
+            .is_some_and(|c| {
+                let constraint =
+                    c.not_null_constraint.clone().unwrap_or(ColumnNotNull {
+                        name: None,
+                        no_inherit: None,
+                    });
+                c.nullable == Some(false)
+                    && constraint.name == not_null.name
+                    && constraint.no_inherit == not_null.no_inherit
+            });
+        if matches {
+            let name = not_null.name.clone().unwrap_or_else(|| {
+                format!("{}_{}_not_null", db.name, not_null.column)
+            });
+            alters.push(Alter::new(format!(
+                "ALTER TABLE {table} VALIDATE CONSTRAINT {};\n",
+                quote_ident(&name)
+            )));
+            not_null.not_valid = None;
+        }
+    }
+    db
 }
 
 /// Column reconciliation; returns false where only a rebuild works
@@ -559,10 +620,22 @@ fn constraints(
         }
     }
     let repo_checks = repo.check_constraints.as_deref().unwrap_or_default();
-    let db_checks = db.check_constraints.as_deref().unwrap_or_default();
+    let db_checks = validations(
+        table,
+        db.check_constraints.as_deref().unwrap_or_default(),
+        repo_checks,
+        |check: &CheckConstraint| check.name.clone(),
+        |check| check.not_valid == Some(true),
+        |check| CheckConstraint {
+            not_valid: None,
+            ..check.clone()
+        },
+        |check| check.name.clone(),
+        alters,
+    );
     named_pairs(
         alters,
-        db_checks,
+        &db_checks,
         repo_checks,
         |check: &CheckConstraint| check.name.clone(),
         |check| {
@@ -573,14 +646,8 @@ fn constraints(
         },
         |check| {
             format!(
-                "ALTER TABLE {table} ADD CONSTRAINT {} CHECK ({}){};\n",
-                quote_ident(&check.name),
-                check.expression,
-                if check.enforced == Some(false) {
-                    " NOT ENFORCED"
-                } else {
-                    ""
-                }
+                "ALTER TABLE {table} ADD {};\n",
+                build::render_check_constraint(check)
             )
         },
     );
@@ -590,10 +657,27 @@ fn constraints(
     // goes through ALTER COLUMN for the same reason — it needs no name
     let repo_not_null =
         repo.not_null_constraints.as_deref().unwrap_or_default();
-    let db_not_null = db.not_null_constraints.as_deref().unwrap_or_default();
+    let db_not_null = validations(
+        table,
+        db.not_null_constraints.as_deref().unwrap_or_default(),
+        repo_not_null,
+        |not_null: &NotNullConstraint| not_null.column.clone(),
+        |not_null| not_null.not_valid == Some(true),
+        |not_null| NotNullConstraint {
+            not_valid: None,
+            ..not_null.clone()
+        },
+        // an unnamed one carries the name PostgreSQL generates
+        |not_null| {
+            not_null.name.clone().unwrap_or_else(|| {
+                format!("{}_{}_not_null", repo.name, not_null.column)
+            })
+        },
+        alters,
+    );
     named_pairs(
         alters,
-        db_not_null,
+        &db_not_null,
         repo_not_null,
         |not_null: &NotNullConstraint| not_null.column.clone(),
         |not_null| {
@@ -604,17 +688,8 @@ fn constraints(
         },
         |not_null| {
             format!(
-                "ALTER TABLE {table} ADD {}NOT NULL {}{};\n",
-                match &not_null.name {
-                    Some(name) => format!("CONSTRAINT {} ", quote_ident(name)),
-                    None => String::new(),
-                },
-                quote_ident(&not_null.column),
-                if not_null.no_inherit == Some(true) {
-                    " NO INHERIT"
-                } else {
-                    ""
-                }
+                "ALTER TABLE {table} ADD {};\n",
+                build::render_not_null_constraint(not_null)
             )
         },
     );
@@ -642,10 +717,22 @@ fn constraints(
         },
     );
     let repo_fks = repo.foreign_keys.as_deref().unwrap_or_default();
-    let db_fks = db.foreign_keys.as_deref().unwrap_or_default();
+    let db_fks = validations(
+        table,
+        db.foreign_keys.as_deref().unwrap_or_default(),
+        repo_fks,
+        |fk: &ForeignKey| fk.name.clone(),
+        |fk| fk.not_valid == Some(true),
+        |fk| ForeignKey {
+            not_valid: None,
+            ..fk.clone()
+        },
+        |fk| fk.name.clone(),
+        alters,
+    );
     named_pairs(
         alters,
-        db_fks,
+        &db_fks,
         repo_fks,
         |fk: &ForeignKey| fk.name.clone(),
         |fk| {
@@ -663,6 +750,46 @@ fn constraints(
         },
     );
     true
+}
+
+/// Emit `VALIDATE CONSTRAINT` for each database constraint that is NOT
+/// VALID where the repo's is otherwise identical and valid, and return
+/// the database side with those counted as matching, so the pairing
+/// that follows leaves them alone.
+///
+/// Dropping and re-adding would reach the same state, but a NOT VALID
+/// constraint exists so a large table need not be scanned and locked
+/// all at once. The ADD rescans the whole table under a heavier lock
+/// than VALIDATE takes, which is the cost the NOT VALID was avoiding.
+#[allow(clippy::too_many_arguments)]
+fn validations<T: Clone + PartialEq>(
+    table: &str,
+    db: &[T],
+    repo: &[T],
+    key: impl Fn(&T) -> String,
+    is_not_valid: impl Fn(&T) -> bool,
+    as_valid: impl Fn(&T) -> T,
+    name: impl Fn(&T) -> String,
+    alters: &mut Vec<Alter>,
+) -> Vec<T> {
+    db.iter()
+        .map(|existing| {
+            let target = is_not_valid(existing)
+                .then(|| repo.iter().find(|r| key(r) == key(existing)))
+                .flatten()
+                .filter(|r| !is_not_valid(r) && **r == as_valid(existing));
+            match target {
+                Some(target) => {
+                    alters.push(Alter::new(format!(
+                        "ALTER TABLE {table} VALIDATE CONSTRAINT {};\n",
+                        quote_ident(&name(existing))
+                    )));
+                    target.clone()
+                }
+                None => existing.clone(),
+            }
+        })
+        .collect()
 }
 
 /// Reconcile named child objects: drop database-side entries that are
@@ -1386,6 +1513,87 @@ mod tests {
                 "ALTER TABLE test.users ADD CONSTRAINT email_has_at CHECK \
                  (email ~ '@') NOT ENFORCED;\n",
             ]
+        );
+    }
+
+    /// Validating a NOT VALID constraint keeps it and runs VALIDATE,
+    /// rather than dropping and re-adding it, which rescans the whole
+    /// table under a heavier lock than VALIDATE takes
+    #[test]
+    fn not_valid_constraints_validate_in_place() {
+        let tables = |not_valid: Option<bool>| {
+            let mut t = base_table();
+            t["columns"] = serde_json::json!([
+                {"name": "id", "data_type": "uuid", "nullable": false},
+                {"name": "email", "data_type": "text"},
+                {"name": "owner", "data_type": "uuid"},
+            ]);
+            t["check_constraints"] = serde_json::json!([
+                {"name": "email_has_at", "expression": "email ~ '@'",
+                 "not_valid": not_valid},
+            ]);
+            t["foreign_keys"] = serde_json::json!([
+                {"name": "users_owner", "columns": ["owner"],
+                 "references": {"name": "test.users", "columns": ["id"]},
+                 "not_valid": not_valid},
+            ]);
+            // a local column's NOT NULL: table-level only while NOT VALID
+            if not_valid == Some(true) {
+                t["not_null_constraints"] = serde_json::json!([
+                    {"name": "users_email_nn", "column": "email",
+                     "not_valid": true},
+                ]);
+            } else {
+                t["columns"][1]["nullable"] = serde_json::json!(false);
+                t["columns"][1]["not_null_constraint"] =
+                    serde_json::json!({"name": "users_email_nn"});
+            }
+            // null not_valid means absent, as a pull writes it
+            let mut value = t;
+            for key in ["check_constraints", "foreign_keys"] {
+                for c in value[key].as_array_mut().unwrap() {
+                    if c["not_valid"].is_null() {
+                        c.as_object_mut().unwrap().remove("not_valid");
+                    }
+                }
+            }
+            parse_table(value)
+        };
+        let alters = statements(table(&tables(None), &tables(Some(true))));
+        let mut got = sql(&alters);
+        got.sort_unstable();
+        assert_eq!(
+            got,
+            vec![
+                "ALTER TABLE test.users VALIDATE CONSTRAINT email_has_at;\n",
+                "ALTER TABLE test.users VALIDATE CONSTRAINT users_email_nn;\n",
+                "ALTER TABLE test.users VALIDATE CONSTRAINT users_owner;\n",
+            ]
+        );
+        assert!(alters.iter().all(|a| !a.destructive));
+    }
+
+    /// A valid table-level NOT NULL on a local column is the constraint
+    /// the database reports on the column, written the other way, so
+    /// the two are not a change
+    #[test]
+    fn local_not_null_written_either_way_is_not_a_change() {
+        let mut repo = base_table();
+        repo["columns"] = serde_json::json!([
+            {"name": "id", "data_type": "uuid", "nullable": false},
+            {"name": "email", "data_type": "text"},
+        ]);
+        repo["not_null_constraints"] = serde_json::json!([
+            {"name": "users_email_nn", "column": "email"},
+        ]);
+        let mut db = base_table();
+        db["columns"] = serde_json::json!([
+            {"name": "id", "data_type": "uuid", "nullable": false},
+            {"name": "email", "data_type": "text", "nullable": false,
+             "not_null_constraint": {"name": "users_email_nn"}},
+        ]);
+        assert!(
+            statements(table(&parse_table(repo), &parse_table(db))).is_empty()
         );
     }
 

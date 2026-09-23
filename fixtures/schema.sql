@@ -362,3 +362,23 @@ CREATE TABLE identity_named (
 CREATE TABLE identity_descending (
     id INT GENERATED ALWAYS AS IDENTITY (INCREMENT BY -1)
 );
+
+-- NOT VALID constraints: rows already in the table were never checked.
+-- The state holds only when the constraint is added with ALTER TABLE;
+-- in CREATE TABLE, PostgreSQL checks the new, empty table and records
+-- it valid. So these are ALTERs, as pg_dump writes them, and the table
+-- needs no rows for the state to stick.
+CREATE TABLE legacy_imports (
+    id        INT PRIMARY KEY,
+    amount    NUMERIC(12,2),
+    source_id INT,
+    reference TEXT
+);
+
+ALTER TABLE legacy_imports
+    ADD CONSTRAINT legacy_imports_positive CHECK (amount > 0) NOT VALID;
+ALTER TABLE legacy_imports
+    ADD CONSTRAINT legacy_imports_source
+    FOREIGN KEY (source_id) REFERENCES legacy_imports (id) NOT VALID;
+ALTER TABLE legacy_imports
+    ADD CONSTRAINT legacy_imports_reference_nn NOT NULL reference NOT VALID;

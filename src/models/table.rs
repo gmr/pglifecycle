@@ -63,6 +63,49 @@ pub struct Table {
     pub comment: Option<String>,
 }
 
+impl Table {
+    /// The same table with each *valid* table-level NOT NULL on one of
+    /// its own columns moved onto that column.
+    ///
+    /// The two are one constraint written two ways. pg_dump writes a
+    /// valid NOT NULL on a local column inline on the column, and the
+    /// table-level form only for an inherited column, or for a NOT
+    /// VALID one, which it has to add with ALTER TABLE. Clearing
+    /// `not_valid` in a pulled project leaves the table-level form on a
+    /// local column, which then never compares equal to what the
+    /// database reports once validated, so deploy dropped and re-added
+    /// it on every run. Comparing canonical forms removes that.
+    pub fn with_canonical_not_nulls(&self) -> Table {
+        let mut table = self.clone();
+        let Some(not_nulls) = table.not_null_constraints.take() else {
+            return table;
+        };
+        let mut kept = Vec::new();
+        for not_null in not_nulls {
+            let column = table
+                .columns
+                .iter_mut()
+                .flatten()
+                .find(|c| c.name == not_null.column);
+            match column {
+                Some(column) if not_null.not_valid != Some(true) => {
+                    column.nullable = Some(false);
+                    if not_null.name.is_some() || not_null.no_inherit.is_some()
+                    {
+                        column.not_null_constraint = Some(ColumnNotNull {
+                            name: not_null.name,
+                            no_inherit: not_null.no_inherit,
+                        });
+                    }
+                }
+                _ => kept.push(not_null),
+            }
+        }
+        table.not_null_constraints = (!kept.is_empty()).then_some(kept);
+        table
+    }
+}
+
 /// Represents a column in a table
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -202,6 +245,10 @@ pub struct CheckConstraint {
     /// one field covers both. Absent means enforced, the default.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enforced: Option<bool>,
+    /// `true` renders `NOT VALID`: rows already in the table were never
+    /// checked, and only new ones are. See [`ForeignKey::not_valid`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub not_valid: Option<bool>,
 }
 
 /// A table-level `NOT NULL <column>` constraint (PostgreSQL 18+).
@@ -218,6 +265,11 @@ pub struct NotNullConstraint {
     pub column: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub no_inherit: Option<bool>,
+    /// `true` renders `NOT VALID`; see [`ForeignKey::not_valid`]. Only
+    /// the table-level form carries it: a column's own `NOT NULL NOT
+    /// VALID` is a syntax error.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub not_valid: Option<bool>,
 }
 
 /// Constraint columns for primary keys and unique constraints. The YAML
@@ -279,6 +331,14 @@ pub struct ForeignKey {
     /// `false` renders `NOT ENFORCED`; see [`CheckConstraint::enforced`]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enforced: Option<bool>,
+    /// `true` renders `NOT VALID`. A constraint keeps that state only
+    /// when added with ALTER TABLE: in CREATE TABLE, PostgreSQL checks
+    /// the (empty) table and records it valid, so the build emits a
+    /// not-valid constraint as its own entry. pg_dump writes only `NOT
+    /// ENFORCED` for a constraint that is not enforced, since that
+    /// implies not validated, so the two do not appear together.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub not_valid: Option<bool>,
 }
 
 /// Represents the table a Foreign Key references

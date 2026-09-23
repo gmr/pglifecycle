@@ -287,6 +287,16 @@ fn existence_key(
 /// A definition as a JSON value with the fields deploy does not
 /// manage removed and type aliases canonicalized
 fn normalized(definition: &Definition) -> Value {
+    // a table compares in its canonical NOT NULL form, so the same
+    // constraint written two ways is not a change
+    let canonical;
+    let definition = match definition {
+        Definition::Table(table) => {
+            canonical = Definition::Table(table.with_canonical_not_nulls());
+            &canonical
+        }
+        other => other,
+    };
     let mut value = serde_json::to_value(definition).unwrap_or(Value::Null);
     normalize(&mut value);
     value

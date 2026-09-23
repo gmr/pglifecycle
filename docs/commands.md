@@ -84,7 +84,10 @@ reconciled in place where PostgreSQL can express it:
   additions, index and trigger create/drop, and comment changes.
   Identity columns are added, and their `ALWAYS`/`BY DEFAULT` behavior
   and sequence options changed, with `ALTER COLUMN`; renaming an
-  identity's sequence falls back. Dropping a column, changing a column
+  identity's sequence falls back. A `NOT VALID` check, foreign key or
+  NOT NULL constraint that the project marks valid is validated with
+  `VALIDATE CONSTRAINT`, which avoids the full scan under a heavy lock
+  that dropping and re-adding it would take. Dropping a column, changing a column
   type, reordering columns, and partitioning/storage changes fall back
   to drop+recreate.
 - **Functions and views** — `CREATE OR REPLACE` (a function whose
