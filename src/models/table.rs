@@ -1,8 +1,19 @@
 //! Tables and their child objects (columns, constraints, indexes,
 //! triggers, partitioning)
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
+
+/// Read a flag whose only non-default value is `true`, keeping an
+/// explicit `false` as absent. Absent and `false` then compare equal
+/// to the value pulled from the database, which records only `true`,
+/// and deploy sees no change where there is none.
+fn true_or_none<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Option::<bool>::deserialize(deserializer)?.filter(|value| *value))
+}
 
 /// Represents a table
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -211,7 +222,11 @@ pub struct SequenceOptions {
     pub max_value: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "true_or_none",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub cycle: Option<bool>,
 }
 
@@ -247,7 +262,11 @@ pub struct CheckConstraint {
     pub enforced: Option<bool>,
     /// `true` renders `NOT VALID`: rows already in the table were never
     /// checked, and only new ones are. See [`ForeignKey::not_valid`].
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "true_or_none",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub not_valid: Option<bool>,
 }
 
@@ -268,7 +287,11 @@ pub struct NotNullConstraint {
     /// `true` renders `NOT VALID`; see [`ForeignKey::not_valid`]. Only
     /// the table-level form carries it: a column's own `NOT NULL NOT
     /// VALID` is a syntax error.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "true_or_none",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub not_valid: Option<bool>,
 }
 
@@ -337,7 +360,11 @@ pub struct ForeignKey {
     /// not-valid constraint as its own entry. pg_dump writes only `NOT
     /// ENFORCED` for a constraint that is not enforced, since that
     /// implies not validated, so the two do not appear together.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "true_or_none",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub not_valid: Option<bool>,
 }
 
@@ -503,4 +530,29 @@ pub struct Trigger {
     pub arguments: Option<Vec<Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An explicit `false` reads as absent, which is what pull records,
+    /// so deploy does not see a change on every run
+    #[test]
+    fn false_flags_read_as_absent() {
+        let check: CheckConstraint =
+            serde_json::from_value(serde_json::json!(
+                {"name": "c", "expression": "a > 0", "not_valid": false}
+            ))
+            .unwrap();
+        assert_eq!(check.not_valid, None);
+        let options: SequenceOptions =
+            serde_json::from_value(serde_json::json!({"cycle": false}))
+                .unwrap();
+        assert_eq!(options, SequenceOptions::default());
+        let options: SequenceOptions =
+            serde_json::from_value(serde_json::json!({"cycle": true}))
+                .unwrap();
+        assert_eq!(options.cycle, Some(true));
+    }
 }

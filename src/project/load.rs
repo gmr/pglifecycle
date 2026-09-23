@@ -325,7 +325,7 @@ impl Loader {
                 .flatten()
                 .chain(table.like_table.iter().map(|like| &like.name));
             for source in sources {
-                let (namespace, tag) = split_name(source);
+                let (namespace, tag) = split_sql_name(source);
                 // a source the project does not manage, such as one an
                 // extension owns, orders nothing and is left alone
                 for parent in lookup_items(
@@ -639,6 +639,29 @@ fn split_name(value: &str) -> (String, String) {
     }
 }
 
+/// Split a `schema.table` SQL reference, as INHERITS and LIKE state
+/// it, into the names the index keys on. A quoted part loses its
+/// quotes and may contain a dot; an unquoted part is kept as written,
+/// as [`split_name`] keeps it.
+fn split_sql_name(value: &str) -> (String, String) {
+    let mut parts = vec![String::new()];
+    let mut quoted = false;
+    let mut chars = value.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' if quoted && chars.peek() == Some(&'"') => {
+                chars.next();
+                parts.last_mut().unwrap().push('"');
+            }
+            '"' => quoted = !quoted,
+            '.' if !quoted => parts.push(String::new()),
+            _ => parts.last_mut().unwrap().push(c),
+        }
+    }
+    let tag = parts.pop().unwrap_or_default();
+    (parts.pop().unwrap_or_default(), tag)
+}
+
 /// Drop null-valued keys so explicit YAML nulls compare equal to
 /// omitted optional fields in round-trip verification
 fn strip_nulls(value: Value) -> Value {
@@ -834,11 +857,19 @@ mod tests {
             ),
             table("copy", json!({"like_table": {"name": "test.source"}})),
             table("elsewhere", json!({"like_table": {"name": "ext.table"}})),
+            table(
+                "quoted",
+                json!({"like_table": {"name": "\"test\".\"Source\""}}),
+            ),
         ] {
             loader.add_definition(ObjectType::Table, entry, None);
         }
         loader.index.insert(
             index_key(ObjectType::Table, Some("test"), "source"),
+            vec![0],
+        );
+        loader.index.insert(
+            index_key(ObjectType::Table, Some("test"), "Source"),
             vec![0],
         );
         loader.apply_structural_dependencies();
@@ -847,6 +878,8 @@ mod tests {
         assert_eq!(loader.project.inventory[1].dependencies, [0].into());
         assert_eq!(loader.project.inventory[2].dependencies, [0].into());
         assert!(loader.project.inventory[3].dependencies.is_empty());
+        // a quoted reference resolves to the unquoted name
+        assert_eq!(loader.project.inventory[4].dependencies, [0].into());
     }
 
     /// Overloads are distinct objects: pull writes them to `f.yaml`

@@ -521,8 +521,11 @@ fn sequence_options(
         .into_iter()
         .find(|e| e.has("kw_name"))
         .and_then(|e| e.child_of_kind("any_name"))
-        .map(|n| n.text(src).to_string())
-        .filter(|name| !is_generated_sequence_name(name, table, column));
+        .filter(|n| {
+            let name = crate::ddl::any_name(n, src);
+            !is_generated_sequence_name(&name, table, column)
+        })
+        .map(|n| n.text(src).to_string());
     // an ascending sequence starts at its minimum and a descending one
     // at its maximum, which default to 1 and -1
     let ascending = parsed.increment_by.is_none_or(|by| by > 0);
@@ -543,21 +546,21 @@ fn sequence_options(
 }
 
 /// Whether `name` is the `<table>_<column>_seq` PostgreSQL gives an
-/// identity column's sequence, in the table's own schema
+/// identity column's sequence, in the table's own schema. Both names
+/// are unquoted, so a quoted `"Orders_id_seq"` matches table `Orders`.
 fn is_generated_sequence_name(
-    name: &str,
+    name: &QualifiedName,
     table: Option<&QualifiedName>,
     column: &str,
 ) -> bool {
     let Some(table) = table else {
         return false;
     };
-    let (schema, bare) = match name.rsplit_once('.') {
-        Some((schema, bare)) => (Some(schema), bare),
-        None => (None, name),
-    };
-    bare == format!("{}_{column}_seq", table.name)
-        && schema.is_none_or(|schema| Some(schema) == table.schema.as_deref())
+    name.name == format!("{}_{column}_seq", table.name)
+        && name
+            .schema
+            .as_ref()
+            .is_none_or(|schema| Some(schema) == table.schema.as_ref())
 }
 
 /// Parse a TableConstraint node into (name, constraint)
@@ -847,7 +850,15 @@ pub(crate) fn apply_constraint(
         TableConstraint::ForeignKey(fk) => {
             table.foreign_keys.get_or_insert_default().push(fk);
         }
-        TableConstraint::NotNull(not_null) => {
+        TableConstraint::NotNull(mut not_null) => {
+            // pg_dump names a NOT VALID one it adds with ALTER TABLE
+            // even when the name is the generated one, which the model
+            // records as none, as it does inline in CREATE TABLE
+            let generated =
+                format!("{}_{}_not_null", table.name, not_null.column);
+            if not_null.name.as_deref() == Some(generated.as_str()) {
+                not_null.name = None;
+            }
             table
                 .not_null_constraints
                 .get_or_insert_default()
@@ -1337,6 +1348,18 @@ mod tests {
         );
     }
 
+    /// A quoted table gives a quoted sequence name, which is still the
+    /// generated one once both names are unquoted
+    #[test]
+    fn identity_drops_a_quoted_generated_name() {
+        let generated = identity_of(
+            "ALTER TABLE public.\"Orders\" ALTER COLUMN id ADD GENERATED \
+             ALWAYS AS IDENTITY (SEQUENCE NAME public.\"Orders_id_seq\" \
+             START WITH 1 INCREMENT BY 1 NO MINVALUE NO MAXVALUE CACHE 1);",
+        );
+        assert_eq!(generated.sequence_options, None);
+    }
+
     /// A descending sequence starts at its maximum, -1 by default, so
     /// `START WITH -1` is the default there and `START WITH 1` is not
     #[test]
@@ -1400,6 +1423,31 @@ mod tests {
             Some(vec![
                 ConstraintColumns::Columns(vec!["email".into()]),
                 detailed("users_one_email", &["email"]),
+            ])
+        );
+
+        // pg_dump names a NOT VALID NOT NULL it adds with ALTER TABLE
+        let not_null = |name: &str| NotNullConstraint {
+            name: Some(name.into()),
+            column: "email".into(),
+            no_inherit: None,
+            not_valid: Some(true),
+        };
+        for name in ["users_email_not_null", "email_required"] {
+            apply_constraint(
+                &mut table,
+                Some(name.into()),
+                TableConstraint::NotNull(not_null(name)),
+            );
+        }
+        assert_eq!(
+            table.not_null_constraints,
+            Some(vec![
+                NotNullConstraint {
+                    name: None,
+                    ..not_null("users_email_not_null")
+                },
+                not_null("email_required"),
             ])
         );
     }

@@ -376,6 +376,30 @@ fn alter_column(
         return false;
     }
     let column = quote_ident(&repo.name);
+    // DROP IDENTITY goes first: PostgreSQL rejects SET DEFAULT and DROP
+    // NOT NULL on a column that is still an identity. The statements
+    // that depend on the drop are gated with it, so a script without
+    // --allow-drop does not keep them and fail.
+    let drops_identity =
+        identities && repo.generated.is_none() && db.generated.is_some();
+    let dependent = |sql: String| {
+        if drops_identity {
+            Alter::destructive(sql)
+        } else {
+            Alter::new(sql)
+        }
+    };
+    if drops_identity {
+        // Gated even though it keeps every row: the sequence and its
+        // position go with it, so adding the identity back restarts the
+        // numbering and collides with existing keys. A project pulled
+        // before identity columns were modeled has none on any column,
+        // so this is also what keeps a deploy of such a project from
+        // stripping every identity in the database.
+        alters.push(Alter::destructive(format!(
+            "ALTER TABLE {table} ALTER COLUMN {column} DROP IDENTITY;\n"
+        )));
+    }
     if canonical_type(&repo.data_type) != canonical_type(&db.data_type) {
         // a type change may rewrite the table (and can fail outright
         // without a USING clause), so it is gated
@@ -385,7 +409,7 @@ fn alter_column(
         )));
     }
     if repo.default != db.default {
-        alters.push(Alter::new(match &repo.default {
+        alters.push(dependent(match &repo.default {
             Some(default) => format!(
                 "ALTER TABLE {table} ALTER COLUMN {column} SET DEFAULT \
                  {};\n",
@@ -405,7 +429,7 @@ fn alter_column(
     let db_not_null = db.nullable == Some(false);
     if repo_not_null != db_not_null {
         if db_not_null {
-            alters.push(Alter::new(format!(
+            alters.push(dependent(format!(
                 "ALTER TABLE {table} ALTER COLUMN {column} DROP NOT \
                  NULL;\n"
             )));
@@ -502,18 +526,10 @@ fn identity(
             )));
             true
         }
-        // Gated even though it keeps every row: the sequence and its
-        // position go with it, so adding the identity back restarts the
-        // numbering and collides with existing keys. A project pulled
-        // before identity columns were modeled has none on any column,
-        // so this is also what keeps a deploy of such a project from
-        // stripping every identity in the database.
-        (None, Some(_)) => {
-            alters.push(Alter::destructive(format!(
-                "ALTER TABLE {table} ALTER COLUMN {column} DROP IDENTITY;\n"
-            )));
-            true
-        }
+        // alter_column emits the DROP IDENTITY ahead of the default
+        // and nullability statements, which PostgreSQL rejects on an
+        // identity column
+        (None, Some(_)) => true,
         (Some(repo), Some(db)) => {
             let repo_options =
                 repo.sequence_options.as_ref().unwrap_or(&default);
@@ -1691,6 +1707,31 @@ mod tests {
             vec!["ALTER TABLE test.users ALTER COLUMN id DROP IDENTITY;\n"]
         );
         assert!(alters[0].destructive);
+    }
+
+    /// PostgreSQL rejects SET DEFAULT and DROP NOT NULL on an identity
+    /// column, so the drop comes first, and both are gated with it
+    #[test]
+    fn identity_drop_precedes_default_and_nullability() {
+        let mut repo = with_id_generation(serde_json::Value::Null);
+        let column = &mut repo.columns.as_mut().unwrap()[0];
+        column.nullable = None;
+        column.default =
+            Some(serde_json::json!("nextval('test.users_id'::regclass)"));
+        let db = with_id_generation(
+            serde_json::json!({"sequence_behavior": "ALWAYS"}),
+        );
+        let alters = statements(table(&repo, &db));
+        assert_eq!(
+            sql(&alters),
+            vec![
+                "ALTER TABLE test.users ALTER COLUMN id DROP IDENTITY;\n",
+                "ALTER TABLE test.users ALTER COLUMN id SET DEFAULT \
+                 nextval('test.users_id'::regclass);\n",
+                "ALTER TABLE test.users ALTER COLUMN id DROP NOT NULL;\n",
+            ]
+        );
+        assert!(alters.iter().all(|alter| alter.destructive));
     }
 
     /// An older project file names a separately managed sequence in

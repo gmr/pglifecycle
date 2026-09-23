@@ -135,7 +135,8 @@ properties:
       - required: [expression]
         not:
           anyOf:
-            - required: [sequence, sequence_behavior]
+            - required: [sequence]
+            - required: [sequence_behavior]
             - required: [sequence_options]
       # An identity column: a pulled one carries only the behavior,
       # while older project files name a separate sequence
