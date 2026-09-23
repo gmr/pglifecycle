@@ -313,21 +313,9 @@ and `fixtures/schema.sql`. `deploy` needs no new comparison logic: the
 diff normalizes `Definition` to JSON, so a new optional field is picked
 up once it round-trips.
 
-0. `period: Option<String>` on `ForeignKey` and `ForeignKeyReference`
-   (A6), carried over from Phase 2: the rendering side is ready, the
-   `optionalPeriodName` and `opt_column_and_period_list` parse is not.
-1. `not_valid: Option<bool>` on `CheckConstraint`, `ForeignKey`,
-   `NotNullConstraint`, `ColumnNotNull` (A2, A3).
-2. `enforced: Option<bool>` on `CheckConstraint` and `ForeignKey` only
-   (A1) — the server rejects the attribute elsewhere, so adding the
-   field to `ConstraintColumns` would model an impossible state.
-3. `nulls_not_distinct: Option<bool>` on `ConstraintColumns::Detailed`
-   and `Index` (A4).
-4. `without_overlaps: Option<String>` on `ConstraintColumns::Detailed`,
-   holding the trailing column name, wired for **both** `primary_key`
-   and `unique_constraints` (A5). `ConstraintColumns` is an untagged
-   enum, so the bare-name and bare-list forms keep parsing.
-5. Identity columns: add `Statement::AddIdentity { table, column,
+1. `not_valid: Option<bool>` on `CheckConstraint`, `ForeignKey` and
+   `NotNullConstraint` (A2, A3).
+2. Identity columns: add `Statement::AddIdentity { table, column,
    behavior, sequence_options }` plus an `alter_table_cmd` arm for `ADD
    GENERATED ... AS IDENTITY (...)`, merged onto the already-ingested
    column the way `SetColumnDefault` is, including the `deferred_*`
@@ -339,7 +327,7 @@ up once it round-trips.
    two existing string fields cannot carry them. A merge whose table or
    column was never assembled must fail loudly, not fall through to
    `remaining`.
-6. Nothing records a dependency edge for `LIKE`. `CREATE TABLE x (LIKE
+3. Nothing records a dependency edge for `LIKE`. `CREATE TABLE x (LIKE
    y ...)` needs `y` to exist first, exactly as `INHERITS` does, and
    the build renders the clause inline (`src/build/mod.rs`, the
    `like_table` arm), but `table_dependencies` in
