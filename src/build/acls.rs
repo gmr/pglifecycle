@@ -43,7 +43,11 @@ const SECTIONS: &[(&str, &str, &[ObjectType])] = &[
         &[ObjectType::ForeignDataWrapper],
     ),
     ("foreign_servers", "FOREIGN SERVER", &[ObjectType::Server]),
-    ("functions", "FUNCTION", &[ObjectType::Function]),
+    (
+        "functions",
+        "FUNCTION",
+        &[ObjectType::Function, ObjectType::Procedure],
+    ),
     ("languages", "LANGUAGE", &[ObjectType::ProceduralLanguage]),
     ("large_objects", "LARGE OBJECT", &[]),
     ("schemata", "SCHEMA", &[ObjectType::Schema]),
@@ -84,6 +88,9 @@ pub(super) fn dump_acls(
     // (section index, object) → statements; BTreeMap keeps the output
     // deterministic across runs
     let mut objects: BTreeMap<(usize, String), ObjectAcl> = BTreeMap::new();
+    // build the lookup index once rather than rescanning the whole
+    // inventory for every ACL group below
+    let index = ObjectIndex::build(project);
     for item in &project.inventory {
         let (grants, revocations) = match &item.definition {
             Definition::Group(d) => (&d.grants, &d.revocations),
@@ -93,17 +100,15 @@ pub(super) fn dump_acls(
         };
         let role = item.definition.name();
         if let Some(acls) = revocations {
-            collect(&mut objects, acls, &role, true);
+            collect(&mut objects, acls, &role, true, &index);
         }
         if let Some(acls) = grants {
-            collect(&mut objects, acls, &role, false);
+            collect(&mut objects, acls, &role, false, &index);
         }
     }
-    // build the lookup index once rather than rescanning the whole
-    // inventory for every ACL group below
-    let index = ObjectIndex::build(project);
     for ((section, object), acl) in &objects {
         let (key, keyword, dep_types) = SECTIONS[*section];
+        let keyword = object_keyword(&index, key, keyword, object);
         // column grants attach to their table's entry
         let target = match key {
             "columns" => match object.rsplit_once('.') {
@@ -291,12 +296,46 @@ fn find_role(
     })
 }
 
+/// The GRANT keyword for an object: a section's own, except that the
+/// functions section holds procedures too, and PostgreSQL rejects ON
+/// FUNCTION for a procedure. Only an exact signature match selects
+/// PROCEDURE. A match on the name alone can be a different overload
+/// of the other kind, so it selects ROUTINE, which PostgreSQL accepts
+/// for both.
+fn object_keyword(
+    index: &ObjectIndex,
+    key: &str,
+    keyword: &'static str,
+    object: &str,
+) -> &'static str {
+    if key != "functions" {
+        return keyword;
+    }
+    let (schema, name) = match object.split_once('.') {
+        Some((schema, name)) => (Some(schema), name),
+        None => (None, object),
+    };
+    if let Some(item) =
+        index.functions_by_identity.get(&(schema, name.to_string()))
+    {
+        return match item.desc {
+            ObjectType::Procedure => "PROCEDURE",
+            _ => keyword,
+        };
+    }
+    match find_function(index, schema, name) {
+        Some(item) if item.desc == ObjectType::Procedure => "ROUTINE",
+        _ => keyword,
+    }
+}
+
 /// Render one role's ACLs into the per-object statement map
 fn collect(
     objects: &mut BTreeMap<(usize, String), ObjectAcl>,
     acls: &Acls,
     role: &str,
     revoke: bool,
+    object_index: &ObjectIndex,
 ) {
     for (index, (key, keyword, _)) in SECTIONS.iter().enumerate() {
         // a section may draw from more than one Acls field; both feed
@@ -335,7 +374,7 @@ fn collect(
                 }
                 let statement = statement(
                     revoke,
-                    keyword,
+                    object_keyword(object_index, key, keyword, object),
                     key,
                     object,
                     &privileges,
@@ -435,9 +474,15 @@ impl<'a> ObjectIndex<'a> {
             objects
                 .entry((item.desc, key_schema, item.definition.name()))
                 .or_insert(item);
-            if let Definition::Function(f) = &item.definition {
+            // procedures share the functions ACL section
+            let identity = match &item.definition {
+                Definition::Function(f) => Some(f.identity()),
+                Definition::Procedure(p) => Some(p.identity()),
+                _ => None,
+            };
+            if let Some(identity) = identity {
                 functions_by_identity
-                    .entry((schema, f.identity()))
+                    .entry((schema, identity))
                     .or_insert(item);
                 functions_by_name
                     .entry((schema, item.definition.name()))
@@ -464,7 +509,7 @@ fn find_object(
         Some((schema, name)) => (Some(schema), name),
         None => (None, object),
     };
-    let item = if descs == [ObjectType::Function] {
+    let item = if descs.contains(&ObjectType::Function) {
         find_function(index, schema, name)
     } else {
         descs.iter().find_map(|desc| {
@@ -619,6 +664,37 @@ mod tests {
             .find(|e| e.desc == libpgdump::ObjectType::Schema)
             .expect("schema entry");
         assert_eq!(acl.dependencies, vec![schema.dump_id]);
+    }
+
+    #[test]
+    fn procedure_keyword_needs_an_exact_signature() {
+        let procedure: models::Procedure = serde_json::from_value(json!({
+            "name": "p", "schema": "s", "owner": "app",
+            "parameters": [{"mode": "IN", "data_type": "integer"}],
+            "language": "sql", "definition": "SELECT 1",
+        }))
+        .unwrap();
+        let project = Project {
+            name: String::from("acls"),
+            encoding: String::from("UTF8"),
+            stdstrings: true,
+            superuser: String::from("postgres"),
+            default_schema: String::from("public"),
+            path: std::path::PathBuf::new(),
+            inventory: vec![Item {
+                id: 0,
+                desc: ObjectType::Procedure,
+                definition: Definition::Procedure(procedure),
+                dependencies: BTreeSet::new(),
+            }],
+        };
+        let index = ObjectIndex::build(&project);
+        let keyword =
+            |object| object_keyword(&index, "functions", "FUNCTION", object);
+        assert_eq!(keyword("s.p(integer)"), "PROCEDURE");
+        // same name, other signature: possibly an untracked function
+        assert_eq!(keyword("s.p(text)"), "ROUTINE");
+        assert_eq!(keyword("s.q(text)"), "FUNCTION");
     }
 
     #[test]

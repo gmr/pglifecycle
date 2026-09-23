@@ -88,6 +88,8 @@ pub enum Statement {
     CreateView(models::View),
     CreateMaterializedView(models::MaterializedView),
     CreateFunction(Box<models::Function>),
+    CreateProcedure(Box<models::Procedure>),
+    CreateOperator(Box<models::Operator>),
     CreateForeignDataWrapper(models::ForeignDataWrapper),
     CreateServer(models::Server),
     CreateUserMapping(models::UserMapping),

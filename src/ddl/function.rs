@@ -46,6 +46,7 @@ pub(crate) fn create_function(
         support: None,
         configuration: None,
         definition: None,
+        sql_body: None,
         object_file: None,
         link_symbol: None,
         comment: None,
@@ -95,6 +96,15 @@ pub(crate) fn create_function(
         {
             apply_common_option(&mut function, &common, src);
         }
+    }
+    // a SQL-standard body, BEGIN ATOMIC ... END, kept as written
+    function.sql_body = node
+        .child_of_kind("opt_routine_body")
+        .map(|n| n.text(src).to_string());
+    if node.child_of_kind("kw_procedure").is_some() {
+        return Ok(Statement::CreateProcedure(Box::new(
+            crate::models::Procedure::from_function(function),
+        )));
     }
     Ok(Statement::CreateFunction(Box::new(function)))
 }
@@ -334,5 +344,30 @@ mod tests {
         };
         assert_eq!(function.schema, "");
         assert_eq!(function.name, "uppercase");
+    }
+
+    #[test]
+    fn parses_procedures_and_standard_bodies() {
+        let Statement::CreateProcedure(procedure) = parse_one(
+            "CREATE PROCEDURE s.noop()\n    LANGUAGE sql\n    BEGIN ATOMIC\n \
+             SELECT 1;\nEND;",
+        ) else {
+            panic!("expected CreateProcedure")
+        };
+        assert_eq!(procedure.name, "noop");
+        assert_eq!(
+            procedure.sql_body.as_deref(),
+            Some("BEGIN ATOMIC\n SELECT 1;\nEND")
+        );
+        let Statement::CreateFunction(function) = parse_one(
+            "CREATE FUNCTION s.f() RETURNS integer LANGUAGE sql BEGIN ATOMIC \
+             SELECT 42; END;",
+        ) else {
+            panic!("expected CreateFunction")
+        };
+        assert_eq!(
+            function.sql_body.as_deref(),
+            Some("BEGIN ATOMIC SELECT 42; END")
+        );
     }
 }

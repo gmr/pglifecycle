@@ -647,6 +647,7 @@ fn lookup_items(
 fn identity(definition: &Definition) -> String {
     match definition {
         Definition::Function(f) => f.identity(),
+        Definition::Procedure(p) => p.identity(),
         _ => definition.name(),
     }
 }
@@ -671,6 +672,7 @@ fn to_definition(
             Definition::ForeignDataWrapper(from(value)?)
         }
         ObjectType::Function => Definition::Function(from(value)?),
+        ObjectType::Procedure => Definition::Procedure(from(value)?),
         ObjectType::Group => Definition::Group(from(value)?),
         ObjectType::MaterializedView => {
             Definition::MaterializedView(from(value)?)

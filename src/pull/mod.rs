@@ -435,6 +435,8 @@ pub struct Assembly {
     pub text_search: Vec<models::TextSearch>,
     pub default_privileges: Vec<models::DefaultPrivileges>,
     pub statistics: Vec<models::Statistics>,
+    pub procedures: Vec<models::Procedure>,
+    pub operators: Vec<models::Operator>,
     pub roles: BTreeMap<String, RoleState>,
     pub remaining: Vec<Remaining>,
     /// Indexes whose target relation had not yet been ingested when the
@@ -521,6 +523,8 @@ impl Assembly {
             ("event triggers", self.event_triggers.len()),
             ("default privileges", self.default_privileges.len()),
             ("statistics", self.statistics.len()),
+            ("procedures", self.procedures.len()),
+            ("operators", self.operators.len()),
             ("foreign data wrappers", self.foreign_data_wrappers.len()),
             ("servers", self.servers.len()),
             ("user mappings", self.user_mappings.len()),
@@ -610,6 +614,8 @@ impl Assembly {
                 | OT::DefaultAcl
                 | OT::Statistics
                 | OT::Rule
+                | OT::Procedure
+                | OT::Operator
                 | OT::ForeignTable
                 | OT::ForeignDataWrapper
                 | OT::ForeignServer
@@ -905,6 +911,14 @@ impl Assembly {
                     self.materialized_views.len(),
                 );
                 self.materialized_views.push(view);
+            }
+            Statement::CreateProcedure(mut procedure) => {
+                procedure.owner = owner;
+                self.procedures.push(*procedure);
+            }
+            Statement::CreateOperator(mut operator) => {
+                operator.owner = owner;
+                self.operators.push(*operator);
             }
             Statement::CreateFunction(mut function) => {
                 function.owner = owner;
@@ -1480,6 +1494,23 @@ impl Assembly {
                 .map(|v| v.comment = Some(comment.clone()))
                 .is_some(),
             "FUNCTION" => self.apply_function_comment(&schema, name, &comment),
+            "PROCEDURE" => {
+                self.apply_procedure_comment(&schema, name, &comment)
+            }
+            "OPERATOR" => self
+                .operators
+                .iter_mut()
+                .find(|o| {
+                    o.schema == schema
+                        && format!(
+                            "{}({}, {})",
+                            o.name,
+                            o.left_arg.as_deref().unwrap_or("NONE"),
+                            o.right_arg.as_deref().unwrap_or("NONE")
+                        ) == *name
+                })
+                .map(|o| o.comment = Some(comment.clone()))
+                .is_some(),
             "TRIGGER" => self.apply_trigger_comment(target, &comment),
             "POLICY" => self.apply_policy_comment(target, &comment),
             "RULE" => self.apply_rule_comment(target, &comment),
@@ -1597,6 +1628,38 @@ impl Assembly {
         }
         first
             .map(|f| f.comment = Some(comment.to_string()))
+            .is_some()
+    }
+
+    /// As [`Self::apply_function_comment`], for a procedure. pg_dump
+    /// writes a procedure's IN modes, which the identity signature
+    /// leaves out, as it does for a function.
+    fn apply_procedure_comment(
+        &mut self,
+        schema: &str,
+        name: &str,
+        comment: &str,
+    ) -> bool {
+        let signature = name.replace("(IN ", "(").replace(", IN ", ", ");
+        if let Some(procedure) = self
+            .procedures
+            .iter_mut()
+            .find(|p| p.schema == schema && p.identity() == signature)
+        {
+            procedure.comment = Some(comment.to_string());
+            return true;
+        }
+        let base = name.split('(').next().unwrap_or(name);
+        let mut candidates = self
+            .procedures
+            .iter_mut()
+            .filter(|p| p.schema == schema && p.name == base);
+        let first = candidates.next();
+        if candidates.next().is_some() {
+            return false;
+        }
+        first
+            .map(|p| p.comment = Some(comment.to_string()))
             .is_some()
     }
 
@@ -1995,6 +2058,27 @@ impl Assembly {
                 format_one(definition, plpgsql, &label, style)
             {
                 function.definition = Some(formatted);
+            }
+        }
+        // procedure bodies are formatted as function bodies are
+        for procedure in &mut self.procedures {
+            let Some(definition) = &procedure.definition else {
+                continue;
+            };
+            task.set_message(format!(
+                "Formatting procedure {}",
+                procedure.name
+            ));
+            let plpgsql = match procedure.language.as_deref() {
+                Some("plpgsql") => true,
+                Some("sql") => false,
+                _ => continue,
+            };
+            let label = format!("procedure {}", procedure.name);
+            if let Some(formatted) =
+                format_one(definition, plpgsql, &label, style)
+            {
+                procedure.definition = Some(formatted);
             }
         }
         task.finish();
@@ -2476,6 +2560,38 @@ mod tests {
                 other => panic!("unexpected parameter type {other}"),
             }
         }
+    }
+
+    #[test]
+    fn procedure_comments_fall_back_to_the_name() {
+        let mut dump = libpgdump::new("fixtures", "UTF8", "18.0").unwrap();
+        add(&mut dump, OT::Schema, "", "test", "CREATE SCHEMA test;");
+        add(
+            &mut dump,
+            OT::Procedure,
+            "test",
+            "archive(IN \"Days\" integer)",
+            "CREATE PROCEDURE test.archive(IN \"Days\" integer) \
+             LANGUAGE sql AS $$ SELECT 1 $$;",
+        );
+        // the quoted parameter name does not match the identity
+        // signature, so the unambiguous name match applies
+        add(
+            &mut dump,
+            OT::Comment,
+            "test",
+            "PROCEDURE archive(IN \"Days\" integer)",
+            "COMMENT ON PROCEDURE test.archive(IN \"Days\" integer) \
+             IS 'archives rows';",
+        );
+        let mut assembly = Assembly::default();
+        assembly.ingest(&dump).unwrap();
+        assert_eq!(assembly.procedures.len(), 1);
+        assert_eq!(assembly.procedures[0].identity(), "archive(Days integer)");
+        assert_eq!(
+            assembly.procedures[0].comment.as_deref(),
+            Some("archives rows")
+        );
     }
 
     #[test]

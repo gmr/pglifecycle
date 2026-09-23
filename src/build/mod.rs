@@ -117,6 +117,12 @@
 //!     name is quoted. The Python rendered `COLLATION`, which does not
 //!     parse, and the bare name, which fails for a name that needs
 //!     quoting. No test-project index has a collation or such a name.
+//! 28. A function's or procedure's stored drop statement names its
+//!     parameters without their defaults. pg_restore builds the owner
+//!     statement from it (see 17), and `ALTER FUNCTION f(x integer =
+//!     0) OWNER TO ...` does not parse, so a routine with a default
+//!     failed to get its owner. No test-project function has a
+//!     default.
 
 mod acls;
 
@@ -262,6 +268,7 @@ impl Builder {
             Definition::Extension(_) => self.dump_extension(item),
             Definition::ForeignDataWrapper(_) => self.dump_fdw(item),
             Definition::Function(_) => self.dump_function(item),
+            Definition::Procedure(_) => self.dump_procedure(item),
             Definition::Group(_) => self.dump_group(item),
             Definition::Language(_) => self.dump_language(item),
             Definition::MaterializedView(_) => {
@@ -404,12 +411,13 @@ impl Builder {
     ) -> Result<(), String> {
         // extensions record the schema they install into as their
         // namespace, but COMMENT ON EXTENSION takes an unqualified name.
-        // FUNCTION tags already carry their own (argtypes) signature,
-        // so they pass through unquoted rather than as a plain ident.
+        // FUNCTION and PROCEDURE tags already carry their own
+        // (argtypes) signature, so they pass through unquoted rather
+        // than as a plain ident.
         let name = target.unwrap_or_else(|| {
             if desc == "EXTENSION" {
                 quote_ident(tag)
-            } else if desc == "FUNCTION" {
+            } else if desc == "FUNCTION" || desc == "PROCEDURE" {
                 if namespace.is_empty() {
                     tag.to_string()
                 } else {
@@ -1011,36 +1019,59 @@ impl Builder {
         let Definition::Function(d) = &item.definition else {
             unreachable!()
         };
+        self.dump_routine(item, d, false)
+    }
+
+    /// A procedure renders as a function would, with PROCEDURE for
+    /// FUNCTION and no RETURNS
+    fn dump_procedure(&mut self, item: &Item) -> Result<(), String> {
+        let Definition::Procedure(d) = &item.definition else {
+            unreachable!()
+        };
+        self.dump_routine(item, &d.as_function(), true)
+    }
+
+    fn dump_routine(
+        &mut self,
+        item: &Item,
+        d: &crate::models::Function,
+        procedure: bool,
+    ) -> Result<(), String> {
+        let kind = if procedure { "PROCEDURE" } else { "FUNCTION" };
         if let Some(sql) = &d.sql {
             return self.add_item(item, vec![sql.clone()], vec![], false);
         }
         // `comment_target` is only set when `func_name` diverges from the
         // default comment target (`namespace.d.name`) computed in
-        // `add_comment` — i.e. only for the bare, unparenthesized
+        // `add_comment` — i.e. for the bare, unparenthesized
         // zero-argument case below, where `()` must be appended for a
-        // valid `COMMENT ON FUNCTION`.
+        // valid `COMMENT ON FUNCTION`, and for a procedure with
+        // parameters.
+        // the signature without defaults, for the stored drop statement
+        let mut drop_name = None;
         let (func_name, comment_target) = match &d.parameters {
             Some(parameters) if !parameters.is_empty() => {
-                let params: Vec<String> = parameters
-                    .iter()
-                    .map(|p| {
-                        let mut value = vec![p.mode.clone()];
-                        if let Some(name) = &p.name {
-                            value.push(name.clone());
-                        }
-                        value.push(p.data_type.clone());
-                        if let Some(default) = &p.default {
-                            value.push("=".into());
-                            value.push(raw_value(default));
-                        }
-                        value.join(" ")
-                    })
-                    .collect();
-                let func_name = format!(
-                    "{}({})",
-                    d.name.split('(').next().unwrap_or_default(),
-                    params.join(", ")
-                );
+                let render = |defaults: bool| -> Vec<String> {
+                    parameters
+                        .iter()
+                        .map(|p| {
+                            let mut value = vec![p.mode.clone()];
+                            if let Some(name) = &p.name {
+                                value.push(name.clone());
+                            }
+                            value.push(p.data_type.clone());
+                            if defaults && let Some(default) = &p.default {
+                                value.push("=".into());
+                                value.push(raw_value(default));
+                            }
+                            value.join(" ")
+                        })
+                        .collect()
+                };
+                let base = d.name.split('(').next().unwrap_or_default();
+                drop_name =
+                    Some(format!("{base}({})", render(false).join(", ")));
+                let func_name = format!("{base}({})", render(true).join(", "));
                 (func_name, None)
             }
             // no structured `parameters`: `d.name` may already carry an
@@ -1069,19 +1100,32 @@ impl Builder {
         } else {
             format!("{}.{}", quote_ident(&d.schema), func_name)
         };
-        let mut create = vec![
-            "CREATE".into(),
-            "FUNCTION".into(),
-            qualified.clone(),
-            "RETURNS".into(),
-            d.returns.clone().unwrap_or_default(),
-            "LANGUAGE".into(),
-            d.language.clone().unwrap_or_default(),
-        ];
+        let mut create = vec!["CREATE".into(), kind.into(), qualified.clone()];
+        if !procedure {
+            create.push("RETURNS".into());
+            create.push(d.returns.clone().unwrap_or_default());
+        }
+        create.push("LANGUAGE".into());
+        create.push(d.language.clone().unwrap_or_default());
         // no IF EXISTS: pg_restore builds this type's owner
         // statement by stripping the leading DROP off this one
-        // (deviation 17)
-        let drop = vec!["DROP FUNCTION".into(), qualified.clone()];
+        // (deviation 17), and for the same reason no parameter
+        // defaults, which ALTER ... OWNER does not accept (deviation 28)
+        let drop_target = match &drop_name {
+            Some(name) if !d.schema.is_empty() => {
+                format!("{}.{name}", quote_ident(&d.schema))
+            }
+            Some(name) => name.clone(),
+            None => qualified.clone(),
+        };
+        // a procedure comment names the full signature, so that it
+        // identifies one overload (functions keep the bare name for
+        // parity)
+        let comment_target = match &drop_name {
+            Some(_) if procedure => Some(drop_target.clone()),
+            _ => comment_target,
+        };
+        let drop = vec![format!("DROP {kind}"), drop_target];
         if let Some(transform_types) = &d.transform_types {
             let tts: Vec<String> = transform_types
                 .iter()
@@ -1139,6 +1183,18 @@ impl Builder {
             for (k, v) in configuration {
                 create.push(format!("SET {k} = {}", postgres_value(v)));
             }
+        }
+        // a SQL-standard body (BEGIN ATOMIC ... END) takes the place of
+        // AS and its string
+        if let Some(body) = &d.sql_body {
+            create.push(body.clone());
+            return self.add_item_with_comment_target(
+                item,
+                create,
+                drop,
+                false,
+                comment_target,
+            );
         }
         create.push("AS".into());
         if let Some(definition) = &d.definition {
@@ -4792,6 +4848,7 @@ mod tests {
                 support: None,
                 configuration: None,
                 definition: Some("BEGIN\n  RETURN NEW;\nEND;".into()),
+                sql_body: None,
                 object_file: None,
                 link_symbol: None,
                 comment: comment.map(String::from),
@@ -4943,6 +5000,38 @@ mod tests {
             vec![
                 "COMMENT ON FUNCTION test.bare_zero() IS $$a trigger \
                  fn$$;\n;\n"
+            ]
+        );
+    }
+
+    #[test]
+    fn comments_procedure_with_signature() {
+        let procedure: crate::models::Procedure =
+            serde_json::from_value(json!({
+                "name": "archive",
+                "schema": "test",
+                "owner": "app",
+                "parameters": [
+                    {"mode": "IN", "name": "days", "data_type": "integer",
+                     "default": 7},
+                ],
+                "language": "sql",
+                "definition": "SELECT 1",
+                "comment": "archives rows",
+            }))
+            .unwrap();
+        let item = Item {
+            id: 1,
+            desc: ObjectType::Procedure,
+            definition: Definition::Procedure(procedure),
+            dependencies: BTreeSet::new(),
+        };
+        // the full signature, without defaults, identifies the overload
+        assert_eq!(
+            comment_defns(&item),
+            vec![
+                "COMMENT ON PROCEDURE test.archive(IN days integer) IS \
+                 $$archives rows$$;\n;\n"
             ]
         );
     }

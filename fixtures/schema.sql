@@ -585,3 +585,43 @@ ALTER TABLE test.ledger DISABLE RULE ledger_redirect;
 CREATE VIEW test.ledger_view AS SELECT id, amount FROM test.ledger;
 CREATE RULE ledger_view_insert AS ON INSERT TO test.ledger_view
     DO INSTEAD INSERT INTO test.ledger (id, amount) VALUES (new.id, new.amount);
+
+-- Procedures: a PL/pgSQL one with an INOUT parameter, a default and a
+-- setting, and a SQL-standard body. A function with a default and one
+-- with a SQL-standard body, whose owner statements the round-trip gate
+-- runs.
+CREATE PROCEDURE test.archive_before(IN days INTEGER, INOUT archived INTEGER DEFAULT 0)
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = test AS $$
+BEGIN
+  archived := days;
+END;
+$$;
+COMMENT ON PROCEDURE test.archive_before(INTEGER, INTEGER) IS 'Archives old rows';
+
+CREATE PROCEDURE test.touch_nothing() LANGUAGE sql
+BEGIN ATOMIC
+  SELECT 1;
+END;
+
+CREATE FUNCTION test.scaled(value INTEGER, factor INTEGER DEFAULT 2)
+    RETURNS INTEGER LANGUAGE sql IMMUTABLE AS $$
+ SELECT value * factor;
+$$;
+
+CREATE FUNCTION test.answer() RETURNS INTEGER LANGUAGE sql
+BEGIN ATOMIC
+  SELECT 42;
+END;
+
+-- Operators: binary with the planner's options and a comment, and
+-- prefix
+CREATE FUNCTION test.same_parity(a INTEGER, b INTEGER) RETURNS BOOLEAN
+    LANGUAGE sql IMMUTABLE AS $$
+ SELECT (a % 2) = (b % 2);
+$$;
+
+CREATE OPERATOR test.=~= (
+    FUNCTION = test.same_parity, LEFTARG = INTEGER, RIGHTARG = INTEGER,
+    COMMUTATOR = OPERATOR(test.=~=), RESTRICT = eqsel, JOIN = eqjoinsel);
+COMMENT ON OPERATOR test.=~= (INTEGER, INTEGER) IS 'Same parity';
+CREATE OPERATOR test.!!! (FUNCTION = int4um, RIGHTARG = INTEGER);

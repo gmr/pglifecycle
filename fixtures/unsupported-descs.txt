@@ -1,5 +1,3 @@
 ACCESS METHOD	pglifecycle_heap
-OPERATOR	unsupported.===
 OPERATOR CLASS	unsupported.int_class
 OPERATOR FAMILY	unsupported.int_family
-PROCEDURE	unsupported.archive(integer)

@@ -10,7 +10,7 @@ use crate::ddl::object::string_value;
 use crate::ddl::{NodeExt, Statement, any_name, unquote};
 use crate::models::{
     Aggregate, Argument, Cast, Collation, Conversion, EventTrigger,
-    EventTriggerFilter, FilteredPublicationTable, Publication,
+    EventTriggerFilter, FilteredPublicationTable, Operator, Publication,
     PublicationTable, Rule, Statistics, TextSearchConfig, TextSearchDict,
     TextSearchParser, TextSearchTemplate,
 };
@@ -72,6 +72,8 @@ pub(crate) fn define(
         Some(create_collation(node, src))
     } else if node.child_of_kind("kw_search").is_some() {
         Some(create_text_search(node, src))
+    } else if node.child_of_kind("kw_operator").is_some() {
+        Some(create_operator(node, src))
     } else {
         None
     }
@@ -196,6 +198,64 @@ fn create_aggregate(node: &Node, src: &str) -> Result<Statement, String> {
         }
     }
     Ok(Statement::CreateAggregate(Box::new(aggregate)))
+}
+
+/// CREATE OPERATOR → Operator
+fn create_operator(node: &Node, src: &str) -> Result<Statement, String> {
+    // the name is `schema.op`: the grammar gives the schema as a ColId
+    // and the operator as an all_Op beneath any_operator
+    let name = node
+        .child_of_kind("any_operator")
+        .ok_or_else(|| String::from("CREATE OPERATOR without a name"))?;
+    let schema = name
+        .child_of_kind("ColId")
+        .map(|n| unquote(n.text(src)))
+        .unwrap_or_default();
+    let operator = name
+        .find("all_Op")
+        .map(|n| n.text(src).to_string())
+        .ok_or_else(|| String::from("CREATE OPERATOR without an operator"))?;
+    let mut value = Operator {
+        name: operator,
+        schema,
+        owner: String::new(),
+        function: String::new(),
+        left_arg: None,
+        right_arg: None,
+        commutator: None,
+        negator: None,
+        restrict: None,
+        join: None,
+        hashes: None,
+        merges: None,
+        sql: None,
+        comment: None,
+    };
+    let definition = node
+        .child_of_kind("definition")
+        .map(|n| definition(&n, src))
+        .unwrap_or_default();
+    for (key, arg) in definition {
+        match key.as_str() {
+            "function" | "procedure" => {
+                value.function = arg.unwrap_or_default()
+            }
+            "leftarg" => value.left_arg = arg,
+            "rightarg" => value.right_arg = arg,
+            "commutator" => value.commutator = arg,
+            "negator" => value.negator = arg,
+            "restrict" => value.restrict = arg,
+            "join" => value.join = arg,
+            "hashes" => value.hashes = Some(true),
+            "merges" => value.merges = Some(true),
+            other => {
+                return Ok(Statement::Unsupported(format!(
+                    "CREATE OPERATOR option {other}"
+                )));
+            }
+        }
+    }
+    Ok(Statement::CreateOperator(Box::new(value)))
 }
 
 fn create_collation(node: &Node, src: &str) -> Result<Statement, String> {
@@ -979,5 +1039,28 @@ mod tests {
             panic!("expected CreateRule")
         };
         assert_eq!((rule.instead, rule.commands), (Some(true), None));
+    }
+
+    #[test]
+    fn parses_operators() {
+        let Statement::CreateOperator(operator) = parse_one(
+            "CREATE OPERATOR s.=== (\n    FUNCTION = s.eq,\n    LEFTARG = \
+             integer,\n    RIGHTARG = integer,\n    COMMUTATOR = \
+             OPERATOR(s.===),\n    MERGES,\n    HASHES,\n    RESTRICT = \
+             eqsel,\n    JOIN = eqjoinsel\n);",
+        ) else {
+            panic!("expected CreateOperator")
+        };
+        assert_eq!(
+            (operator.schema.as_str(), operator.name.as_str()),
+            ("s", "===")
+        );
+        assert_eq!(operator.function, "s.eq");
+        assert_eq!(operator.left_arg.as_deref(), Some("integer"));
+        assert_eq!(operator.commutator.as_deref(), Some("OPERATOR(s.===)"));
+        assert_eq!(
+            (operator.hashes, operator.merges),
+            (Some(true), Some(true))
+        );
     }
 }

@@ -191,6 +191,34 @@ mod tests {
         assert!(grant("reader", true));
     }
 
+    /// A routine has one body form only
+    #[test]
+    fn routine_body_forms_are_exclusive() {
+        let routine = |kind: &str, keys: &[&str]| {
+            let mut data = json!({
+                "schema": "test", "name": "r", "owner": "app",
+                "language": "sql",
+            });
+            if kind == "function" {
+                data["returns"] = json!("integer");
+            }
+            for key in keys {
+                data[*key] = json!("SELECT 1");
+            }
+            validate_object(kind, "r", &data)
+        };
+        assert!(routine("function", &["definition"]));
+        assert!(routine("function", &["sql_body"]));
+        assert!(!routine("function", &["definition", "sql_body"]));
+        assert!(routine("procedure", &["definition"]));
+        assert!(routine("procedure", &["sql_body"]));
+        assert!(routine("procedure", &["object_file"]));
+        assert!(!routine("procedure", &["definition", "sql_body"]));
+        assert!(!routine("procedure", &["definition", "sql"]));
+        assert!(!routine("procedure", &["object_file", "sql_body"]));
+        assert!(!routine("procedure", &["object_file", "definition"]));
+    }
+
     #[test]
     fn merges_package_schemas() {
         // casts.yml composes cast.yml via $package_schema

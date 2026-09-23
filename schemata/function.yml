@@ -32,7 +32,7 @@ properties:
         mode:
           title: Parameter Mode
           type: string
-          enum: [IN, OUT, BOTH, VARADIC, TABLE]
+          enum: [IN, OUT, INOUT, VARIADIC, TABLE]
         name:
           title: Parameter Name
           type: string
@@ -197,6 +197,12 @@ properties:
       It can be an internal function name, the path to an object file, an SQL
       command, or text in a procedural language.
     type: string
+  sql_body:
+    title: SQL-Standard Body
+    description: >
+      A body written in SQL-standard form, `BEGIN ATOMIC ... END`, in place of
+      `definition`; the statements are parsed when the function is created.
+    type: string
   object_file:
     title: Object File
     description: >
@@ -228,7 +234,15 @@ required:
   - name
 oneOf:
   - required: [language, returns, definition]
-    not: {required: [sql, object_file, link_symbol]}
+    not:
+      anyOf:
+        - required: [sql, object_file, link_symbol]
+        - required: [sql_body]
+  - required: [language, returns, sql_body]
+    not:
+      anyOf:
+        - required: [sql]
+        - required: [definition]
   - required: [sql]
     not:
       required:
@@ -249,5 +263,6 @@ oneOf:
         - support
         - configuration
         - definition
+        - sql_body
         - object_file
         - link_symbol
