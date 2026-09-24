@@ -5,8 +5,8 @@
 //!
 //! `UNEXERCISED <desc>` is a type in `pull::MODELED_DESCS` that no
 //! archive contains, so no gate tests it. `UNPARSED <desc> <tag>` is an
-//! entry of a modeled type whose DDL does not parse into a supported
-//! statement. pull models extensions from the entry itself, so their
+//! entry of a modeled type that has no DDL, or whose DDL does not parse
+//! into a supported statement. pull models extensions from the entry itself, so their
 //! DDL is not parsed.
 
 use std::collections::BTreeSet;
@@ -29,13 +29,13 @@ fn main() {
             if entry.desc == OT::Extension {
                 continue;
             }
-            let Some(defn) = entry.defn.as_deref() else {
-                continue;
-            };
-            let supported = parser.parse(defn).is_ok_and(|statements| {
-                !statements
-                    .iter()
-                    .any(|s| matches!(s, ddl::Statement::Unsupported(_)))
+            // pull skips an entry that has no DDL, so it is a gap
+            let supported = entry.defn.as_deref().is_some_and(|defn| {
+                parser.parse(defn).is_ok_and(|statements| {
+                    !statements
+                        .iter()
+                        .any(|s| matches!(s, ddl::Statement::Unsupported(_)))
+                })
             });
             if !supported {
                 println!(
