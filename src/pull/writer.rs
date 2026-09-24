@@ -193,6 +193,12 @@ impl Writer {
                 serialize(&assembly.extensions)?,
             );
         }
+        if !assembly.access_methods.is_empty() {
+            project.insert(
+                String::from("access_methods"),
+                serialize(&assembly.access_methods)?,
+            );
+        }
         if !assembly.languages.is_empty() {
             project.insert(
                 String::from("languages"),
@@ -304,6 +310,18 @@ impl Writer {
             .map(serialize)
             .collect::<Result<_, String>>()?;
         self.write_container("operators", &operators)?;
+        let families: Vec<Value> = assembly
+            .operator_families
+            .iter()
+            .map(serialize)
+            .collect::<Result<_, String>>()?;
+        self.write_container("operator_families", &families)?;
+        let classes: Vec<Value> = assembly
+            .operator_classes
+            .iter()
+            .map(serialize)
+            .collect::<Result<_, String>>()?;
+        self.write_container("operator_classes", &classes)?;
         for statistics in &assembly.statistics {
             self.save(
                 nested("statistics", &statistics.schema, &statistics.name)?,
@@ -482,6 +500,8 @@ fn kind(relative: &Path) -> &'static str {
         Some("collations") => "collation",
         Some("conversions") => "conversion",
         Some("operators") => "operator",
+        Some("operator_families") => "operator_family",
+        Some("operator_classes") => "operator_class",
         Some("publications") => "publication",
         Some("statistics") => "statistics",
         Some("subscriptions") => "subscription",

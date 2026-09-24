@@ -1,6 +1,7 @@
-//! Aggregates, casts, collations, conversions, domains, event triggers,
-//! extensions, FDWs, languages, operators, publications, schemas,
-//! sequences, servers, subscriptions, tablespaces, and user mappings
+//! Access methods, aggregates, casts, collations, conversions, domains,
+//! event triggers, extensions, FDWs, languages, operators, operator
+//! classes and families, publications, schemas, sequences, servers,
+//! subscriptions, tablespaces, and user mappings
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -288,6 +289,97 @@ pub struct Operator {
     pub sql: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
+}
+
+/// An access method (CREATE ACCESS METHOD). It has no schema and no
+/// owner.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccessMethod {
+    pub name: String,
+    /// TABLE or INDEX
+    #[serde(rename = "type")]
+    pub method_type: String,
+    pub handler: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+}
+
+/// An operator family (CREATE OPERATOR FAMILY). The operators and
+/// support functions are the ones added to the family with ALTER
+/// OPERATOR FAMILY ... ADD, not the ones of its operator classes.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OperatorFamily {
+    pub name: String,
+    pub schema: String,
+    pub owner: String,
+    /// The index access method (USING)
+    pub method: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operators: Option<Vec<OperatorClassOperator>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub functions: Option<Vec<OperatorClassFunction>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+}
+
+/// An operator class (CREATE OPERATOR CLASS)
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OperatorClass {
+    pub name: String,
+    pub schema: String,
+    pub owner: String,
+    /// The index access method (USING)
+    pub method: String,
+    /// The column data type (FOR TYPE)
+    pub data_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default: Option<bool>,
+    /// The operator family, schema-qualified. Without one, PostgreSQL
+    /// makes a family with the name of the class.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub family: Option<String>,
+    /// The data type stored in the index (STORAGE)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub storage: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operators: Option<Vec<OperatorClassOperator>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub functions: Option<Vec<OperatorClassFunction>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+}
+
+/// An operator of an operator class or family: `OPERATOR strategy
+/// name (left, right) [FOR ORDER BY sort_family]`
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OperatorClassOperator {
+    pub strategy: u32,
+    /// The operator, schema-qualified when it is not in pg_catalog
+    pub name: String,
+    /// The left and right operand types
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<Vec<String>>,
+    /// The btree operator family that sorts the result of an ordering
+    /// operator (FOR ORDER BY)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub order_by: Option<String>,
+}
+
+/// A support function of an operator class or family: `FUNCTION
+/// number (left, right) function(arguments)`
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OperatorClassFunction {
+    pub support: u32,
+    /// The left and right operand types the function is for
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub types: Option<Vec<String>>,
+    /// The function and its argument types
+    pub function: String,
 }
 
 /// Extended statistics on a table or materialized view (CREATE

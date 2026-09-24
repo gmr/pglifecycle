@@ -313,6 +313,24 @@ fn existence_index(assembly: &Assembly) -> BTreeSet<(String, String, String)> {
         .chain(assembly.statistics.iter().map(|d| {
             (ObjectType::Statistics, Definition::Statistics(d.clone()))
         }))
+        .chain(assembly.operator_families.iter().map(|d| {
+            (
+                ObjectType::OperatorFamily,
+                Definition::OperatorFamily(d.clone()),
+            )
+        }))
+        .chain(assembly.operator_classes.iter().map(|d| {
+            (
+                ObjectType::OperatorClass,
+                Definition::OperatorClass(d.clone()),
+            )
+        }))
+        .chain(assembly.access_methods.iter().map(|d| {
+            (
+                ObjectType::AccessMethod,
+                Definition::AccessMethod(d.clone()),
+            )
+        }))
         .chain(assembly.default_privileges.iter().map(|d| {
             (
                 ObjectType::DefaultPrivileges,
@@ -374,6 +392,17 @@ fn definition_existence_key(
                     operator.right_arg.as_deref().unwrap_or("NONE")
                 )
             ),
+        ),
+        // one name can be used once for each index method
+        Definition::OperatorClass(class) => (
+            desc.as_str().to_string(),
+            class.schema.clone(),
+            format!("{} USING {}", class.name, class.method),
+        ),
+        Definition::OperatorFamily(family) => (
+            desc.as_str().to_string(),
+            family.schema.clone(),
+            format!("{} USING {}", family.name, family.method),
         ),
         Definition::Cast(cast) => {
             let name = format!(

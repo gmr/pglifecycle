@@ -1,0 +1,67 @@
+---
+$schema: https://json-schema.org/draft/2020-12/schema
+$id: https://gmr.github.io/pglifecycle/schemata/operator_class.json
+title: Operator Class
+description: >
+  An operator class (CREATE OPERATOR CLASS): how an index method uses the
+  operators and support functions of a data type.
+type: object
+properties:
+  name:
+    title: Name
+    description: The name of the operator class.
+    type: string
+  schema:
+    title: Schema
+    description: The schema the operator class is created in.
+    type: string
+  owner:
+    title: Owner
+    description: The role that owns the operator class.
+    type: string
+  method:
+    title: Index Method
+    description: The index access method the class is for (USING).
+    type: string
+  data_type:
+    title: Data Type
+    description: The column data type the class is for (FOR TYPE).
+    type: string
+  default:
+    title: Default
+    description: The class is the default for its data type and index method.
+    type: boolean
+  family:
+    title: Operator Family
+    description: >
+      The operator family the class belongs to, schema-qualified. Without
+      it, PostgreSQL makes a family with the name of the class.
+    type: string
+  storage:
+    title: Storage Type
+    description: >
+      The data type stored in the index (STORAGE), when it is not the column
+      data type.
+    type: string
+  operators:
+    title: Operators
+    description: The operators of the class.
+    type: array
+    items:
+      $package_schema: operator_class_operator
+  functions:
+    title: Support Functions
+    description: The support functions of the class.
+    type: array
+    items:
+      $package_schema: operator_class_function
+  comment:
+    title: Comment
+    description: An optional comment about the operator class.
+    type: string
+additionalProperties: false
+required:
+  - name
+  - schema
+  - method
+  - data_type

@@ -128,6 +128,9 @@ impl Loader {
                 Some(&path),
             );
         }
+        for entry in array_field(&project, "access_methods") {
+            self.add_definition(ObjectType::AccessMethod, entry, Some(&path));
+        }
         for entry in array_field(&project, "languages") {
             self.add_definition(
                 ObjectType::ProceduralLanguage,
@@ -379,6 +382,37 @@ impl Loader {
                 }
                 Definition::EventTrigger(t) => {
                     references.extend(functions(&[&t.function]));
+                }
+                Definition::AccessMethod(m) => {
+                    references.extend(functions(&[&Some(m.handler.clone())]));
+                }
+                Definition::OperatorFamily(f) => {
+                    references
+                        .push((ObjectType::AccessMethod, f.method.clone()));
+                    references.extend(operator_class_members(
+                        f.operators.as_deref(),
+                        f.functions.as_deref(),
+                    ));
+                }
+                Definition::OperatorClass(c) => {
+                    references
+                        .push((ObjectType::AccessMethod, c.method.clone()));
+                    if let Some(family) = &c.family {
+                        references.push((
+                            ObjectType::OperatorFamily,
+                            family.clone(),
+                        ));
+                    }
+                    references.extend(
+                        [Some(c.data_type.clone()), c.storage.clone()]
+                            .into_iter()
+                            .flatten()
+                            .flat_map(type_references),
+                    );
+                    references.extend(operator_class_members(
+                        c.operators.as_deref(),
+                        c.functions.as_deref(),
+                    ));
                 }
                 Definition::Language(l) => {
                     references.extend(functions(&[
@@ -667,6 +701,13 @@ fn identity(definition: &Definition) -> String {
     match definition {
         Definition::Function(f) => f.identity(),
         Definition::Procedure(p) => p.identity(),
+        // one name can be used once for each index method
+        Definition::OperatorClass(c) => {
+            format!("{} USING {}", c.name, c.method)
+        }
+        Definition::OperatorFamily(f) => {
+            format!("{} USING {}", f.name, f.method)
+        }
         _ => definition.name(),
     }
 }
@@ -677,6 +718,7 @@ fn to_definition(
 ) -> Result<Definition, serde_json::Error> {
     use serde_json::from_value as from;
     Ok(match ot {
+        ObjectType::AccessMethod => Definition::AccessMethod(from(value)?),
         ObjectType::Aggregate => Definition::Aggregate(from(value)?),
         ObjectType::Cast => Definition::Cast(from(value)?),
         ObjectType::Collation => Definition::Collation(from(value)?),
@@ -697,6 +739,8 @@ fn to_definition(
             Definition::MaterializedView(from(value)?)
         }
         ObjectType::Operator => Definition::Operator(from(value)?),
+        ObjectType::OperatorClass => Definition::OperatorClass(from(value)?),
+        ObjectType::OperatorFamily => Definition::OperatorFamily(from(value)?),
         ObjectType::ProceduralLanguage => Definition::Language(from(value)?),
         ObjectType::Publication => Definition::Publication(from(value)?),
         ObjectType::Role => Definition::Role(from(value)?),
@@ -775,6 +819,32 @@ pub(crate) fn split_sql_name(value: &str) -> (String, String) {
 /// The type a type name refers to, for ordering: its name without an
 /// array suffix or modifier. Built-in types are not in the project, so
 /// the lookup finds nothing for them.
+/// The operators, functions and types that the members of an operator
+/// class or family name
+fn operator_class_members(
+    operators: Option<&[crate::models::OperatorClassOperator]>,
+    functions: Option<&[crate::models::OperatorClassFunction]>,
+) -> Vec<(ObjectType, String)> {
+    let operators = operators.unwrap_or_default();
+    let functions = functions.unwrap_or_default();
+    let types = operators
+        .iter()
+        .flat_map(|o| o.arguments.iter().flatten())
+        .chain(functions.iter().flat_map(|f| f.types.iter().flatten()))
+        .cloned()
+        .flat_map(type_references);
+    operators
+        .iter()
+        .map(|o| (ObjectType::Operator, o.name.clone()))
+        .chain(
+            functions
+                .iter()
+                .map(|f| (ObjectType::Function, f.function.clone())),
+        )
+        .chain(types)
+        .collect()
+}
+
 fn type_references(data_type: String) -> Option<(ObjectType, String)> {
     let name = data_type
         .split(['(', '['])

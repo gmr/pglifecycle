@@ -1,0 +1,36 @@
+---
+$schema: https://json-schema.org/draft/2020-12/schema
+$id: https://gmr.github.io/pglifecycle/schemata/operator_class_operator.json
+title: Operator Class Operator
+description: >
+  An operator of an operator class or family:
+  OPERATOR strategy name (left, right) [FOR ORDER BY sort_family].
+type: object
+properties:
+  strategy:
+    title: Strategy Number
+    description: The index method's strategy number for the operator.
+    type: integer
+    minimum: 1
+  name:
+    title: Operator
+    description: The operator, schema-qualified when it is not in pg_catalog.
+    type: string
+  arguments:
+    title: Operand Types
+    description: The left and right operand types.
+    type: array
+    items:
+      type: string
+    minItems: 2
+    maxItems: 2
+  order_by:
+    title: Sort Family
+    description: >
+      The btree operator family that sorts the result of an ordering
+      operator (FOR ORDER BY). Without it, the operator is a search operator.
+    type: string
+additionalProperties: false
+required:
+  - strategy
+  - name

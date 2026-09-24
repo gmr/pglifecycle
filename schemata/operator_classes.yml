@@ -1,0 +1,26 @@
+---
+$schema: https://json-schema.org/draft/2020-12/schema
+$id: https://gmr.github.io/pglifecycle/schemata/operator_classes.json
+title: Operator Classes
+description: Specifies all operator classes in a schema
+type: object
+properties:
+  schema:
+    title: Schema
+    description: The schema every object in this file belongs to.
+    type: string
+  owner:
+    title: Owner
+    description: >
+      The role that owns every object in this file, unless an entry names its
+      own. Defaults to the project's superuser.
+    type: string
+  operator_classes:
+    title: Operator Classes
+    type: array
+    items:
+      $package_schema: operator_class
+required:
+  - schema
+  - operator_classes
+additionalProperties: false

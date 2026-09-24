@@ -1,0 +1,32 @@
+---
+$schema: https://json-schema.org/draft/2020-12/schema
+$id: https://gmr.github.io/pglifecycle/schemata/access_method.json
+title: Access Method
+description: >
+  A table or index access method (CREATE ACCESS METHOD). An access method
+  has no schema and no owner.
+type: object
+properties:
+  name:
+    title: Name
+    description: The name of the access method.
+    type: string
+  type:
+    title: Type
+    description: The kind of access method.
+    enum: [TABLE, INDEX]
+  handler:
+    title: Handler
+    description: >
+      The function that returns the access method's API, for example
+      heap_tableam_handler.
+    type: string
+  comment:
+    title: Comment
+    description: An optional comment about the access method.
+    type: string
+additionalProperties: false
+required:
+  - name
+  - type
+  - handler

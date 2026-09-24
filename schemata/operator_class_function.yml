@@ -1,0 +1,30 @@
+---
+$schema: https://json-schema.org/draft/2020-12/schema
+$id: https://gmr.github.io/pglifecycle/schemata/operator_class_function.json
+title: Operator Class Function
+description: >
+  A support function of an operator class or family:
+  FUNCTION number (left, right) function(arguments).
+type: object
+properties:
+  support:
+    title: Support Number
+    description: The index method's support function number.
+    type: integer
+    minimum: 1
+  types:
+    title: Operand Types
+    description: The left and right operand types the function is for.
+    type: array
+    items:
+      type: string
+    minItems: 2
+    maxItems: 2
+  function:
+    title: Function
+    description: The function and its argument types.
+    type: string
+additionalProperties: false
+required:
+  - support
+  - function

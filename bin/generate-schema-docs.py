@@ -53,6 +53,9 @@ GROUPS: dict[str, list[str]] = {
         'index',
         'materialized_view',
         'operator',
+        'operator_class',
+        'operator_family',
+        'access_method',
         'publication',
         'schema',
         'sequence',
@@ -79,6 +82,8 @@ GROUPS: dict[str, list[str]] = {
         'constraint',
         'dependencies',
         'foreign_key',
+        'operator_class_function',
+        'operator_class_operator',
         'policy',
         'rule',
         'trigger',
@@ -87,6 +92,8 @@ GROUPS: dict[str, list[str]] = {
         'casts',
         'conversions',
         'operators',
+        'operator_classes',
+        'operator_families',
         'types',
     ],
 }
@@ -103,6 +110,8 @@ CONTAINER_MEMBER = {
     'casts': 'cast',
     'conversions': 'conversion',
     'operators': 'operator',
+    'operator_classes': 'operator_class',
+    'operator_families': 'operator_family',
     'types': 'type',
 }
 

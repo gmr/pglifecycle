@@ -102,6 +102,17 @@ pub enum Statement {
     CreateCollation(models::Collation),
     CreateConversion(models::Conversion),
     CreateLanguage(models::Language),
+    CreateAccessMethod(models::AccessMethod),
+    CreateOperatorFamily(models::OperatorFamily),
+    /// ALTER OPERATOR FAMILY ... ADD: members that belong to the family
+    /// and to none of its classes
+    AlterOperatorFamily {
+        family: QualifiedName,
+        method: String,
+        operators: Vec<models::OperatorClassOperator>,
+        functions: Vec<models::OperatorClassFunction>,
+    },
+    CreateOperatorClass(Box<models::OperatorClass>),
     CreateEventTrigger(models::EventTrigger),
     /// ALTER EVENT TRIGGER ... ENABLE/DISABLE; `enabled` is `None` for
     /// the default state
@@ -371,6 +382,16 @@ fn dispatch(node: &Node, src: &str) -> Result<Vec<Statement>, String> {
             Ok(vec![misc::create_conversion(node, src)?])
         }
         "CreatePLangStmt" => Ok(vec![misc::create_language(node, src)?]),
+        "CreateAmStmt" => Ok(vec![misc::create_access_method(node, src)?]),
+        "CreateOpFamilyStmt" => {
+            Ok(vec![misc::create_operator_family(node, src)?])
+        }
+        "AlterOpFamilyStmt" => {
+            Ok(vec![misc::alter_operator_family(node, src)?])
+        }
+        "CreateOpClassStmt" => {
+            Ok(vec![misc::create_operator_class(node, src)?])
+        }
         "CreateEventTrigStmt" => {
             Ok(vec![misc::create_event_trigger(node, src)?])
         }

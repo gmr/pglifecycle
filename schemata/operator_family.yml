@@ -1,0 +1,47 @@
+---
+$schema: https://json-schema.org/draft/2020-12/schema
+$id: https://gmr.github.io/pglifecycle/schemata/operator_family.json
+title: Operator Family
+description: >
+  An operator family (CREATE OPERATOR FAMILY). The operators and functions
+  here are the members that are added to the family with ALTER OPERATOR
+  FAMILY ... ADD. The members of an operator class are in the class.
+type: object
+properties:
+  name:
+    title: Name
+    description: The name of the operator family.
+    type: string
+  schema:
+    title: Schema
+    description: The schema the operator family is created in.
+    type: string
+  owner:
+    title: Owner
+    description: The role that owns the operator family.
+    type: string
+  method:
+    title: Index Method
+    description: The index access method the family is for (USING).
+    type: string
+  operators:
+    title: Operators
+    description: The operators that belong to the family.
+    type: array
+    items:
+      $package_schema: operator_class_operator
+  functions:
+    title: Support Functions
+    description: The support functions that belong to the family.
+    type: array
+    items:
+      $package_schema: operator_class_function
+  comment:
+    title: Comment
+    description: An optional comment about the operator family.
+    type: string
+additionalProperties: false
+required:
+  - name
+  - schema
+  - method
