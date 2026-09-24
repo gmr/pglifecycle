@@ -15,7 +15,7 @@ properties:
     type: string
   event:
     title: The event that cause the fire to trigger
-    enum: [ddl_command_start, ddl_command_end, table_rewrite, sql_drop]
+    enum: [ddl_command_start, ddl_command_end, table_rewrite, sql_drop, login]
   filter:
     title: Filter
     description: >

@@ -1,7 +1,7 @@
 # Coverage plan: silent schema loss, RLS, and PostgreSQL 18
 
-Status: Phases 0 to 5 complete, and Phase 6 items 1 to 6. Phase 6
-item 7, and Phases 7 and 8, proposed.
+Status: Phases 0 to 5 and 8 complete, and Phase 6 items 1 to 6. Phase
+6 item 7 and Phase 7 proposed.
 Written 2026-09-21.
 
 Every claim below was verified against PostgreSQL 18.4 (the version
@@ -681,7 +681,36 @@ Four gates, each checking something the others cannot:
 Then correct the Postgres 17 → 18 line in `CLAUDE.md`. (Done in
 Phase 1.)
 
-### Phase 8 — A pagila gate (~1 day)
+### Phase 8 — A pagila gate — **DONE**
+
+**Done:** `fixtures/pagila/pagila-schema.sql`, vendored with its
+license, and `just pagila-gate`, which is `bin/round-trip` on it; CI
+runs it with the other gates. `bin/round-trip` takes the fixture and a
+database-name prefix, so it serves both.
+
+It found three defects that `fixtures/schema.sql` did not:
+
+- **Partitions lost everything of their own.** Pull folded every
+  attached partition into its parent's `partitions` list and deleted
+  the child table, and with it the partition's primary key, indexes,
+  foreign keys and defaults, without a warning. A partition with
+  properties of its own now stays a table, and its entry in the
+  parent's list is marked `attached`; build creates it on its own and
+  attaches it with `ATTACH PARTITION`, as pg_dump writes it. A
+  partition with nothing of its own still folds into its parent.
+- **A numeric default was quoted**, so `DEFAULT 3` on a smallint came
+  back as `DEFAULT '3'::smallint` (deviation 29).
+- **The `login` event** (PostgreSQL 17) was not a valid event trigger
+  event in the schema.
+
+Pagila's function bodies are not in the style pull formats them in, so
+the gate compares routine bodies with whitespace and semicolons
+removed (`NORMALIZE_BODIES=1`, `bin/normalize-routine-bodies`).
+Everything else is compared exactly.
+
+The two build defects described below, inline foreign keys and dropped
+foreign key names, were fixed in Phase 2 (deviation 14). The original
+item follows.
 
 Take the schema from [xzilla/pagila](https://github.com/xzilla/pagila),
 the PostgreSQL sample database, and gate the full cycle on it: load

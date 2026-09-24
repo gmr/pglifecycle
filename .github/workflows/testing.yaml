@@ -125,5 +125,10 @@ jobs:
       - name: Round-trip gate
         run: bin/round-trip
 
+      - name: Pagila gate
+        run: bin/round-trip fixtures/pagila/pagila-schema.sql pagila
+        env:
+          NORMALIZE_BODIES: "1"
+
       - name: Deploy gates
         run: bin/deploy-gates

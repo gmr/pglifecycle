@@ -61,6 +61,7 @@ pub(crate) fn create_table(
                 for_values_from: bound.for_values_from,
                 for_values_to: bound.for_values_to,
                 for_values_with: bound.for_values_with,
+                attached: None,
                 comment: None,
             },
         });
@@ -508,6 +509,7 @@ pub(crate) fn alter_table(
                 for_values_from: bound.for_values_from,
                 for_values_to: bound.for_values_to,
                 for_values_with: bound.for_values_with,
+                attached: None,
                 comment: None,
             },
         });

@@ -90,8 +90,17 @@ deploy-gates: build db-up
     PGUSER=postgres \
     bin/deploy-gates
 
+# Pagila gate: the round-trip gate on the pagila sample database, a
+# schema written by someone else (fixtures/pagila/README.md)
+pagila-gate: build db-up
+    PGHOST=localhost \
+    PGPORT="$(docker compose port postgres 5432 | cut -d: -f2)" \
+    PGUSER=postgres \
+    NORMALIZE_BODIES=1 \
+    bin/round-trip fixtures/pagila/pagila-schema.sql pagila
+
 # Every database gate
-gates: coverage-gate round-trip deploy-gates
+gates: coverage-gate round-trip pagila-gate deploy-gates
 
 # --- Docs ------------------------------------------------------------
 

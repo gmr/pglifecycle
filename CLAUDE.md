@@ -92,7 +92,7 @@ Module headers reference the Python file each replaces ("ports X.py").
 Integration tests live in `tests/`. The database gates need
 PostgreSQL: they bring up `compose.yaml` (Postgres 18) on a
 dynamically-mapped host port and run the scripts in `bin/`. GitHub
-Actions runs the same three scripts in a `gates` job against a
+Actions runs the same scripts in a `gates` job against a
 `postgres:18` service container, so a gate failure blocks a pull
 request; run them locally first.
 
@@ -101,8 +101,9 @@ just db-up          # start the container, wait until healthy
 just db-port        # print the mapped host port
 just coverage-gate  # which objects pull still cannot model
 just round-trip     # schema → pull → build → restore → diff
+just pagila-gate    # the round-trip gate on the pagila sample schema
 just deploy-gates   # deploy equivalence / convergence / safety
-just gates          # all three
+just gates          # all four
 ```
 
 The gate recipes discover the mapped port automatically. To run a gate

@@ -629,8 +629,49 @@ pub struct TablePartition {
     pub for_values_to: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub for_values_with: Option<String>,
+    /// The partition is a table of its own in the project, created on
+    /// its own and attached with ATTACH PARTITION, because it has
+    /// indexes, constraints or other properties of its own that a
+    /// partition modeled by its bounds alone cannot hold
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attached: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
+}
+
+impl Table {
+    /// Whether this table, a partition, has anything of its own beyond
+    /// what its parent gives it, and so has to stay a table of its own
+    /// in the project rather than fold into its parent's `partitions`
+    pub fn has_own_partition_properties(&self) -> bool {
+        let columns = self.columns.iter().flatten().any(|c| {
+            c.default.is_some()
+                || c.comment.is_some()
+                || c.storage.is_some()
+                || c.compression.is_some()
+                || c.statistics.is_some()
+                || c.options.is_some()
+                || c.generated.is_some()
+        });
+        columns
+            || self.indexes.is_some()
+            || self.primary_key.is_some()
+            || self.unique_constraints.is_some()
+            || self.foreign_keys.is_some()
+            || self.check_constraints.is_some()
+            || self.exclude_constraints.is_some()
+            || self.constraint_comments.is_some()
+            || self.triggers.is_some()
+            || self.rules.is_some()
+            || self.row_level_security.is_some()
+            || self.policies.is_some()
+            || self.replica_identity.is_some()
+            || self.partition.is_some()
+            || self.partitions.is_some()
+            || self.storage_parameters.is_some()
+            || self.tablespace.is_some()
+            || self.access_method.is_some()
+    }
 }
 
 /// Defines how a table is partitioned
