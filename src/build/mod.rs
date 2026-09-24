@@ -1407,6 +1407,11 @@ impl Builder {
             d.operators.as_deref(),
             d.functions.as_deref(),
         ));
+        // the item list must not be empty: as pg_dump does, write a
+        // STORAGE item for the column data type, which is a no-op
+        if items.is_empty() {
+            items.push(format!("STORAGE {}", d.data_type));
+        }
         create.push(format!("AS\n    {}", items.join(",\n    ")));
         // no IF EXISTS, as for an operator family
         let drop = vec![format!("DROP OPERATOR CLASS {name}")];

@@ -816,11 +816,8 @@ pub(crate) fn split_sql_name(value: &str) -> (String, String) {
     (parts.pop().unwrap_or_default(), tag)
 }
 
-/// The type a type name refers to, for ordering: its name without an
-/// array suffix or modifier. Built-in types are not in the project, so
-/// the lookup finds nothing for them.
-/// The operators, functions and types that the members of an operator
-/// class or family name
+/// The operators, functions, sort families and types that the members
+/// of an operator class or family name
 fn operator_class_members(
     operators: Option<&[crate::models::OperatorClassOperator]>,
     functions: Option<&[crate::models::OperatorClassFunction]>,
@@ -841,10 +838,20 @@ fn operator_class_members(
                 .iter()
                 .map(|f| (ObjectType::Function, f.function.clone())),
         )
+        // the sort family of a FOR ORDER BY operator
+        .chain(
+            operators
+                .iter()
+                .filter_map(|o| o.order_by.clone())
+                .map(|family| (ObjectType::OperatorFamily, family)),
+        )
         .chain(types)
         .collect()
 }
 
+/// The type a type name refers to, for ordering: its name without an
+/// array suffix or modifier. Built-in types are not in the project, so
+/// the lookup finds nothing for them.
 fn type_references(data_type: String) -> Option<(ObjectType, String)> {
     let name = data_type
         .split(['(', '['])
