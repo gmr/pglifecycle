@@ -422,19 +422,21 @@ impl Loader {
                     _ if namespace.is_empty() => (own_schema.to_string(), tag),
                     _ => (namespace, tag),
                 };
-                let found =
-                    lookup_items(&self.index, desc, Some(&namespace), &tag)
-                        .into_iter()
-                        .chain(if desc == ObjectType::Type {
-                            lookup_items(
-                                &self.index,
-                                ObjectType::Domain,
-                                Some(&namespace),
-                                &tag,
-                            )
-                        } else {
-                            Vec::new()
-                        });
+                // a language has no schema, and the index keys it so
+                let namespace = (desc != ObjectType::ProceduralLanguage)
+                    .then_some(namespace.as_str());
+                let found = lookup_items(&self.index, desc, namespace, &tag)
+                    .into_iter()
+                    .chain(if desc == ObjectType::Type {
+                        lookup_items(
+                            &self.index,
+                            ObjectType::Domain,
+                            namespace,
+                            &tag,
+                        )
+                    } else {
+                        Vec::new()
+                    });
                 for parent in found {
                     if parent != id {
                         edges.push((id, parent));

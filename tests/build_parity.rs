@@ -527,7 +527,7 @@ fn records_inventory_dependency_edges() {
         })
         .collect();
     edges.sort();
-    // the same 7 inventory edges the loader resolves, plus the edge
+    // the same 8 inventory edges the loader resolves, plus the edge
     // from the FK CONSTRAINT entry to its own table (Python recorded
     // no dependency edges at all; libpgdump's weighted toposort uses
     // these to order the archive). A foreign key needs no edge to the
@@ -547,6 +547,8 @@ fn records_inventory_dependency_edges() {
              FUNCTION:test_aggregate(integer, integer)",
             "DOMAIN:bcp47_locale -> EXTENSION:citext",
             "FK CONSTRAINT:addresses addresses_user_id -> TABLE:addresses",
+            "FUNCTION:utf8_to_latin1(integer, integer, cstring, internal, \
+             integer) -> PROCEDURAL LANGUAGE:plpython3u",
             "MATERIALIZED VIEW:user_addresses -> \
              TABLE:addresses, TABLE:users",
             "SERVER:localhost -> EXTENSION:postgres_fdw",
