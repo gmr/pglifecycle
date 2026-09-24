@@ -23,6 +23,8 @@ const MANAGED_DIRS: &[&str] = &[
     "event_triggers",
     "functions",
     "materialized_views",
+    "operator_classes",
+    "operator_families",
     "operators",
     "procedures",
     "publications",
@@ -110,8 +112,8 @@ fn roles_extracted(args: &cli::Pull) -> bool {
 /// the file's path under `root`
 fn schema_of(dir: &str, relative: &Path) -> Option<String> {
     match dir {
-        "casts" | "conversions" | "operators" | "schemata" | "text_search"
-        | "types" => relative
+        "casts" | "conversions" | "operator_classes" | "operator_families"
+        | "operators" | "schemata" | "text_search" | "types" => relative
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned()),
         "aggregates" | "collations" | "domains" | "functions"

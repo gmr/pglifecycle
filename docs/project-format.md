@@ -6,7 +6,8 @@ database object, validated against the JSON-Schema definitions in
 
 ```text
 my-project/
-├── project.yaml          # name, encoding, extensions, languages
+├── project.yaml          # name, encoding, extensions, languages,
+│                         # access methods
 ├── schemata/             # one file per schema
 │   └── test.yaml
 ├── tables/               # <schema>/<table>.yaml
@@ -22,7 +23,9 @@ my-project/
 ├── users/
 ├── groups/
 └── ...                   # aggregates, casts, collations, conversions,
-                          # event_triggers, operators, publications,
+                          # event_triggers, operators,
+                          # operator_classes, operator_families,
+                          # publications,
                           # servers, subscriptions, tablespaces,
                           # text_search, user_mappings, dml
 ```

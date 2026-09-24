@@ -271,6 +271,7 @@ struct Builder {
 impl Builder {
     fn dump_item(&mut self, item: &Item) -> Result<(), String> {
         match &item.definition {
+            Definition::AccessMethod(_) => self.dump_access_method(item),
             Definition::Aggregate(_) => self.dump_aggregate(item),
             Definition::Cast(_) => self.dump_cast(item),
             Definition::Collation(_) => self.dump_collation(item),
@@ -290,6 +291,8 @@ impl Builder {
                 self.dump_materialized_view(item)
             }
             Definition::Operator(_) => self.dump_operator(item),
+            Definition::OperatorClass(_) => self.dump_operator_class(item),
+            Definition::OperatorFamily(_) => self.dump_operator_family(item),
             Definition::Publication(_) => self.dump_publication(item),
             Definition::Role(_) => self.dump_role(item),
             Definition::Schema(_) => self.dump_schema(item),
@@ -1331,6 +1334,94 @@ impl Builder {
             self.dump_index(index, item, &d.schema, &d.owner, None)?;
         }
         Ok(())
+    }
+
+    fn dump_access_method(&mut self, item: &Item) -> Result<(), String> {
+        let Definition::AccessMethod(d) = &item.definition else {
+            unreachable!()
+        };
+        let create = vec![
+            "CREATE ACCESS METHOD".into(),
+            self.item_name(item),
+            "TYPE".into(),
+            d.method_type.clone(),
+            "HANDLER".into(),
+            d.handler.clone(),
+        ];
+        let drop =
+            vec!["DROP ACCESS METHOD IF EXISTS".into(), self.item_name(item)];
+        // an access method has no owner
+        self.add_item(item, create, drop, true)
+    }
+
+    fn dump_operator_family(&mut self, item: &Item) -> Result<(), String> {
+        let Definition::OperatorFamily(d) = &item.definition else {
+            unreachable!()
+        };
+        let name = format!("{} USING {}", self.item_name(item), d.method);
+        let mut create = format!("CREATE OPERATOR FAMILY {name}");
+        let members = operator_class_items(
+            d.operators.as_deref(),
+            d.functions.as_deref(),
+        );
+        if !members.is_empty() {
+            create.push_str(&format!(
+                ";\nALTER OPERATOR FAMILY {name} ADD\n    {}",
+                members.join(",\n    ")
+            ));
+        }
+        // no IF EXISTS: pg_restore builds this type's owner statement
+        // by stripping the leading DROP off this one (deviation 17)
+        let drop = vec![format!("DROP OPERATOR FAMILY {name}")];
+        self.add_item_with_comment_target(
+            item,
+            vec![create],
+            drop,
+            false,
+            Some(name),
+        )
+    }
+
+    fn dump_operator_class(&mut self, item: &Item) -> Result<(), String> {
+        let Definition::OperatorClass(d) = &item.definition else {
+            unreachable!()
+        };
+        let name = format!("{} USING {}", self.item_name(item), d.method);
+        let mut create =
+            vec!["CREATE OPERATOR CLASS".into(), self.item_name(item)];
+        if d.default == Some(true) {
+            create.push("DEFAULT".into());
+        }
+        create.extend([
+            "FOR TYPE".into(),
+            d.data_type.clone(),
+            "USING".into(),
+            d.method.clone(),
+        ]);
+        if let Some(family) = &d.family {
+            create.push(format!("FAMILY {family}"));
+        }
+        let mut items: Vec<String> =
+            d.storage.iter().map(|s| format!("STORAGE {s}")).collect();
+        items.extend(operator_class_items(
+            d.operators.as_deref(),
+            d.functions.as_deref(),
+        ));
+        // the item list must not be empty: as pg_dump does, write a
+        // STORAGE item for the column data type, which is a no-op
+        if items.is_empty() {
+            items.push(format!("STORAGE {}", d.data_type));
+        }
+        create.push(format!("AS\n    {}", items.join(",\n    ")));
+        // no IF EXISTS, as for an operator family
+        let drop = vec![format!("DROP OPERATOR CLASS {name}")];
+        self.add_item_with_comment_target(
+            item,
+            create,
+            drop,
+            false,
+            Some(name),
+        )
     }
 
     fn dump_operator(&mut self, item: &Item) -> Result<(), String> {
@@ -3819,6 +3910,37 @@ fn render_options(options: &Map<String, Value>) -> String {
 
 /// `key = value` parameter rendering (ports _format_parameters)
 /// A string constant, dollar-quoted when it holds a single quote
+/// The OPERATOR and FUNCTION items of an operator class or family
+fn operator_class_items(
+    operators: Option<&[crate::models::OperatorClassOperator]>,
+    functions: Option<&[crate::models::OperatorClassFunction]>,
+) -> Vec<String> {
+    let operators = operators.unwrap_or_default().iter().map(|o| {
+        let mut item = format!("OPERATOR {} {}", o.strategy, o.name);
+        if let Some(arguments) = &o.arguments {
+            item.push_str(&format!("({})", arguments.join(", ")));
+        }
+        if let Some(order_by) = &o.order_by {
+            item.push_str(&format!(" FOR ORDER BY {order_by}"));
+        }
+        item
+    });
+    let functions =
+        functions
+            .unwrap_or_default()
+            .iter()
+            .map(|f| match &f.types {
+                Some(types) => format!(
+                    "FUNCTION {} ({}) {}",
+                    f.support,
+                    types.join(", "),
+                    f.function
+                ),
+                None => format!("FUNCTION {} {}", f.support, f.function),
+            });
+    operators.chain(functions).collect()
+}
+
 fn string_literal(value: &str) -> String {
     postgres_value(&Value::String(value.to_string()))
 }

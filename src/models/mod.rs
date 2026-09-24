@@ -28,6 +28,7 @@ pub use views::*;
 #[derive(Clone, Debug, PartialEq, serde::Serialize)]
 #[serde(untagged)]
 pub enum Definition {
+    AccessMethod(AccessMethod),
     Aggregate(Aggregate),
     Cast(Cast),
     Collation(Collation),
@@ -42,6 +43,8 @@ pub enum Definition {
     Language(Language),
     MaterializedView(MaterializedView),
     Operator(Operator),
+    OperatorClass(OperatorClass),
+    OperatorFamily(OperatorFamily),
     Procedure(Procedure),
     Publication(Publication),
     Role(Role),
@@ -63,6 +66,7 @@ impl Definition {
     /// The object name (`name` field; casts derive one from their types)
     pub fn name(&self) -> String {
         match self {
+            Definition::AccessMethod(d) => d.name.clone(),
             Definition::Aggregate(d) => d.name.clone(),
             Definition::Cast(d) => format!(
                 "({} AS {})",
@@ -81,6 +85,8 @@ impl Definition {
             Definition::Language(d) => d.name.clone(),
             Definition::MaterializedView(d) => d.name.clone(),
             Definition::Operator(d) => d.name.clone(),
+            Definition::OperatorClass(d) => d.name.clone(),
+            Definition::OperatorFamily(d) => d.name.clone(),
             Definition::Procedure(d) => d.name.clone(),
             Definition::Publication(d) => d.name.clone(),
             Definition::Role(d) => d.name.clone(),
@@ -111,6 +117,8 @@ impl Definition {
             Definition::Function(d) => Some(&d.owner),
             Definition::MaterializedView(d) => Some(&d.owner),
             Definition::Operator(d) => Some(&d.owner),
+            Definition::OperatorClass(d) => Some(&d.owner),
+            Definition::OperatorFamily(d) => Some(&d.owner),
             Definition::Procedure(d) => Some(&d.owner),
             Definition::Schema(d) => Some(&d.owner),
             Definition::Sequence(d) => Some(&d.owner),
@@ -126,6 +134,7 @@ impl Definition {
     /// The object comment, where the type has one
     pub fn comment(&self) -> Option<&str> {
         match self {
+            Definition::AccessMethod(d) => d.comment.as_deref(),
             Definition::Aggregate(d) => d.comment.as_deref(),
             Definition::Cast(d) => d.comment.as_deref(),
             Definition::Collation(d) => d.comment.as_deref(),
@@ -139,6 +148,8 @@ impl Definition {
             Definition::Language(d) => d.comment.as_deref(),
             Definition::MaterializedView(d) => d.comment.as_deref(),
             Definition::Operator(d) => d.comment.as_deref(),
+            Definition::OperatorClass(d) => d.comment.as_deref(),
+            Definition::OperatorFamily(d) => d.comment.as_deref(),
             Definition::Procedure(d) => d.comment.as_deref(),
             Definition::Publication(d) => d.comment.as_deref(),
             Definition::Role(d) => d.comment.as_deref(),
@@ -179,6 +190,8 @@ impl Definition {
             Definition::Function(d) => Some(&d.schema),
             Definition::MaterializedView(d) => Some(&d.schema),
             Definition::Operator(d) => Some(&d.schema),
+            Definition::OperatorClass(d) => Some(&d.schema),
+            Definition::OperatorFamily(d) => Some(&d.schema),
             Definition::Procedure(d) => Some(&d.schema),
             Definition::Sequence(d) => Some(&d.schema),
             Definition::Statistics(d) => Some(&d.schema),

@@ -668,3 +668,48 @@ CREATE OPERATOR test.=~= (
     COMMUTATOR = OPERATOR(test.=~=), RESTRICT = eqsel, JOIN = eqjoinsel);
 COMMENT ON OPERATOR test.=~= (INTEGER, INTEGER) IS 'Same parity';
 CREATE OPERATOR test.!!! (FUNCTION = int4um, RIGHTARG = INTEGER);
+
+-- Access methods: a table method and an index method, with the
+-- handlers of the built-in ones. A table and a materialized view use
+-- the table method, which pg_dump keeps in the entry, not in the DDL.
+CREATE ACCESS METHOD heap_copy TYPE TABLE HANDLER heap_tableam_handler;
+COMMENT ON ACCESS METHOD heap_copy IS 'A copy of heap';
+CREATE ACCESS METHOD btree_copy TYPE INDEX HANDLER bthandler;
+CREATE TABLE test.heap_copied (id INTEGER) USING heap_copy;
+CREATE MATERIALIZED VIEW test.heap_copied_ids USING heap_copy AS
+SELECT id
+  FROM test.heap_copied;
+
+-- Operator families and classes: a btree family with a member that no
+-- class has, and a class in it; a default class for the copied index
+-- method, which makes its own family; and a gist class with a storage
+-- type and an ordering operator, which pg_dump moves to the family
+CREATE FUNCTION test.compare_ints(a INTEGER, b INTEGER) RETURNS INTEGER
+    LANGUAGE sql IMMUTABLE AS $$
+ SELECT a - b;
+$$;
+CREATE OPERATOR FAMILY test.int_family USING btree;
+COMMENT ON OPERATOR FAMILY test.int_family USING btree IS 'Integers';
+ALTER OPERATOR FAMILY test.int_family USING btree ADD
+    OPERATOR 1 < (INTEGER, BIGINT),
+    FUNCTION 1 (INTEGER, BIGINT) btint48cmp(INTEGER, BIGINT);
+CREATE OPERATOR CLASS test.int_class FOR TYPE INTEGER USING btree
+    FAMILY test.int_family AS
+    OPERATOR 1 <, OPERATOR 3 =, FUNCTION 1 test.compare_ints(INTEGER, INTEGER);
+COMMENT ON OPERATOR CLASS test.int_class USING btree IS 'By difference';
+CREATE OPERATOR CLASS test.int_copy_ops DEFAULT FOR TYPE INTEGER
+    USING btree_copy AS
+    OPERATOR 1 <, OPERATOR 2 <=, OPERATOR 3 =, OPERATOR 4 >=, OPERATOR 5 >,
+    FUNCTION 1 btint4cmp(INTEGER, INTEGER);
+CREATE OPERATOR CLASS test.point_distance FOR TYPE point USING gist AS
+    OPERATOR 15 <-> (point, point) FOR ORDER BY float_ops,
+    FUNCTION 1 gist_point_consistent(internal, point, smallint, oid, internal),
+    FUNCTION 2 gist_box_union(internal, internal),
+    FUNCTION 3 gist_point_compress(internal),
+    FUNCTION 5 gist_box_penalty(internal, internal, internal),
+    FUNCTION 6 gist_box_picksplit(internal, internal),
+    FUNCTION 7 gist_box_same(box, box, internal),
+    FUNCTION 8 gist_point_distance(internal, point, smallint, oid, internal),
+    STORAGE box;
+-- an index that uses the default class of the copied method
+CREATE INDEX heap_copied_id ON test.heap_copied USING btree_copy (id);

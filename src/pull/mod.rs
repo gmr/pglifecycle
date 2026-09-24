@@ -66,6 +66,9 @@ pub const MODELED_DESCS: &[libpgdump::ObjectType] = {
         OT::Rule,
         OT::Procedure,
         OT::Operator,
+        OT::OperatorFamily,
+        OT::OperatorClass,
+        OT::AccessMethod,
         OT::ForeignTable,
         OT::ForeignDataWrapper,
         OT::ForeignServer,
@@ -492,6 +495,9 @@ pub struct Assembly {
     pub statistics: Vec<models::Statistics>,
     pub procedures: Vec<models::Procedure>,
     pub operators: Vec<models::Operator>,
+    pub operator_families: Vec<models::OperatorFamily>,
+    pub operator_classes: Vec<models::OperatorClass>,
+    pub access_methods: Vec<models::AccessMethod>,
     pub roles: BTreeMap<String, RoleState>,
     pub remaining: Vec<Remaining>,
     /// Indexes whose target relation had not yet been ingested when the
@@ -580,6 +586,9 @@ impl Assembly {
             ("statistics", self.statistics.len()),
             ("procedures", self.procedures.len()),
             ("operators", self.operators.len()),
+            ("operator families", self.operator_families.len()),
+            ("operator classes", self.operator_classes.len()),
+            ("access methods", self.access_methods.len()),
             ("foreign data wrappers", self.foreign_data_wrappers.len()),
             ("servers", self.servers.len()),
             ("user mappings", self.user_mappings.len()),
@@ -838,6 +847,7 @@ impl Assembly {
             }
             Statement::CreateTable(mut table) => {
                 table.owner = owner;
+                table.access_method = table_access_method(entry);
                 self.table_index.insert(
                     (table.schema.clone(), table.name.clone()),
                     self.tables.len(),
@@ -873,6 +883,7 @@ impl Assembly {
             }
             Statement::CreateMaterializedView(mut view) => {
                 view.owner = owner;
+                view.table_access_method = table_access_method(entry);
                 self.matview_index.insert(
                     (view.schema.clone(), view.name.clone()),
                     self.materialized_views.len(),
@@ -886,6 +897,51 @@ impl Assembly {
             Statement::CreateOperator(mut operator) => {
                 operator.owner = owner;
                 self.operators.push(*operator);
+            }
+            Statement::CreateAccessMethod(method) => {
+                self.access_methods.push(method);
+            }
+            Statement::CreateOperatorFamily(mut family) => {
+                family.owner = owner;
+                self.operator_families.push(family);
+            }
+            Statement::AlterOperatorFamily {
+                family,
+                method,
+                operators,
+                functions,
+            } => {
+                let schema = family.schema.clone().unwrap_or_default();
+                match self.operator_families.iter_mut().find(|f| {
+                    f.schema == schema
+                        && f.name == family.name
+                        && f.method == method
+                }) {
+                    Some(family) => {
+                        if !operators.is_empty() {
+                            family
+                                .operators
+                                .get_or_insert_default()
+                                .extend(operators);
+                        }
+                        if !functions.is_empty() {
+                            family
+                                .functions
+                                .get_or_insert_default()
+                                .extend(functions);
+                        }
+                    }
+                    None => {
+                        log::warn!(
+                            "Members of unknown operator family {family}"
+                        );
+                        self.push_remaining(entry);
+                    }
+                }
+            }
+            Statement::CreateOperatorClass(mut class) => {
+                class.owner = owner;
+                self.operator_classes.push(*class);
             }
             Statement::CreateFunction(mut function) => {
                 function.owner = owner;
@@ -1486,6 +1542,31 @@ impl Assembly {
                         ) == *name
                 })
                 .map(|o| o.comment = Some(comment.clone()))
+                .is_some(),
+            // named `name USING method`
+            "OPERATOR FAMILY" => self
+                .operator_families
+                .iter_mut()
+                .find(|f| {
+                    f.schema == schema
+                        && format!("{} USING {}", f.name, f.method) == *name
+                })
+                .map(|f| f.comment = Some(comment.clone()))
+                .is_some(),
+            "OPERATOR CLASS" => self
+                .operator_classes
+                .iter_mut()
+                .find(|c| {
+                    c.schema == schema
+                        && format!("{} USING {}", c.name, c.method) == *name
+                })
+                .map(|c| c.comment = Some(comment.clone()))
+                .is_some(),
+            "ACCESS METHOD" => self
+                .access_methods
+                .iter_mut()
+                .find(|m| m.name == *name)
+                .map(|m| m.comment = Some(comment.clone()))
                 .is_some(),
             "TRIGGER" => self.apply_trigger_comment(target, &comment),
             "POLICY" => self.apply_policy_comment(target, &comment),
@@ -2129,6 +2210,18 @@ fn entry_label(entry: &libpgdump::Entry) -> String {
         }
         None => format!("{} {tag}", entry.desc.as_str()),
     }
+}
+
+/// The table access method of a table or materialized view entry.
+/// pg_dump does not write it in the DDL: it keeps it in the entry, and
+/// pg_restore sets default_table_access_method before the statement.
+/// pg_dump records `heap` for every table that uses it, and a project
+/// omits the default.
+fn table_access_method(entry: &libpgdump::Entry) -> Option<String> {
+    entry
+        .tableam
+        .clone()
+        .filter(|method| !method.is_empty() && method != "heap")
 }
 
 /// A body in a language that is not formatted, without the newline

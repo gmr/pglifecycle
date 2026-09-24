@@ -9,10 +9,11 @@ use tree_sitter::Node;
 use crate::ddl::object::string_value;
 use crate::ddl::{NodeExt, Statement, any_name, unquote};
 use crate::models::{
-    Aggregate, Argument, Cast, Collation, Conversion, EventTrigger,
-    EventTriggerFilter, FilteredPublicationTable, Language, Operator,
-    Publication, PublicationTable, Rule, Statistics, TextSearchConfig,
-    TextSearchDict, TextSearchParser, TextSearchTemplate,
+    AccessMethod, Aggregate, Argument, Cast, Collation, Conversion,
+    EventTrigger, EventTriggerFilter, FilteredPublicationTable, Language,
+    Operator, OperatorClass, OperatorClassFunction, OperatorClassOperator,
+    OperatorFamily, Publication, PublicationTable, Rule, Statistics,
+    TextSearchConfig, TextSearchDict, TextSearchParser, TextSearchTemplate,
 };
 
 /// A text search object and the schema it belongs to
@@ -520,6 +521,210 @@ pub(crate) fn create_language(
     }))
 }
 
+/// CREATE ACCESS METHOD → AccessMethod
+pub(crate) fn create_access_method(
+    node: &Node,
+    src: &str,
+) -> Result<Statement, String> {
+    let text = |kind: &str| node.child_of_kind(kind).map(|n| n.text(src));
+    let (Some(name), Some(method_type), Some(handler)) =
+        (text("name"), text("am_type"), text("handler_name"))
+    else {
+        return Err(String::from("CREATE ACCESS METHOD without a handler"));
+    };
+    Ok(Statement::CreateAccessMethod(AccessMethod {
+        name: unquote(name),
+        method_type: method_type.to_uppercase(),
+        handler: handler.to_string(),
+        comment: None,
+    }))
+}
+
+/// The family name and the index method (`USING`) of an operator
+/// family or class statement
+fn family_and_method(
+    node: &Node,
+    src: &str,
+) -> Result<(crate::ddl::QualifiedName, String), String> {
+    let name = node
+        .child_of_kind("any_name")
+        .map(|n| any_name(&n, src))
+        .ok_or_else(|| String::from("operator family without a name"))?;
+    let method = node
+        .child_of_kind("name")
+        .map(|n| unquote(n.text(src)))
+        .ok_or_else(|| String::from("operator family without USING"))?;
+    Ok((name, method))
+}
+
+/// CREATE OPERATOR FAMILY → OperatorFamily
+pub(crate) fn create_operator_family(
+    node: &Node,
+    src: &str,
+) -> Result<Statement, String> {
+    let (name, method) = family_and_method(node, src)?;
+    Ok(Statement::CreateOperatorFamily(OperatorFamily {
+        name: name.name,
+        schema: name.schema.unwrap_or_default(),
+        owner: String::new(),
+        method,
+        operators: None,
+        functions: None,
+        comment: None,
+    }))
+}
+
+/// ALTER OPERATOR FAMILY ... ADD → the members it adds
+pub(crate) fn alter_operator_family(
+    node: &Node,
+    src: &str,
+) -> Result<Statement, String> {
+    if node.child_of_kind("kw_add").is_none() {
+        return Ok(Statement::Unsupported(String::from(
+            "ALTER OPERATOR FAMILY without ADD",
+        )));
+    }
+    let (family, method) = family_and_method(node, src)?;
+    let (operators, functions, _) = operator_class_items(node, src)?;
+    Ok(Statement::AlterOperatorFamily {
+        family,
+        method,
+        operators,
+        functions,
+    })
+}
+
+/// CREATE OPERATOR CLASS → OperatorClass
+pub(crate) fn create_operator_class(
+    node: &Node,
+    src: &str,
+) -> Result<Statement, String> {
+    let name = node
+        .child_of_kind("any_name")
+        .map(|n| any_name(&n, src))
+        .ok_or_else(|| String::from("CREATE OPERATOR CLASS without a name"))?;
+    let method = node
+        .child_of_kind("name")
+        .map(|n| unquote(n.text(src)))
+        .ok_or_else(|| String::from("CREATE OPERATOR CLASS without USING"))?;
+    let data_type = node
+        .child_of_kind("Typename")
+        .map(|n| n.text(src).to_string())
+        .ok_or_else(|| {
+            String::from("CREATE OPERATOR CLASS without FOR TYPE")
+        })?;
+    let family = node
+        .child_of_kind("opt_opfamily")
+        .and_then(|n| n.find("any_name"))
+        .map(|n| n.text(src).to_string());
+    let (operators, functions, storage) = operator_class_items(node, src)?;
+    Ok(Statement::CreateOperatorClass(Box::new(OperatorClass {
+        name: name.name,
+        schema: name.schema.unwrap_or_default(),
+        owner: String::new(),
+        method,
+        data_type,
+        default: node.child_of_kind("opt_default").is_some().then_some(true),
+        family,
+        storage,
+        operators: (!operators.is_empty()).then_some(operators),
+        functions: (!functions.is_empty()).then_some(functions),
+        comment: None,
+    })))
+}
+
+/// The OPERATOR, FUNCTION and STORAGE items of an operator class or
+/// family statement, in order
+#[allow(clippy::type_complexity)]
+fn operator_class_items(
+    node: &Node,
+    src: &str,
+) -> Result<
+    (
+        Vec<OperatorClassOperator>,
+        Vec<OperatorClassFunction>,
+        Option<String>,
+    ),
+    String,
+> {
+    let (mut operators, mut functions, mut storage) =
+        (Vec::new(), Vec::new(), None);
+    for item in node.find_all("opclass_item") {
+        let number = || {
+            item.child_of_kind("Iconst")
+                .and_then(|n| n.text(src).parse::<u32>().ok())
+                .ok_or_else(|| {
+                    format!(
+                        "operator class item without a number: {}",
+                        item.text(src)
+                    )
+                })
+        };
+        if item.child_of_kind("kw_storage").is_some() {
+            storage = item
+                .child_of_kind("Typename")
+                .map(|n| n.text(src).to_string());
+        } else if item.child_of_kind("kw_operator").is_some() {
+            let with_args = item.child_of_kind("operator_with_argtypes");
+            let name = with_args
+                .as_ref()
+                .and_then(|n| n.child_of_kind("any_operator"))
+                .or_else(|| item.child_of_kind("any_operator"))
+                .map(|n| n.text(src).to_string())
+                .ok_or_else(|| {
+                    format!(
+                        "operator class item without an operator: {}",
+                        item.text(src)
+                    )
+                })?;
+            let arguments = with_args
+                .and_then(|n| n.child_of_kind("oper_argtypes"))
+                .map(|n| {
+                    let mut cursor = n.walk();
+                    n.children(&mut cursor)
+                        .filter(|c| {
+                            c.kind() == "Typename" || c.kind() == "kw_none"
+                        })
+                        .map(|c| c.text(src).to_string())
+                        .collect()
+                });
+            let order_by = item
+                .child_of_kind("opclass_purpose")
+                .filter(|n| n.child_of_kind("kw_order").is_some())
+                .and_then(|n| n.child_of_kind("any_name"))
+                .map(|n| n.text(src).to_string());
+            operators.push(OperatorClassOperator {
+                strategy: number()?,
+                name,
+                arguments,
+                order_by,
+            });
+        } else if item.child_of_kind("kw_function").is_some() {
+            let function = item
+                .child_of_kind("function_with_argtypes")
+                .map(|n| n.text(src).to_string())
+                .ok_or_else(|| {
+                    format!(
+                        "operator class item without a function: {}",
+                        item.text(src)
+                    )
+                })?;
+            let types = item.child_of_kind("type_list").map(|list| {
+                list.find_all("Typename")
+                    .iter()
+                    .map(|n| n.text(src).to_string())
+                    .collect()
+            });
+            functions.push(OperatorClassFunction {
+                support: number()?,
+                types,
+                function,
+            });
+        }
+    }
+    Ok((operators, functions, storage))
+}
+
 /// CREATE EVENT TRIGGER → EventTrigger
 pub(crate) fn create_event_trigger(
     node: &Node,
@@ -875,6 +1080,90 @@ mod tests {
         assert_eq!(aggregate.initial_condition.as_deref(), Some("0"));
         assert_eq!(aggregate.parallel.as_deref(), Some("SAFE"));
         assert_eq!(aggregate.hypothetical, Some(true));
+    }
+
+    #[test]
+    fn parses_access_methods() {
+        let Statement::CreateAccessMethod(method) = parse_one(
+            "CREATE ACCESS METHOD heap_copy TYPE TABLE \
+             HANDLER heap_tableam_handler;",
+        ) else {
+            panic!("expected CreateAccessMethod")
+        };
+        assert_eq!(method.name, "heap_copy");
+        assert_eq!(method.method_type, "TABLE");
+        assert_eq!(method.handler, "heap_tableam_handler");
+    }
+
+    #[test]
+    fn parses_operator_families() {
+        let Statement::CreateOperatorFamily(family) =
+            parse_one("CREATE OPERATOR FAMILY s.fam USING btree;")
+        else {
+            panic!("expected CreateOperatorFamily")
+        };
+        assert_eq!(
+            (family.schema.as_str(), family.name.as_str()),
+            ("s", "fam")
+        );
+        assert_eq!(family.method, "btree");
+        let Statement::AlterOperatorFamily {
+            family,
+            method,
+            operators,
+            functions,
+        } = parse_one(
+            "ALTER OPERATOR FAMILY s.fam USING gist ADD\n    \
+             OPERATOR 15 <->(point,point) FOR ORDER BY \
+             pg_catalog.float_ops ,\n    \
+             FUNCTION 3 (point, point) gist_point_compress(internal);",
+        )
+        else {
+            panic!("expected AlterOperatorFamily")
+        };
+        assert_eq!(family.name, "fam");
+        assert_eq!(method, "gist");
+        assert_eq!(operators[0].strategy, 15);
+        assert_eq!(operators[0].name, "<->");
+        assert_eq!(
+            operators[0].arguments.as_deref(),
+            Some(&[String::from("point"), String::from("point")][..])
+        );
+        assert_eq!(
+            operators[0].order_by.as_deref(),
+            Some("pg_catalog.float_ops")
+        );
+        assert_eq!(functions[0].support, 3);
+        assert_eq!(functions[0].function, "gist_point_compress(internal)");
+    }
+
+    #[test]
+    fn parses_operator_classes() {
+        let Statement::CreateOperatorClass(class) = parse_one(
+            "CREATE OPERATOR CLASS s.cls DEFAULT\n    \
+             FOR TYPE integer USING btree FAMILY s.fam AS\n    \
+             STORAGE integer ,\n    \
+             OPERATOR 1 s.<<(integer,integer) ,\n    \
+             OPERATOR 2 < ,\n    \
+             FUNCTION 1 s.cmp(integer,integer);",
+        ) else {
+            panic!("expected CreateOperatorClass")
+        };
+        assert_eq!((class.schema.as_str(), class.name.as_str()), ("s", "cls"));
+        assert_eq!(
+            (class.method.as_str(), class.data_type.as_str()),
+            ("btree", "integer")
+        );
+        assert_eq!(class.default, Some(true));
+        assert_eq!(class.family.as_deref(), Some("s.fam"));
+        assert_eq!(class.storage.as_deref(), Some("integer"));
+        let operators = class.operators.unwrap();
+        assert_eq!(operators[0].name, "s.<<");
+        assert_eq!(operators[1].name, "<");
+        assert_eq!(operators[1].arguments, None);
+        let functions = class.functions.unwrap();
+        assert_eq!(functions[0].types, None);
+        assert_eq!(functions[0].function, "s.cmp(integer,integer)");
     }
 
     #[test]

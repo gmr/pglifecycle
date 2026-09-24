@@ -25,14 +25,10 @@ properties:
     type: boolean
   method:
     title: Index Method
-    description: The name of the index method to be used
-    enum:
-      - brin
-      - btree
-      - gin
-      - gist
-      - hash
-      - spgist
+    description: >
+      The name of the index method to be used: a built-in one (brin, btree,
+      gin, gist, hash or spgist) or one made with CREATE ACCESS METHOD
+    type: string
     default: btree
   columns:
     title: Columns

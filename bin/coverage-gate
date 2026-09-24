@@ -25,11 +25,22 @@ export PGHOST PGPORT PGUSER
 # fixtures/unsupported.sql.
 SOURCE_DB=coverage_source
 READER_ROLE=pglifecycle_coverage_reader
+SUBSCRIPTION=pglifecycle_coverage_sub
 EXPECTED=fixtures/unsupported-descs.txt
 WORKDIR="$(mktemp -d)"
 
+# a database with a subscription cannot be dropped, and a subscription
+# with a slot name tries to drop the slot on the publisher, which does
+# not exist
+drop_subscription() {
+    psql -d "${SOURCE_DB}" -q \
+        -c "ALTER SUBSCRIPTION ${SUBSCRIPTION} SET (slot_name = NONE)" \
+        -c "DROP SUBSCRIPTION ${SUBSCRIPTION}" >/dev/null 2>&1 || true
+}
+
 cleanup() {
     rm -rf "${WORKDIR}"
+    drop_subscription
     psql -d postgres -q -c "DROP DATABASE IF EXISTS ${SOURCE_DB}" \
         >/dev/null 2>&1 || true
     psql -d postgres -q -c "DROP ROLE IF EXISTS ${READER_ROLE}" \
@@ -42,6 +53,7 @@ echo "==> Building pglifecycle"
 cargo build --quiet
 
 echo "==> Creating ${SOURCE_DB} from fixtures/unsupported.sql"
+drop_subscription
 psql -d postgres -q -c "DROP DATABASE IF EXISTS ${SOURCE_DB}"
 psql -d postgres -q -c "DROP ROLE IF EXISTS ${READER_ROLE}"
 psql -d postgres -q -c "CREATE DATABASE ${SOURCE_DB}"

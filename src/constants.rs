@@ -15,6 +15,8 @@ pub const PROJECT_DIRS: &[&str] = &[
     "functions",
     "groups",
     "materialized_views",
+    "operator_classes",
+    "operator_families",
     "operators",
     "procedures",
     "publications",
@@ -36,6 +38,7 @@ pub const PROJECT_DIRS: &[&str] = &[
 /// Database object types tracked in the project inventory
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum ObjectType {
+    AccessMethod,
     Aggregate,
     Cast,
     Collation,
@@ -49,6 +52,8 @@ pub enum ObjectType {
     Group,
     MaterializedView,
     Operator,
+    OperatorClass,
+    OperatorFamily,
     ProceduralLanguage,
     Procedure,
     Publication,
@@ -71,6 +76,7 @@ impl ObjectType {
     /// The pg_dump-style description (constants.py values)
     pub fn as_str(&self) -> &'static str {
         match self {
+            Self::AccessMethod => "ACCESS METHOD",
             Self::Aggregate => "AGGREGATE",
             Self::Cast => "CAST",
             Self::Collation => "COLLATION",
@@ -84,6 +90,8 @@ impl ObjectType {
             Self::Group => "GROUP",
             Self::MaterializedView => "MATERIALIZED VIEW",
             Self::Operator => "OPERATOR",
+            Self::OperatorClass => "OPERATOR CLASS",
+            Self::OperatorFamily => "OPERATOR FAMILY",
             Self::ProceduralLanguage => "PROCEDURAL LANGUAGE",
             Self::Procedure => "PROCEDURE",
             Self::Publication => "PUBLICATION",
@@ -117,6 +125,8 @@ impl ObjectType {
             Self::Group => "groups",
             Self::MaterializedView => "materialized_views",
             Self::Operator => "operators",
+            Self::OperatorClass => "operator_classes",
+            Self::OperatorFamily => "operator_families",
             Self::Procedure => "procedures",
             Self::Publication => "publications",
             Self::Role => "roles",
@@ -132,7 +142,8 @@ impl ObjectType {
             Self::User => "users",
             Self::UserMapping => "user_mappings",
             Self::View => "views",
-            Self::Extension
+            Self::AccessMethod
+            | Self::Extension
             | Self::ForeignDataWrapper
             | Self::ProceduralLanguage => return None,
         })
@@ -147,6 +158,7 @@ impl ObjectType {
     /// (constants.OBJ_KEYS)
     pub fn from_plural_key(key: &str) -> Option<Self> {
         Some(match key {
+            "access_methods" => Self::AccessMethod,
             "aggregates" => Self::Aggregate,
             "casts" => Self::Cast,
             "collations" => Self::Collation,
@@ -160,6 +172,8 @@ impl ObjectType {
             "groups" => Self::Group,
             "languages" => Self::ProceduralLanguage,
             "materialized_views" => Self::MaterializedView,
+            "operator_classes" => Self::OperatorClass,
+            "operator_families" => Self::OperatorFamily,
             "operators" => Self::Operator,
             "procedures" => Self::Procedure,
             "publications" => Self::Publication,
@@ -186,6 +200,8 @@ impl ObjectType {
             Self::Cast => "casts",
             Self::Conversion => "conversions",
             Self::Operator => "operators",
+            Self::OperatorClass => "operator_classes",
+            Self::OperatorFamily => "operator_families",
             Self::TextSearch => "text_search",
             Self::Type => "types",
             other => unreachable!("no container key for {other:?}"),
@@ -200,6 +216,8 @@ impl ObjectType {
             Self::Cast
                 | Self::Conversion
                 | Self::Operator
+                | Self::OperatorClass
+                | Self::OperatorFamily
                 | Self::TextSearch
                 | Self::Type
         )
@@ -209,7 +227,8 @@ impl ObjectType {
     pub fn is_ownerless(&self) -> bool {
         matches!(
             self,
-            Self::DefaultPrivileges
+            Self::AccessMethod
+                | Self::DefaultPrivileges
                 | Self::EventTrigger
                 | Self::Group
                 | Self::Publication
@@ -226,7 +245,8 @@ impl ObjectType {
     pub fn is_schemaless(&self) -> bool {
         matches!(
             self,
-            Self::DefaultPrivileges
+            Self::AccessMethod
+                | Self::DefaultPrivileges
                 | Self::EventTrigger
                 | Self::Group
                 | Self::Publication
@@ -255,6 +275,8 @@ pub const READ_ORDER: &[ObjectType] = &[
     ObjectType::Sequence,
     ObjectType::Function,
     ObjectType::Procedure,
+    ObjectType::OperatorFamily,
+    ObjectType::OperatorClass,
     ObjectType::View,
     ObjectType::MaterializedView,
     ObjectType::Statistics,

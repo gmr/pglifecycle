@@ -1,6 +1,6 @@
 # Coverage plan: silent schema loss, RLS, and PostgreSQL 18
 
-Status: Phases 0 to 5, 7 and 8 complete, and Phase 6 items 1 to 6.
+Status: Phases 0 to 5 and 7 to 9 complete, and Phase 6 items 1 to 6.
 Phase 6 item 7 proposed.
 Written 2026-09-21.
 
@@ -829,6 +829,39 @@ stops at `pull` and never builds or restores.
 so procedures were overlooked entirely rather than deliberately
 deferred. Add them to Phase 5, which is already the "pull parity"
 phase.
+
+### Phase 9 — Operator classes, operator families, access methods — **DONE**
+
+These were the last types in the coverage fixture.
+
+- **Operator families**, in `operator_families/<schema>.yaml`: the
+  index method, and the operators and support functions that `ALTER
+  OPERATOR FAMILY ... ADD` gives the family and none of its classes.
+- **Operator classes**, in `operator_classes/<schema>.yaml`: the index
+  method, the data type, `DEFAULT`, the family, `STORAGE`, and the
+  operators (with `FOR ORDER BY`) and support functions. pg_dump writes
+  the family of every class, also one that PostgreSQL made implicitly,
+  so the project has it too.
+- **Access methods**, in `project.yaml` beside the languages: the type
+  and the handler. An access method has no schema and no owner.
+- Deploy matches all three by existence; a class or family by its name
+  and its index method.
+- The owner statement of a class or family is derived from its drop
+  statement, as for a function, so the drop has no `IF EXISTS`.
+
+Two defects were on the way:
+
+- **A table or materialized view lost its access method.** pg_dump
+  keeps it in the TOC entry, not in the DDL, and pull did not read it,
+  so `USING heap_copy` came back as heap without a warning. pull now
+  reads it; `heap`, the default, is left out.
+- **An index on a custom index method did not validate.** The index
+  `method` schema allowed only the built-in methods.
+
+The coverage fixture now records the gaps that are left, and pull
+fails on each of them with an error: `SHELL TYPE` (a base type's shell),
+`TRANSFORM`, `INDEX ATTACH` (every index on a partitioned table) and
+`SUBSCRIPTION`. `INDEX ATTACH` is the most common in real schemas.
 
 ## Effort
 

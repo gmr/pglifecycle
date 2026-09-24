@@ -62,6 +62,12 @@ properties:
     type: array
     items:
       $package_schema: foreign_data_wrapper
+  access_methods:
+    title: Access Methods
+    description: An array of table and index access methods to create
+    type: array
+    items:
+      $package_schema: access_method
   languages:
     description: An array of Procedural Languages to load into the database
     type: array

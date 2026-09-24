@@ -332,6 +332,7 @@ pub(crate) fn comment(node: &Node, src: &str) -> Result<Statement, String> {
     // (e.g. `DOMAIN` in `CONSTRAINT c ON DOMAIN d`) are part of the
     // target's own syntax, not the object-type keyword sequence
     let mut in_target = false;
+    let mut using = false;
     for child in node.children(&mut cursor) {
         let kind = child.kind();
         match kind {
@@ -440,6 +441,15 @@ pub(crate) fn comment(node: &Node, src: &str) -> Result<Statement, String> {
                 name.name = format!("{}({})", name.name, args.join(", "));
                 target = Some(name);
                 pending_first_name = false;
+            }
+            // an operator class or family is named with its index
+            // method: `name USING method`
+            "kw_using" if in_target => using = true,
+            "name" if using => {
+                if let Some(target) = target.as_mut() {
+                    target.name =
+                        format!("{} USING {}", target.name, child.text(src));
+                }
             }
             "name" | "ColId" if past_on => {
                 in_target = true;
@@ -567,6 +577,25 @@ mod tests {
         let mut statements = parser.parse(sql).unwrap();
         assert_eq!(statements.len(), 1, "expected one statement");
         statements.remove(0)
+    }
+
+    #[test]
+    fn names_operator_class_comments_with_their_method() {
+        let Statement::Comment { on, target, .. } =
+            parse_one("COMMENT ON OPERATOR FAMILY s.fam USING btree IS 'c';")
+        else {
+            panic!("expected Comment")
+        };
+        assert_eq!(on, "OPERATOR FAMILY");
+        assert_eq!(target.schema.as_deref(), Some("s"));
+        assert_eq!(target.name, "fam USING btree");
+        let Statement::Comment { on, target, .. } =
+            parse_one("COMMENT ON ACCESS METHOD heap_copy IS 'c';")
+        else {
+            panic!("expected Comment")
+        };
+        assert_eq!(on, "ACCESS METHOD");
+        assert_eq!(target.name, "heap_copy");
     }
 
     #[test]
