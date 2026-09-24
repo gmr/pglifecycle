@@ -2988,9 +2988,23 @@ pub(crate) fn render_default(value: &Value) -> String {
         ];
         // a numeric literal is an expression too: quoted, it becomes a
         // string cast to the column's type, which PostgreSQL keeps as
-        // `'3'::smallint` (deviation 29)
-        let numeric =
-            s.parse::<f64>().is_ok() && !s.contains(char::is_alphabetic);
+        // `'3'::smallint` (deviation 29). Only the form pg_dump prints
+        // is bare: no leading zeros, no sign other than '-', digits on
+        // both sides of a decimal point. `'007'` on a text column
+        // must stay a string, not become the integer 7.
+        let numeric = {
+            let digits = s.strip_prefix('-').unwrap_or(s);
+            let (int, frac) = match digits.split_once('.') {
+                Some((i, f)) => (i, Some(f)),
+                None => (digits, None),
+            };
+            !int.is_empty()
+                && int.bytes().all(|b| b.is_ascii_digit())
+                && (int == "0" || !int.starts_with('0'))
+                && frac.is_none_or(|f| {
+                    !f.is_empty() && f.bytes().all(|b| b.is_ascii_digit())
+                })
+        };
         let expression = s.starts_with('\'')
             || (s.contains('(') && s.ends_with(')'))
             || s.contains("::")
@@ -4986,6 +5000,17 @@ mod tests {
         // FUNCTION by stripping the leading DROP off this one
         // (deviation 17)
         assert_eq!(drop, "DROP FUNCTION test.bare_zero();\n");
+    }
+
+    #[test]
+    fn renders_only_canonical_numeric_defaults_bare() {
+        let render = |s: &str| render_default(&Value::String(s.into()));
+        for bare in ["0", "3", "-1", "0.00", "12.5", "-0.5"] {
+            assert_eq!(render(bare), bare);
+        }
+        for quoted in ["007", "+5", ".5", "5.", "-", "1e5"] {
+            assert_eq!(render(quoted), format!("'{quoted}'"));
+        }
     }
 
     #[test]
