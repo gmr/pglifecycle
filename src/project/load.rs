@@ -380,6 +380,23 @@ impl Loader {
                 Definition::EventTrigger(t) => {
                     references.extend(functions(&[&t.function]));
                 }
+                Definition::Language(l) => {
+                    references.extend(functions(&[
+                        &l.handler,
+                        &l.inline_handler,
+                        &l.validator,
+                    ]));
+                }
+                Definition::Function(f) => {
+                    references.extend(f.language.iter().map(|language| {
+                        (ObjectType::ProceduralLanguage, language.clone())
+                    }));
+                }
+                Definition::Procedure(p) => {
+                    references.extend(p.language.iter().map(|language| {
+                        (ObjectType::ProceduralLanguage, language.clone())
+                    }));
+                }
                 Definition::Publication(p) => {
                     for table in p.tables.iter().flatten() {
                         references.push((
@@ -399,25 +416,27 @@ impl Loader {
                     reference.split('(').next().unwrap_or_default();
                 let (namespace, tag) = split_sql_name(reference);
                 let (namespace, tag) = match desc {
-                    ObjectType::Schema => {
+                    ObjectType::Schema | ObjectType::ProceduralLanguage => {
                         (String::new(), reference.to_string())
                     }
                     _ if namespace.is_empty() => (own_schema.to_string(), tag),
                     _ => (namespace, tag),
                 };
-                let found =
-                    lookup_items(&self.index, desc, Some(&namespace), &tag)
-                        .into_iter()
-                        .chain(if desc == ObjectType::Type {
-                            lookup_items(
-                                &self.index,
-                                ObjectType::Domain,
-                                Some(&namespace),
-                                &tag,
-                            )
-                        } else {
-                            Vec::new()
-                        });
+                // a language has no schema, and the index keys it so
+                let namespace = (desc != ObjectType::ProceduralLanguage)
+                    .then_some(namespace.as_str());
+                let found = lookup_items(&self.index, desc, namespace, &tag)
+                    .into_iter()
+                    .chain(if desc == ObjectType::Type {
+                        lookup_items(
+                            &self.index,
+                            ObjectType::Domain,
+                            namespace,
+                            &tag,
+                        )
+                    } else {
+                        Vec::new()
+                    });
                 for parent in found {
                     if parent != id {
                         edges.push((id, parent));

@@ -1,0 +1,6 @@
+# The modeled TOC entry types that no fixture exercises, as
+# bin/parse-coverage prints them. Keep each one with its reason.
+#
+# pg_dump 18 writes a foreign server as SERVER, so no archive that it
+# writes has this type. libpgdump defines the type, and pull accepts it.
+UNEXERCISED FOREIGN SERVER

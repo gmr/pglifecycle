@@ -76,13 +76,16 @@ fn resolves_dependencies() {
         })
         .collect();
     edges.sort();
-    // the exact edge set the Python implementation resolves
+    // the exact edge set the Python implementation resolves, plus the
+    // edge from a routine to its procedural language
     assert_eq!(
         edges,
         vec![
             "AGGREGATE:test_agg -> \
              FUNCTION:test_aggregate(integer, integer)",
             "DOMAIN:bcp47_locale -> EXTENSION:citext",
+            "FUNCTION:utf8_to_latin1(integer, integer, cstring, internal, \
+             integer) -> PROCEDURAL LANGUAGE:plpython3u",
             "MATERIALIZED VIEW:user_addresses -> \
              TABLE:addresses, TABLE:users",
             "SERVER:localhost -> EXTENSION:postgres_fdw",

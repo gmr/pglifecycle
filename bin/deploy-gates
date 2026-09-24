@@ -3,8 +3,9 @@
 #
 #   1. Equivalence — deploy --apply against an empty database yields the
 #      same schema as build + pg_restore (schema-only dumps match).
-#   2. Convergence — mutate the database, deploy --apply --allow-drop,
-#      then a re-deploy produces an empty plan.
+#   2. Convergence — mutate the database; without --allow-drop every
+#      destructive change is withheld and reported, and with it
+#      deploy --apply converges, so a re-deploy produces an empty plan.
 #   3. Safety — without --allow-drop the script has no destructive
 #      statements and --apply refuses while drops are pending.
 #
@@ -49,22 +50,6 @@ psql -d "${SOURCE_DB}" -q -v ON_ERROR_STOP=1 -f fixtures/schema.sql
 # cleared during convergence (gate 2)
 psql -d "${SOURCE_DB}" -q -v ON_ERROR_STOP=1 \
     -c "CREATE VIEW test.deploy_probe AS SELECT 1 AS n;"
-# foreign objects (a handler-less wrapper needs no remote to exist):
-# their options are reconciled in place during convergence (gate 2)
-psql -d "${SOURCE_DB}" -q -v ON_ERROR_STOP=1 <<'SQL'
-CREATE FOREIGN DATA WRAPPER gate_fdw OPTIONS (debug 'true');
-CREATE SERVER gate_srv FOREIGN DATA WRAPPER gate_fdw
-    OPTIONS (host 'h', dbname 'w');
-CREATE USER MAPPING FOR postgres SERVER gate_srv OPTIONS (usr 'u');
-CREATE FOREIGN TABLE test.gate_ft (id integer)
-    SERVER gate_srv OPTIONS (schema_name 'public', table_name 't');
--- an inheriting foreign table: its columns come from the parent, so it
--- declares none of its own, and it must restore after the parent
-CREATE TABLE test.gate_ft_parent (id integer, note text);
-CREATE FOREIGN TABLE test.gate_ft_child (CHECK (id > 0))
-    INHERITS (test.gate_ft_parent)
-    SERVER gate_srv OPTIONS (schema_name 'public', table_name 'c');
-SQL
 
 echo "==> pull a project from ${SOURCE_DB}"
 pg_dump -d "${SOURCE_DB}" -Fc --schema-only -f "${WORKDIR}/source.dump"
@@ -140,6 +125,28 @@ COMMENT ON RULE ledger_audit_insert ON test.ledger IS 'drift';
 CREATE OR REPLACE RULE ledger_view_insert AS ON INSERT TO test.ledger_view
     DO INSTEAD NOTHING;
 SQL
+# every destructive change is run twice: first withheld and reported,
+# then applied with --allow-drop
+./target/debug/pglifecycle deploy -o "${WORKDIR}/withheld.sql" \
+    -d "${TARGET_DB}" "${WORKDIR}/project"
+./target/debug/pglifecycle deploy --allow-drop -o "${WORKDIR}/allowed.sql" \
+    -d "${TARGET_DB}" "${WORKDIR}/project"
+withheld="$(sed -n 's/^-- destructive statements: \([0-9]*\) excluded.*/\1/p' \
+    "${WORKDIR}/withheld.sql")"
+allowed="$(sed -n 's/^-- destructive statements: \([0-9]*\) included$/\1/p' \
+    "${WORKDIR}/allowed.sql")"
+if [ -z "${withheld}" ] || [ "${withheld}" != "${allowed}" ]; then
+    echo "Convergence gate FAILED: ${withheld:-no} statement(s) withheld" \
+        "without --allow-drop, ${allowed:-no} included with it" >&2
+    exit 1
+fi
+if grep -Eq '^(DROP |ALTER TABLE .* DROP COLUMN)' "${WORKDIR}/withheld.sql"
+then
+    echo "Convergence gate FAILED: destructive statement in the script" \
+        "without --allow-drop" >&2
+    cat "${WORKDIR}/withheld.sql" >&2
+    exit 1
+fi
 ./target/debug/pglifecycle deploy --apply --allow-drop -d "${TARGET_DB}" \
     "${WORKDIR}/project"
 ./target/debug/pglifecycle deploy -o "${WORKDIR}/replan.sql" \

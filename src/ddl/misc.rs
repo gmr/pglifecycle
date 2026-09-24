@@ -10,9 +10,9 @@ use crate::ddl::object::string_value;
 use crate::ddl::{NodeExt, Statement, any_name, unquote};
 use crate::models::{
     Aggregate, Argument, Cast, Collation, Conversion, EventTrigger,
-    EventTriggerFilter, FilteredPublicationTable, Operator, Publication,
-    PublicationTable, Rule, Statistics, TextSearchConfig, TextSearchDict,
-    TextSearchParser, TextSearchTemplate,
+    EventTriggerFilter, FilteredPublicationTable, Language, Operator,
+    Publication, PublicationTable, Rule, Statistics, TextSearchConfig,
+    TextSearchDict, TextSearchParser, TextSearchTemplate,
 };
 
 /// A text search object and the schema it belongs to
@@ -489,6 +489,37 @@ pub(crate) fn create_conversion(
     }))
 }
 
+/// CREATE LANGUAGE → Language. pg_dump writes OR REPLACE and no
+/// handler when the handler is not part of the dump, which is the case
+/// for a handler in `pg_catalog`.
+pub(crate) fn create_language(
+    node: &Node,
+    src: &str,
+) -> Result<Statement, String> {
+    let name = node
+        .child_of_kind("name")
+        .map(|n| unquote(n.text(src)))
+        .ok_or_else(|| String::from("CREATE LANGUAGE without a name"))?;
+    let handler = |n: Option<Node>| {
+        n.and_then(|n| n.find_all("handler_name").into_iter().next())
+            .map(|n| n.text(src).to_string())
+    };
+    Ok(Statement::CreateLanguage(Language {
+        name,
+        replace: node
+            .child_of_kind("opt_or_replace")
+            .is_some()
+            .then_some(true),
+        trusted: node.child_of_kind("opt_trusted").is_some().then_some(true),
+        handler: node
+            .child_of_kind("handler_name")
+            .map(|n| n.text(src).to_string()),
+        inline_handler: handler(node.child_of_kind("opt_inline_handler")),
+        validator: handler(node.child_of_kind("opt_validator")),
+        comment: None,
+    }))
+}
+
 /// CREATE EVENT TRIGGER → EventTrigger
 pub(crate) fn create_event_trigger(
     node: &Node,
@@ -844,6 +875,29 @@ mod tests {
         assert_eq!(aggregate.initial_condition.as_deref(), Some("0"));
         assert_eq!(aggregate.parallel.as_deref(), Some("SAFE"));
         assert_eq!(aggregate.hypothetical, Some(true));
+    }
+
+    #[test]
+    fn parses_languages() {
+        let Statement::CreateLanguage(language) = parse_one(
+            "CREATE TRUSTED PROCEDURAL LANGUAGE plcopy HANDLER s.h \
+             INLINE s.i VALIDATOR s.v;",
+        ) else {
+            panic!("expected CreateLanguage")
+        };
+        assert_eq!(language.name, "plcopy");
+        assert_eq!((language.replace, language.trusted), (None, Some(true)));
+        assert_eq!(language.handler.as_deref(), Some("s.h"));
+        assert_eq!(language.inline_handler.as_deref(), Some("s.i"));
+        assert_eq!(language.validator.as_deref(), Some("s.v"));
+        // pg_dump's form for a language whose handler it does not dump
+        let Statement::CreateLanguage(language) =
+            parse_one("CREATE OR REPLACE PROCEDURAL LANGUAGE plcopy;")
+        else {
+            panic!("expected CreateLanguage")
+        };
+        assert_eq!((language.replace, language.trusted), (Some(true), None));
+        assert_eq!(language.handler, None);
     }
 
     #[test]

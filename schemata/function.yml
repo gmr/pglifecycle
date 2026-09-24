@@ -238,11 +238,19 @@ oneOf:
       anyOf:
         - required: [sql, object_file, link_symbol]
         - required: [sql_body]
+        - required: [object_file]
   - required: [language, returns, sql_body]
     not:
       anyOf:
         - required: [sql]
         - required: [definition]
+        - required: [object_file]
+  - required: [language, returns, object_file]
+    not:
+      anyOf:
+        - required: [sql]
+        - required: [definition]
+        - required: [sql_body]
   - required: [sql]
     not:
       required:

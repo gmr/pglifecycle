@@ -454,6 +454,49 @@ COMMENT ON TEXT SEARCH DICTIONARY test.english_simple IS 'Simple, no stopwords';
 CREATE TEXT SEARCH CONFIGURATION test.english_urls (COPY = pg_catalog.english);
 ALTER TEXT SEARCH CONFIGURATION test.english_urls
     ALTER MAPPING FOR url WITH test.english_simple;
+-- a parser and a template, built from the functions of the built-in
+-- ones, with comments
+CREATE TEXT SEARCH PARSER test.default_copy (
+    START = prsd_start, GETTOKEN = prsd_nexttoken, END = prsd_end,
+    LEXTYPES = prsd_lextype, HEADLINE = prsd_headline);
+COMMENT ON TEXT SEARCH PARSER test.default_copy IS 'Copy of default';
+CREATE TEXT SEARCH TEMPLATE test.simple_copy (
+    INIT = dsimple_init, LEXIZE = dsimple_lexize);
+COMMENT ON TEXT SEARCH TEMPLATE test.simple_copy IS 'Copy of simple';
+
+-- Foreign objects: a wrapper with no handler needs no remote server.
+-- The deploy convergence gate changes their options, which deploy has
+-- to reconcile in place.
+CREATE FOREIGN DATA WRAPPER gate_fdw OPTIONS (debug 'true');
+CREATE SERVER gate_srv FOREIGN DATA WRAPPER gate_fdw
+    OPTIONS (host 'h', dbname 'w');
+CREATE USER MAPPING FOR postgres SERVER gate_srv OPTIONS (usr 'u');
+CREATE FOREIGN TABLE test.gate_ft (id integer)
+    SERVER gate_srv OPTIONS (schema_name 'public', table_name 't');
+-- an inheriting foreign table: its columns come from the parent, so it
+-- declares none of its own, and it must restore after the parent
+CREATE TABLE test.gate_ft_parent (id integer, note text);
+CREATE FOREIGN TABLE test.gate_ft_child (CHECK (id > 0))
+    INHERITS (test.gate_ft_parent)
+    SERVER gate_srv OPTIONS (schema_name 'public', table_name 'c');
+
+-- A procedural language that is not an extension, with a function
+-- written in it. Its handlers are plpgsql's, declared in a dumped
+-- schema; pg_dump omits a handler that is in pg_catalog.
+CREATE FUNCTION test.plcopy_handler() RETURNS language_handler
+    LANGUAGE c AS '$libdir/plpgsql', 'plpgsql_call_handler';
+CREATE FUNCTION test.plcopy_inline(internal) RETURNS void
+    LANGUAGE c AS '$libdir/plpgsql', 'plpgsql_inline_handler';
+CREATE FUNCTION test.plcopy_validator(oid) RETURNS void
+    LANGUAGE c AS '$libdir/plpgsql', 'plpgsql_validator';
+CREATE TRUSTED LANGUAGE plcopy HANDLER test.plcopy_handler
+    INLINE test.plcopy_inline VALIDATOR test.plcopy_validator;
+COMMENT ON LANGUAGE plcopy IS 'A copy of plpgsql';
+CREATE FUNCTION test.in_plcopy() RETURNS INTEGER LANGUAGE plcopy AS $$
+BEGIN
+  RETURN 1;
+END;
+$$;
 
 -- Publications: tables with a column list and a row filter, a schema,
 -- and every table. pg_dump writes each table as its own entry.

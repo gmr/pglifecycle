@@ -210,6 +210,9 @@ mod tests {
         assert!(routine("function", &["definition"]));
         assert!(routine("function", &["sql_body"]));
         assert!(!routine("function", &["definition", "sql_body"]));
+        assert!(routine("function", &["object_file"]));
+        assert!(!routine("function", &["object_file", "sql_body"]));
+        assert!(!routine("function", &["object_file", "definition"]));
         assert!(routine("procedure", &["definition"]));
         assert!(routine("procedure", &["sql_body"]));
         assert!(routine("procedure", &["object_file"]));

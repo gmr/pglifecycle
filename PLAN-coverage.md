@@ -1,7 +1,7 @@
 # Coverage plan: silent schema loss, RLS, and PostgreSQL 18
 
-Status: Phases 0 to 5 and 8 complete, and Phase 6 items 1 to 6. Phase
-6 item 7 and Phase 7 proposed.
+Status: Phases 0 to 5, 7 and 8 complete, and Phase 6 items 1 to 6.
+Phase 6 item 7 proposed.
 Written 2026-09-21.
 
 Every claim below was verified against PostgreSQL 18.4 (the version
@@ -637,7 +637,42 @@ Defer until the above land:
    provider on pull even though SQL lets it be omitted, and honour the
    existing `--no-security-labels` flag.
 
-### Phase 7 — Gates and housekeeping (~1 day)
+### Phase 7 — Gates and housekeeping — **DONE**
+
+**Done:** `bin/parse-coverage` (`just parse-coverage`, and a CI step)
+dumps `fixtures/schema.sql` and the pagila schema and checks that they
+contain every type in `pull::MODELED_DESCS`, the list that pull's
+ingest now matches on, and that each of those entries parses. The one
+expected gap is `FOREIGN SERVER`, which pg_dump 18 does not write
+(`fixtures/unexercised-descs.txt`). The deploy convergence gate now
+runs its drift twice: without `--allow-drop` every destructive change
+is withheld and counted in the script header, with no `DROP` in the
+script; with it, the same count is included and the deploy converges.
+Item 5 was already done: `bin/round-trip` restores once more with
+owners applied.
+
+The new gate found four gaps that the other gates did not test:
+
+- **Text search parsers and templates** were modeled but in no
+  fixture. They are in `fixtures/schema.sql` now, and they round-trip.
+- **Foreign-data objects** were only in `bin/deploy-gates`, so the
+  round-trip gate did not test them. They moved to
+  `fixtures/schema.sql`.
+- **A procedural language lost its handler.** pull kept only the name
+  of a language, so the build wrote `CREATE LANGUAGE name` with no
+  handler, and the restore failed. pull now parses `CREATE LANGUAGE`
+  (trusted, handler, inline, validator), routes `COMMENT ON LANGUAGE`,
+  and a language is ordered after its handler functions, and a routine
+  after its language.
+- **A C function did not validate.** `schemata/function.yml` had no
+  body branch for `object_file`, so a pulled C function failed the
+  load. Also, a body in a language that pull does not format came back
+  with an extra blank line at each end; pull now removes the newline
+  after the opening `$$` and the one before the closing `$$`, which
+  build adds again.
+
+The original proposal follows.
+
 
 Four gates, each checking something the others cannot:
 
