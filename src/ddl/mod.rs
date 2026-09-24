@@ -101,6 +101,7 @@ pub enum Statement {
     CreateCast(models::Cast),
     CreateCollation(models::Collation),
     CreateConversion(models::Conversion),
+    CreateLanguage(models::Language),
     CreateEventTrigger(models::EventTrigger),
     /// ALTER EVENT TRIGGER ... ENABLE/DISABLE; `enabled` is `None` for
     /// the default state
@@ -369,6 +370,7 @@ fn dispatch(node: &Node, src: &str) -> Result<Vec<Statement>, String> {
         "CreateConversionStmt" => {
             Ok(vec![misc::create_conversion(node, src)?])
         }
+        "CreatePLangStmt" => Ok(vec![misc::create_language(node, src)?]),
         "CreateEventTrigStmt" => {
             Ok(vec![misc::create_event_trigger(node, src)?])
         }

@@ -380,6 +380,23 @@ impl Loader {
                 Definition::EventTrigger(t) => {
                     references.extend(functions(&[&t.function]));
                 }
+                Definition::Language(l) => {
+                    references.extend(functions(&[
+                        &l.handler,
+                        &l.inline_handler,
+                        &l.validator,
+                    ]));
+                }
+                Definition::Function(f) => {
+                    references.extend(f.language.iter().map(|language| {
+                        (ObjectType::ProceduralLanguage, language.clone())
+                    }));
+                }
+                Definition::Procedure(p) => {
+                    references.extend(p.language.iter().map(|language| {
+                        (ObjectType::ProceduralLanguage, language.clone())
+                    }));
+                }
                 Definition::Publication(p) => {
                     for table in p.tables.iter().flatten() {
                         references.push((
@@ -399,7 +416,7 @@ impl Loader {
                     reference.split('(').next().unwrap_or_default();
                 let (namespace, tag) = split_sql_name(reference);
                 let (namespace, tag) = match desc {
-                    ObjectType::Schema => {
+                    ObjectType::Schema | ObjectType::ProceduralLanguage => {
                         (String::new(), reference.to_string())
                     }
                     _ if namespace.is_empty() => (own_schema.to_string(), tag),

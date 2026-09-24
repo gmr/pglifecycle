@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# Parse-coverage gate:
+#
+#   fixtures/schema.sql and the pagila schema -> PostgreSQL ->
+#   pg_dump -Fc -> examples/parse_coverage -> the gaps it reports
+#   match fixtures/unexercised-descs.txt exactly
+#
+# pull models the TOC entry types in pull::MODELED_DESCS. This gate
+# makes sure that the round-trip gates exercise each one, and that each
+# entry of those types parses into a supported statement. A type that
+# no fixture contains is untested, so it is a gap. The expected list
+# records the types that no fixture can contain, with the reason.
+#
+# Requires a PostgreSQL superuser connection (defaults target the
+# compose.yaml container; override with PGHOST/PGPORT/PGUSER) and the
+# postgres client tools on PATH.
+set -euo pipefail
+
+PGHOST="${PGHOST:-localhost}"
+PGPORT="${PGPORT:-5432}"
+PGUSER="${PGUSER:-postgres}"
+export PGHOST PGPORT PGUSER
+
+FIXTURES=(fixtures/schema.sql fixtures/pagila/pagila-schema.sql)
+EXPECTED=fixtures/unexercised-descs.txt
+WORKDIR="$(mktemp -d)"
+
+cleanup() {
+    rm -rf "${WORKDIR}"
+    for i in "${!FIXTURES[@]}"; do
+        psql -d postgres -q -c "DROP DATABASE IF EXISTS parse_coverage_${i}" \
+            >/dev/null 2>&1 || true
+    done
+}
+
+trap cleanup EXIT INT TERM
+
+echo "==> Building the parse_coverage example"
+cargo build --quiet --example parse_coverage
+
+dumps=()
+for i in "${!FIXTURES[@]}"; do
+    db="parse_coverage_${i}"
+    echo "==> Creating ${db} from ${FIXTURES[$i]}"
+    psql -d postgres -q -c "DROP DATABASE IF EXISTS ${db}"
+    psql -d postgres -q -c "CREATE DATABASE ${db}"
+    psql -d "${db}" -q -v ON_ERROR_STOP=1 -f "${FIXTURES[$i]}" \
+        >/dev/null
+    pg_dump -d "${db}" -Fc --schema-only -f "${WORKDIR}/${i}.dump"
+    dumps+=("${WORKDIR}/${i}.dump")
+done
+
+echo "==> Checking the modeled entry types"
+./target/debug/examples/parse_coverage "${dumps[@]}" > "${WORKDIR}/actual"
+# the expected list carries comments that give the reasons
+grep -v '^#' "${EXPECTED}" > "${WORKDIR}/expected"
+if diff -u "${WORKDIR}/expected" "${WORKDIR}/actual"; then
+    echo "Parse-coverage gate passed: every modeled type is exercised"
+else
+    echo "Parse-coverage gate FAILED: the gaps differ from ${EXPECTED}" >&2
+    exit 1
+fi

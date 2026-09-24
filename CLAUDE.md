@@ -100,10 +100,11 @@ request; run them locally first.
 just db-up          # start the container, wait until healthy
 just db-port        # print the mapped host port
 just coverage-gate  # which objects pull still cannot model
+just parse-coverage # the fixtures exercise every type pull models
 just round-trip     # schema → pull → build → restore → diff
 just pagila-gate    # the round-trip gate on the pagila sample schema
 just deploy-gates   # deploy equivalence / convergence / safety
-just gates          # all four
+just gates          # all five
 ```
 
 The gate recipes discover the mapped port automatically. To run a gate
@@ -118,6 +119,14 @@ stays an accurate record of what the tool drops. Constructs that parse
 into the *wrong* model belong in `fixtures/schema.sql` instead, where
 the round-trip gate's schema diff catches them.
 
+`just parse-coverage` dumps `fixtures/schema.sql` and the pagila
+schema, and checks that they contain every TOC entry type in
+`pull::MODELED_DESCS` and that each of those entries parses
+(`examples/parse_coverage.rs`). A modeled type that no fixture contains
+is untested; `fixtures/unexercised-descs.txt` lists the few that no
+fixture can contain, each with its reason. When you model a new type,
+add it to `MODELED_DESCS` and to `fixtures/schema.sql`.
+
 ## Key directories
 
 - `schemata/` — JSON-Schema (YAML) definitions for PostgreSQL objects;
@@ -125,7 +134,8 @@ the round-trip gate's schema diff catches them.
 - `test-project/` — example project structure; a parity contract.
 - `fixtures/` — test database schemata: `schema.sql` for the
   round-trip and deploy gates, `unsupported.sql` plus
-  `unsupported-descs.txt` for the coverage gate.
+  `unsupported-descs.txt` for the coverage gate, and
+  `unexercised-descs.txt` for the parse-coverage gate.
 - `bin/` — gate scripts and fixture-data generation.
 - `docs/` — properdocs site (a MkDocs 1.x fork; `just docs` builds
   with `--strict`).

@@ -76,6 +76,13 @@ coverage-gate: build db-up
     PGUSER=postgres \
     bin/coverage-gate
 
+# Parse-coverage gate (the fixtures exercise every type pull models)
+parse-coverage: db-up
+    PGHOST=localhost \
+    PGPORT="$(docker compose port postgres 5432 | cut -d: -f2)" \
+    PGUSER=postgres \
+    bin/parse-coverage
+
 # Round-trip gate (schema → pull → build → restore → diff)
 round-trip: build db-up
     PGHOST=localhost \
@@ -100,7 +107,7 @@ pagila-gate: build db-up
     bin/round-trip fixtures/pagila/pagila-schema.sql pagila
 
 # Every database gate
-gates: coverage-gate round-trip pagila-gate deploy-gates
+gates: coverage-gate parse-coverage round-trip pagila-gate deploy-gates
 
 # --- Docs ------------------------------------------------------------
 

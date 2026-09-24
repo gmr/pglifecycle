@@ -21,6 +21,61 @@ use crate::ddl::{self, Acl, AclTarget, QualifiedName, RoleDef, Statement};
 use crate::models;
 use crate::{cli, diagnostics, pgdump, progress};
 
+/// Every TOC entry type that pull models. pull parses the DDL of each
+/// one, except for extension entries, which it models from the entry
+/// itself. Every other type goes to
+/// `remaining`. The parse-coverage gate (`bin/parse-coverage`) makes
+/// sure that the fixtures exercise each type in this list.
+pub const MODELED_DESCS: &[libpgdump::ObjectType] = {
+    use libpgdump::ObjectType as OT;
+    &[
+        OT::Extension,
+        OT::ProceduralLanguage,
+        OT::Schema,
+        OT::Domain,
+        OT::Type,
+        OT::Table,
+        OT::View,
+        OT::MaterializedView,
+        OT::Function,
+        OT::Sequence,
+        OT::SequenceOwnedBy,
+        OT::Index,
+        OT::Constraint,
+        OT::FkConstraint,
+        OT::CheckConstraint,
+        OT::Default,
+        OT::TableAttach,
+        OT::Trigger,
+        OT::Policy,
+        OT::RowSecurity,
+        OT::Aggregate,
+        OT::Cast,
+        OT::Collation,
+        OT::Conversion,
+        OT::EventTrigger,
+        OT::Publication,
+        OT::PublicationTable,
+        OT::PublicationTablesInSchema,
+        OT::TextSearchConfiguration,
+        OT::TextSearchDictionary,
+        OT::TextSearchParser,
+        OT::TextSearchTemplate,
+        OT::DefaultAcl,
+        OT::Statistics,
+        OT::Rule,
+        OT::Procedure,
+        OT::Operator,
+        OT::ForeignTable,
+        OT::ForeignDataWrapper,
+        OT::ForeignServer,
+        OT::Server,
+        OT::UserMapping,
+        OT::Comment,
+        OT::Acl,
+    ]
+};
+
 /// The root-level file holding dump entries that could not be modeled
 pub(super) const REMAINING_FILE: &str = "remaining.yaml";
 
@@ -570,59 +625,7 @@ impl Assembly {
                         .map(|v| v == "on");
                 }
                 OT::Extension => self.extensions.push(extension(entry)),
-                OT::ProceduralLanguage => {
-                    self.languages.push(models::Language {
-                        name: entry.tag.clone().unwrap_or_default(),
-                        replace: None,
-                        trusted: None,
-                        handler: None,
-                        inline_handler: None,
-                        validator: None,
-                        comment: None,
-                    });
-                }
-                OT::Schema
-                | OT::Domain
-                | OT::Type
-                | OT::Table
-                | OT::View
-                | OT::MaterializedView
-                | OT::Function
-                | OT::Sequence
-                | OT::SequenceOwnedBy
-                | OT::Index
-                | OT::Constraint
-                | OT::FkConstraint
-                | OT::CheckConstraint
-                | OT::Default
-                | OT::TableAttach
-                | OT::Trigger
-                | OT::Policy
-                | OT::RowSecurity
-                | OT::Aggregate
-                | OT::Cast
-                | OT::Collation
-                | OT::Conversion
-                | OT::EventTrigger
-                | OT::Publication
-                | OT::PublicationTable
-                | OT::PublicationTablesInSchema
-                | OT::TextSearchConfiguration
-                | OT::TextSearchDictionary
-                | OT::TextSearchParser
-                | OT::TextSearchTemplate
-                | OT::DefaultAcl
-                | OT::Statistics
-                | OT::Rule
-                | OT::Procedure
-                | OT::Operator
-                | OT::ForeignTable
-                | OT::ForeignDataWrapper
-                | OT::ForeignServer
-                | OT::Server
-                | OT::UserMapping
-                | OT::Comment
-                | OT::Acl => {
+                desc if MODELED_DESCS.contains(desc) => {
                     let Some(defn) = &entry.defn else { continue };
                     let label = format!(
                         "{} {}",
@@ -1031,6 +1034,9 @@ impl Assembly {
                 collation.owner = owner;
                 self.collations.push(collation);
             }
+            Statement::CreateLanguage(language) => {
+                self.languages.push(language);
+            }
             Statement::CreateConversion(mut conversion) => {
                 conversion.owner = owner;
                 self.conversions.push(conversion);
@@ -1421,6 +1427,12 @@ impl Assembly {
                 .iter_mut()
                 .find(|e| e.name == *name)
                 .map(|e| e.comment = Some(comment.clone()))
+                .is_some(),
+            "LANGUAGE" => self
+                .languages
+                .iter_mut()
+                .find(|l| l.name == *name)
+                .map(|l| l.comment = Some(comment.clone()))
                 .is_some(),
             "TABLE" | "FOREIGN TABLE" => self
                 .find_table(target)
@@ -2015,7 +2027,10 @@ impl Assembly {
             let plpgsql = match function.language.as_deref() {
                 Some("plpgsql") => true,
                 Some("sql") => false,
-                _ => continue,
+                _ => {
+                    function.definition = Some(unwrap_body(definition));
+                    continue;
+                }
             };
             let label = format!("function {}", function.name);
             if let Some(formatted) =
@@ -2036,7 +2051,10 @@ impl Assembly {
             let plpgsql = match procedure.language.as_deref() {
                 Some("plpgsql") => true,
                 Some("sql") => false,
-                _ => continue,
+                _ => {
+                    procedure.definition = Some(unwrap_body(definition));
+                    continue;
+                }
             };
             let label = format!("procedure {}", procedure.name);
             if let Some(formatted) =
@@ -2111,6 +2129,16 @@ fn entry_label(entry: &libpgdump::Entry) -> String {
         }
         None => format!("{} {tag}", entry.desc.as_str()),
     }
+}
+
+/// A body in a language that is not formatted, without the newline
+/// after its opening `$$` and the one before its closing `$$`: build
+/// writes those newlines around every body
+fn unwrap_body(body: &str) -> String {
+    body.strip_prefix('\n')
+        .and_then(|body| body.strip_suffix('\n'))
+        .unwrap_or(body)
+        .to_string()
 }
 
 fn strip_trailing(formatted: &str) -> String {
@@ -2479,6 +2507,14 @@ mod tests {
         let mut assembly = Assembly::default();
         assembly.ingest(&fixture_dump()).unwrap();
         assembly
+    }
+
+    #[test]
+    fn unwrap_body_removes_one_newline_at_each_end() {
+        assert_eq!(unwrap_body("\nBEGIN\nEND;\n"), "BEGIN\nEND;");
+        assert_eq!(unwrap_body("\n\nx\n\n"), "\nx\n");
+        assert_eq!(unwrap_body("begin return 1; end"), "begin return 1; end");
+        assert_eq!(unwrap_body("\nx"), "\nx");
     }
 
     #[test]

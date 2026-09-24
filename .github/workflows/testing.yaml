@@ -122,6 +122,9 @@ jobs:
       - name: Coverage gate
         run: bin/coverage-gate
 
+      - name: Parse-coverage gate
+        run: bin/parse-coverage
+
       - name: Round-trip gate
         run: bin/round-trip
 
