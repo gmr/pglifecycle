@@ -726,51 +726,15 @@ impl Assembly {
             let key = (partition.schema.clone(), partition.name.clone());
             match self.table_index.get(&key).and_then(|&i| self.tables.get(i))
             {
+                // a partition with properties of its own stays a table,
+                // attached to its parent; one without folds into the
+                // parent's partitions, modeled by its bounds
+                Some(child) if child.has_own_partition_properties() => {
+                    partition.attached = Some(true);
+                }
                 Some(child) => {
                     if partition.comment.is_none() {
                         partition.comment = child.comment.clone();
-                    }
-                    // a partition is modeled by its bounds alone, so
-                    // row security of its own would be lost with the
-                    // child table; record it so the pull fails
-                    if child.row_level_security.is_some()
-                        || child.policies.is_some()
-                    {
-                        log::warn!(
-                            "Cannot model row security of partition {}.{}",
-                            partition.schema,
-                            partition.name
-                        );
-                        self.remaining.push(Remaining {
-                            desc: String::from("ROW SECURITY"),
-                            namespace: Some(partition.schema.clone()),
-                            tag: Some(partition.name.clone()),
-                            defn: None,
-                        });
-                    }
-                    // a partition keeps its own replica identity, which
-                    // would be lost in the same way; keep its statement
-                    if let Some(sql) = crate::build::render_replica_identity(
-                        child.replica_identity.as_ref(),
-                        &format!(
-                            "{}.{}",
-                            crate::utils::quote_ident(&partition.schema),
-                            crate::utils::quote_ident(&partition.name)
-                        ),
-                        |_| true,
-                    ) {
-                        log::warn!(
-                            "Cannot model replica identity of partition \
-                             {}.{}",
-                            partition.schema,
-                            partition.name
-                        );
-                        self.remaining.push(Remaining {
-                            desc: String::from("REPLICA IDENTITY"),
-                            namespace: Some(partition.schema.clone()),
-                            tag: Some(partition.name.clone()),
-                            defn: Some(format!("{sql};")),
-                        });
                     }
                     removed.insert(key);
                 }
@@ -3148,9 +3112,10 @@ mod tests {
     }
 
     #[test]
-    fn partition_replica_identity_is_recorded_as_remaining() {
-        // a partition keeps its own replica identity; the model cannot
-        // hold it, so the pull must record it and fail, not drop it
+    fn partition_with_its_own_properties_stays_a_table() {
+        // a partition with a replica identity, or anything else of its
+        // own, stays a table attached to its parent, where a partition
+        // modeled by its bounds alone would lose it
         let mut dump = libpgdump::new("fixtures", "UTF8", "18.0").unwrap();
         add(&mut dump, OT::Schema, "", "test", "CREATE SCHEMA test;");
         add(
@@ -3180,29 +3145,21 @@ mod tests {
         );
         let mut assembly = Assembly::default();
         assembly.ingest(&dump).unwrap();
-        assert_eq!(assembly.tables.len(), 1);
-        let entry = assembly
-            .remaining
-            .iter()
-            .find(|r| {
-                r.desc == "REPLICA IDENTITY"
-                    && r.tag.as_deref() == Some("events_2024")
-            })
-            .unwrap_or_else(|| {
-                panic!(
-                    "{:?}",
-                    assembly
-                        .remaining
-                        .iter()
-                        .map(|r| (&r.desc, &r.tag))
-                        .collect::<Vec<_>>()
-                )
-            });
-        // the statement is kept, so the mode is not lost
+        assert!(assembly.remaining.is_empty(), "{:?}", assembly.remaining);
+        let table = |name: &str| {
+            assembly
+                .tables
+                .iter()
+                .find(|t| t.name == name)
+                .unwrap_or_else(|| panic!("no table {name}"))
+        };
         assert_eq!(
-            entry.defn.as_deref(),
-            Some("ALTER TABLE ONLY test.events_2024 REPLICA IDENTITY FULL;")
+            table("events_2024").replica_identity,
+            Some(models::ReplicaIdentity::Mode(String::from("FULL")))
         );
+        let partitions = table("events").partitions.as_ref().unwrap();
+        assert_eq!(partitions[0].name, "events_2024");
+        assert_eq!(partitions[0].attached, Some(true));
     }
 
     #[test]

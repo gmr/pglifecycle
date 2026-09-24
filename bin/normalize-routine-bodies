@@ -1,0 +1,29 @@
+#!/usr/bin/env python3
+"""Normalize routine bodies in a pg_dump --schema-only text dump.
+
+pull formats function and procedure bodies with libpgfmt, which
+re-indents them and ends the last statement with a semicolon, so a body
+written in another style dumps differently after a round trip although
+it is the same code. This removes whitespace and semicolons inside each
+dollar-quoted body and each SQL-standard body (BEGIN ATOMIC ... END), so
+the round-trip diff compares their content. Everything outside a body
+is left as it is.
+
+    bin/normalize-routine-bodies < dump.sql > normalized.sql
+"""
+
+import re
+import sys
+
+DOLLAR = re.compile(r"AS (\$[A-Za-z_]*\$)(.*?)\1", re.DOTALL)
+ATOMIC = re.compile(r"BEGIN ATOMIC\n(.*?)\nEND;", re.DOTALL)
+
+
+def squeeze(body: str) -> str:
+    return re.sub(r"[\s;]+", "", body)
+
+
+text = sys.stdin.read()
+text = DOLLAR.sub(lambda m: f"AS {m[1]}{squeeze(m[2])}{m[1]}", text)
+text = ATOMIC.sub(lambda m: f"BEGIN ATOMIC {squeeze(m[1])} END;", text)
+sys.stdout.write(text)

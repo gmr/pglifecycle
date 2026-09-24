@@ -245,6 +245,13 @@ revocations:
     privileges: [EXECUTE]
 ```
 
+- A partition is listed in its parent's `partitions` by its bounds.
+  A partition with properties of its own (indexes, constraints,
+  defaults, triggers, a replica identity, …) is also a table file of
+  its own, and its entry in the parent's list has `attached: true`:
+  `build` creates it as an ordinary table and attaches it with `ALTER
+  TABLE ... ATTACH PARTITION`, as `pg_dump` writes it.
+
 - A cast has no schema of its own. `pull` files it in the
   `casts/<schema>.yaml` of the first schema its function or types name,
   or `public` when they are all built-in.

@@ -123,6 +123,9 @@
 //!     0) OWNER TO ...` does not parse, so a routine with a default
 //!     failed to get its owner. No test-project function has a
 //!     default.
+//! 29. A default that is a numeric literal renders bare. The Python
+//!     quoted it, so `DEFAULT 3` on a smallint came back as `DEFAULT
+//!     '3'::smallint`.
 
 mod acls;
 
@@ -175,6 +178,7 @@ pub fn assemble(project: &Project) -> Result<BuildOutput, String> {
         dump,
         dump_id_map: HashMap::new(),
         text_search_last: HashMap::new(),
+        pending_attaches: Vec::new(),
         text_search_ids: HashMap::new(),
         text_search_refs: Vec::new(),
         superuser: project.superuser.clone(),
@@ -221,6 +225,7 @@ pub fn assemble(project: &Project) -> Result<BuildOutput, String> {
         }
     }
     builder.apply_text_search_references();
+    builder.apply_attaches(project)?;
     builder.split_column_defaults(project)?;
     let item_ids = builder
         .dump_id_map
@@ -238,12 +243,22 @@ const TS_TEMPLATE: &str = "TEXT SEARCH TEMPLATE";
 const TS_DICTIONARY: &str = "TEXT SEARCH DICTIONARY";
 const TS_CONFIGURATION: &str = "TEXT SEARCH CONFIGURATION";
 
+/// An ATTACH PARTITION waiting for its child table's entry
+struct PendingAttach {
+    parent: i32,
+    parent_name: String,
+    owner: String,
+    partition: TablePartition,
+}
+
 struct Builder {
     dump: libpgdump::Dump,
     dump_id_map: HashMap<usize, i32>,
     /// The last entry each text search container added (see
     /// `add_text_search_item`)
     text_search_last: HashMap<usize, i32>,
+    /// ATTACH PARTITION entries to add once every table has its entry
+    pending_attaches: Vec<PendingAttach>,
     /// The entry of each text search object, by its kind, schema and
     /// name
     text_search_ids: HashMap<(&'static str, String, String), i32>,
@@ -1856,6 +1871,17 @@ impl Builder {
             quote_ident(&partition.schema),
             quote_ident(&partition.name)
         );
+        // a partition that is its own table is created from its own
+        // file; here it is only attached, once both tables exist
+        if partition.attached == Some(true) {
+            self.pending_attaches.push(PendingAttach {
+                parent: self.dump_id_map[&parent.id],
+                parent_name: self.item_name(parent),
+                owner: table.owner.clone(),
+                partition: partition.clone(),
+            });
+            return Ok(());
+        }
         let mut create = vec![
             "CREATE TABLE".into(),
             qualified.clone(),
@@ -2487,6 +2513,54 @@ impl Builder {
         }
     }
 
+    /// `ALTER TABLE ONLY parent ATTACH PARTITION child FOR VALUES ...`
+    /// for each partition that is a table of its own, as pg_dump writes
+    /// it, after both tables. A partition whose table the project does
+    /// not have cannot be attached, which is an error in the project.
+    fn apply_attaches(&mut self, project: &Project) -> Result<(), String> {
+        for attach in std::mem::take(&mut self.pending_attaches) {
+            let partition = &attach.partition;
+            let child = project
+                .inventory
+                .iter()
+                .find(|item| {
+                    item.desc == crate::constants::ObjectType::Table
+                        && item.definition.schema() == Some(&partition.schema)
+                        && item.definition.name() == partition.name
+                })
+                .and_then(|item| self.dump_id_map.get(&item.id).copied())
+                .ok_or_else(|| {
+                    format!(
+                        "attached partition {}.{} of {} has no table",
+                        partition.schema, partition.name, attach.parent_name
+                    )
+                })?;
+            let qualified = format!(
+                "{}.{}",
+                quote_ident(&partition.schema),
+                quote_ident(&partition.name)
+            );
+            let create = vec![format!(
+                "ALTER TABLE ONLY {} ATTACH PARTITION {qualified} {}",
+                attach.parent_name,
+                render_partition_for_values(partition)
+            )];
+            // no drop statement, as pg_dump stores none: with one,
+            // pg_restore tries to set an owner on the entry and fails
+            self.add_entry(
+                "TABLE ATTACH",
+                &partition.schema,
+                &partition.name,
+                &attach.owner,
+                &create,
+                &[],
+                &[attach.parent, child],
+                None,
+            )?;
+        }
+        Ok(())
+    }
+
     /// Order each text search entry after the text search objects it
     /// names. The container of a schema is too coarse to order: two
     /// schemas whose configurations use a dictionary of the other make
@@ -2912,9 +2986,15 @@ pub(crate) fn render_default(value: &Value) -> String {
             "SESSION_USER",
             "USER",
         ];
+        // a numeric literal is an expression too: quoted, it becomes a
+        // string cast to the column's type, which PostgreSQL keeps as
+        // `'3'::smallint` (deviation 29)
+        let numeric =
+            s.parse::<f64>().is_ok() && !s.contains(char::is_alphabetic);
         let expression = s.starts_with('\'')
             || (s.contains('(') && s.ends_with(')'))
             || s.contains("::")
+            || numeric
             || RAW_KEYWORDS.iter().any(|kw| s.eq_ignore_ascii_case(kw));
         if expression {
             return s.clone();
@@ -3907,6 +3987,7 @@ mod tests {
             dump,
             dump_id_map: HashMap::new(),
             text_search_last: HashMap::new(),
+            pending_attaches: Vec::new(),
             text_search_ids: HashMap::new(),
             text_search_refs: Vec::new(),
             superuser: "postgres".into(),
@@ -4359,6 +4440,7 @@ mod tests {
             dump,
             dump_id_map: HashMap::new(),
             text_search_last: HashMap::new(),
+            pending_attaches: Vec::new(),
             text_search_ids: HashMap::new(),
             text_search_refs: Vec::new(),
             superuser: "postgres".into(),
@@ -4380,6 +4462,7 @@ mod tests {
             dump,
             dump_id_map: HashMap::new(),
             text_search_last: HashMap::new(),
+            pending_attaches: Vec::new(),
             text_search_ids: HashMap::new(),
             text_search_refs: Vec::new(),
             superuser: "postgres".into(),
@@ -4614,6 +4697,7 @@ mod tests {
             dump,
             dump_id_map: HashMap::new(),
             text_search_last: HashMap::new(),
+            pending_attaches: Vec::new(),
             text_search_ids: HashMap::new(),
             text_search_refs: Vec::new(),
             superuser: "postgres".into(),
@@ -4669,6 +4753,7 @@ mod tests {
             dump,
             dump_id_map: HashMap::new(),
             text_search_last: HashMap::new(),
+            pending_attaches: Vec::new(),
             text_search_ids: HashMap::new(),
             text_search_refs: Vec::new(),
             superuser: "postgres".into(),
@@ -4767,6 +4852,7 @@ mod tests {
             for_values_from: None,
             for_values_to: None,
             for_values_with: None,
+            attached: None,
             comment: None,
         }]);
         let item = table_item(1, table);
@@ -4789,6 +4875,7 @@ mod tests {
             for_values_from: Some(json!("2024-01-01")),
             for_values_to: Some(json!("MAXVALUE")),
             for_values_with: None,
+            attached: None,
             comment: None,
         }]);
         let item = table_item(1, table);
@@ -4811,6 +4898,7 @@ mod tests {
             for_values_from: None,
             for_values_to: None,
             for_values_with: None,
+            attached: None,
             comment: None,
         }]);
         let item = table_item(1, table);
@@ -4864,6 +4952,7 @@ mod tests {
             dump,
             dump_id_map: HashMap::new(),
             text_search_last: HashMap::new(),
+            pending_attaches: Vec::new(),
             text_search_ids: HashMap::new(),
             text_search_refs: Vec::new(),
             superuser: "postgres".into(),

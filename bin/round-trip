@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Round-trip gate:
 #
-#   fixtures/schema.sql -> PostgreSQL -> pg_dump -Fc -> pull ->
+#   bin/round-trip [FIXTURE [NAME]]
+#
+#   FIXTURE -> PostgreSQL -> pg_dump -Fc -> pull ->
 #   load + validate -> build -> pg_restore -> pg_dump --schema-only
 #   of both databases -> diff is empty
 #
@@ -11,17 +13,29 @@
 # Requires a PostgreSQL superuser connection (defaults target the
 # compose.yaml container; override with PGHOST/PGPORT/PGUSER) and the
 # postgres client tools on PATH. All commands run via psql/pg_dump
-# against two scratch databases that are dropped and recreated.
+# against scratch databases, named NAME_source, NAME_restored and
+# NAME_owned, that are dropped and recreated. FIXTURE defaults to
+# fixtures/schema.sql and NAME to roundtrip.
+#
+# pull formats routine bodies, so a fixture that is not written in the
+# formatter's style dumps its bodies differently after the round trip.
+# NORMALIZE_BODIES=1 compares the bodies with whitespace and semicolons
+# removed (bin/normalize-routine-bodies); everything else is compared
+# exactly. fixtures/schema.sql is written in that style and needs no
+# normalizing.
 set -euo pipefail
+
+FIXTURE="${1:-fixtures/schema.sql}"
+NAME="${2:-roundtrip}"
 
 PGHOST="${PGHOST:-localhost}"
 PGPORT="${PGPORT:-5432}"
 PGUSER="${PGUSER:-postgres}"
 export PGHOST PGPORT PGUSER
 
-SOURCE_DB=roundtrip_source
-RESTORED_DB=roundtrip_restored
-OWNED_DB=roundtrip_owned
+SOURCE_DB="${NAME}_source"
+RESTORED_DB="${NAME}_restored"
+OWNED_DB="${NAME}_owned"
 WORKDIR="$(mktemp -d)"
 
 cleanup() {
@@ -39,10 +53,10 @@ trap cleanup EXIT INT TERM
 echo "==> Building pglifecycle"
 cargo build --quiet
 
-echo "==> Creating ${SOURCE_DB} from fixtures/schema.sql"
+echo "==> Creating ${SOURCE_DB} from ${FIXTURE}"
 psql -d postgres -q -c "DROP DATABASE IF EXISTS ${SOURCE_DB}"
 psql -d postgres -q -c "CREATE DATABASE ${SOURCE_DB}"
-psql -d "${SOURCE_DB}" -q -v ON_ERROR_STOP=1 -f fixtures/schema.sql
+psql -d "${SOURCE_DB}" -q -v ON_ERROR_STOP=1 -f "${FIXTURE}"
 
 echo "==> pg_dump ${SOURCE_DB}"
 pg_dump -d "${SOURCE_DB}" -Fc --schema-only -f "${WORKDIR}/source.dump"
@@ -84,11 +98,20 @@ psql -d postgres -q -c "CREATE DATABASE ${OWNED_DB}"
 pg_restore -d "${OWNED_DB}" --exit-on-error "${WORKDIR}/build.dump"
 
 echo "==> Comparing schema-only dumps"
+normalize() {
+    if [ "${NORMALIZE_BODIES:-0}" = "1" ]; then
+        bin/normalize-routine-bodies
+    else
+        cat
+    fi
+}
 # the \restrict/\unrestrict psql guards carry a random per-dump token
 pg_dump -d "${SOURCE_DB}" --schema-only --no-owner \
-    | grep -v '^\\\(un\)\{0,1\}restrict ' > "${WORKDIR}/source.sql"
+    | grep -v '^\\\(un\)\{0,1\}restrict ' | normalize \
+    > "${WORKDIR}/source.sql"
 pg_dump -d "${RESTORED_DB}" --schema-only --no-owner \
-    | grep -v '^\\\(un\)\{0,1\}restrict ' > "${WORKDIR}/restored.sql"
+    | grep -v '^\\\(un\)\{0,1\}restrict ' | normalize \
+    > "${WORKDIR}/restored.sql"
 if diff -u "${WORKDIR}/source.sql" "${WORKDIR}/restored.sql"; then
     echo "Round-trip gate passed: schema diff is empty"
 else

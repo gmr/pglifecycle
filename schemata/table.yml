@@ -587,6 +587,13 @@ properties:
           title: Partition Values With Expression
           description: Used in HASH partitioning
           type: string
+        attached:
+          title: Attached
+          description: >
+            The partition is a table of its own in the project, created on
+            its own and attached with ATTACH PARTITION, because it has
+            indexes, constraints or other properties of its own
+          type: boolean
         comment:
           title: Comment
           description: An optional comment about the partition
