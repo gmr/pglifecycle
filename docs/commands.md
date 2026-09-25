@@ -87,6 +87,12 @@ reconciled in place where PostgreSQL can express it:
   comment), and comment changes, including comments on constraints. A
   changed comment on a constraint is set alone, without rebuilding the
   constraint; a constraint that is re-added gets its comment again.
+  A changed comment on an index is set alone, too. The indexes of a
+  partitioned table and of its partitions change as one group:
+  PostgreSQL does not drop an index that is attached to another, and
+  dropping the partitioned table's index drops its partitions'. So when
+  any index of the group changes, deploy drops the partitioned table's
+  index, then makes all of them again and attaches them.
   Identity columns are added, and their `ALWAYS`/`BY DEFAULT` behavior
   and sequence options changed, with `ALTER COLUMN`; renaming an
   identity's sequence falls back. A `NOT VALID` check, foreign key or

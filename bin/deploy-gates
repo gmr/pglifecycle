@@ -88,8 +88,11 @@ echo "==> Gate 2: convergence (mutate, deploy --apply, re-deploy is empty)"
 # and cleared, and a commented check replaced by a different one, whose
 # comment deploy has to set again after re-adding it; rules
 # re-enabled, dropped, commented and replaced, on a table and a view;
-# a partitioned table's index dropped, which drops its partitions'
-# indexes too, so deploy has to make and attach them again
+# a partitioned table's index made again with another definition, as
+# are its partitions' indexes, so deploy has to drop the group and
+# make and attach it again; and a comment on an attached partition
+# index, which deploy has to change in place, because PostgreSQL does
+# not drop an attached index
 psql -d "${TARGET_DB}" -q -v ON_ERROR_STOP=1 <<'SQL'
 ALTER TABLE test.users ADD COLUMN scratch text;
 ALTER TABLE test.users ALTER COLUMN display_name SET NOT NULL;
@@ -127,6 +130,12 @@ COMMENT ON RULE ledger_audit_insert ON test.ledger IS 'drift';
 CREATE OR REPLACE RULE ledger_view_insert AS ON INSERT TO test.ledger_view
     DO INSTEAD NOTHING;
 DROP INDEX test.readings_taken;
+CREATE INDEX readings_taken ON ONLY test.readings (taken DESC);
+CREATE INDEX readings_2020_by_day ON test.readings_2020 (taken DESC);
+ALTER INDEX test.readings_taken ATTACH PARTITION test.readings_2020_by_day;
+CREATE INDEX readings_2021_by_day ON test.readings_2021 (taken DESC);
+ALTER INDEX test.readings_taken ATTACH PARTITION test.readings_2021_by_day;
+COMMENT ON INDEX test.readings_2021_id_idx IS 'drift';
 SQL
 # every destructive change is run twice: first withheld and reported,
 # then applied with --allow-drop
@@ -143,7 +152,9 @@ if [ -z "${withheld}" ] || [ "${withheld}" != "${allowed}" ]; then
         "without --allow-drop, ${allowed:-no} included with it" >&2
     exit 1
 fi
-if grep -Eq '^(DROP |ALTER TABLE .* DROP COLUMN)' "${WORKDIR}/withheld.sql"
+# an index drop loses no data, so deploy does not withhold it
+if grep -v '^DROP INDEX ' "${WORKDIR}/withheld.sql" \
+        | grep -Eq '^(DROP |ALTER TABLE .* DROP COLUMN)'
 then
     echo "Convergence gate FAILED: destructive statement in the script" \
         "without --allow-drop" >&2
