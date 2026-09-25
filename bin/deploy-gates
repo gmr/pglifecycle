@@ -172,6 +172,22 @@ else
     cat "${WORKDIR}/replan.sql" >&2
     exit 1
 fi
+# a renamed partition index whose partitioned table has no other
+# change: deploy has to rebuild the group from the partitioned table,
+# because PostgreSQL does not attach a second index for the same parent
+psql -d "${TARGET_DB}" -q -v ON_ERROR_STOP=1 \
+    -c "ALTER INDEX test.readings_2020_id_idx RENAME TO readings_2020_id_drift;"
+./target/debug/pglifecycle deploy --apply --allow-drop -d "${TARGET_DB}" \
+    "${WORKDIR}/project"
+./target/debug/pglifecycle deploy -o "${WORKDIR}/replan.sql" \
+    -d "${TARGET_DB}" "${WORKDIR}/project"
+if grep -q '^-- no changes' "${WORKDIR}/replan.sql"; then
+    echo "Convergence gate passed: partition index group rebuilt"
+else
+    echo "Convergence gate FAILED: partition index group not rebuilt" >&2
+    cat "${WORKDIR}/replan.sql" >&2
+    exit 1
+fi
 
 echo "==> Gate 3: safety (drops gated without --allow-drop)"
 psql -d "${TARGET_DB}" -q -v ON_ERROR_STOP=1 \

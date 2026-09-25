@@ -116,9 +116,10 @@ fn as_table(definition: &Definition) -> Option<&crate::models::Table> {
 }
 
 /// The index groups of partitioned tables that the plan rebuilds (see
-/// [`alter::IndexGroups`]). A partition whose table has no other change
-/// still has indexes in a rebuilt group, which the rebuild drops, so
-/// its table is marked changed to make them again.
+/// [`alter::IndexGroups`]). A table with no other change can still have
+/// indexes in a rebuilt group, so its table is marked changed: the
+/// partitioned table drops and makes again the group's index, and a
+/// partition makes its indexes again after the drop.
 fn partition_index_groups(
     project: &project::Project,
     diff: &mut Diff,
@@ -139,10 +140,14 @@ fn partition_index_groups(
         if diff.items.get(&item.id) != Some(&Change::Unchanged) {
             continue;
         }
+        // a partitioned table whose index is in a group, or a partition
+        // whose index belongs to one
         let in_group = table.indexes.iter().flatten().any(|index| {
-            index.parent.as_deref().is_some_and(|parent| {
-                groups.contains(&alter::parent_index(parent, &table.schema))
-            })
+            groups.contains(&(table.schema.clone(), index.name.clone()))
+                || index.parent.as_deref().is_some_and(|parent| {
+                    groups
+                        .contains(&alter::parent_index(parent, &table.schema))
+                })
         });
         if in_group {
             // unchanged, so the project's copy is the database's
