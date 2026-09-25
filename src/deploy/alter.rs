@@ -19,6 +19,7 @@ use crate::models::{
     Rule, Schema, Sequence, SequenceOptions, Server, Table, Trigger, Type,
     UserMapping, View, ViewColumn,
 };
+use crate::project::split_sql_name;
 use crate::utils::{
     dollar_quote, postgres_value, quote_ident, raw_value, user_mapping_subject,
 };
@@ -1377,13 +1378,11 @@ fn indexes(table: &str, repo: &Table, db: &Table, alters: &mut Vec<Alter>) {
             // partitioned table; the partitioned table's changes come
             // first, so its index exists
             if let Some(parent) = &index.parent {
-                let parent = match parent.split_once('.') {
-                    Some((parent_schema, name)) => format!(
-                        "{}.{}",
-                        quote_ident(parent_schema),
-                        quote_ident(name)
-                    ),
-                    None => format!("{schema}.{}", quote_ident(parent)),
+                let parent = match split_sql_name(parent) {
+                    (parent_schema, name) if parent_schema.is_empty() => {
+                        format!("{schema}.{}", quote_ident(&name))
+                    }
+                    (parent_schema, name) => qualified(&parent_schema, &name),
                 };
                 sql.push_str(&format!(
                     "ALTER INDEX {parent} ATTACH PARTITION {schema}.{};\n",

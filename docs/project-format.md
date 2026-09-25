@@ -259,9 +259,10 @@ revocations:
   `ON ONLY` the partitioned table, as `pg_dump` writes it. Each
   partition's index is then in the partition's table file, with the
   index it belongs to as `parent`, and `build` and `deploy` attach it
-  with `ALTER INDEX parent ATTACH PARTITION`. The index of a unique or
-  primary key constraint needs no `parent`: it attaches with its
-  partition.
+  with `ALTER INDEX parent ATTACH PARTITION`. The `parent` index must
+  have `recurse: false`, or `build` stops with an error. The index of a
+  unique or primary key constraint needs no `parent`: it attaches with
+  its partition.
 
 - A cast has no schema of its own. `pull` files it in the
   `casts/<schema>.yaml` of the first schema its function or types name,

@@ -19,6 +19,7 @@ use serde_json::{Map, Value};
 
 use crate::ddl::{self, Acl, AclTarget, QualifiedName, RoleDef, Statement};
 use crate::models;
+use crate::utils::quote_ident;
 use crate::{cli, diagnostics, pgdump, progress};
 
 /// Every TOC entry type that pull models. pull parses the DDL of each
@@ -2053,7 +2054,15 @@ impl Assembly {
         ) {
             (Some((t, i)), Some(_)) => {
                 if let Some(indexes) = self.tables[t].indexes.as_mut() {
-                    indexes[i].parent = Some(parent.to_string());
+                    // quoted, so that a dot in a name is not taken
+                    // for the one between the schema and the name
+                    let name = quote_ident(&parent.name);
+                    indexes[i].parent = Some(match &parent.schema {
+                        Some(schema) => {
+                            format!("{}.{name}", quote_ident(schema))
+                        }
+                        None => name,
+                    });
                 }
             }
             // a constraint's index attaches with its partition

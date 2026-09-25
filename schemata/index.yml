@@ -29,7 +29,9 @@ properties:
     title: Parent Index
     description: >
       The index of the partitioned table that this index of a partition
-      belongs to (ALTER INDEX parent ATTACH PARTITION), schema-qualified.
+      belongs to (ALTER INDEX parent ATTACH PARTITION), schema-qualified,
+      with each part quoted as an SQL identifier when it needs quotes. That
+      index must have recurse set to false.
     type: string
   method:
     title: Index Method
