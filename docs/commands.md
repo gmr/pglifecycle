@@ -91,8 +91,10 @@ reconciled in place where PostgreSQL can express it:
   partitioned table and of its partitions change as one group:
   PostgreSQL does not drop an index that is attached to another, and
   dropping the partitioned table's index drops its partitions'. So when
-  any index of the group changes, deploy drops the partitioned table's
-  index, then makes all of them again and attaches them.
+  the definition of an index of the group changes, or an index of the
+  group is removed, deploy drops the partitioned table's index, then
+  makes all of them again and attaches them. A change to the comment
+  only does not rebuild the group.
   Identity columns are added, and their `ALWAYS`/`BY DEFAULT` behavior
   and sequence options changed, with `ALTER COLUMN`; renaming an
   identity's sequence falls back. A `NOT VALID` check, foreign key or
