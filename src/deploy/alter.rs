@@ -19,6 +19,7 @@ use crate::models::{
     Rule, Schema, Sequence, SequenceOptions, Server, Table, Trigger, Type,
     UserMapping, View, ViewColumn,
 };
+use crate::project::split_sql_name;
 use crate::utils::{
     dollar_quote, postgres_value, quote_ident, raw_value, user_mapping_subject,
 };
@@ -1373,6 +1374,21 @@ fn indexes(table: &str, repo: &Table, db: &Table, alters: &mut Vec<Alter>) {
         |index| {
             let mut sql =
                 format!("{};\n", build::render_index(index, table).join(" "));
+            // an index of a partition that belongs to an index of the
+            // partitioned table; the partitioned table's changes come
+            // first, so its index exists
+            if let Some(parent) = &index.parent {
+                let parent = match split_sql_name(parent) {
+                    (parent_schema, name) if parent_schema.is_empty() => {
+                        format!("{schema}.{}", quote_ident(&name))
+                    }
+                    (parent_schema, name) => qualified(&parent_schema, &name),
+                };
+                sql.push_str(&format!(
+                    "ALTER INDEX {parent} ATTACH PARTITION {schema}.{};\n",
+                    quote_ident(&index.name)
+                ));
+            }
             if let Some(comment) = &index.comment {
                 let name = format!("{schema}.{}", quote_ident(&index.name));
                 sql.push_str(&comment_on("INDEX", &name, Some(comment)));

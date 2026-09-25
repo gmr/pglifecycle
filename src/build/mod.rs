@@ -129,7 +129,7 @@
 
 mod acls;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
 use serde_json::{Map, Value};
@@ -179,6 +179,7 @@ pub fn assemble(project: &Project) -> Result<BuildOutput, String> {
         dump_id_map: HashMap::new(),
         text_search_last: HashMap::new(),
         pending_attaches: Vec::new(),
+        index_attaches: IndexAttaches::default(),
         text_search_ids: HashMap::new(),
         text_search_refs: Vec::new(),
         superuser: project.superuser.clone(),
@@ -226,6 +227,7 @@ pub fn assemble(project: &Project) -> Result<BuildOutput, String> {
     }
     builder.apply_text_search_references();
     builder.apply_attaches(project)?;
+    builder.apply_index_attaches()?;
     builder.split_column_defaults(project)?;
     let item_ids = builder
         .dump_id_map
@@ -251,6 +253,20 @@ struct PendingAttach {
     partition: TablePartition,
 }
 
+/// The index entries, by (schema, name), and the partition indexes
+/// that belong to an index of their partitioned table, as (schema,
+/// index, parent index, owner): each gets an INDEX ATTACH entry once
+/// every index has its entry. `only` has the indexes made ON ONLY
+/// their table: a partition index can attach only to one of these,
+/// because an index made without ON ONLY makes its partition indexes
+/// itself.
+#[derive(Default)]
+struct IndexAttaches {
+    ids: HashMap<(String, String), i32>,
+    only: HashSet<(String, String)>,
+    pending: Vec<(String, String, String, String)>,
+}
+
 struct Builder {
     dump: libpgdump::Dump,
     dump_id_map: HashMap<usize, i32>,
@@ -259,6 +275,7 @@ struct Builder {
     text_search_last: HashMap<usize, i32>,
     /// ATTACH PARTITION entries to add once every table has its entry
     pending_attaches: Vec<PendingAttach>,
+    index_attaches: IndexAttaches,
     /// The entry of each text search object, by its kind, schema and
     /// name
     text_search_ids: HashMap<(&'static str, String, String), i32>,
@@ -2185,6 +2202,22 @@ impl Builder {
             &[parent_dump_id],
             index.tablespace.as_deref(),
         )?;
+        self.index_attaches
+            .ids
+            .insert((schema.to_string(), index.name.clone()), dump_id);
+        if index.recurse == Some(false) {
+            self.index_attaches
+                .only
+                .insert((schema.to_string(), index.name.clone()));
+        }
+        if let Some(parent) = &index.parent {
+            self.index_attaches.pending.push((
+                schema.to_string(),
+                index.name.clone(),
+                parent.clone(),
+                owner.to_string(),
+            ));
+        }
         if let Some(comment) = &index.comment {
             self.add_comment(
                 "INDEX",
@@ -2608,6 +2641,57 @@ impl Builder {
     /// for each partition that is a table of its own, as pg_dump writes
     /// it, after both tables. A partition whose table the project does
     /// not have cannot be attached, which is an error in the project.
+    /// `ALTER INDEX parent ATTACH PARTITION child` for each partition
+    /// index that belongs to an index of its partitioned table, after
+    /// both indexes, as pg_dump writes it
+    fn apply_index_attaches(&mut self) -> Result<(), String> {
+        for (schema, name, parent, owner) in
+            std::mem::take(&mut self.index_attaches.pending)
+        {
+            let (parent_schema, parent_name) = match split_sql_name(&parent) {
+                (parent_schema, name) if parent_schema.is_empty() => {
+                    (schema.clone(), name)
+                }
+                parent => parent,
+            };
+            let key = (parent_schema.clone(), parent_name.clone());
+            let parent_id =
+                *self.index_attaches.ids.get(&key).ok_or_else(|| {
+                    format!(
+                        "index {schema}.{name} belongs to {parent}, which \
+                         is not an index in the project"
+                    )
+                })?;
+            if !self.index_attaches.only.contains(&key) {
+                return Err(format!(
+                    "index {schema}.{name} belongs to {parent}, which \
+                     must have recurse: false"
+                ));
+            }
+            let child_id =
+                self.index_attaches.ids[&(schema.clone(), name.clone())];
+            let create = vec![format!(
+                "ALTER INDEX {}.{} ATTACH PARTITION {}.{}",
+                quote_ident(&parent_schema),
+                quote_ident(&parent_name),
+                quote_ident(&schema),
+                quote_ident(&name)
+            )];
+            // no drop statement, as for TABLE ATTACH
+            self.add_entry(
+                "INDEX ATTACH",
+                &schema,
+                &name,
+                &owner,
+                &create,
+                &[],
+                &[parent_id, child_id],
+                None,
+            )?;
+        }
+        Ok(())
+    }
+
     fn apply_attaches(&mut self, project: &Project) -> Result<(), String> {
         for attach in std::mem::take(&mut self.pending_attaches) {
             let partition = &attach.partition;
@@ -4124,6 +4208,7 @@ mod tests {
             dump_id_map: HashMap::new(),
             text_search_last: HashMap::new(),
             pending_attaches: Vec::new(),
+            index_attaches: IndexAttaches::default(),
             text_search_ids: HashMap::new(),
             text_search_refs: Vec::new(),
             superuser: "postgres".into(),
@@ -4577,6 +4662,7 @@ mod tests {
             dump_id_map: HashMap::new(),
             text_search_last: HashMap::new(),
             pending_attaches: Vec::new(),
+            index_attaches: IndexAttaches::default(),
             text_search_ids: HashMap::new(),
             text_search_refs: Vec::new(),
             superuser: "postgres".into(),
@@ -4591,6 +4677,74 @@ mod tests {
             .unwrap_or_else(|| panic!("no {desc:?} entry tagged {tag}"))
     }
 
+    /// Build a partitioned table and one partition, each with one
+    /// index, in the schema `tenant.eu`, the partition index with the
+    /// given parent; return the INDEX ATTACH definition, or the error
+    fn index_attach(
+        recurse: Option<bool>,
+        parent: &str,
+    ) -> Result<String, String> {
+        let index = |name: &str, recurse, parent: Option<&str>| {
+            let mut index: Index = serde_json::from_value(serde_json::json!({
+                "name": name,
+                "columns": [{"name": "taken"}],
+            }))
+            .unwrap();
+            index.recurse = recurse;
+            index.parent = parent.map(str::to_string);
+            index
+        };
+        let mut readings = base_table("readings");
+        readings.schema = "tenant.eu".into();
+        readings.indexes = Some(vec![index("readings_taken", recurse, None)]);
+        let mut early = base_table("readings_early");
+        early.schema = "tenant.eu".into();
+        early.indexes =
+            Some(vec![index("readings_early_taken", None, Some(parent))]);
+        let dump = libpgdump::new("t", "UTF-8", "18.0").unwrap();
+        let mut builder = Builder {
+            dump,
+            dump_id_map: HashMap::new(),
+            text_search_last: HashMap::new(),
+            pending_attaches: Vec::new(),
+            index_attaches: IndexAttaches::default(),
+            text_search_ids: HashMap::new(),
+            text_search_refs: Vec::new(),
+            superuser: "postgres".into(),
+        };
+        builder.dump_item(&table_item(0, readings)).unwrap();
+        builder.dump_item(&table_item(1, early)).unwrap();
+        builder.apply_index_attaches()?;
+        Ok(builder
+            .dump
+            .entries()
+            .iter()
+            .find(|e| e.desc == libpgdump::ObjectType::IndexAttach)
+            .and_then(|e| e.defn.clone())
+            .expect("no INDEX ATTACH entry"))
+    }
+
+    /// A dot in a quoted schema name is part of the name
+    #[test]
+    fn attaches_a_partition_index_in_a_schema_with_a_dot() {
+        let defn =
+            index_attach(Some(false), "\"tenant.eu\".readings_taken").unwrap();
+        assert_eq!(
+            defn,
+            "ALTER INDEX \"tenant.eu\".readings_taken ATTACH PARTITION \
+             \"tenant.eu\".readings_early_taken;\n"
+        );
+    }
+
+    /// An index made without ON ONLY makes its partition indexes
+    /// itself, so a partition index cannot also attach to it
+    #[test]
+    fn rejects_a_partition_index_of_a_recursive_index() {
+        let error =
+            index_attach(None, "\"tenant.eu\".readings_taken").unwrap_err();
+        assert!(error.contains("must have recurse: false"), "{error}");
+    }
+
     /// Render `item` and return every COMMENT entry's definition SQL
     fn comment_defns(item: &Item) -> Vec<String> {
         let dump = libpgdump::new("t", "UTF-8", "18.0").unwrap();
@@ -4599,6 +4753,7 @@ mod tests {
             dump_id_map: HashMap::new(),
             text_search_last: HashMap::new(),
             pending_attaches: Vec::new(),
+            index_attaches: IndexAttaches::default(),
             text_search_ids: HashMap::new(),
             text_search_refs: Vec::new(),
             superuser: "postgres".into(),
@@ -4834,6 +4989,7 @@ mod tests {
             dump_id_map: HashMap::new(),
             text_search_last: HashMap::new(),
             pending_attaches: Vec::new(),
+            index_attaches: IndexAttaches::default(),
             text_search_ids: HashMap::new(),
             text_search_refs: Vec::new(),
             superuser: "postgres".into(),
@@ -4890,6 +5046,7 @@ mod tests {
             dump_id_map: HashMap::new(),
             text_search_last: HashMap::new(),
             pending_attaches: Vec::new(),
+            index_attaches: IndexAttaches::default(),
             text_search_ids: HashMap::new(),
             text_search_refs: Vec::new(),
             superuser: "postgres".into(),
@@ -5089,6 +5246,7 @@ mod tests {
             dump_id_map: HashMap::new(),
             text_search_last: HashMap::new(),
             pending_attaches: Vec::new(),
+            index_attaches: IndexAttaches::default(),
             text_search_ids: HashMap::new(),
             text_search_refs: Vec::new(),
             superuser: "postgres".into(),

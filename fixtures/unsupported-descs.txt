@@ -1,4 +1,3 @@
-INDEX ATTACH	unsupported.measurements_2020_id_idx
 SHELL TYPE	unsupported.base_int
 SUBSCRIPTION	pglifecycle_coverage_sub
 TRANSFORM	TRANSFORM FOR unsupported.base_int LANGUAGE sql

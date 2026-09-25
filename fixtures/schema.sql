@@ -713,3 +713,21 @@ CREATE OPERATOR CLASS test.point_distance FOR TYPE point USING gist AS
     STORAGE box;
 -- an index that uses the default class of the copied method
 CREATE INDEX heap_copied_id ON test.heap_copied USING btree_copy (id);
+
+-- Indexes on a partitioned table. pg_dump makes the parent's index ON
+-- ONLY, each partition's index on its own, and an INDEX ATTACH for
+-- each. One index has partition indexes with names of their own, and
+-- a unique constraint's indexes attach with their partitions.
+CREATE TABLE test.readings (id INTEGER, taken DATE) PARTITION BY RANGE (taken);
+CREATE TABLE test.readings_2020 PARTITION OF test.readings
+    FOR VALUES FROM ('2020-01-01') TO ('2021-01-01');
+CREATE TABLE test.readings_2021 PARTITION OF test.readings
+    FOR VALUES FROM ('2021-01-01') TO ('2022-01-01');
+CREATE INDEX readings_id ON test.readings (id);
+CREATE INDEX readings_taken ON ONLY test.readings (taken);
+CREATE INDEX readings_2020_by_day ON test.readings_2020 (taken);
+ALTER INDEX test.readings_taken ATTACH PARTITION test.readings_2020_by_day;
+CREATE INDEX readings_2021_by_day ON test.readings_2021 (taken);
+ALTER INDEX test.readings_taken ATTACH PARTITION test.readings_2021_by_day;
+ALTER TABLE test.readings ADD CONSTRAINT readings_unique UNIQUE (id, taken);
+COMMENT ON INDEX test.readings_2020_by_day IS 'Readings by day';

@@ -21,8 +21,18 @@ properties:
   recurse:
     title: Recurse to Partitions
     description: >
-      Used to specify that the index should be created on partitions of the table.
+      Used to specify that the index should be created on partitions of the
+      table. False for an index of a partitioned table that is made with ON
+      ONLY: each partition then has its own index, with a parent.
     type: boolean
+  parent:
+    title: Parent Index
+    description: >
+      The index of the partitioned table that this index of a partition
+      belongs to (ALTER INDEX parent ATTACH PARTITION), schema-qualified,
+      with each part quoted as an SQL identifier when it needs quotes. That
+      index must have recurse set to false.
+    type: string
   method:
     title: Index Method
     description: >
