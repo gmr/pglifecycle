@@ -414,6 +414,17 @@ impl Loader {
                         c.functions.as_deref(),
                     ));
                 }
+                Definition::Type(t) => {
+                    references.extend(functions(&[
+                        &t.input,
+                        &t.output,
+                        &t.receive,
+                        &t.send,
+                        &t.typmod_in,
+                        &t.typmod_out,
+                        &t.analyze,
+                    ]));
+                }
                 Definition::Language(l) => {
                     references.extend(functions(&[
                         &l.handler,

@@ -126,6 +126,15 @@
 //! 29. A default that is a numeric literal renders bare. The Python
 //!     quoted it, so `DEFAULT 3` on a smallint came back as `DEFAULT
 //!     '3'::smallint`.
+//! 30. A base type renders `CREATE TYPE name (INPUT = ...)`, after a
+//!     `SHELL TYPE` entry that its I/O functions use. The Python
+//!     rendered `CREATE TYPE name AS (INPUT = ...)`, which does not
+//!     parse, and wrote no shell type, so the I/O functions failed.
+//!     No test-project type is a base type.
+//! 31. The body of a `LANGUAGE internal` function renders as a string
+//!     constant. The Python wrapped every body in `$$` and newlines,
+//!     and a built-in function name with newlines names no function.
+//!     No test-project function is internal.
 
 mod acls;
 
@@ -1232,6 +1241,20 @@ impl Builder {
             );
         }
         create.push("AS".into());
+        // the body of an internal function is the name of a built-in
+        // function, so a newline around it names no function
+        if let Some(definition) = &d.definition
+            && d.language.as_deref() == Some("internal")
+        {
+            create.push(postgres_value(&Value::String(definition.clone())));
+            return self.add_item_with_comment_target(
+                item,
+                create,
+                drop,
+                false,
+                comment_target,
+            );
+        }
         if let Some(definition) = &d.definition {
             let create_sql =
                 vec![format!("{} $$\n{}\n$$", create.join(" "), definition)];
@@ -2818,14 +2841,26 @@ impl Builder {
         if let Some(sql) = &d.sql {
             return self.add_item(item, vec![sql.clone()], vec![], false);
         }
-        let mut create = vec![
-            "CREATE".into(),
-            "TYPE".into(),
-            self.item_name(item),
-            "AS".into(),
-        ];
+        let mut create =
+            vec!["CREATE".into(), "TYPE".into(), self.item_name(item)];
+        if d.type_kind.as_deref() != Some("base") {
+            create.push("AS".into());
+        }
+        let mut shell = None;
         match d.type_kind.as_deref() {
             Some("base") => {
+                // the I/O functions take or return the type, so a
+                // shell type comes before them, as pg_dump writes it
+                shell = Some(self.add_entry(
+                    "SHELL TYPE",
+                    &d.schema,
+                    &d.name,
+                    &d.owner,
+                    &["CREATE TYPE".into(), self.item_name(item)],
+                    &[],
+                    &[],
+                    None,
+                )?);
                 let mut options = vec![
                     format!("INPUT = {}", d.input.clone().unwrap_or_default()),
                     format!(
@@ -2943,7 +2978,14 @@ impl Builder {
             _ => {}
         }
         let drop = vec!["DROP TYPE IF EXISTS".into(), self.item_name(item)];
-        self.add_item(item, create, drop, false)
+        self.add_item(item, create, drop, false)?;
+        if let Some(shell) = shell
+            && let Some(dump_id) = self.dump_id_map.get(&item.id)
+            && let Some(entry) = self.dump.get_entry_mut(*dump_id)
+        {
+            entry.dependencies.push(shell);
+        }
+        Ok(())
     }
 
     fn dump_user(&mut self, item: &Item) -> Result<(), String> {
@@ -5060,6 +5102,61 @@ mod tests {
             .filter_map(|e| e.tag.clone())
             .collect();
         assert_eq!(rules, vec!["active_orders no_delete".to_string()]);
+    }
+
+    #[test]
+    fn renders_base_type_after_its_shell_type() {
+        let item = Item {
+            id: 1,
+            desc: ObjectType::Type,
+            definition: Definition::Type(
+                serde_json::from_value(serde_json::json!({
+                    "name": "base_int",
+                    "schema": "test",
+                    "owner": "app",
+                    "type": "base",
+                    "input": "test.base_int_in",
+                    "output": "test.base_int_out",
+                    "like_type": "integer",
+                }))
+                .unwrap(),
+            ),
+            dependencies: BTreeSet::new(),
+        };
+        let dump = libpgdump::new("t", "UTF-8", "18.0").unwrap();
+        let mut builder = Builder {
+            dump,
+            dump_id_map: HashMap::new(),
+            text_search_last: HashMap::new(),
+            pending_attaches: Vec::new(),
+            index_attaches: IndexAttaches::default(),
+            text_search_ids: HashMap::new(),
+            text_search_refs: Vec::new(),
+            superuser: "postgres".into(),
+        };
+        builder.dump_item(&item).unwrap();
+        let entries = builder.dump.entries();
+        let shell = entries
+            .iter()
+            .find(|e| e.desc == libpgdump::ObjectType::ShellType)
+            .unwrap();
+        let base = entries
+            .iter()
+            .find(|e| e.desc == libpgdump::ObjectType::Type)
+            .unwrap();
+        assert_eq!(
+            shell.defn.as_deref(),
+            Some("CREATE TYPE test.base_int;\n")
+        );
+        assert_eq!(shell.drop_stmt, None);
+        assert_eq!(
+            base.defn.as_deref(),
+            Some(
+                "CREATE TYPE test.base_int (INPUT = test.base_int_in, \
+                 OUTPUT = test.base_int_out, LIKE = integer);\n"
+            )
+        );
+        assert!(base.dependencies.contains(&shell.dump_id));
     }
 
     #[test]

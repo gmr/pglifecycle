@@ -1,3 +1,2 @@
-SHELL TYPE	unsupported.base_int
 SUBSCRIPTION	pglifecycle_coverage_sub
 TRANSFORM	TRANSFORM FOR unsupported.base_int LANGUAGE sql

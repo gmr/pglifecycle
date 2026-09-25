@@ -731,3 +731,15 @@ CREATE INDEX readings_2021_by_day ON test.readings_2021 (taken);
 ALTER INDEX test.readings_taken ATTACH PARTITION test.readings_2021_by_day;
 ALTER TABLE test.readings ADD CONSTRAINT readings_unique UNIQUE (id, taken);
 COMMENT ON INDEX test.readings_2020_by_day IS 'Readings by day';
+
+-- A base type: pg_dump writes a SHELL TYPE entry before the functions
+-- that the type's input and output need. Its I/O functions are the
+-- integer ones, so the type needs no C code.
+CREATE TYPE test.base_int;
+CREATE FUNCTION test.base_int_in(cstring) RETURNS test.base_int
+    AS 'int4in' LANGUAGE internal IMMUTABLE STRICT;
+CREATE FUNCTION test.base_int_out(test.base_int) RETURNS cstring
+    AS 'int4out' LANGUAGE internal IMMUTABLE STRICT;
+CREATE TYPE test.base_int (INPUT = test.base_int_in,
+    OUTPUT = test.base_int_out, LIKE = integer);
+COMMENT ON TYPE test.base_int IS 'An integer with its own I/O';
