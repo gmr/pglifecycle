@@ -51,8 +51,9 @@ pub fn deploy(args: &cli::Deploy) -> Result<(), String> {
         libpgfmt::style::Style::PgDump,
     )?;
     let task = progress::spinner("Diffing project against database");
-    let diff = diff::diff(&project, &assembly);
-    let resolutions = resolutions(&project, &diff);
+    let mut diff = diff::diff(&project, &assembly);
+    let groups = partition_index_groups(&project, &mut diff);
+    let resolutions = resolutions(&project, &diff, &groups);
     task.finish();
     let mut output = build::assemble(&project)?;
     let task = progress::spinner("Planning changes");
@@ -107,11 +108,62 @@ fn apply(plan: &Plan, script: &str, args: &cli::Deploy) -> Result<(), String> {
     Ok(())
 }
 
+fn as_table(definition: &Definition) -> Option<&crate::models::Table> {
+    match definition {
+        Definition::Table(table) => Some(table),
+        _ => None,
+    }
+}
+
+/// The index groups of partitioned tables that the plan rebuilds (see
+/// [`alter::IndexGroups`]). A table with no other change can still have
+/// indexes in a rebuilt group, so its table is marked changed: the
+/// partitioned table drops and makes again the group's index, and a
+/// partition makes its indexes again after the drop.
+fn partition_index_groups(
+    project: &project::Project,
+    diff: &mut Diff,
+) -> alter::IndexGroups {
+    let groups = alter::rebuilt_index_groups(
+        project.inventory.iter().filter_map(|item| {
+            let db = diff.changed.get(&item.id)?;
+            Some((as_table(&item.definition)?, as_table(db)?))
+        }),
+    );
+    if groups.is_empty() {
+        return groups;
+    }
+    for item in &project.inventory {
+        let Some(table) = as_table(&item.definition) else {
+            continue;
+        };
+        if diff.items.get(&item.id) != Some(&Change::Unchanged) {
+            continue;
+        }
+        // a partitioned table whose index is in a group, or a partition
+        // whose index belongs to one
+        let in_group = table.indexes.iter().flatten().any(|index| {
+            groups.contains(&(table.schema.clone(), index.name.clone()))
+                || index.parent.as_deref().is_some_and(|parent| {
+                    groups
+                        .contains(&alter::parent_index(parent, &table.schema))
+                })
+        });
+        if in_group {
+            // unchanged, so the project's copy is the database's
+            diff.items.insert(item.id, Change::Changed);
+            diff.changed.insert(item.id, item.definition.clone());
+        }
+    }
+    groups
+}
+
 /// Resolve each changed item into in-place statements or the
 /// drop+recreate fallback
 fn resolutions(
     project: &project::Project,
     diff: &Diff,
+    groups: &alter::IndexGroups,
 ) -> BTreeMap<usize, Resolution> {
     let inventory_by_id = project
         .inventory
@@ -124,7 +176,7 @@ fn resolutions(
             let repo = inventory_by_id
                 .get(id)
                 .expect("changed item id missing from project inventory");
-            (*id, alter::resolve(repo, database))
+            (*id, alter::resolve_with(repo, database, groups))
         })
         .collect()
 }

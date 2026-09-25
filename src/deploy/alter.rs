@@ -83,10 +83,80 @@ pub(crate) enum Resolution {
     Replace,
 }
 
+/// The indexes of partitioned tables, as (schema, name), that deploy
+/// drops and makes again with the indexes of their partitions.
+/// PostgreSQL cannot drop a partition's index while it is attached,
+/// and dropping the partitioned table's index drops its partitions'
+/// indexes too, so a change to any index of the group rebuilds all of
+/// it.
+pub(crate) type IndexGroups = std::collections::BTreeSet<(String, String)>;
+
+/// The index groups that the changed tables rebuild: each index of a
+/// partitioned table that is changed or removed, and the parent of each
+/// partition index that is changed or removed. A change to the comment
+/// only is made in place, so it rebuilds nothing.
+pub(crate) fn rebuilt_index_groups<'a>(
+    tables: impl Iterator<Item = (&'a Table, &'a Table)>,
+) -> IndexGroups {
+    let mut groups = IndexGroups::new();
+    for (repo, db) in tables {
+        for existing in db.indexes.iter().flatten() {
+            let unchanged = repo
+                .indexes
+                .iter()
+                .flatten()
+                .find(|index| index.name == existing.name)
+                .is_some_and(|wanted| same_but_comment(wanted, existing));
+            if unchanged {
+                continue;
+            }
+            if let Some(parent) = &existing.parent {
+                groups.insert(parent_index(parent, &db.schema));
+            }
+            if existing.recurse == Some(false) {
+                groups.insert((db.schema.clone(), existing.name.clone()));
+            }
+        }
+    }
+    groups
+}
+
+/// The (schema, name) of a partition index's parent; a parent without a
+/// schema is in the partition's
+pub(crate) fn parent_index(parent: &str, schema: &str) -> (String, String) {
+    match split_sql_name(parent) {
+        (parent_schema, name) if parent_schema.is_empty() => {
+            (schema.to_string(), name)
+        }
+        key => key,
+    }
+}
+
+/// Two indexes that differ at most in their comment
+fn same_but_comment(a: &Index, b: &Index) -> bool {
+    let without = |index: &Index| Index {
+        comment: None,
+        ..index.clone()
+    };
+    without(a) == without(b)
+}
+
 /// Resolve a changed object into in-place statements where supported
+#[cfg(test)]
 pub(crate) fn resolve(repo: &Definition, database: &Definition) -> Resolution {
+    resolve_with(repo, database, &IndexGroups::new())
+}
+
+/// [`resolve`], with the index groups that the plan rebuilds
+pub(crate) fn resolve_with(
+    repo: &Definition,
+    database: &Definition,
+    groups: &IndexGroups,
+) -> Resolution {
     match (repo, database) {
-        (Definition::Table(repo), Definition::Table(db)) => table(repo, db),
+        (Definition::Table(repo), Definition::Table(db)) => {
+            table_in(repo, db, groups)
+        }
         (Definition::Sequence(repo), Definition::Sequence(db)) => {
             sequence(repo, db)
         }
@@ -218,7 +288,13 @@ fn view_columns_compatible(repo: &View, db: &View) -> bool {
         .all(|(r, d)| view_column_name(r) == view_column_name(d))
 }
 
+#[cfg(test)]
 fn table(repo: &Table, db: &Table) -> Resolution {
+    table_in(repo, db, &IndexGroups::new())
+}
+
+/// A changed table, with the index groups that the plan rebuilds
+fn table_in(repo: &Table, db: &Table, groups: &IndexGroups) -> Resolution {
     // Validating a NOT NULL on a local column changes how it is
     // written, not only its state, so it is found before the two sides
     // are made canonical: afterwards the repo's copy has moved onto the
@@ -258,7 +334,7 @@ fn table(repo: &Table, db: &Table) -> Resolution {
     {
         return Resolution::Replace;
     }
-    indexes(&name, repo, db, &mut alters);
+    indexes(&name, repo, db, groups, &mut alters);
     rules(
         &name,
         repo.rules.as_deref().unwrap_or_default(),
@@ -1358,44 +1434,86 @@ fn named_pairs<T: PartialEq>(
     }
 }
 
-fn indexes(table: &str, repo: &Table, db: &Table, alters: &mut Vec<Alter>) {
+/// Index reconciliation. An index of a rebuilt group (see
+/// [`IndexGroups`]) is made again: the partitioned table's index is
+/// dropped, which drops its partitions' indexes with it. A change to
+/// the comment only is a COMMENT ON.
+fn indexes(
+    table: &str,
+    repo: &Table,
+    db: &Table,
+    groups: &IndexGroups,
+    alters: &mut Vec<Alter>,
+) {
     let schema = quote_ident(&repo.schema);
-    named_pairs(
-        alters,
-        db.indexes.as_deref().unwrap_or_default(),
-        repo.indexes.as_deref().unwrap_or_default(),
-        |index: &Index| index.name.clone(),
-        |index| {
-            format!(
-                "DROP INDEX IF EXISTS {schema}.{};\n",
-                quote_ident(&index.name)
-            )
-        },
-        |index| {
-            let mut sql =
-                format!("{};\n", build::render_index(index, table).join(" "));
-            // an index of a partition that belongs to an index of the
-            // partitioned table; the partitioned table's changes come
-            // first, so its index exists
-            if let Some(parent) = &index.parent {
-                let parent = match split_sql_name(parent) {
-                    (parent_schema, name) if parent_schema.is_empty() => {
-                        format!("{schema}.{}", quote_ident(&name))
-                    }
-                    (parent_schema, name) => qualified(&parent_schema, &name),
-                };
-                sql.push_str(&format!(
-                    "ALTER INDEX {parent} ATTACH PARTITION {schema}.{};\n",
-                    quote_ident(&index.name)
-                ));
+    let repo_indexes = repo.indexes.as_deref().unwrap_or_default();
+    let db_indexes = db.indexes.as_deref().unwrap_or_default();
+    let is_group = |index: &Index| {
+        groups.contains(&(db.schema.clone(), index.name.clone()))
+    };
+    let in_group = |index: &Index| {
+        index.parent.as_deref().is_some_and(|parent| {
+            groups.contains(&parent_index(parent, &db.schema))
+        })
+    };
+    let target =
+        |index: &Index| format!("{schema}.{}", quote_ident(&index.name));
+    for existing in db_indexes {
+        let wanted = repo_indexes.iter().find(|i| i.name == existing.name);
+        if is_group(existing) {
+            alters.push(Alter::new(format!(
+                "DROP INDEX IF EXISTS {};\n",
+                target(existing)
+            )));
+        } else if in_group(existing) {
+            // dropped with the partitioned table's index
+        } else {
+            match wanted {
+                Some(wanted) if wanted == existing => {}
+                Some(wanted) if same_but_comment(wanted, existing) => {
+                    alters.push(Alter::new(comment_on(
+                        "INDEX",
+                        &target(wanted),
+                        wanted.comment.as_deref(),
+                    )));
+                }
+                _ => alters.push(Alter::new(format!(
+                    "DROP INDEX IF EXISTS {};\n",
+                    target(existing)
+                ))),
             }
-            if let Some(comment) = &index.comment {
-                let name = format!("{schema}.{}", quote_ident(&index.name));
-                sql.push_str(&comment_on("INDEX", &name, Some(comment)));
-            }
-            sql
-        },
-    );
+        }
+    }
+    for wanted in repo_indexes {
+        let kept = db_indexes
+            .iter()
+            .find(|i| i.name == wanted.name)
+            .is_some_and(|existing| {
+                !is_group(existing)
+                    && !in_group(existing)
+                    && same_but_comment(wanted, existing)
+            });
+        if kept {
+            continue;
+        }
+        let mut sql =
+            format!("{};\n", build::render_index(wanted, table).join(" "));
+        // an index of a partition that belongs to an index of the
+        // partitioned table; the partitioned table's changes come
+        // first, so its index exists
+        if let Some(parent) = &wanted.parent {
+            let (parent_schema, name) = parent_index(parent, &repo.schema);
+            sql.push_str(&format!(
+                "ALTER INDEX {} ATTACH PARTITION {};\n",
+                qualified(&parent_schema, &name),
+                target(wanted)
+            ));
+        }
+        if let Some(comment) = &wanted.comment {
+            sql.push_str(&comment_on("INDEX", &target(wanted), Some(comment)));
+        }
+        alters.push(Alter::new(sql));
+    }
 }
 
 /// Trigger reconciliation; triggers without names cannot be matched
@@ -3584,5 +3702,81 @@ mod tests {
             vec!["DROP RULE IF EXISTS r ON test.users;\n"]
         );
         assert!(alters.iter().all(|a| a.destructive));
+    }
+
+    /// A partitioned table and one partition, each with one index, the
+    /// partition's attached to the partitioned table's
+    fn partitioned(order: Option<&str>) -> (Table, Table) {
+        let column = match order {
+            Some(order) => {
+                serde_json::json!({"name": "at", "direction": order})
+            }
+            None => serde_json::json!({"name": "at"}),
+        };
+        let parent = parse_table(serde_json::json!({
+            "name": "p", "schema": "g", "owner": "postgres",
+            "columns": [{"name": "at", "data_type": "date"}],
+            "indexes": [{"name": "p_at", "recurse": false,
+                         "method": "btree", "columns": [column]}],
+        }));
+        let child = parse_table(serde_json::json!({
+            "name": "p1", "schema": "g", "owner": "postgres",
+            "columns": [{"name": "at", "data_type": "date"}],
+            "indexes": [{"name": "p1_at", "parent": "g.p_at",
+                         "method": "btree", "columns": [column]}],
+        }));
+        (parent, child)
+    }
+
+    #[test]
+    fn a_changed_partition_index_rebuilds_its_group() {
+        let (repo_parent, repo_child) = partitioned(None);
+        let (db_parent, db_child) = partitioned(Some("DESC"));
+        let groups = rebuilt_index_groups(
+            [(&repo_parent, &db_parent), (&repo_child, &db_child)].into_iter(),
+        );
+        assert_eq!(
+            groups.into_iter().collect::<Vec<_>>(),
+            vec![(String::from("g"), String::from("p_at"))]
+        );
+        let groups = rebuilt_index_groups(
+            [(&repo_parent, &db_parent), (&repo_child, &db_child)].into_iter(),
+        );
+        // the partitioned table's index is dropped and made again
+        let parent = statements(table_in(&repo_parent, &db_parent, &groups));
+        assert_eq!(
+            sql(&parent),
+            vec![
+                "DROP INDEX IF EXISTS g.p_at;\n",
+                "CREATE INDEX p_at ON ONLY g.p USING btree ( at );\n",
+            ]
+        );
+        // the partition's is not dropped, as the parent's drop drops
+        // it, but it is made and attached again
+        let child = statements(table_in(&repo_child, &db_child, &groups));
+        assert_eq!(
+            sql(&child),
+            vec![
+                "CREATE INDEX p1_at ON g.p1 USING btree ( at );\n\
+                 ALTER INDEX g.p_at ATTACH PARTITION g.p1_at;\n",
+            ]
+        );
+    }
+
+    #[test]
+    fn an_index_comment_changes_in_place() {
+        let (repo_parent, mut repo_child) = partitioned(None);
+        let (db_parent, db_child) = partitioned(None);
+        repo_child.indexes.as_mut().unwrap()[0].comment =
+            Some(String::from("By day"));
+        let groups = rebuilt_index_groups(
+            [(&repo_parent, &db_parent), (&repo_child, &db_child)].into_iter(),
+        );
+        assert!(groups.is_empty());
+        let child = statements(table_in(&repo_child, &db_child, &groups));
+        assert_eq!(
+            sql(&child),
+            vec!["COMMENT ON INDEX g.p1_at IS $$By day$$;\n"]
+        );
     }
 }
