@@ -863,6 +863,16 @@ fails on each of them with an error: `SHELL TYPE` (a base type's shell),
 `TRANSFORM`, `INDEX ATTACH` (every index on a partitioned table) and
 `SUBSCRIPTION`. `INDEX ATTACH` is the most common in real schemas.
 
+**Done since:** `INDEX ATTACH`. An index made `ON ONLY` a partitioned
+table is pulled with `recurse: false`, and each partition's index
+with the index it belongs to as `parent`. build writes an `INDEX
+ATTACH` entry after both indexes, and deploy writes `ALTER INDEX ...
+ATTACH PARTITION` after it makes a partition's index. An attached
+partition is ordered after its partitioned table, so the partitioned
+table's index is there first. The index of a unique or primary key
+constraint needs nothing: attaching the partition attaches it. The
+coverage fixture has `SHELL TYPE`, `TRANSFORM` and `SUBSCRIPTION` left.
+
 ## Effort
 
 Roughly three focused weeks end to end. Phase 0 is a day and

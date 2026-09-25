@@ -478,6 +478,27 @@ impl Loader {
                 }
             }
         }
+        // an attached partition is a table of its own, after its
+        // partitioned table, so that deploy makes the partitioned
+        // table's indexes before it attaches a partition's to them
+        for (id, item) in self.project.inventory.iter().enumerate() {
+            let Definition::Table(table) = &item.definition else {
+                continue;
+            };
+            for partition in table.partitions.iter().flatten() {
+                if partition.attached != Some(true) {
+                    continue;
+                }
+                for child in lookup_items(
+                    &self.index,
+                    ObjectType::Table,
+                    Some(&partition.schema),
+                    &partition.name,
+                ) {
+                    edges.push((child, id));
+                }
+            }
+        }
         for (id, parent) in edges {
             self.project.inventory[id].dependencies.insert(parent);
         }

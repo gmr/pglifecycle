@@ -291,14 +291,38 @@ pub(crate) fn column(node: &Node, src: &str) -> Column {
     column
 }
 
+/// ALTER INDEX parent ATTACH PARTITION child → AttachIndex. pg_dump
+/// writes it for every index of a partition that belongs to an index
+/// of the partitioned table.
+fn alter_index(node: &Node, src: &str) -> Result<Statement, String> {
+    let attach = node
+        .child_of_kind("index_partition_cmd")
+        .filter(|cmd| cmd.child_of_kind("kw_attach").is_some());
+    let (Some(parent), Some(child)) = (
+        node.child_of_kind("qualified_name"),
+        attach.and_then(|cmd| cmd.child_of_kind("qualified_name")),
+    ) else {
+        return Ok(Statement::Unsupported(format!(
+            "ALTER INDEX: {}",
+            crate::ddl::truncate(node.text(src), 80)
+        )));
+    };
+    Ok(Statement::AttachIndex {
+        parent: qualified_name(&parent, src)?,
+        child: qualified_name(&child, src)?,
+    })
+}
+
 /// CREATE INDEX → (table, Index)
 pub(crate) fn create_index(
     node: &Node,
     src: &str,
 ) -> Result<Statement, String> {
-    let table = node
+    let relation = node
         .find("relation_expr")
-        .and_then(|n| n.find("qualified_name"))
+        .ok_or_else(|| String::from("CREATE INDEX without a relation"))?;
+    let table = relation
+        .find("qualified_name")
         .ok_or_else(|| String::from("CREATE INDEX without a relation"))?;
     let table = qualified_name(&table, src)?;
     let name = node
@@ -314,7 +338,10 @@ pub(crate) fn create_index(
         name,
         sql: None,
         unique: node.has("opt_unique").then_some(true),
-        recurse: None,
+        // ON ONLY: an index of a partitioned table that is not made on
+        // its partitions; pg_dump writes each partition's index, and an
+        // INDEX ATTACH, separately
+        recurse: relation.has("kw_only").then_some(false),
         parent: None,
         method: node
             .child_of_kind("access_method_clause")
@@ -379,6 +406,9 @@ pub(crate) fn alter_table(
     node: &Node,
     src: &str,
 ) -> Result<Vec<Statement>, String> {
+    if node.child_of_kind("kw_index").is_some() {
+        return Ok(vec![alter_index(node, src)?]);
+    }
     let table = node
         .find("relation_expr")
         .and_then(|n| n.find("qualified_name"))
@@ -1849,6 +1879,35 @@ mod tests {
         assert_eq!(partition.name, "events_2024");
         assert_eq!(partition.for_values_from, Some(json!("2024-01-01")));
         assert_eq!(partition.for_values_to, Some(json!("2025-01-01")));
+    }
+
+    #[test]
+    fn parses_index_attach() {
+        let Statement::AttachIndex { parent, child } = parse_one(
+            "ALTER INDEX test.readings_taken ATTACH PARTITION \
+             test.readings_2020_by_day;",
+        ) else {
+            panic!("expected AttachIndex")
+        };
+        assert_eq!(parent.to_string(), "test.readings_taken");
+        assert_eq!(child.to_string(), "test.readings_2020_by_day");
+    }
+
+    #[test]
+    fn parses_an_index_on_only_the_partitioned_table() {
+        let Statement::CreateIndex { index, .. } = parse_one(
+            "CREATE INDEX readings_taken ON ONLY test.readings \
+             USING btree (taken);",
+        ) else {
+            panic!("expected CreateIndex")
+        };
+        assert_eq!(index.recurse, Some(false));
+        let Statement::CreateIndex { index, .. } =
+            parse_one("CREATE INDEX t_id ON test.t USING btree (id);")
+        else {
+            panic!("expected CreateIndex")
+        };
+        assert_eq!(index.recurse, None);
     }
 
     #[test]

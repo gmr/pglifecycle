@@ -179,6 +179,7 @@ pub fn assemble(project: &Project) -> Result<BuildOutput, String> {
         dump_id_map: HashMap::new(),
         text_search_last: HashMap::new(),
         pending_attaches: Vec::new(),
+        index_attaches: IndexAttaches::default(),
         text_search_ids: HashMap::new(),
         text_search_refs: Vec::new(),
         superuser: project.superuser.clone(),
@@ -226,6 +227,7 @@ pub fn assemble(project: &Project) -> Result<BuildOutput, String> {
     }
     builder.apply_text_search_references();
     builder.apply_attaches(project)?;
+    builder.apply_index_attaches()?;
     builder.split_column_defaults(project)?;
     let item_ids = builder
         .dump_id_map
@@ -251,6 +253,16 @@ struct PendingAttach {
     partition: TablePartition,
 }
 
+/// The index entries, by (schema, name), and the partition indexes
+/// that belong to an index of their partitioned table, as (schema,
+/// index, parent index, owner): each gets an INDEX ATTACH entry once
+/// every index has its entry
+#[derive(Default)]
+struct IndexAttaches {
+    ids: HashMap<(String, String), i32>,
+    pending: Vec<(String, String, String, String)>,
+}
+
 struct Builder {
     dump: libpgdump::Dump,
     dump_id_map: HashMap<usize, i32>,
@@ -259,6 +271,7 @@ struct Builder {
     text_search_last: HashMap<usize, i32>,
     /// ATTACH PARTITION entries to add once every table has its entry
     pending_attaches: Vec<PendingAttach>,
+    index_attaches: IndexAttaches,
     /// The entry of each text search object, by its kind, schema and
     /// name
     text_search_ids: HashMap<(&'static str, String, String), i32>,
@@ -2185,6 +2198,17 @@ impl Builder {
             &[parent_dump_id],
             index.tablespace.as_deref(),
         )?;
+        self.index_attaches
+            .ids
+            .insert((schema.to_string(), index.name.clone()), dump_id);
+        if let Some(parent) = &index.parent {
+            self.index_attaches.pending.push((
+                schema.to_string(),
+                index.name.clone(),
+                parent.clone(),
+                owner.to_string(),
+            ));
+        }
         if let Some(comment) = &index.comment {
             self.add_comment(
                 "INDEX",
@@ -2608,6 +2632,49 @@ impl Builder {
     /// for each partition that is a table of its own, as pg_dump writes
     /// it, after both tables. A partition whose table the project does
     /// not have cannot be attached, which is an error in the project.
+    /// `ALTER INDEX parent ATTACH PARTITION child` for each partition
+    /// index that belongs to an index of its partitioned table, after
+    /// both indexes, as pg_dump writes it
+    fn apply_index_attaches(&mut self) -> Result<(), String> {
+        for (schema, name, parent, owner) in
+            std::mem::take(&mut self.index_attaches.pending)
+        {
+            let (parent_schema, parent_name) = match parent.split_once('.') {
+                Some((schema, name)) => (schema.to_string(), name.to_string()),
+                None => (schema.clone(), parent.clone()),
+            };
+            let key = (parent_schema.clone(), parent_name.clone());
+            let parent_id =
+                *self.index_attaches.ids.get(&key).ok_or_else(|| {
+                    format!(
+                        "index {schema}.{name} belongs to {parent}, which \
+                         is not an index in the project"
+                    )
+                })?;
+            let child_id =
+                self.index_attaches.ids[&(schema.clone(), name.clone())];
+            let create = vec![format!(
+                "ALTER INDEX {}.{} ATTACH PARTITION {}.{}",
+                quote_ident(&parent_schema),
+                quote_ident(&parent_name),
+                quote_ident(&schema),
+                quote_ident(&name)
+            )];
+            // no drop statement, as for TABLE ATTACH
+            self.add_entry(
+                "INDEX ATTACH",
+                &schema,
+                &name,
+                &owner,
+                &create,
+                &[],
+                &[parent_id, child_id],
+                None,
+            )?;
+        }
+        Ok(())
+    }
+
     fn apply_attaches(&mut self, project: &Project) -> Result<(), String> {
         for attach in std::mem::take(&mut self.pending_attaches) {
             let partition = &attach.partition;
@@ -4124,6 +4191,7 @@ mod tests {
             dump_id_map: HashMap::new(),
             text_search_last: HashMap::new(),
             pending_attaches: Vec::new(),
+            index_attaches: IndexAttaches::default(),
             text_search_ids: HashMap::new(),
             text_search_refs: Vec::new(),
             superuser: "postgres".into(),
@@ -4577,6 +4645,7 @@ mod tests {
             dump_id_map: HashMap::new(),
             text_search_last: HashMap::new(),
             pending_attaches: Vec::new(),
+            index_attaches: IndexAttaches::default(),
             text_search_ids: HashMap::new(),
             text_search_refs: Vec::new(),
             superuser: "postgres".into(),
@@ -4599,6 +4668,7 @@ mod tests {
             dump_id_map: HashMap::new(),
             text_search_last: HashMap::new(),
             pending_attaches: Vec::new(),
+            index_attaches: IndexAttaches::default(),
             text_search_ids: HashMap::new(),
             text_search_refs: Vec::new(),
             superuser: "postgres".into(),
@@ -4834,6 +4904,7 @@ mod tests {
             dump_id_map: HashMap::new(),
             text_search_last: HashMap::new(),
             pending_attaches: Vec::new(),
+            index_attaches: IndexAttaches::default(),
             text_search_ids: HashMap::new(),
             text_search_refs: Vec::new(),
             superuser: "postgres".into(),
@@ -4890,6 +4961,7 @@ mod tests {
             dump_id_map: HashMap::new(),
             text_search_last: HashMap::new(),
             pending_attaches: Vec::new(),
+            index_attaches: IndexAttaches::default(),
             text_search_ids: HashMap::new(),
             text_search_refs: Vec::new(),
             superuser: "postgres".into(),
@@ -5089,6 +5161,7 @@ mod tests {
             dump_id_map: HashMap::new(),
             text_search_last: HashMap::new(),
             pending_attaches: Vec::new(),
+            index_attaches: IndexAttaches::default(),
             text_search_ids: HashMap::new(),
             text_search_refs: Vec::new(),
             superuser: "postgres".into(),

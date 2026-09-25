@@ -38,14 +38,6 @@ CREATE FUNCTION base_int_from_sql(internal) RETURNS internal
 CREATE TRANSFORM FOR base_int LANGUAGE sql
     (FROM SQL WITH FUNCTION base_int_from_sql(internal));
 
--- An index on a partitioned table: pg_dump writes each partition's
--- index, and an INDEX ATTACH entry that attaches it to the parent index
-CREATE TABLE measurements (id INTEGER, taken DATE)
-    PARTITION BY RANGE (taken);
-CREATE TABLE measurements_2020 PARTITION OF measurements
-    FOR VALUES FROM ('2020-01-01') TO ('2021-01-01');
-CREATE INDEX measurements_id ON measurements (id);
-
 -- A subscription that does not connect, so it needs no publisher. Its
 -- name must match bin/coverage-gate, which drops it before it drops
 -- the database.

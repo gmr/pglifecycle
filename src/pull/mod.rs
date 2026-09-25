@@ -41,6 +41,7 @@ pub const MODELED_DESCS: &[libpgdump::ObjectType] = {
         OT::Sequence,
         OT::SequenceOwnedBy,
         OT::Index,
+        OT::IndexAttach,
         OT::Constraint,
         OT::FkConstraint,
         OT::CheckConstraint,
@@ -897,6 +898,9 @@ impl Assembly {
             Statement::CreateOperator(mut operator) => {
                 operator.owner = owner;
                 self.operators.push(*operator);
+            }
+            Statement::AttachIndex { parent, child } => {
+                self.attach_index(&parent, &child, entry);
             }
             Statement::CreateAccessMethod(method) => {
                 self.access_methods.push(method);
@@ -2019,6 +2023,48 @@ impl Assembly {
         };
         policy.comment = Some(comment.to_string());
         true
+    }
+
+    /// Record that the index of a partition belongs to an index of the
+    /// partitioned table. pg_dump writes the INDEX ATTACH after both
+    /// indexes. The index of a unique, primary key or exclusion
+    /// constraint needs nothing: attaching the partition attaches it.
+    fn attach_index(
+        &mut self,
+        parent: &QualifiedName,
+        child: &QualifiedName,
+        entry: &libpgdump::Entry,
+    ) {
+        let index_in = |tables: &[models::Table],
+                        name: &QualifiedName|
+         -> Option<(usize, usize)> {
+            let schema = name.schema.as_deref().unwrap_or_default();
+            tables.iter().enumerate().find_map(|(t, table)| {
+                (table.schema == schema)
+                    .then_some(table.indexes.as_deref()?)?
+                    .iter()
+                    .position(|index| index.name == name.name)
+                    .map(|i| (t, i))
+            })
+        };
+        match (
+            index_in(&self.tables, child),
+            index_in(&self.tables, parent),
+        ) {
+            (Some((t, i)), Some(_)) => {
+                if let Some(indexes) = self.tables[t].indexes.as_mut() {
+                    indexes[i].parent = Some(parent.to_string());
+                }
+            }
+            // a constraint's index attaches with its partition
+            (None, None) => {}
+            _ => {
+                log::warn!(
+                    "Cannot model the attach of index {child} to {parent}"
+                );
+                self.push_remaining(entry);
+            }
+        }
     }
 
     fn find_table(

@@ -1373,6 +1373,23 @@ fn indexes(table: &str, repo: &Table, db: &Table, alters: &mut Vec<Alter>) {
         |index| {
             let mut sql =
                 format!("{};\n", build::render_index(index, table).join(" "));
+            // an index of a partition that belongs to an index of the
+            // partitioned table; the partitioned table's changes come
+            // first, so its index exists
+            if let Some(parent) = &index.parent {
+                let parent = match parent.split_once('.') {
+                    Some((parent_schema, name)) => format!(
+                        "{}.{}",
+                        quote_ident(parent_schema),
+                        quote_ident(name)
+                    ),
+                    None => format!("{schema}.{}", quote_ident(parent)),
+                };
+                sql.push_str(&format!(
+                    "ALTER INDEX {parent} ATTACH PARTITION {schema}.{};\n",
+                    quote_ident(&index.name)
+                ));
+            }
             if let Some(comment) = &index.comment {
                 let name = format!("{schema}.{}", quote_ident(&index.name));
                 sql.push_str(&comment_on("INDEX", &name, Some(comment)));

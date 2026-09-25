@@ -87,7 +87,9 @@ echo "==> Gate 2: convergence (mutate, deploy --apply, re-deploy is empty)"
 # statistics target and options changed; constraint comments changed
 # and cleared, and a commented check replaced by a different one, whose
 # comment deploy has to set again after re-adding it; rules
-# re-enabled, dropped, commented and replaced, on a table and a view
+# re-enabled, dropped, commented and replaced, on a table and a view;
+# a partitioned table's index dropped, which drops its partitions'
+# indexes too, so deploy has to make and attach them again
 psql -d "${TARGET_DB}" -q -v ON_ERROR_STOP=1 <<'SQL'
 ALTER TABLE test.users ADD COLUMN scratch text;
 ALTER TABLE test.users ALTER COLUMN display_name SET NOT NULL;
@@ -124,6 +126,7 @@ DROP RULE ledger_no_delete ON test.ledger;
 COMMENT ON RULE ledger_audit_insert ON test.ledger IS 'drift';
 CREATE OR REPLACE RULE ledger_view_insert AS ON INSERT TO test.ledger_view
     DO INSTEAD NOTHING;
+DROP INDEX test.readings_taken;
 SQL
 # every destructive change is run twice: first withheld and reported,
 # then applied with --allow-drop

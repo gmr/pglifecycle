@@ -54,6 +54,12 @@ pub enum Statement {
         parent: QualifiedName,
         partition: models::TablePartition,
     },
+    /// ALTER INDEX parent ATTACH PARTITION child: the index of a
+    /// partition belongs to the index of its partitioned table
+    AttachIndex {
+        parent: QualifiedName,
+        child: QualifiedName,
+    },
     /// ALTER TABLE ... ALTER COLUMN ... SET DEFAULT — pg_dump emits
     /// column defaults this way (e.g. `nextval(...)` for SERIAL) rather
     /// than inline on the CREATE TABLE column; folded onto the matching
