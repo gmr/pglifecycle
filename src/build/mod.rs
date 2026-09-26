@@ -1244,7 +1244,9 @@ impl Builder {
         // the body of an internal function is the name of a built-in
         // function, so a newline around it names no function
         if let Some(definition) = &d.definition
-            && d.language.as_deref() == Some("internal")
+            && d.language
+                .as_deref()
+                .is_some_and(|l| l.eq_ignore_ascii_case("internal"))
         {
             create.push(postgres_value(&Value::String(definition.clone())));
             return self.add_item_with_comment_target(
