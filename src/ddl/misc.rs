@@ -995,6 +995,23 @@ pub(crate) fn create_subscription(
     }))
 }
 
+/// The schema part of a qualified SQL name, as `s` in
+/// `s."part.one"(internal)`, or None for an unqualified name. A period
+/// in a quoted identifier does not separate the parts, and the name
+/// stops at the argument list.
+fn name_schema(name: &str) -> Option<String> {
+    let mut quoted = false;
+    for (index, c) in name.char_indices() {
+        match c {
+            '"' => quoted = !quoted,
+            '.' if !quoted => return Some(unquote(&name[..index])),
+            '(' if !quoted => return None,
+            _ => {}
+        }
+    }
+    None
+}
+
 /// CREATE TRANSFORM → Transform
 pub(crate) fn create_transform(
     node: &Node,
@@ -1038,10 +1055,7 @@ pub(crate) fn create_transform(
     ]
     .into_iter()
     .flatten()
-    .find_map(|name| {
-        let name = name.split('(').next().unwrap_or(name);
-        name.rsplit_once('.').map(|(schema, _)| unquote(schema))
-    })
+    .find_map(name_schema)
     .unwrap_or_else(|| String::from("public"));
     Ok(Statement::CreateTransform(Transform {
         schema,
@@ -1226,6 +1240,26 @@ mod tests {
         assert_eq!(transform.schema, "public");
         assert_eq!(transform.from_sql, None);
         assert_eq!(transform.to_sql.as_deref(), Some("int_to(internal)"));
+    }
+
+    #[test]
+    fn transform_schema_ignores_periods_in_quoted_names() {
+        let Statement::CreateTransform(transform) = parse_one(
+            "CREATE TRANSFORM FOR \"My.Schema\".\"part.one\" LANGUAGE \
+             \"MyLang\" (FROM SQL WITH FUNCTION \
+             \"My.Schema\".\"f.x\"(internal));",
+        ) else {
+            panic!("expected CreateTransform")
+        };
+        assert_eq!(transform.schema, "My.Schema");
+        assert_eq!(transform.language, "MyLang");
+        let Statement::CreateTransform(transform) = parse_one(
+            "CREATE TRANSFORM FOR integer LANGUAGE sql (TO SQL WITH \
+             FUNCTION s.\"f.x\"(internal));",
+        ) else {
+            panic!("expected CreateTransform")
+        };
+        assert_eq!(transform.schema, "s");
     }
 
     #[test]
