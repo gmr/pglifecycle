@@ -56,6 +56,7 @@ pub enum Definition {
     Table(Table),
     Tablespace(Tablespace),
     TextSearch(TextSearch),
+    Transform(Transform),
     Type(Type),
     User(User),
     UserMapping(UserMapping),
@@ -76,6 +77,9 @@ impl Definition {
             Definition::Collation(d) => d.name.clone(),
             Definition::Conversion(d) => d.name.clone(),
             Definition::DefaultPrivileges(d) => d.name.clone(),
+            Definition::Transform(d) => {
+                format!("FOR {} LANGUAGE {}", d.data_type, d.language)
+            }
             Definition::Domain(d) => d.name.clone(),
             Definition::EventTrigger(d) => d.name.clone(),
             Definition::Extension(d) => d.name.clone(),
@@ -137,6 +141,7 @@ impl Definition {
             Definition::AccessMethod(d) => d.comment.as_deref(),
             Definition::Aggregate(d) => d.comment.as_deref(),
             Definition::Cast(d) => d.comment.as_deref(),
+            Definition::Transform(d) => d.comment.as_deref(),
             Definition::Collation(d) => d.comment.as_deref(),
             Definition::Conversion(d) => d.comment.as_deref(),
             Definition::Domain(d) => d.comment.as_deref(),
@@ -183,6 +188,7 @@ impl Definition {
         match self {
             Definition::Aggregate(d) => Some(&d.schema),
             Definition::Cast(d) => Some(&d.schema),
+            Definition::Transform(d) => Some(&d.schema),
             Definition::Collation(d) => Some(&d.schema),
             Definition::Conversion(d) => Some(&d.schema),
             Definition::Domain(d) => Some(&d.schema),

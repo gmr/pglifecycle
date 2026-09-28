@@ -1,0 +1,52 @@
+---
+$schema: https://json-schema.org/draft/2020-12/schema
+$id: https://gmr.github.io/pglifecycle/schemata/transform.json
+title: Transform
+description: >
+  Defines a transform, which converts a data type to and from the form a
+  procedural language uses. A transform has no owner. The project keeps it
+  in the schema of its data type. When the data type is built-in, the
+  project keeps it in the first schema that its functions name, or in
+  public.
+type: object
+properties:
+  schema:
+    title: Schema
+    type: string
+  type:
+    title: Data Type
+    description: The data type the transform converts.
+    type: string
+  language:
+    title: Language
+    description: The procedural language the transform is for.
+    type: string
+  from_sql:
+    title: From SQL Function
+    description: >
+      The function, with its argument types, that converts the data type to
+      the form the language uses. It takes one argument of type internal and
+      returns internal.
+    type: string
+  to_sql:
+    title: To SQL Function
+    description: >
+      The function, with its argument types, that converts from the form the
+      language uses to the data type. It takes one argument of type internal
+      and returns the data type.
+    type: string
+  comment:
+    title: Comment
+    description: An optional comment about the transform
+    type: string
+  dependencies:
+    title: Dependencies
+    description: Database objects this object is dependent upon
+    $package_schema: dependencies
+additionalProperties: false
+required:
+  - type
+  - language
+anyOf:
+  - required: [from_sql]
+  - required: [to_sql]

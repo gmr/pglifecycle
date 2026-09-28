@@ -284,6 +284,9 @@ fn existence_index(assembly: &Assembly) -> BTreeSet<(String, String, String)> {
                 .iter()
                 .map(|d| (ObjectType::Cast, Definition::Cast(d.clone()))),
         )
+        .chain(assembly.transforms.iter().map(|d| {
+            (ObjectType::Transform, Definition::Transform(d.clone()))
+        }))
         .chain(assembly.collations.iter().map(|d| {
             (ObjectType::Collation, Definition::Collation(d.clone()))
         }))
@@ -409,6 +412,17 @@ fn definition_existence_key(
             desc.as_str().to_string(),
             family.schema.clone(),
             format!("{} USING {}", family.name, family.method),
+        ),
+        // a transform has no schema, and pull and the project may file
+        // it under different ones
+        Definition::Transform(transform) => (
+            desc.as_str().to_string(),
+            String::new(),
+            format!(
+                "FOR {} LANGUAGE {}",
+                canonical_type(&transform.data_type),
+                transform.language
+            ),
         ),
         Definition::Cast(cast) => {
             let name = format!(

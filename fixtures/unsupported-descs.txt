@@ -1,1 +1,0 @@
-TRANSFORM	TRANSFORM FOR unsupported.base_int LANGUAGE sql

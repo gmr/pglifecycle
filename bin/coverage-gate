@@ -9,6 +9,9 @@
 # and a fix makes the expected list shrink, so the list is the record
 # of how much schema the tool still drops. See PLAN-coverage.md.
 #
+# An empty list means that pull models every object in the fixture: then
+# pull must succeed and write no remaining.yaml.
+#
 # Requires a PostgreSQL superuser connection (defaults target the
 # compose.yaml container; override with PGHOST/PGPORT/PGUSER) and the
 # postgres client tools on PATH.
@@ -19,20 +22,14 @@ PGPORT="${PGPORT:-5432}"
 PGUSER="${PGUSER:-postgres}"
 export PGHOST PGPORT PGUSER
 
-# Scratch objects the gate drops and recreates on each run. Roles are
-# cluster-global, so the role name carries the tool prefix to keep the
-# gate from dropping a role the cluster already had. It must match
-# fixtures/unsupported.sql.
+# Scratch database the gate drops and recreates on each run.
 SOURCE_DB=coverage_source
-READER_ROLE=pglifecycle_coverage_reader
 EXPECTED=fixtures/unsupported-descs.txt
 WORKDIR="$(mktemp -d)"
 
 cleanup() {
     rm -rf "${WORKDIR}"
     bin/drop-database "${SOURCE_DB}" \
-        >/dev/null 2>&1 || true
-    psql -d postgres -q -c "DROP ROLE IF EXISTS ${READER_ROLE}" \
         >/dev/null 2>&1 || true
 }
 
@@ -43,21 +40,30 @@ cargo build --quiet
 
 echo "==> Creating ${SOURCE_DB} from fixtures/unsupported.sql"
 bin/drop-database "${SOURCE_DB}"
-psql -d postgres -q -c "DROP ROLE IF EXISTS ${READER_ROLE}"
 psql -d postgres -q -c "CREATE DATABASE ${SOURCE_DB}"
 psql -d "${SOURCE_DB}" -q -v ON_ERROR_STOP=1 -f fixtures/unsupported.sql
 
 echo "==> pg_dump ${SOURCE_DB}"
 pg_dump -d "${SOURCE_DB}" -Fc --schema-only -f "${WORKDIR}/source.dump"
 
-# every object in this fixture is one pull cannot model, so the command
-# is expected to fail without --allow-unsupported
-echo "==> pull (must fail without --allow-unsupported)"
-if ./target/debug/pglifecycle pull --dump "${WORKDIR}/source.dump" \
-    "${WORKDIR}/must-fail" >/dev/null 2>&1; then
-    echo "Coverage gate FAILED: pull succeeded on a schema it cannot" \
-        "model" >&2
-    exit 1
+# with a known gap, pull must fail without --allow-unsupported; with
+# none, it must succeed
+if [ -s "${EXPECTED}" ]; then
+    echo "==> pull (must fail without --allow-unsupported)"
+    if ./target/debug/pglifecycle pull --dump "${WORKDIR}/source.dump" \
+        "${WORKDIR}/must-fail" >/dev/null 2>&1; then
+        echo "Coverage gate FAILED: pull succeeded on a schema it cannot" \
+            "model" >&2
+        exit 1
+    fi
+else
+    echo "==> pull (must succeed: no known unsupported entries)"
+    ./target/debug/pglifecycle pull --dump "${WORKDIR}/source.dump" \
+        "${WORKDIR}/must-pass" >/dev/null
+    if [ -e "${WORKDIR}/must-pass/remaining.yaml" ]; then
+        echo "Coverage gate FAILED: pull wrote remaining.yaml" >&2
+        exit 1
+    fi
 fi
 
 echo "==> pull --allow-unsupported"
@@ -73,15 +79,19 @@ import sys
 
 import yaml
 
-with open(sys.argv[1]) as handle:
-    entries = yaml.safe_load(handle) or []
+try:
+    with open(sys.argv[1]) as handle:
+        entries = yaml.safe_load(handle) or []
+except FileNotFoundError:
+    entries = []
 lines = set()
 for entry in entries:
     namespace = entry.get("namespace") or ""
     tag = entry.get("tag") or ""
     name = f"{namespace}.{tag}" if namespace else tag
     lines.add(f"{entry['desc']}\t{name}")
-print("\n".join(sorted(lines)))
+if lines:
+    print("\n".join(sorted(lines)))
 PYTHON
 
 if diff -u "${EXPECTED}" "${WORKDIR}/actual.txt"; then

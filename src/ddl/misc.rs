@@ -14,7 +14,7 @@ use crate::models::{
     Operator, OperatorClass, OperatorClassFunction, OperatorClassOperator,
     OperatorFamily, Publication, PublicationTable, Rule, Statistics,
     Subscription, TextSearchConfig, TextSearchDict, TextSearchParser,
-    TextSearchTemplate,
+    TextSearchTemplate, Transform,
 };
 
 /// A text search object and the schema it belongs to
@@ -995,6 +995,78 @@ pub(crate) fn create_subscription(
     }))
 }
 
+/// The schema part of a qualified SQL name, as `s` in
+/// `s."part.one"(internal)`, or None for an unqualified name. A period
+/// in a quoted identifier does not separate the parts, and the name
+/// stops at the argument list.
+fn name_schema(name: &str) -> Option<String> {
+    let mut quoted = false;
+    for (index, c) in name.char_indices() {
+        match c {
+            '"' => quoted = !quoted,
+            '.' if !quoted => return Some(unquote(&name[..index])),
+            '(' if !quoted => return None,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// CREATE TRANSFORM → Transform
+pub(crate) fn create_transform(
+    node: &Node,
+    src: &str,
+) -> Result<Statement, String> {
+    let data_type = node
+        .child_of_kind("Typename")
+        .map(|n| n.text(src).to_string())
+        .ok_or_else(|| String::from("CREATE TRANSFORM without a type"))?;
+    let language = node
+        .child_of_kind("name")
+        .map(|n| unquote(n.text(src)))
+        .ok_or_else(|| String::from("CREATE TRANSFORM without a language"))?;
+    let mut from_sql = None;
+    let mut to_sql = None;
+    let mut from = false;
+    if let Some(list) = node.child_of_kind("transform_element_list") {
+        let mut cursor = list.walk();
+        for child in list.children(&mut cursor) {
+            match child.kind() {
+                "kw_from" => from = true,
+                "kw_to" => from = false,
+                "function_with_argtypes" => {
+                    let function = Some(child.text(src).to_string());
+                    if from {
+                        from_sql = function;
+                    } else {
+                        to_sql = function;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    // a transform has no schema of its own; the project files it with
+    // the first schema its type or functions name, as for a cast
+    let schema = [
+        Some(data_type.as_str()),
+        from_sql.as_deref(),
+        to_sql.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(name_schema)
+    .unwrap_or_else(|| String::from("public"));
+    Ok(Statement::CreateTransform(Transform {
+        schema,
+        data_type,
+        language,
+        from_sql,
+        to_sql,
+        comment: None,
+    }))
+}
+
 /// ALTER PUBLICATION ... ADD, the form pg_dump writes for each table
 /// and schema
 pub(crate) fn alter_publication(
@@ -1143,6 +1215,68 @@ mod tests {
         let mut statements = parser.parse(sql).unwrap();
         assert_eq!(statements.len(), 1, "expected one statement");
         statements.remove(0)
+    }
+
+    #[test]
+    fn parses_create_transform() {
+        let Statement::CreateTransform(transform) = parse_one(
+            "CREATE TRANSFORM FOR s.t LANGUAGE sql (FROM SQL WITH \
+             FUNCTION s.t_from(internal), TO SQL WITH FUNCTION \
+             s.t_to(internal));",
+        ) else {
+            panic!("expected CreateTransform")
+        };
+        assert_eq!(transform.schema, "s");
+        assert_eq!(transform.data_type, "s.t");
+        assert_eq!(transform.language, "sql");
+        assert_eq!(transform.from_sql.as_deref(), Some("s.t_from(internal)"));
+        assert_eq!(transform.to_sql.as_deref(), Some("s.t_to(internal)"));
+        let Statement::CreateTransform(transform) = parse_one(
+            "CREATE TRANSFORM FOR integer LANGUAGE plpgsql (TO SQL WITH \
+             FUNCTION int_to(internal));",
+        ) else {
+            panic!("expected CreateTransform")
+        };
+        assert_eq!(transform.schema, "public");
+        assert_eq!(transform.from_sql, None);
+        assert_eq!(transform.to_sql.as_deref(), Some("int_to(internal)"));
+    }
+
+    #[test]
+    fn transform_schema_ignores_periods_in_quoted_names() {
+        let Statement::CreateTransform(transform) = parse_one(
+            "CREATE TRANSFORM FOR \"My.Schema\".\"part.one\" LANGUAGE \
+             \"MyLang\" (FROM SQL WITH FUNCTION \
+             \"My.Schema\".\"f.x\"(internal));",
+        ) else {
+            panic!("expected CreateTransform")
+        };
+        assert_eq!(transform.schema, "My.Schema");
+        assert_eq!(transform.language, "MyLang");
+        let Statement::CreateTransform(transform) = parse_one(
+            "CREATE TRANSFORM FOR integer LANGUAGE sql (TO SQL WITH \
+             FUNCTION s.\"f.x\"(internal));",
+        ) else {
+            panic!("expected CreateTransform")
+        };
+        assert_eq!(transform.schema, "s");
+    }
+
+    #[test]
+    fn parses_comment_on_transform() {
+        let Statement::Comment {
+            on,
+            target,
+            comment,
+        } = parse_one(
+            "COMMENT ON TRANSFORM FOR s.t LANGUAGE sql IS 'converts';",
+        )
+        else {
+            panic!("expected Comment")
+        };
+        assert_eq!(on, "TRANSFORM");
+        assert_eq!(target.name, "FOR s.t LANGUAGE sql");
+        assert_eq!(comment, "converts");
     }
 
     #[test]

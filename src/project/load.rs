@@ -184,13 +184,21 @@ impl Loader {
                 continue;
             };
             for mut entry in entries {
-                inject(&mut entry, "owner", &owner);
+                if !ot.is_ownerless() {
+                    inject(&mut entry, "owner", &owner);
+                }
                 inject(&mut entry, "schema", &container_schema);
                 let name = if ot == ObjectType::Cast {
                     format!(
                         "({} AS {})",
                         entry["source_type"].as_str().unwrap_or_default(),
                         entry["target_type"].as_str().unwrap_or_default()
+                    )
+                } else if ot == ObjectType::Transform {
+                    format!(
+                        "FOR {} LANGUAGE {}",
+                        entry["type"].as_str().unwrap_or_default(),
+                        entry["language"].as_str().unwrap_or_default()
                     )
                 } else {
                     match object_name(&entry) {
@@ -374,6 +382,14 @@ impl Loader {
                 }
                 Definition::Conversion(c) => {
                     references.extend(functions(&[&c.function]));
+                }
+                Definition::Transform(t) => {
+                    references.extend(functions(&[&t.from_sql, &t.to_sql]));
+                    references.extend(type_references(t.data_type.clone()));
+                    references.push((
+                        ObjectType::ProceduralLanguage,
+                        t.language.clone(),
+                    ));
                 }
                 Definition::Statistics(s) => {
                     references.push((ObjectType::Table, s.table.clone()));
@@ -753,6 +769,7 @@ fn to_definition(
         ObjectType::AccessMethod => Definition::AccessMethod(from(value)?),
         ObjectType::Aggregate => Definition::Aggregate(from(value)?),
         ObjectType::Cast => Definition::Cast(from(value)?),
+        ObjectType::Transform => Definition::Transform(from(value)?),
         ObjectType::Collation => Definition::Collation(from(value)?),
         ObjectType::Conversion => Definition::Conversion(from(value)?),
         ObjectType::DefaultPrivileges => {

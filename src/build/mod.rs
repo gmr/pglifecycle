@@ -305,6 +305,7 @@ impl Builder {
             Definition::AccessMethod(_) => self.dump_access_method(item),
             Definition::Aggregate(_) => self.dump_aggregate(item),
             Definition::Cast(_) => self.dump_cast(item),
+            Definition::Transform(_) => self.dump_transform(item),
             Definition::Collation(_) => self.dump_collation(item),
             Definition::Conversion(_) => self.dump_conversion(item),
             Definition::DefaultPrivileges(_) => {
@@ -736,6 +737,38 @@ impl Builder {
             false,
             Some(name),
         )
+    }
+
+    fn dump_transform(&mut self, item: &Item) -> Result<(), String> {
+        let Definition::Transform(d) = &item.definition else {
+            unreachable!()
+        };
+        // the archive tag keeps the language name as the project writes
+        // it; the SQL quotes it, so that PostgreSQL does not fold its
+        // case. The type is SQL text, which pg_dump qualifies.
+        let name = format!(
+            "FOR {} LANGUAGE {}",
+            d.data_type,
+            quote_ident(&d.language)
+        );
+        let elements: Vec<String> = [
+            d.from_sql
+                .as_ref()
+                .map(|f| format!("FROM SQL WITH FUNCTION {f}")),
+            d.to_sql
+                .as_ref()
+                .map(|f| format!("TO SQL WITH FUNCTION {f}")),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let create = vec![
+            "CREATE TRANSFORM".into(),
+            name.clone(),
+            format!("({})", elements.join(", ")),
+        ];
+        let drop = vec!["DROP TRANSFORM IF EXISTS".into(), name.clone()];
+        self.add_item_with_comment_target(item, create, drop, true, Some(name))
     }
 
     fn dump_collation(&mut self, item: &Item) -> Result<(), String> {
@@ -5417,6 +5450,35 @@ mod tests {
         // FUNCTION by stripping the leading DROP off this one
         // (deviation 17)
         assert_eq!(drop, "DROP FUNCTION test.bare_zero();\n");
+    }
+
+    #[test]
+    fn renders_transform_with_a_quoted_language() {
+        let item = Item {
+            id: 1,
+            desc: ObjectType::Transform,
+            definition: Definition::Transform(crate::models::Transform {
+                schema: "s".into(),
+                data_type: "s.t".into(),
+                language: "MyLang".into(),
+                from_sql: Some("s.t_from(internal)".into()),
+                to_sql: None,
+                comment: Some("converts".into()),
+            }),
+            dependencies: BTreeSet::new(),
+        };
+        // the tag keeps the name as the project writes it
+        let tag = "FOR s.t LANGUAGE MyLang";
+        assert_eq!(
+            table_defn(&item, libpgdump::ObjectType::Transform, tag),
+            "CREATE TRANSFORM FOR s.t LANGUAGE \"MyLang\" (FROM SQL WITH \
+             FUNCTION s.t_from(internal));\n"
+        );
+        assert_eq!(
+            table_defn(&item, libpgdump::ObjectType::Comment, tag),
+            "COMMENT ON TRANSFORM FOR s.t LANGUAGE \"MyLang\" IS \
+             $$converts$$;\n;\n"
+        );
     }
 
     #[test]

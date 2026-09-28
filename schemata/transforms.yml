@@ -1,0 +1,21 @@
+---
+$schema: https://json-schema.org/draft/2020-12/schema
+$id: https://gmr.github.io/pglifecycle/schemata/transforms.json
+title: Transforms
+description: >
+  Specifies the transforms for the data types in a schema
+type: object
+properties:
+  schema:
+    title: Schema
+    description: The schema of the data types in this file.
+    type: string
+  transforms:
+    title: Transforms
+    type: array
+    items:
+      $package_schema: transform
+required:
+  - schema
+  - transforms
+additionalProperties: false

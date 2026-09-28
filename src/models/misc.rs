@@ -523,6 +523,24 @@ pub struct Subscription {
     pub comment: Option<String>,
 }
 
+/// Represents a transform, which converts a data type for a
+/// procedural language. It has no owner and no schema: the project
+/// files it under the schema of its type.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Transform {
+    pub schema: String,
+    #[serde(rename = "type")]
+    pub data_type: String,
+    pub language: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from_sql: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub to_sql: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+}
+
 /// Represents a tablespace
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

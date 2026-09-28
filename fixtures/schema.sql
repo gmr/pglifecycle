@@ -744,6 +744,20 @@ CREATE TYPE test.base_int (INPUT = test.base_int_in,
     OUTPUT = test.base_int_out, LIKE = integer);
 COMMENT ON TYPE test.base_int IS 'An integer with its own I/O';
 
+-- Transforms for the base type: one with both functions and a
+-- comment, and one with only its TO SQL function
+CREATE FUNCTION test.base_int_from_sql(internal) RETURNS internal
+    AS 'int4send' LANGUAGE internal IMMUTABLE;
+CREATE FUNCTION test.base_int_to_sql(internal) RETURNS test.base_int
+    AS 'int4recv' LANGUAGE internal IMMUTABLE;
+CREATE TRANSFORM FOR test.base_int LANGUAGE sql (
+    FROM SQL WITH FUNCTION test.base_int_from_sql(internal),
+    TO SQL WITH FUNCTION test.base_int_to_sql(internal));
+COMMENT ON TRANSFORM FOR test.base_int LANGUAGE sql
+    IS 'Converts base_int for SQL functions';
+CREATE TRANSFORM FOR test.base_int LANGUAGE plpgsql (
+    TO SQL WITH FUNCTION test.base_int_to_sql(internal));
+
 -- A subscription that does not connect, so it needs no publisher.
 -- pg_dump writes each option that is not at its default. PostgreSQL
 -- does not drop a database that has a subscription, so the gates drop

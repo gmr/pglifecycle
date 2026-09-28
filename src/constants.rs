@@ -29,6 +29,7 @@ pub const PROJECT_DIRS: &[&str] = &[
     "tables",
     "tablespaces",
     "text_search",
+    "transforms",
     "types",
     "user_mappings",
     "users",
@@ -66,6 +67,7 @@ pub enum ObjectType {
     Table,
     Tablespace,
     TextSearch,
+    Transform,
     Type,
     User,
     UserMapping,
@@ -104,6 +106,7 @@ impl ObjectType {
             Self::Table => "TABLE",
             Self::Tablespace => "TABLESPACE",
             Self::TextSearch => "TEXT SEARCH",
+            Self::Transform => "TRANSFORM",
             Self::Type => "TYPE",
             Self::User => "USER",
             Self::UserMapping => "USER MAPPING",
@@ -138,6 +141,7 @@ impl ObjectType {
             Self::Table => "tables",
             Self::Tablespace => "tablespaces",
             Self::TextSearch => "text_search",
+            Self::Transform => "transforms",
             Self::Type => "types",
             Self::User => "users",
             Self::UserMapping => "user_mappings",
@@ -186,6 +190,7 @@ impl ObjectType {
             "tables" => Self::Table,
             "tablespaces" => Self::Tablespace,
             "text_search" => Self::TextSearch,
+            "transforms" => Self::Transform,
             "types" => Self::Type,
             "users" => Self::User,
             "user_mappings" => Self::UserMapping,
@@ -203,6 +208,7 @@ impl ObjectType {
             Self::OperatorClass => "operator_classes",
             Self::OperatorFamily => "operator_families",
             Self::TextSearch => "text_search",
+            Self::Transform => "transforms",
             Self::Type => "types",
             other => unreachable!("no container key for {other:?}"),
         }
@@ -219,6 +225,7 @@ impl ObjectType {
                 | Self::OperatorClass
                 | Self::OperatorFamily
                 | Self::TextSearch
+                | Self::Transform
                 | Self::Type
         )
     }
@@ -236,6 +243,7 @@ impl ObjectType {
                 | Self::Server
                 | Self::Subscription
                 | Self::TextSearch
+                | Self::Transform
                 | Self::User
                 | Self::UserMapping
         )
@@ -281,6 +289,7 @@ pub const READ_ORDER: &[ObjectType] = &[
     ObjectType::MaterializedView,
     ObjectType::Statistics,
     ObjectType::Cast,
+    ObjectType::Transform,
     ObjectType::TextSearch,
     ObjectType::Server,
     ObjectType::EventTrigger,

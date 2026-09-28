@@ -60,6 +60,7 @@ pub const MODELED_DESCS: &[libpgdump::ObjectType] = {
         OT::PublicationTable,
         OT::PublicationTablesInSchema,
         OT::Subscription,
+        OT::Transform,
         OT::TextSearchConfiguration,
         OT::TextSearchDictionary,
         OT::TextSearchParser,
@@ -488,6 +489,7 @@ pub struct Assembly {
     pub user_mappings: Vec<models::UserMapping>,
     pub aggregates: Vec<models::Aggregate>,
     pub casts: Vec<models::Cast>,
+    pub transforms: Vec<models::Transform>,
     pub collations: Vec<models::Collation>,
     pub conversions: Vec<models::Conversion>,
     pub event_triggers: Vec<models::EventTrigger>,
@@ -570,6 +572,7 @@ impl Assembly {
             ("functions", self.functions.len()),
             ("aggregates", self.aggregates.len()),
             ("casts", self.casts.len()),
+            ("transforms", self.transforms.len()),
             ("collations", self.collations.len()),
             ("conversions", self.conversions.len()),
             (
@@ -1098,6 +1101,9 @@ impl Assembly {
             }
             // a cast has no owner of its own
             Statement::CreateCast(cast) => self.casts.push(cast),
+            Statement::CreateTransform(transform) => {
+                self.transforms.push(transform);
+            }
             Statement::CreateCollation(mut collation) => {
                 collation.owner = owner;
                 self.collations.push(collation);
@@ -1604,6 +1610,14 @@ impl Assembly {
                     models::Definition::Cast((*c).clone()).name() == *name
                 })
                 .map(|c| c.comment = Some(comment.clone()))
+                .is_some(),
+            "TRANSFORM" => self
+                .transforms
+                .iter_mut()
+                .find(|t| {
+                    models::Definition::Transform((*t).clone()).name() == *name
+                })
+                .map(|t| t.comment = Some(comment.clone()))
                 .is_some(),
             "COLLATION" => self
                 .collations

@@ -319,6 +319,25 @@ pub(crate) fn comment(node: &Node, src: &str) -> Result<Statement, String> {
         .ok_or_else(|| {
             format!("COMMENT without text: {}", truncate(node.text(src), 80))
         })?;
+    // a transform is named by its type and its language
+    if node.child_of_kind("kw_transform").is_some() {
+        let data_type = node
+            .child_of_kind("Typename")
+            .map(|n| n.text(src).to_string())
+            .unwrap_or_default();
+        let language = node
+            .child_of_kind("name")
+            .map(|n| unquote(n.text(src)))
+            .unwrap_or_default();
+        return Ok(Statement::Comment {
+            on: String::from("TRANSFORM"),
+            target: QualifiedName {
+                schema: None,
+                name: format!("FOR {data_type} LANGUAGE {language}"),
+            },
+            comment: text,
+        });
+    }
     // the object type is the keyword sequence between ON and the name
     let mut object_type = Vec::new();
     let mut target: Option<QualifiedName> = None;
