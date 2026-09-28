@@ -817,6 +817,10 @@ pub struct Trigger {
     pub when: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub events: Option<Vec<String>>,
+    /// The columns of `UPDATE OF`: the UPDATE event fires only when
+    /// one of them is a target of the update
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub update_columns: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub for_each: Option<String>,
     /// A CONSTRAINT TRIGGER (always AFTER ROW; may be deferrable)

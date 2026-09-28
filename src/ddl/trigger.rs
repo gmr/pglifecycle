@@ -35,6 +35,7 @@ pub(crate) fn create_trigger(
     // are all direct children of TriggerOneEvent (one per grammar
     // alternative), so child_of_kind (single-level) replaces the
     // recursive has() walks
+    let mut update_columns = None;
     let events: Vec<String> = node
         .find_all("TriggerOneEvent")
         .iter()
@@ -46,7 +47,14 @@ pub(crate) fn create_trigger(
             } else if event.child_of_kind("kw_truncate").is_some() {
                 "TRUNCATE".to_string()
             } else if let Some(columns) = event.child_of_kind("columnList") {
-                format!("UPDATE OF {}", columns.text(src))
+                update_columns = Some(
+                    columns
+                        .find_all("columnElem")
+                        .iter()
+                        .map(|c| unquote(c.text(src)))
+                        .collect(),
+                );
+                "UPDATE".to_string()
             } else {
                 "UPDATE".to_string()
             }
@@ -113,6 +121,7 @@ pub(crate) fn create_trigger(
             name: Some(name),
             when,
             events: (!events.is_empty()).then_some(events),
+            update_columns,
             for_each,
             constraint,
             // omit the defaults (NOT DEFERRABLE / INITIALLY IMMEDIATE)
@@ -138,6 +147,24 @@ mod tests {
         let mut statements = parser.parse(sql).unwrap();
         assert_eq!(statements.len(), 1, "expected one statement");
         statements.remove(0)
+    }
+
+    #[test]
+    fn parses_update_of_columns() {
+        let Statement::CreateTrigger { trigger, .. } = parse_one(
+            "CREATE TRIGGER t BEFORE INSERT OR UPDATE OF \"Name\", total \
+             ON s.t FOR EACH ROW EXECUTE FUNCTION s.f();",
+        ) else {
+            panic!("expected CreateTrigger")
+        };
+        assert_eq!(
+            trigger.events,
+            Some(vec!["INSERT".into(), "UPDATE".into()])
+        );
+        assert_eq!(
+            trigger.update_columns,
+            Some(vec!["Name".into(), "total".into()])
+        );
     }
 
     #[test]

@@ -191,6 +191,28 @@ mod tests {
         assert!(grant("reader", true));
     }
 
+    /// UPDATE OF needs the UPDATE event, and the raw SQL form cannot
+    /// have it
+    #[test]
+    fn trigger_update_columns_need_update() {
+        let trigger = |events: &[&str], sql: bool| {
+            let mut data = json!({"update_columns": ["Name"]});
+            if sql {
+                data["sql"] = json!("CREATE TRIGGER t ...");
+            } else {
+                data["name"] = json!("t");
+                data["when"] = json!("BEFORE");
+                data["events"] = json!(events);
+                data["function"] = json!("test.f()");
+            }
+            validate_object("trigger", "t", &data)
+        };
+        assert!(trigger(&["UPDATE"], false));
+        assert!(trigger(&["INSERT", "UPDATE"], false));
+        assert!(!trigger(&["INSERT"], false));
+        assert!(!trigger(&[], true));
+    }
+
     /// A routine has one body form only
     #[test]
     fn routine_body_forms_are_exclusive() {

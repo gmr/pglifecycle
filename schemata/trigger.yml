@@ -21,6 +21,15 @@ properties:
     type: array
     items:
       enum: [INSERT, UPDATE, DELETE, TRUNCATE]
+  update_columns:
+    title: Update Of Columns
+    description: >
+      The columns of UPDATE OF: the UPDATE event fires only when one of these
+      columns is a target of the UPDATE command. Needs UPDATE in events.
+    type: array
+    items:
+      type: string
+    minItems: 1
   for_each:
     title: For Each Row or Statement
     enum: [ROW, STATEMENT]
@@ -78,6 +87,7 @@ oneOf:
         - required: [name]
         - required: [when]
         - required: [events]
+        - required: [update_columns]
         - required: [for_each]
         - required: [constraint]
         - required: [deferrable]
@@ -88,6 +98,12 @@ oneOf:
   - required: [name, when, events, function]
     not: {required: [sql]}
 allOf:
+  - if:
+      required: [update_columns]
+    then:
+      properties:
+        events: {contains: {const: UPDATE}}
+      required: [events]
   - if:
       properties: {deferrable: {const: true}}
       required: [deferrable]

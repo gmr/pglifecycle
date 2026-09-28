@@ -1383,8 +1383,10 @@ impl Builder {
             self.item_name(item),
         ];
         if let Some(columns) = &d.columns {
-            let names: Vec<&str> =
-                columns.iter().map(view_column_name).collect();
+            let names: Vec<String> = columns
+                .iter()
+                .map(|c| quote_ident(view_column_name(c)))
+                .collect();
             create.push(format!("({})", names.join(", ")));
         }
         if let Some(method) = &d.table_access_method {
@@ -2990,7 +2992,7 @@ impl Builder {
                     .iter()
                     .map(|column| {
                         let mut col = vec![
-                            column.name.clone(),
+                            quote_ident(&column.name),
                             column.data_type.clone(),
                         ];
                         if let Some(collation) = &column.collation {
@@ -3131,8 +3133,10 @@ impl Builder {
         create.push("VIEW".into());
         create.push(self.item_name(item));
         if let Some(columns) = &d.columns {
-            let names: Vec<&str> =
-                columns.iter().map(view_column_name).collect();
+            let names: Vec<String> = columns
+                .iter()
+                .map(|c| quote_ident(view_column_name(c)))
+                .collect();
             create.push(format!("({})", names.join(", ")));
         }
         let mut with_options = Vec::new();
@@ -3334,7 +3338,7 @@ pub(crate) fn render_column_not_null(column: &Column) -> String {
 }
 
 pub(crate) fn render_table_column(column: &Column) -> String {
-    let mut sql = vec![column.name.clone(), column.data_type.clone()];
+    let mut sql = vec![quote_ident(&column.name), column.data_type.clone()];
     if let Some(collation) = &column.collation {
         sql.push("COLLATE".into());
         sql.push(collation.clone());
@@ -3701,7 +3705,23 @@ pub(crate) fn render_trigger(
         "TRIGGER".into(),
         name.clone(),
         trigger.when.clone().unwrap_or_default(),
-        trigger.events.clone().unwrap_or_default().join(" OR "),
+        trigger
+            .events
+            .iter()
+            .flatten()
+            .map(|event| match &trigger.update_columns {
+                Some(columns) if event == "UPDATE" => format!(
+                    "UPDATE OF {}",
+                    columns
+                        .iter()
+                        .map(|c| quote_ident(c))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                _ => event.clone(),
+            })
+            .collect::<Vec<_>>()
+            .join(" OR "),
         "ON".into(),
         table_name.to_string(),
     ]);
@@ -3761,9 +3781,10 @@ pub(crate) fn render_foreign_key(fk: &crate::models::ForeignKey) -> String {
     // a temporal foreign key names its range column after PERIOD, and
     // the two sides must have the same arity
     let with_period = |columns: &[String], period: Option<&String>| {
-        let mut parts = columns.to_vec();
+        let mut parts: Vec<String> =
+            columns.iter().map(|c| quote_ident(c)).collect();
         if let Some(period) = period {
-            parts.push(format!("PERIOD {period}"));
+            parts.push(format!("PERIOD {}", quote_ident(period)));
         }
         parts.join(", ")
     };
@@ -3858,7 +3879,8 @@ pub(crate) fn render_constraint(
         };
     // WITHOUT OVERLAPS binds to the last column rather than to the
     // constraint, so it goes inside the parentheses
-    let mut columns = columns;
+    let mut columns: Vec<String> =
+        columns.iter().map(|c| quote_ident(c)).collect();
     if without_overlaps && let Some(last) = columns.last_mut() {
         last.push_str(" WITHOUT OVERLAPS");
     }
@@ -3873,7 +3895,14 @@ pub(crate) fn render_constraint(
     };
     let mut sql = vec![format!("{keyword} ({})", columns.join(", "))];
     if let Some(include) = include {
-        sql.push(format!("INCLUDE ({})", include.join(", ")));
+        sql.push(format!(
+            "INCLUDE ({})",
+            include
+                .iter()
+                .map(|c| quote_ident(c))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
     }
     sql.join(" ")
 }
@@ -4019,7 +4048,7 @@ fn render_typed_table_column(column: &Column) -> Option<String> {
     } else {
         Some(format!(
             "{} WITH OPTIONS {}",
-            column.name,
+            quote_ident(&column.name),
             constraints.join(" ")
         ))
     }
@@ -4067,7 +4096,7 @@ fn render_partition_bound(value: &Value) -> String {
 
 fn render_partition_column(column: &TablePartitionColumn) -> String {
     match column {
-        TablePartitionColumn::Name(name) => name.clone(),
+        TablePartitionColumn::Name(name) => quote_ident(name),
         TablePartitionColumn::Detailed {
             name,
             expression,
@@ -4075,7 +4104,8 @@ fn render_partition_column(column: &TablePartitionColumn) -> String {
             opclass,
         } => {
             let mut sql = vec![
-                name.clone()
+                name.as_deref()
+                    .map(quote_ident)
                     .or_else(|| expression.clone())
                     .unwrap_or_default(),
             ];
@@ -4251,6 +4281,7 @@ mod tests {
             name: Some("emit".into()),
             when: Some("AFTER".into()),
             events: Some(vec!["INSERT".into()]),
+            update_columns: None,
             for_each: Some("ROW".into()),
             constraint: Some(true),
             deferrable: deferred.then_some(true),
@@ -4656,6 +4687,7 @@ mod tests {
             name: Some("documents_fulltext".into()),
             when: Some("BEFORE".into()),
             events: Some(vec!["INSERT".into()]),
+            update_columns: None,
             for_each: Some("ROW".into()),
             condition: None,
             function: Some("tsvector_update_trigger()".into()),
@@ -5151,6 +5183,55 @@ mod tests {
         );
     }
 
+    /// A view column name that needs quoting is quoted
+    #[test]
+    fn quotes_view_column_names() {
+        let item = Item {
+            id: 1,
+            desc: ObjectType::View,
+            definition: Definition::View(View {
+                name: "v".into(),
+                schema: "public".into(),
+                owner: "app".into(),
+                sql: None,
+                recursive: None,
+                columns: Some(vec![
+                    ViewColumn::Name("Out Col".into()),
+                    ViewColumn::Name("id".into()),
+                ]),
+                check_option: None,
+                security_barrier: None,
+                query: Some("SELECT 1, 2".into()),
+                comment: None,
+                rules: None,
+            }),
+            dependencies: BTreeSet::new(),
+        };
+        let dump = libpgdump::new("t", "UTF-8", "18.0").unwrap();
+        let mut builder = Builder {
+            dump,
+            dump_id_map: HashMap::new(),
+            text_search_last: HashMap::new(),
+            pending_attaches: Vec::new(),
+            index_attaches: IndexAttaches::default(),
+            text_search_ids: HashMap::new(),
+            text_search_refs: Vec::new(),
+            superuser: "postgres".into(),
+        };
+        builder.dump_item(&item).unwrap();
+        let defn = builder
+            .dump
+            .entries()
+            .iter()
+            .find(|e| e.desc == libpgdump::ObjectType::View)
+            .and_then(|e| e.defn.clone())
+            .expect("a VIEW entry");
+        assert_eq!(
+            defn,
+            "CREATE VIEW public.v (\"Out Col\", id) AS SELECT 1, 2;\n"
+        );
+    }
+
     /// A view that keeps its definition as raw SQL still gets its rules
     #[test]
     fn raw_sql_view_emits_rules() {
@@ -5280,6 +5361,20 @@ mod tests {
             )
         );
         assert!(base.dependencies.contains(&shell.dump_id));
+    }
+
+    #[test]
+    fn quotes_column_names_that_need_it() {
+        let mut table = base_table("t");
+        table.columns = Some(vec![column("Has Space", "text", false)]);
+        table.primary_key =
+            Some(ConstraintColumns::Columns(vec!["Has Space".into()]));
+        let item = table_item(1, table);
+        assert_eq!(
+            table_defn(&item, libpgdump::ObjectType::Table, "t"),
+            "CREATE TABLE test.t ( \"Has Space\" text, PRIMARY KEY \
+             (\"Has Space\") );\n"
+        );
     }
 
     #[test]
