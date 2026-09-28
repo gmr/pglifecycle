@@ -416,8 +416,28 @@ pub(crate) fn statement(
             ),
             None => (privileges.join(", "), quote_object(object)),
         },
-        // function signatures carry their argument list verbatim
-        "functions" => (privileges.join(", "), object.to_string()),
+        // a function signature carries its argument list verbatim;
+        // the schema and the name are quoted
+        "functions" => {
+            let (name, arguments) =
+                object.split_once('(').unwrap_or((object, ""));
+            let paren = if arguments.is_empty() && !object.contains('(') {
+                ""
+            } else {
+                "("
+            };
+            (
+                privileges.join(", "),
+                format!("{}{paren}{arguments}", quote_object(name)),
+            )
+        }
+        // an object with no schema: the key is the whole name
+        "databases"
+        | "foreign_data_wrappers"
+        | "foreign_servers"
+        | "languages"
+        | "schemata"
+        | "tablespaces" => (privileges.join(", "), quote_ident(object)),
         _ => (privileges.join(", "), quote_object(object)),
     };
     if revoke {
@@ -629,13 +649,16 @@ fn coalesced<'a>(acls: &'a Acls, key: &str) -> Option<&'a Map<String, Value>> {
     }
 }
 
-/// Quote each part of a possibly-qualified object name
+/// Quote the schema and the name of a `schema.name` key. The first
+/// period ends the schema name, as the key format sets, so a name can
+/// contain a period.
 fn quote_object(object: &str) -> String {
-    object
-        .split('.')
-        .map(quote_ident)
-        .collect::<Vec<_>>()
-        .join(".")
+    match object.split_once('.') {
+        Some((schema, name)) => {
+            format!("{}.{}", quote_ident(schema), quote_ident(name))
+        }
+        None => quote_ident(object),
+    }
 }
 
 /// PUBLIC is a keyword, not an identifier
@@ -763,6 +786,38 @@ mod tests {
         assert_eq!(
             statement(true, "TABLE", "tables", "t.x", &privileges, "r", true),
             "REVOKE GRANT OPTION FOR SELECT ON TABLE t.x FROM r;"
+        );
+    }
+
+    #[test]
+    fn statement_quotes_names_that_need_it() {
+        let usage = [String::from("USAGE")];
+        let execute = [String::from("EXECUTE")];
+        let update = [String::from("UPDATE")];
+        let grant = |keyword, section, object, privileges: &[String]| {
+            statement(false, keyword, section, object, privileges, "r", false)
+        };
+        assert_eq!(
+            grant("TABLE", "tables", "My Schema.My Table", &usage),
+            "GRANT USAGE ON TABLE \"My Schema\".\"My Table\" TO r;"
+        );
+        // the first period ends the schema name
+        assert_eq!(
+            grant("TABLE", "tables", "s.a.b", &usage),
+            "GRANT USAGE ON TABLE s.\"a.b\" TO r;"
+        );
+        assert_eq!(
+            grant("TABLE", "columns", "My Schema.a.b.Label", &update),
+            "GRANT UPDATE(\"Label\") ON TABLE \"My Schema\".\"a.b\" TO r;"
+        );
+        // an object with no schema is one name
+        assert_eq!(
+            grant("SCHEMA", "schemata", "gate.dotted", &usage),
+            "GRANT USAGE ON SCHEMA \"gate.dotted\" TO r;"
+        );
+        assert_eq!(
+            grant("FUNCTION", "functions", "My Schema.f(n integer)", &execute),
+            "GRANT EXECUTE ON FUNCTION \"My Schema\".f(n integer) TO r;"
         );
     }
 

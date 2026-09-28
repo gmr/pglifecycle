@@ -9,14 +9,22 @@ description: >
 
   `ALL` stands for every privilege the object type has. Append
   ` WITH GRANT OPTION` to a privilege to let the grantee grant it onward.
+
+  A key names its object as `schema.name` (`schema.table.column` for a
+  column), with each name as it is, not quoted: `My Schema.My Table`. The
+  first period ends the schema name, so a schema name in such a key cannot
+  contain a period. In a column key, the last period starts the column
+  name, so a column name cannot contain a period.
 type: object
 properties:
   columns:
     description: >
       Privileges on individual columns, keyed by `schema.table.column`.
+      The table name can contain a period; the schema name and the column
+      name cannot.
     type: object
     propertyNames:
-      pattern: ^([A-Za-z0-9_\-]+)\.([A-Za-z0-9_\-]+)\.([^.]+)$
+      pattern: ^([^.]+)\.(.+)\.([^.]+)$
     patternProperties:
       "^.*$":
         type: array
@@ -27,7 +35,7 @@ properties:
       Privileges on databases, keyed by database name.
     type: object
     propertyNames:
-      pattern: ^([A-Za-z_\-\.])+$
+      pattern: ^.+$
     patternProperties:
       "^.*$":
         type: array
@@ -38,7 +46,7 @@ properties:
       Privileges on domains, keyed by `schema.domain`.
     type: object
     propertyNames:
-      pattern: ^([A-Za-z0-9_\-]+)\.([A-Za-z0-9_\-]+)$
+      pattern: ^([^.]+)\.(.+)$
     patternProperties:
       "^.*$":
         type: array
@@ -49,7 +57,7 @@ properties:
       Privileges on foreign data wrappers, keyed by wrapper name.
     type: object
     propertyNames:
-      pattern: ^([A-Za-z0-9_\-\.]+)$
+      pattern: ^.+$
     patternProperties:
       "^.*$":
         type: array
@@ -60,7 +68,7 @@ properties:
       Privileges on foreign servers, keyed by server name.
     type: object
     propertyNames:
-      pattern: ^([A-Za-z0-9_\-\.]+)$
+      pattern: ^.+$
     patternProperties:
       "^.*$":
         type: array
@@ -73,7 +81,7 @@ properties:
       is ambiguous across overloads.
     type: object
     propertyNames:
-      pattern: ^([A-Za-z0-9_\-]+)\.([A-Za-z0-9_\-]+)\((.*)\)$
+      pattern: ^([^.]+)\.([^(]+)\((.*)\)$
     patternProperties:
       "^.*$":
         type: array
@@ -129,7 +137,7 @@ properties:
       Privileges on procedural languages, keyed by language name.
     type: object
     propertyNames:
-      pattern: ^([A-Za-z0-9_\-\.]+)$
+      pattern: ^.+$
     patternProperties:
       "^.*$":
         type: array
@@ -196,7 +204,7 @@ properties:
       Privileges on schemas, keyed by schema name.
     type: object
     propertyNames:
-      pattern: ^([A-Za-z0-9_\-]+)$
+      pattern: ^.+$
     patternProperties:
       "^.*$":
         type: array
@@ -207,7 +215,7 @@ properties:
       Privileges on sequences, keyed by `schema.sequence`.
     type: object
     propertyNames:
-      pattern: ^([A-Za-z0-9_\-]+)\.([A-Za-z0-9_\-]+)$
+      pattern: ^([^.]+)\.(.+)$
     patternProperties:
       "^.*$":
         type: array
@@ -220,7 +228,7 @@ properties:
       syntax, so both emit `GRANT ... ON TABLE`.
     type: object
     propertyNames:
-      pattern: ^([A-Za-z0-9_\-]+)\.([A-Za-z0-9_\-]+)$
+      pattern: ^([^.]+)\.(.+)$
     patternProperties:
       "^.*$":
         type: array
@@ -231,7 +239,7 @@ properties:
       Privileges on tablespaces, keyed by tablespace name.
     type: object
     propertyNames:
-      pattern: ^([A-Za-z0-9_\-]+)$
+      pattern: ^.+$
     patternProperties:
       "^.*$":
         type: array
@@ -242,7 +250,7 @@ properties:
       Privileges on types, keyed by `schema.type`.
     type: object
     propertyNames:
-      pattern: ^([A-Za-z0-9_\-]+)\.([A-Za-z0-9_\-]+)$
+      pattern: ^([^.]+)\.(.+)$
     patternProperties:
       "^.*$":
         type: array
@@ -254,7 +262,7 @@ properties:
       TABLE`, as PostgreSQL requires.
     type: object
     propertyNames:
-      pattern: ^([A-Za-z0-9_\-]+)\.([A-Za-z0-9_\-]+)$
+      pattern: ^([^.]+)\.(.+)$
     patternProperties:
       "^.*$":
         type: array

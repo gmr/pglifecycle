@@ -12,6 +12,8 @@
 mod alter;
 mod diff;
 
+pub(crate) use diff::identity_type;
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::IsTerminal;
 
