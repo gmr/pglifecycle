@@ -3493,11 +3493,16 @@ pub(crate) fn render_index(index: &Index, table_name: &str) -> Vec<String> {
 /// One index column: the column or expression, then its collation,
 /// operator class, order and null placement. The name is quoted and
 /// the keyword is `COLLATE`; the Python wrote the name bare and
-/// `COLLATION`, which does not parse (deviation 27).
+/// `COLLATION`, which does not parse (deviation 27). An expression
+/// is in its own parentheses: an expression that is not a function
+/// call does not parse without them, and a function call does with
+/// them.
 fn render_index_column(column: &crate::models::IndexColumn) -> String {
     let mut sql = vec![match (&column.name, &column.expression) {
         (Some(name), _) => quote_ident(name),
-        (None, Some(expression)) => expression.clone(),
+        (None, Some(expression)) => {
+            format!("({})", crate::utils::strip_outer_parens(expression))
+        }
         (None, None) => String::new(),
     }];
     if let Some(collation) = &column.collation {

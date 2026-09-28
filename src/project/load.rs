@@ -660,8 +660,15 @@ impl Loader {
             return;
         }
         // after the round-trip check, which compares what was read
-        if let Definition::Table(table) = &mut definition {
-            normalize_table(table);
+        match &mut definition {
+            Definition::Table(table) => {
+                normalize_table(table);
+                index_expressions(table.indexes.as_mut());
+            }
+            Definition::MaterializedView(view) => {
+                index_expressions(view.indexes.as_mut());
+            }
+            _ => {}
         }
         // two definitions collide only when they share an identity:
         // overloaded functions share a name but not a signature
@@ -825,6 +832,20 @@ fn object_name(defn: &Value) -> Result<String, String> {
 }
 
 /// Set a string key on a mapping unless it is already present
+/// Write each index expression as pull writes it, without the
+/// parentheses that enclose all of it, so that `((a)::text)` and
+/// `(a)::text` compare the same in deploy
+fn index_expressions(indexes: Option<&mut Vec<crate::models::Index>>) {
+    for index in indexes.into_iter().flatten() {
+        for column in index.columns.iter_mut().flatten() {
+            if let Some(expression) = &mut column.expression {
+                *expression =
+                    crate::utils::strip_outer_parens(expression).to_string();
+            }
+        }
+    }
+}
+
 /// Write the parts of a table that the project can give in more than
 /// one form in the form that pull writes, so that deploy compares them
 /// as equal:

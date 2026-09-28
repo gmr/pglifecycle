@@ -634,6 +634,15 @@ CREATE STATISTICS test.measurements_expr (mcv)
     ON (a + b), lower(label) FROM test.measurements;
 CREATE STATISTICS test.user_states_stats ON state, total FROM test.user_states;
 
+-- Expression indexes: a cast with an operator class, which needs its
+-- own parentheses (the form of an HNSW index on a halfvec cast), a
+-- function call, which does not, and a sum with an order
+CREATE INDEX measurements_label_cast
+    ON test.measurements ((label::varchar(20)) varchar_pattern_ops);
+CREATE INDEX measurements_lower
+    ON test.measurements (lower(label) text_pattern_ops);
+CREATE INDEX measurements_sum ON test.measurements ((a + b) DESC NULLS LAST);
+
 -- Rules: DO INSTEAD NOTHING with a comment, a conditional DO ALSO with
 -- two commands, a disabled one, and one on a view
 CREATE TABLE test.ledger (id INTEGER, amount NUMERIC);

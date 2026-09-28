@@ -113,6 +113,114 @@ const RESERVED_KEYWORDS: &[&str] = &[
     "with",
 ];
 
+/// An SQL expression without the parentheses that enclose all of it,
+/// as in `((a + b))`. The pair in `(a) + (b)` does not enclose all of
+/// it, so that expression does not change. A parenthesis in a quoted
+/// string or name does not count. Quoted strings include E-strings
+/// with backslash escapes and dollar-quoted strings.
+pub fn strip_outer_parens(expression: &str) -> &str {
+    let mut expression = expression.trim();
+    loop {
+        let inner = strip_one_pair(expression);
+        if inner == expression {
+            return expression;
+        }
+        expression = inner;
+    }
+}
+
+fn strip_one_pair(expression: &str) -> &str {
+    let trimmed = expression.trim();
+    let Some(inner) = trimmed
+        .strip_prefix('(')
+        .and_then(|rest| rest.strip_suffix(')'))
+    else {
+        return trimmed;
+    };
+    let bytes = inner.as_bytes();
+    let mut depth = 0i32;
+    let mut i = 0;
+    while i < bytes.len() {
+        let previous = i.checked_sub(1).map(|p| bytes[p]);
+        let after_ident = previous.is_some_and(is_ident_byte);
+        match bytes[i] {
+            b'\'' => {
+                // `E'...'` (not `name'...'`) lets a backslash escape
+                let escapes = matches!(previous, Some(b'e' | b'E'))
+                    && !i
+                        .checked_sub(2)
+                        .is_some_and(|p| is_ident_byte(bytes[p]));
+                i = skip_quoted(bytes, i + 1, b"'", escapes);
+            }
+            b'"' => i = skip_quoted(bytes, i + 1, b"\"", false),
+            b'$' if !after_ident => match dollar_tag(&bytes[i..]) {
+                Some(tag) => {
+                    i = skip_quoted(bytes, i + tag.len(), tag, false);
+                }
+                None => i += 1,
+            },
+            b'(' => {
+                depth += 1;
+                i += 1;
+            }
+            b')' => {
+                depth -= 1;
+                // the first parenthesis closes before the end
+                if depth < 0 {
+                    return trimmed;
+                }
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    if depth == 0 { inner.trim() } else { trimmed }
+}
+
+/// A byte that can continue an unquoted identifier
+fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_' || b == b'$' || b >= 0x80
+}
+
+/// The `$tag$` delimiter at the start of `bytes`, if one is there.
+/// `$1` is a parameter, not a delimiter.
+fn dollar_tag(bytes: &[u8]) -> Option<&[u8]> {
+    let mut end = 1;
+    if bytes
+        .get(1)
+        .is_some_and(|b| b.is_ascii_alphabetic() || *b == b'_' || *b >= 0x80)
+    {
+        while bytes.get(end).is_some_and(|b| {
+            b.is_ascii_alphanumeric() || *b == b'_' || *b >= 0x80
+        }) {
+            end += 1;
+        }
+    }
+    (bytes.get(end) == Some(&b'$')).then(|| &bytes[..=end])
+}
+
+/// The index after the `end` delimiter that closes a quoted span
+/// that starts at `start`. If `escapes`, a backslash escapes the
+/// byte after it.
+fn skip_quoted(
+    bytes: &[u8],
+    start: usize,
+    end: &[u8],
+    escapes: bool,
+) -> usize {
+    let mut i = start;
+    while i < bytes.len() {
+        if escapes && bytes[i] == b'\\' {
+            i += 2;
+        } else if bytes[i..].starts_with(end) {
+            return i + end.len();
+        } else {
+            i += 1;
+        }
+    }
+    bytes.len()
+}
+
 /// Quote a PostgreSQL identifier (object name, etc)
 pub fn quote_ident(value: &str) -> String {
     let is_safe_shape = !value.is_empty()
@@ -246,6 +354,24 @@ mod tests {
         assert_eq!(postgres_value(&json!(5)), "5");
         assert_eq!(postgres_value(&json!(true)), "True");
         assert_eq!(postgres_value(&json!(["a", ["b"]])), "ARRAY['a', ['b']]");
+    }
+
+    #[test]
+    fn strips_only_enclosing_parentheses() {
+        assert_eq!(strip_outer_parens("((a + b))"), "a + b");
+        assert_eq!(
+            strip_outer_parens("((label)::character varying(20))"),
+            "(label)::character varying(20)"
+        );
+        assert_eq!(strip_outer_parens("(a) + (b)"), "(a) + (b)");
+        assert_eq!(strip_outer_parens("lower(name)"), "lower(name)");
+        assert_eq!(strip_outer_parens("(a || ')(')"), "a || ')('");
+        assert_eq!(strip_outer_parens("(\"odd)\" + 1)"), "\"odd)\" + 1");
+        assert_eq!(strip_outer_parens("(a || $$)$$)"), "a || $$)$$");
+        assert_eq!(strip_outer_parens("(a || $x$)$$($x$)"), "a || $x$)$$($x$");
+        assert_eq!(strip_outer_parens("(E'it\\')'::text)"), "E'it\\')'::text");
+        assert_eq!(strip_outer_parens("(a || 'x\\')"), "a || 'x\\'");
+        assert_eq!(strip_outer_parens("($1) + ($2)"), "($1) + ($2)");
     }
 
     #[test]

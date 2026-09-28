@@ -256,6 +256,13 @@ revocations:
   `build` creates it as an ordinary table and attaches it with `ALTER
   TABLE ... ATTACH PARTITION`, as `pg_dump` writes it.
 
+- An index column that is an expression, such as a cast for an HNSW
+  index, is written without parentheses around all of it:
+  `expression: (embedding)::halfvec(1536)`. `build` adds them, because
+  `CREATE INDEX` needs them for an expression that is not a function
+  call. Parentheses around all of it are also accepted, and `deploy`
+  compares the expression without them.
+
 - A foreign key can leave out its `name`. The project then uses the
   name PostgreSQL generates, `<table>_<columns>_fkey`, cut to 63
   bytes. When that name is already in use, PostgreSQL adds a number,
