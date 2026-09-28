@@ -21,6 +21,15 @@ properties:
     type: array
     items:
       enum: [INSERT, UPDATE, DELETE, TRUNCATE]
+  update_columns:
+    title: Update Of Columns
+    description: >
+      The columns of UPDATE OF: the UPDATE event fires only when one of these
+      columns is a target of the UPDATE command. Needs UPDATE in events.
+    type: array
+    items:
+      type: string
+    minItems: 1
   for_each:
     title: For Each Row or Statement
     enum: [ROW, STATEMENT]
