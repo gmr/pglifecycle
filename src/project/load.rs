@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::constants::{DEPENDENCIES, ObjectType, READ_ORDER};
+use crate::deploy::identity_type;
 use crate::models::{Definition, Item};
 use crate::project::{Project, validate};
 use crate::yamlio;
@@ -760,6 +761,29 @@ fn identity(definition: &Definition) -> String {
     match definition {
         Definition::Function(f) => f.identity(),
         Definition::Procedure(p) => p.identity(),
+        // overloads share a name, and differ in their argument types.
+        // Type aliases are made canonical and typmods are removed, so
+        // `int4` and `integer` are the same argument type, and
+        // `varchar(10)` and `character varying` are too
+        Definition::Operator(o) => format!(
+            "{}({}, {})",
+            o.name,
+            identity_type(o.left_arg.as_deref().unwrap_or("NONE")),
+            identity_type(o.right_arg.as_deref().unwrap_or("NONE"))
+        ),
+        // PostgreSQL identifies an ordered-set aggregate by its direct
+        // and ORDER BY argument types together, so `a(integer, bigint)`
+        // and `a(integer ORDER BY bigint)` are the same object
+        Definition::Aggregate(a) => format!(
+            "{}({})",
+            a.name,
+            a.arguments
+                .iter()
+                .chain(a.order_by.iter().flatten())
+                .map(|a| identity_type(&a.data_type))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
         // one name can be used once for each index method
         Definition::OperatorClass(c) => {
             format!("{} USING {}", c.name, c.method)
@@ -1047,6 +1071,74 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    /// Operator and aggregate overloads share a name, but not an
+    /// identity. A type alias gives the same identity as its canonical
+    /// name, and a typmod does not change it. An ordered-set aggregate
+    /// has the identity of the aggregate with the same argument types in
+    /// one list
+    #[test]
+    fn operator_and_aggregate_overloads_have_their_own_identity() {
+        let operator = |right: &str| {
+            to_definition(
+                ObjectType::Operator,
+                json!({"name": "!!!", "schema": "s", "owner": "o",
+                       "function": "f", "right_arg": right}),
+            )
+            .unwrap()
+        };
+        assert_ne!(
+            identity(&operator("integer")),
+            identity(&operator("bigint"))
+        );
+        assert_eq!(
+            identity(&operator("int4")),
+            identity(&operator("integer"))
+        );
+        let aggregate = |data_type: &str| {
+            to_definition(
+                ObjectType::Aggregate,
+                json!({"name": "agg", "schema": "s", "owner": "o",
+                       "sfunc": "f", "state_data_type": data_type,
+                       "arguments": [{"data_type": data_type}]}),
+            )
+            .unwrap()
+        };
+        assert_ne!(
+            identity(&aggregate("integer")),
+            identity(&aggregate("bigint"))
+        );
+        assert_eq!(
+            identity(&aggregate("int4")),
+            identity(&aggregate("integer"))
+        );
+        // a typmod is not part of the argument type
+        assert_eq!(
+            identity(&operator("varchar(10)")),
+            identity(&operator("character varying"))
+        );
+        assert_eq!(
+            identity(&aggregate("numeric(10,2)")),
+            identity(&aggregate("numeric"))
+        );
+        let ordered_set = to_definition(
+            ObjectType::Aggregate,
+            json!({"name": "agg", "schema": "s", "owner": "o",
+                   "sfunc": "f", "state_data_type": "integer",
+                   "arguments": [{"data_type": "integer"}],
+                   "order_by": [{"data_type": "bigint"}]}),
+        )
+        .unwrap();
+        let ordinary = to_definition(
+            ObjectType::Aggregate,
+            json!({"name": "agg", "schema": "s", "owner": "o",
+                   "sfunc": "f", "state_data_type": "integer",
+                   "arguments": [{"data_type": "integer"},
+                                 {"data_type": "bigint"}]}),
+        )
+        .unwrap();
+        assert_eq!(identity(&ordered_set), identity(&ordinary));
+    }
 
     /// M6: a second object with the same (desc, schema, name) is
     /// rejected as an error instead of silently duplicating the item
