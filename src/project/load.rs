@@ -636,7 +636,7 @@ impl Loader {
         path: Option<&Path>,
     ) {
         let pending = std::mem::take(&mut self.pending_dependencies);
-        let definition = match to_definition(ot, value.clone()) {
+        let mut definition = match to_definition(ot, value.clone()) {
             Ok(definition) => definition,
             Err(error) => {
                 log::error!(
@@ -658,6 +658,16 @@ impl Loader {
             );
             self.errors += 1;
             return;
+        }
+        // after the round-trip check, which compares what was read
+        match &mut definition {
+            Definition::Table(table) => {
+                index_expressions(table.indexes.as_mut())
+            }
+            Definition::MaterializedView(view) => {
+                index_expressions(view.indexes.as_mut());
+            }
+            _ => {}
         }
         // two definitions collide only when they share an identity:
         // overloaded functions share a name but not a signature
@@ -821,6 +831,20 @@ fn object_name(defn: &Value) -> Result<String, String> {
 }
 
 /// Set a string key on a mapping unless it is already present
+/// Write each index expression as pull writes it, without the
+/// parentheses that enclose all of it, so that `((a)::text)` and
+/// `(a)::text` compare the same in deploy
+fn index_expressions(indexes: Option<&mut Vec<crate::models::Index>>) {
+    for index in indexes.into_iter().flatten() {
+        for column in index.columns.iter_mut().flatten() {
+            if let Some(expression) = &mut column.expression {
+                *expression =
+                    crate::utils::strip_outer_parens(expression).to_string();
+            }
+        }
+    }
+}
+
 fn inject(defn: &mut Value, key: &str, value: &str) {
     if let Value::Object(map) = defn
         && !map.contains_key(key)

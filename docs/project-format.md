@@ -256,6 +256,13 @@ revocations:
   `build` creates it as an ordinary table and attaches it with `ALTER
   TABLE ... ATTACH PARTITION`, as `pg_dump` writes it.
 
+- An index column that is an expression, such as a cast for an HNSW
+  index, is written without parentheses around all of it:
+  `expression: (embedding)::halfvec(1536)`. `build` adds them, because
+  `CREATE INDEX` needs them for an expression that is not a function
+  call. Parentheses around all of it are also accepted, and `deploy`
+  compares the expression without them.
+
 - An index of a partitioned table has `recurse: false` when it is made
   `ON ONLY` the partitioned table, as `pg_dump` writes it. Each
   partition's index is then in the partition's table file, with the

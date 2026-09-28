@@ -114,6 +114,50 @@ const RESERVED_KEYWORDS: &[&str] = &[
 ];
 
 /// Quote a PostgreSQL identifier (object name, etc)
+/// An SQL expression without the parentheses that enclose all of it,
+/// as in `((a + b))`. The pair in `(a) + (b)` does not enclose all of
+/// it, so that expression does not change. A parenthesis in a quoted
+/// string or name does not count.
+pub fn strip_outer_parens(expression: &str) -> &str {
+    let mut expression = expression.trim();
+    loop {
+        let inner = strip_one_pair(expression);
+        if inner == expression {
+            return expression;
+        }
+        expression = inner;
+    }
+}
+
+fn strip_one_pair(expression: &str) -> &str {
+    let trimmed = expression.trim();
+    let Some(inner) = trimmed
+        .strip_prefix('(')
+        .and_then(|rest| rest.strip_suffix(')'))
+    else {
+        return trimmed;
+    };
+    let mut depth = 0i32;
+    let mut quote: Option<char> = None;
+    for c in inner.chars() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), _) => {}
+            (None, '\'' | '"') => quote = Some(c),
+            (None, '(') => depth += 1,
+            (None, ')') => {
+                depth -= 1;
+                // the first parenthesis closes before the end
+                if depth < 0 {
+                    return trimmed;
+                }
+            }
+            _ => {}
+        }
+    }
+    if depth == 0 { inner.trim() } else { trimmed }
+}
+
 pub fn quote_ident(value: &str) -> String {
     let is_safe_shape = !value.is_empty()
         && value
@@ -246,6 +290,19 @@ mod tests {
         assert_eq!(postgres_value(&json!(5)), "5");
         assert_eq!(postgres_value(&json!(true)), "True");
         assert_eq!(postgres_value(&json!(["a", ["b"]])), "ARRAY['a', ['b']]");
+    }
+
+    #[test]
+    fn strips_only_enclosing_parentheses() {
+        assert_eq!(strip_outer_parens("((a + b))"), "a + b");
+        assert_eq!(
+            strip_outer_parens("((label)::character varying(20))"),
+            "(label)::character varying(20)"
+        );
+        assert_eq!(strip_outer_parens("(a) + (b)"), "(a) + (b)");
+        assert_eq!(strip_outer_parens("lower(name)"), "lower(name)");
+        assert_eq!(strip_outer_parens("(a || ')(')"), "a || ')('");
+        assert_eq!(strip_outer_parens("(\"odd)\" + 1)"), "\"odd)\" + 1");
     }
 
     #[test]

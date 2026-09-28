@@ -371,10 +371,12 @@ pub(crate) fn create_index(
 
 fn index_column(node: &Node, src: &str) -> IndexColumn {
     let name = node.child_of_kind("ColId").map(|n| unquote(n.text(src)));
+    // without the parentheses that pg_dump adds, as the project loads
+    // an expression (see `strip_outer_parens`)
     let expression = if name.is_none() {
         node.child_of_kind("func_expr_windowless")
             .or_else(|| node.child_of_kind("a_expr"))
-            .map(|n| n.text(src).to_string())
+            .map(|n| crate::utils::strip_outer_parens(n.text(src)).to_string())
     } else {
         None
     };

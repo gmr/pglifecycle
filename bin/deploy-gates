@@ -172,6 +172,21 @@ else
     cat "${WORKDIR}/replan.sql" >&2
     exit 1
 fi
+# an index expression written with the parentheses that enclose all
+# of it, as CREATE INDEX needs for a cast: deploy compares it without
+# them, so the plan stays empty
+perl -pi -e 's/expression: \(label\)::character varying\(20\)$/expression: ((label)::character varying(20))/' \
+    "${WORKDIR}/project/tables/test/measurements.yaml"
+grep -q 'expression: ((label)' "${WORKDIR}/project/tables/test/measurements.yaml"
+./target/debug/pglifecycle deploy -o "${WORKDIR}/replan.sql" \
+    -d "${TARGET_DB}" "${WORKDIR}/project"
+if grep -q '^-- no changes' "${WORKDIR}/replan.sql"; then
+    echo "Convergence gate passed: an enclosed index expression is unchanged"
+else
+    echo "Convergence gate FAILED: an enclosed index expression changed" >&2
+    cat "${WORKDIR}/replan.sql" >&2
+    exit 1
+fi
 # a renamed partition index whose partitioned table has no other
 # change: deploy has to rebuild the group from the partitioned table,
 # because PostgreSQL does not attach a second index for the same parent
