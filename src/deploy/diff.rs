@@ -357,7 +357,9 @@ fn existence_index(assembly: &Assembly) -> BTreeSet<(String, String, String)> {
 /// leave every cast the same empty name, and its types canonical, so
 /// `int4` matches the `integer` pg_dump writes. An aggregate is
 /// identified by its name and its input types, so its key keeps its
-/// canonical types and one overload does not stand for another.
+/// canonical types and one overload does not stand for another. The
+/// aggregate and operator keys remove typmods, as PostgreSQL does not
+/// keep them in an argument type (see [`identity_type`]).
 fn definition_existence_key(
     desc: ObjectType,
     definition: &Definition,
@@ -366,7 +368,7 @@ fn definition_existence_key(
         Definition::Aggregate(aggregate) => {
             let types = |args: &[crate::models::Argument]| {
                 args.iter()
-                    .map(|a| canonical_type(&a.data_type))
+                    .map(|a| identity_type(&a.data_type))
                     .collect::<Vec<_>>()
                     .join(", ")
             };
@@ -396,10 +398,8 @@ fn definition_existence_key(
             format!(
                 "{}({}, {})",
                 operator.name,
-                canonical_type(operator.left_arg.as_deref().unwrap_or("NONE")),
-                canonical_type(
-                    operator.right_arg.as_deref().unwrap_or("NONE")
-                )
+                identity_type(operator.left_arg.as_deref().unwrap_or("NONE")),
+                identity_type(operator.right_arg.as_deref().unwrap_or("NONE"))
             ),
         ),
         // one name can be used once for each index method
@@ -539,6 +539,29 @@ pub(crate) fn canonical_type(data_type: &str) -> String {
     format!("{canonical}{modifier}{array}")
 }
 
+/// A type as it identifies an argument: [`canonical_type`] without
+/// its modifiers. PostgreSQL does not keep a typmod in an argument
+/// type, so `varchar(10)` and `varchar` give the same aggregate or
+/// operator. A modifier in a quoted name is kept.
+pub(crate) fn identity_type(data_type: &str) -> String {
+    let mut quoted = false;
+    let mut depth = 0usize;
+    let mut result = String::new();
+    for c in canonical_type(data_type).chars() {
+        if c == '"' && depth == 0 {
+            quoted = !quoted;
+        }
+        if !quoted && c == '(' {
+            depth += 1;
+        } else if !quoted && c == ')' && depth > 0 {
+            depth -= 1;
+        } else if depth == 0 {
+            result.push(c);
+        }
+    }
+    result.trim_end().to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -640,6 +663,19 @@ mod tests {
         assert_ne!(key("integer"), key("text"));
         // a type alias is the same input type
         assert_eq!(key("int4"), key("integer"));
+        // a typmod is not part of the input type
+        assert_eq!(key("varchar(10)"), key("character varying"));
+    }
+
+    #[test]
+    fn identity_type_removes_typmods() {
+        assert_eq!(identity_type("varchar(10)[]"), "character varying[]");
+        assert_eq!(identity_type("NUMERIC(10, 2)"), "numeric");
+        assert_eq!(
+            identity_type("timestamp(3) with time zone"),
+            "timestamp with time zone"
+        );
+        assert_eq!(identity_type("public.\"a(b)\""), "public.\"a(b)\"");
     }
 
     #[test]
