@@ -873,6 +873,16 @@ table's index is there first. The index of a unique or primary key
 constraint needs nothing: attaching the partition attaches it. The
 coverage fixture has `SHELL TYPE`, `TRANSFORM` and `SUBSCRIPTION` left.
 
+**Done since:** `SHELL TYPE`. pg_dump writes a shell type only for a
+base type that it also dumps, so pull reads no model from it. build
+writes a `SHELL TYPE` entry before each base type, and the base type
+depends on its I/O functions. Three build defects were on the way: a
+base type rendered with `AS`, which does not parse; an `internal`
+function's body rendered with newlines, which names no built-in
+function; and pull wrote `INTERNALLENGTH` as a string, which the
+schema does not accept. The coverage fixture has `TRANSFORM` and
+`SUBSCRIPTION` left.
+
 ## Effort
 
 Roughly three focused weeks end to end. Phase 0 is a day and

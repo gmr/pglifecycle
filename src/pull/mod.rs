@@ -621,9 +621,13 @@ impl Assembly {
                 entry.tag.as_deref().unwrap_or_default()
             ));
             match &entry.desc {
+                // pg_dump writes a shell type only for a base type
+                // that it also dumps, and build writes the shell again
+                // for each base type
                 OT::Database
                 | OT::SearchPath
                 | OT::SequenceSet
+                | OT::ShellType
                 | OT::TableData => {}
                 OT::Encoding => {
                     self.encoding = entry.defn.as_deref().and_then(set_value);

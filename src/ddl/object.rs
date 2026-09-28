@@ -204,9 +204,12 @@ pub(crate) fn create_type(
                 "typmod_in" => value.typmod_in = Some(arg),
                 "typmod_out" => value.typmod_out = Some(arg),
                 "analyze" => value.analyze = Some(arg),
+                // a number of bytes, or VARIABLE
                 "internallength" => {
-                    value.internal_length =
-                        Some(serde_json::Value::String(arg));
+                    value.internal_length = Some(arg.parse::<i64>().map_or(
+                        serde_json::Value::String(arg.to_uppercase()),
+                        serde_json::Value::from,
+                    ));
                 }
                 "passedbyvalue" => value.passed_by_value = Some(true),
                 "alignment" => value.alignment = Some(arg),
@@ -753,6 +756,23 @@ mod tests {
         assert_eq!(value.type_kind, Some("range".into()));
         assert_eq!(value.subtype, Some("float8".into()));
         assert_eq!(value.subtype_diff, Some("float8mi".into()));
+    }
+
+    #[test]
+    fn parses_base_type_internal_length_as_number_or_variable() {
+        for (length, expected) in [
+            ("4", serde_json::json!(4)),
+            ("variable", serde_json::json!("VARIABLE")),
+        ] {
+            let Statement::CreateType(value) = parse_one(&format!(
+                "CREATE TYPE test.t (INTERNALLENGTH = {length}, \
+                 INPUT = test.t_in, OUTPUT = test.t_out);"
+            )) else {
+                panic!("expected CreateType")
+            };
+            assert_eq!(value.type_kind, Some("base".into()));
+            assert_eq!(value.internal_length, Some(expected));
+        }
     }
 
     #[test]

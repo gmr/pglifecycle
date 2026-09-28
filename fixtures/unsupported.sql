@@ -21,9 +21,8 @@ SET search_path = unsupported, public, pg_catalog;
 
 CREATE ROLE pglifecycle_coverage_reader;
 
--- A base type: pg_dump writes a SHELL TYPE entry before the functions
--- that the type's input and output need. Its I/O functions are the
--- integer ones, so the type needs no C code.
+-- A base type for the transform. fixtures/schema.sql has the same
+-- type, where the round-trip gate tests it.
 CREATE TYPE base_int;
 CREATE FUNCTION base_int_in(cstring) RETURNS base_int
     AS 'int4in' LANGUAGE internal IMMUTABLE STRICT;
