@@ -358,27 +358,30 @@ fn existence_index(assembly: &Assembly) -> BTreeSet<(String, String, String)> {
 /// `int4` matches the `integer` pg_dump writes. An aggregate is
 /// identified by its name and its input types, so its key keeps its
 /// canonical types and one overload does not stand for another. The
-/// aggregate and operator keys remove typmods, as PostgreSQL does not
-/// keep them in an argument type (see [`identity_type`]).
+/// direct and ORDER BY types of an ordered-set aggregate are one list
+/// in PostgreSQL, so `agg(integer, bigint)` and `agg(integer ORDER BY
+/// bigint)` have the same key. The aggregate and operator keys remove
+/// typmods, as PostgreSQL does not keep them in an argument type (see
+/// [`identity_type`]).
 fn definition_existence_key(
     desc: ObjectType,
     definition: &Definition,
 ) -> (String, String, String) {
     match definition {
         Definition::Aggregate(aggregate) => {
-            let types = |args: &[crate::models::Argument]| {
-                args.iter()
-                    .map(|a| identity_type(&a.data_type))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            };
-            let direct = types(&aggregate.arguments);
-            let signature = match aggregate.order_by.as_deref() {
-                Some(order_by) => {
-                    format!("{direct} ORDER BY {}", types(order_by))
-                }
-                None if direct.is_empty() => String::from("*"),
-                None => direct,
+            // the direct and ORDER BY types are one list, as the
+            // project loader identity uses
+            let signature = aggregate
+                .arguments
+                .iter()
+                .chain(aggregate.order_by.iter().flatten())
+                .map(|a| identity_type(&a.data_type))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let signature = if signature.is_empty() {
+                String::from("*")
+            } else {
+                signature
             };
             (
                 desc.as_str().to_string(),
@@ -665,6 +668,44 @@ mod tests {
         assert_eq!(key("int4"), key("integer"));
         // a typmod is not part of the input type
         assert_eq!(key("varchar(10)"), key("character varying"));
+    }
+
+    #[test]
+    fn aggregate_existence_key_joins_order_by_types() {
+        let aggregate = |arguments, order_by| {
+            let mut value = serde_json::json!({
+                "name": "agg",
+                "schema": "test",
+                "owner": "postgres",
+                "arguments": arguments,
+                "sfunc": "f",
+                "state_data_type": "integer",
+            });
+            if let Some(order_by) = order_by {
+                value["order_by"] = order_by;
+            }
+            Definition::Aggregate(serde_json::from_value(value).unwrap())
+        };
+        let key = |d: &Definition| {
+            definition_existence_key(ObjectType::Aggregate, d)
+        };
+        let ordered = aggregate(
+            serde_json::json!([{"data_type": "integer"}]),
+            Some(serde_json::json!([{"data_type": "bigint"}])),
+        );
+        let plain = aggregate(
+            serde_json::json!([
+                {"data_type": "integer"},
+                {"data_type": "bigint"}
+            ]),
+            None,
+        );
+        // PostgreSQL keeps one list of input types for both forms
+        assert_eq!(key(&ordered), key(&plain));
+        assert_eq!(key(&ordered).2, "agg(integer, bigint)");
+        // an aggregate with no input types is agg(*)
+        let star = aggregate(serde_json::json!([]), None);
+        assert_eq!(key(&star).2, "agg(*)");
     }
 
     #[test]
