@@ -43,7 +43,6 @@ properties:
     description: Default value for the column.
     oneOf:
       - type: boolean
-      - type: integer
       - type: number
       - type: string
   collation:
