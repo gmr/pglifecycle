@@ -477,6 +477,9 @@ struct ObjectIndex<'a> {
     /// (schema, bare name) → matching items, for the unambiguous
     /// bare-name fallback
     functions_by_name: HashMap<(Option<&'a str>, String), Vec<&'a Item>>,
+    /// (schema, name) of each identity column's sequence → its table.
+    /// The sequence is not an item, so an ACL on it belongs to the table.
+    identity_sequences: HashMap<(String, String), &'a Item>,
 }
 
 impl<'a> ObjectIndex<'a> {
@@ -515,6 +518,7 @@ impl<'a> ObjectIndex<'a> {
         // when it makes the table. A real item keeps its own entry. A
         // partition's ACL waits for the partition's own entry (see
         // `find_object`).
+        let mut identity_sequences = HashMap::new();
         for item in &project.inventory {
             let Definition::Table(table) = &item.definition else {
                 continue;
@@ -531,13 +535,17 @@ impl<'a> ObjectIndex<'a> {
                     .sequence_options
                     .as_ref()
                     .and_then(|o| o.name.as_deref());
+                // a name in the project is SQL, maybe quoted; an ACL key
+                // holds each name as it is
                 let (schema, name) = match named {
-                    Some(name) => match name.split_once('.') {
-                        Some((schema, name)) => (schema, name.to_string()),
-                        None => (table.schema.as_str(), name.to_string()),
+                    Some(name) => match crate::project::split_sql_name(name) {
+                        (schema, name) if schema.is_empty() => {
+                            (table.schema.clone(), name)
+                        }
+                        parts => parts,
                     },
                     None => (
-                        table.schema.as_str(),
+                        table.schema.clone(),
                         crate::project::generated_name(
                             &table.name,
                             &column.name,
@@ -545,9 +553,7 @@ impl<'a> ObjectIndex<'a> {
                         ),
                     ),
                 };
-                objects
-                    .entry((ObjectType::Sequence, Some(schema), name))
-                    .or_insert(item);
+                identity_sequences.entry((schema, name)).or_insert(item);
             }
             for partition in table.partitions.iter().flatten() {
                 objects
@@ -563,6 +569,7 @@ impl<'a> ObjectIndex<'a> {
             objects,
             functions_by_identity,
             functions_by_name,
+            identity_sequences,
         }
     }
 }
@@ -581,13 +588,24 @@ fn find_object(
     let item = if descs.contains(&ObjectType::Function) {
         find_function(index, schema, name)
     } else {
-        descs.iter().find_map(|desc| {
-            let key_schema = if desc.is_schemaless() { None } else { schema };
-            index
-                .objects
-                .get(&(*desc, key_schema, name.to_string()))
-                .copied()
-        })
+        descs
+            .iter()
+            .find_map(|desc| {
+                let key_schema =
+                    if desc.is_schemaless() { None } else { schema };
+                index
+                    .objects
+                    .get(&(*desc, key_schema, name.to_string()))
+                    .copied()
+            })
+            // a real sequence item keeps its own entry
+            .or_else(|| {
+                descs.contains(&ObjectType::Sequence).then_some(())?;
+                index
+                    .identity_sequences
+                    .get(&(schema?.to_string(), name.to_string()))
+                    .copied()
+            })
     }?;
     // a partition modeled by its bounds has an entry of its own, which
     // the ACL waits for; its item is the partitioned table
