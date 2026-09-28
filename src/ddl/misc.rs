@@ -969,11 +969,18 @@ pub(crate) fn create_subscription(
         .unwrap_or_default();
     for (key, value) in options {
         let value = value.unwrap_or_default();
+        // these are the values that PostgreSQL (defGetBoolean) accepts
         let value = if SUBSCRIPTION_BOOLEANS.contains(&key.as_str()) {
-            Value::Bool(matches!(
-                value.to_lowercase().as_str(),
-                "" | "true" | "on" | "1"
-            ))
+            match value.to_lowercase().as_str() {
+                "" | "true" | "on" | "1" => Value::Bool(true),
+                "false" | "off" | "0" => Value::Bool(false),
+                _ => {
+                    return Err(format!(
+                        "CREATE SUBSCRIPTION option {key} = {value} \
+                         is not a boolean"
+                    ));
+                }
+            }
         } else {
             Value::String(value)
         };
@@ -1155,6 +1162,18 @@ mod tests {
         assert_eq!(parameters["slot_name"], Value::String("NONE".into()));
         assert_eq!(parameters["two_phase"], Value::Bool(true));
         assert_eq!(parameters["streaming"], Value::String("parallel".into()));
+    }
+
+    #[test]
+    fn rejects_a_subscription_boolean_that_is_not_valid() {
+        let mut parser = Parser::new().unwrap();
+        let error = parser
+            .parse(
+                "CREATE SUBSCRIPTION s CONNECTION 'dbname=x' \
+                 PUBLICATION p WITH (binary = 'yes');",
+            )
+            .unwrap_err();
+        assert!(error.contains("is not a boolean"), "{error}");
     }
 
     #[test]
