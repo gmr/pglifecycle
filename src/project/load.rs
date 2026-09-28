@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::constants::{DEPENDENCIES, ObjectType, READ_ORDER};
+use crate::deploy::canonical_type;
 use crate::models::{Definition, Item};
 use crate::project::{Project, validate};
 use crate::yamlio;
@@ -760,12 +761,14 @@ fn identity(definition: &Definition) -> String {
     match definition {
         Definition::Function(f) => f.identity(),
         Definition::Procedure(p) => p.identity(),
-        // overloads share a name, and differ in their argument types
+        // overloads share a name, and differ in their argument types.
+        // Type aliases are made canonical, so `int4` and `integer` are
+        // the same argument type
         Definition::Operator(o) => format!(
             "{}({}, {})",
             o.name,
-            o.left_arg.as_deref().unwrap_or("NONE"),
-            o.right_arg.as_deref().unwrap_or("NONE")
+            canonical_type(o.left_arg.as_deref().unwrap_or("NONE")),
+            canonical_type(o.right_arg.as_deref().unwrap_or("NONE"))
         ),
         // PostgreSQL identifies an ordered-set aggregate by its direct
         // and ORDER BY argument types together, so `a(integer, bigint)`
@@ -776,7 +779,7 @@ fn identity(definition: &Definition) -> String {
             a.arguments
                 .iter()
                 .chain(a.order_by.iter().flatten())
-                .map(|a| a.data_type.as_str())
+                .map(|a| canonical_type(&a.data_type))
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
@@ -1069,7 +1072,8 @@ mod tests {
     use super::*;
 
     /// Operator and aggregate overloads share a name, but not an
-    /// identity. An ordered-set aggregate has the identity of the
+    /// identity. A type alias gives the same identity as its canonical
+    /// name. An ordered-set aggregate has the identity of the
     /// aggregate with the same argument types in one list
     #[test]
     fn operator_and_aggregate_overloads_have_their_own_identity() {
@@ -1085,6 +1089,10 @@ mod tests {
             identity(&operator("integer")),
             identity(&operator("bigint"))
         );
+        assert_eq!(
+            identity(&operator("int4")),
+            identity(&operator("integer"))
+        );
         let aggregate = |data_type: &str| {
             to_definition(
                 ObjectType::Aggregate,
@@ -1097,6 +1105,10 @@ mod tests {
         assert_ne!(
             identity(&aggregate("integer")),
             identity(&aggregate("bigint"))
+        );
+        assert_eq!(
+            identity(&aggregate("int4")),
+            identity(&aggregate("integer"))
         );
         let ordered_set = to_definition(
             ObjectType::Aggregate,
@@ -1119,7 +1131,6 @@ mod tests {
 
     /// M6: a second object with the same (desc, schema, name) is
     /// rejected as an error instead of silently duplicating the item
-
     #[test]
     fn generated_foreign_key_name_matches_postgres() {
         assert_eq!(
