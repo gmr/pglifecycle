@@ -490,6 +490,55 @@ impl<'a> ObjectIndex<'a> {
                     .push(item);
             }
         }
+        // objects that a table makes, which are not items of their own:
+        // an ACL on one belongs to the table, so that deploy grants it
+        // when it makes the table. A real item keeps its own entry. A
+        // partition's ACL waits for the partition's own entry (see
+        // `find_object`).
+        for item in &project.inventory {
+            let Definition::Table(table) = &item.definition else {
+                continue;
+            };
+            for column in table.columns.iter().flatten() {
+                let Some(generated) = column
+                    .generated
+                    .as_ref()
+                    .filter(|g| g.expression.is_none())
+                else {
+                    continue;
+                };
+                let named = generated
+                    .sequence_options
+                    .as_ref()
+                    .and_then(|o| o.name.as_deref());
+                let (schema, name) = match named {
+                    Some(name) => match name.split_once('.') {
+                        Some((schema, name)) => (schema, name.to_string()),
+                        None => (table.schema.as_str(), name.to_string()),
+                    },
+                    None => (
+                        table.schema.as_str(),
+                        crate::project::generated_name(
+                            &table.name,
+                            &column.name,
+                            "seq",
+                        ),
+                    ),
+                };
+                objects
+                    .entry((ObjectType::Sequence, Some(schema), name))
+                    .or_insert(item);
+            }
+            for partition in table.partitions.iter().flatten() {
+                objects
+                    .entry((
+                        ObjectType::Table,
+                        Some(partition.schema.as_str()),
+                        partition.name.clone(),
+                    ))
+                    .or_insert(item);
+            }
+        }
         ObjectIndex {
             objects,
             functions_by_identity,
@@ -520,7 +569,14 @@ fn find_object(
                 .copied()
         })
     }?;
-    let dump_id = builder.dump_id_map.get(&item.id)?;
+    // a partition modeled by its bounds has an entry of its own, which
+    // the ACL waits for; its item is the partitioned table
+    let partition = schema.and_then(|schema| {
+        builder
+            .partition_ids
+            .get(&(schema.to_string(), name.to_string()))
+    });
+    let dump_id = partition.or_else(|| builder.dump_id_map.get(&item.id))?;
     Some((*dump_id, item.definition.owner().map(str::to_string)))
 }
 

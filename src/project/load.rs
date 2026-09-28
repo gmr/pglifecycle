@@ -884,7 +884,11 @@ fn normalize_table(table: &mut crate::models::Table) {
 /// character boundary. PostgreSQL adds a number when the name is in
 /// use; that case is not known here, so such a key needs its name in
 /// the project.
-fn generated_name(table: &str, columns: &str, label: &str) -> String {
+pub(crate) fn generated_name(
+    table: &str,
+    columns: &str,
+    label: &str,
+) -> String {
     const MAX: usize = 63;
     let available = MAX - label.len() - 2;
     let (mut table_len, mut columns_len) = (table.len(), columns.len());

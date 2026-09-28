@@ -819,6 +819,18 @@ CREATE TYPE "gate.dotted"."pair.t" AS (x INTEGER);
 COMMENT ON TYPE "gate.dotted"."pair.t" IS 'A type with a period';
 CREATE CAST ("gate.dotted"."pair.t" AS TEXT) WITH INOUT;
 
+-- Grants on objects that a table makes, which are not tables or
+-- sequences of their own in the project: an identity column's
+-- sequence, and a partition modeled by its bounds. Each also gets the
+-- default privileges of the test schema. deploy grants them when it
+-- makes the table.
+CREATE TABLE test.granted_ids (id INTEGER GENERATED ALWAYS AS IDENTITY);
+GRANT SELECT ON SEQUENCE test.granted_ids_id_seq TO PUBLIC;
+CREATE TABLE test.granted_parts (k INTEGER) PARTITION BY RANGE (k);
+CREATE TABLE test.granted_parts_1 PARTITION OF test.granted_parts
+    FOR VALUES FROM (0) TO (10);
+GRANT INSERT ON test.granted_parts_1 TO PUBLIC;
+
 -- Transforms for the base type: one with both functions and a
 -- comment, and one with only its TO SQL function
 CREATE FUNCTION test.base_int_from_sql(internal) RETURNS internal

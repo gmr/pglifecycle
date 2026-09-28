@@ -196,6 +196,7 @@ pub fn assemble(project: &Project) -> Result<BuildOutput, String> {
         index_attaches: IndexAttaches::default(),
         text_search_ids: HashMap::new(),
         text_search_refs: Vec::new(),
+        partition_ids: HashMap::new(),
         superuser: project.superuser.clone(),
     };
     let task =
@@ -296,6 +297,9 @@ struct Builder {
     /// The text search objects each text search entry names, as
     /// (entry, kind, schema, name)
     text_search_refs: Vec<(i32, &'static str, String, String)>,
+    /// The entry of each partition modeled by its bounds, by (schema,
+    /// name): it is not an item, so an ACL on it depends on this entry
+    partition_ids: HashMap<(String, String), i32>,
     superuser: String,
 }
 
@@ -2092,6 +2096,10 @@ impl Builder {
             &[parent_dump_id],
             None,
         )?;
+        self.partition_ids.insert(
+            (partition.schema.clone(), partition.name.clone()),
+            dump_id,
+        );
         if let Some(comment) = &partition.comment {
             self.add_comment(
                 "TABLE",
@@ -4349,6 +4357,7 @@ mod tests {
             index_attaches: IndexAttaches::default(),
             text_search_ids: HashMap::new(),
             text_search_refs: Vec::new(),
+            partition_ids: HashMap::new(),
             superuser: "postgres".into(),
         };
         builder.dump_item(item).unwrap();
@@ -4839,6 +4848,7 @@ mod tests {
             index_attaches: IndexAttaches::default(),
             text_search_ids: HashMap::new(),
             text_search_refs: Vec::new(),
+            partition_ids: HashMap::new(),
             superuser: "postgres".into(),
         };
         builder.dump_item(item).unwrap();
@@ -4884,6 +4894,7 @@ mod tests {
             index_attaches: IndexAttaches::default(),
             text_search_ids: HashMap::new(),
             text_search_refs: Vec::new(),
+            partition_ids: HashMap::new(),
             superuser: "postgres".into(),
         };
         builder.dump_item(&table_item(0, readings)).unwrap();
@@ -4930,6 +4941,7 @@ mod tests {
             index_attaches: IndexAttaches::default(),
             text_search_ids: HashMap::new(),
             text_search_refs: Vec::new(),
+            partition_ids: HashMap::new(),
             superuser: "postgres".into(),
         };
         builder.dump_item(item).unwrap();
@@ -5166,6 +5178,7 @@ mod tests {
             index_attaches: IndexAttaches::default(),
             text_search_ids: HashMap::new(),
             text_search_refs: Vec::new(),
+            partition_ids: HashMap::new(),
             superuser: "postgres".into(),
         };
         builder.dump_item(&item).unwrap();
@@ -5216,6 +5229,7 @@ mod tests {
             index_attaches: IndexAttaches::default(),
             text_search_ids: HashMap::new(),
             text_search_refs: Vec::new(),
+            partition_ids: HashMap::new(),
             superuser: "postgres".into(),
         };
         builder.dump_item(&item).unwrap();
@@ -5272,6 +5286,7 @@ mod tests {
             index_attaches: IndexAttaches::default(),
             text_search_ids: HashMap::new(),
             text_search_refs: Vec::new(),
+            partition_ids: HashMap::new(),
             superuser: "postgres".into(),
         };
         builder.dump_item(&item).unwrap();
@@ -5336,6 +5351,7 @@ mod tests {
             index_attaches: IndexAttaches::default(),
             text_search_ids: HashMap::new(),
             text_search_refs: Vec::new(),
+            partition_ids: HashMap::new(),
             superuser: "postgres".into(),
         };
         builder.dump_item(&item).unwrap();
@@ -5564,6 +5580,7 @@ mod tests {
             index_attaches: IndexAttaches::default(),
             text_search_ids: HashMap::new(),
             text_search_refs: Vec::new(),
+            partition_ids: HashMap::new(),
             superuser: "postgres".into(),
         };
         builder.dump_item(item).unwrap();
