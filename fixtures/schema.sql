@@ -775,6 +775,13 @@ CREATE TYPE test.base_int (INPUT = test.base_int_in,
     OUTPUT = test.base_int_out, LIKE = integer);
 COMMENT ON TYPE test.base_int IS 'An integer with its own I/O';
 
+-- A schema whose quoted name has a period, with a type, its comment
+-- and a cast: the period does not separate the name's parts
+CREATE SCHEMA "gate.dotted";
+CREATE TYPE "gate.dotted"."pair.t" AS (x INTEGER);
+COMMENT ON TYPE "gate.dotted"."pair.t" IS 'A type with a period';
+CREATE CAST ("gate.dotted"."pair.t" AS TEXT) WITH INOUT;
+
 -- Transforms for the base type: one with both functions and a
 -- comment, and one with only its TO SQL function
 CREATE FUNCTION test.base_int_from_sql(internal) RETURNS internal

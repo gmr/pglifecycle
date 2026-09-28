@@ -438,10 +438,7 @@ pub(crate) fn create_cast(
     let schema = [function.as_deref(), Some(source), Some(target)]
         .into_iter()
         .flatten()
-        .find_map(|name| {
-            let name = name.split('(').next().unwrap_or(name);
-            name.rsplit_once('.').map(|(schema, _)| unquote(schema))
-        })
+        .find_map(name_schema)
         .unwrap_or_else(|| String::from("public"));
     Ok(Statement::CreateCast(Cast {
         schema,
@@ -1454,6 +1451,13 @@ mod tests {
         };
         assert_eq!((cast.inout, cast.assignment), (Some(true), None));
         assert_eq!(cast.schema, "public");
+        // a period in a quoted schema name does not separate the parts
+        let Statement::CreateCast(cast) =
+            parse_one("CREATE CAST (\"a.b\".pair AS integer) WITH INOUT;")
+        else {
+            panic!("expected CreateCast")
+        };
+        assert_eq!(cast.schema, "a.b");
     }
 
     #[test]
