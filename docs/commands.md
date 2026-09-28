@@ -57,6 +57,7 @@ destructive statements are pending).
 | `-o, --output FILE` | Write the DDL script to FILE instead of stdout |
 | `--apply` | Execute the script in one transaction via psql (conflicts with `--dump`) |
 | `--allow-drop` | Include destructive statements in the script |
+| `--allow-drop-indexes` | Drop indexes that the database has and the project does not (kept by default) |
 | `-x, --no-privileges` | Do not include GRANT/REVOKE |
 | `--error-file FILE` | Where to record failures and their DDL (default `pglifecycle-errors.log`) |
 | `-T, --exclude-table PATTERN` | Exclude tables/views/sequences matching `PATTERN` (repeatable; conflicts with `--dump`) |
@@ -141,9 +142,20 @@ Destructive statements — `DROP` for database-only objects, data-losing
 column changes, and every drop+recreate fallback — are excluded from
 the script unless `--allow-drop` is given; each exclusion is reported
 on stderr and counted in the script header, and `--apply` refuses while
-any are pending. Index, trigger, and constraint drops issued while
+any are pending. Trigger and constraint drops issued while
 reconciling a table are *not* gated: they lose no data and the project
-is authoritative.
+is authoritative. A changed index is also dropped and made again
+without a gate.
+
+An index that the database has and the project does not is **kept**
+unless `--allow-drop-indexes` is given. Such an index is often made at
+runtime, and one such as an HNSW vector index is slow to make again.
+Each kept index is reported on stderr and listed in the script header,
+and it does not stop `--apply`. `--allow-drop` does not drop it:
+give `--allow-drop-indexes` to drop it. To keep an index for good,
+add it to the project. A table that deploy drops and makes again
+(with `--allow-drop`) loses every index that the project does not
+have.
 
 `DROP RULE` is gated although a rule holds no data. A `DO INSTEAD
 NOTHING` rule can block writes, so dropping one can let through changes

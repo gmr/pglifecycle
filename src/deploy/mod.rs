@@ -195,6 +195,9 @@ struct Statement {
 struct Plan {
     included: Vec<Statement>,
     excluded: Vec<Statement>,
+    /// Index drops left out when `--allow-drop-indexes` is not given:
+    /// the database keeps these indexes that the project does not have
+    kept: Vec<Statement>,
     /// How many of `included` are destructive (non-zero only with
     /// `--allow-drop`)
     included_destructive: usize,
@@ -214,6 +217,7 @@ fn plan(
     let mut included = Vec::new();
     let mut excluded = Vec::new();
     let mut included_destructive = 0usize;
+    let mut kept = Vec::new();
     let mut push = |destructive: bool, statement: Statement| {
         if destructive && !args.allow_drop {
             excluded.push(statement);
@@ -349,17 +353,22 @@ fn plan(
             match resolutions.get(id) {
                 Some(Resolution::Statements(alters)) => {
                     for alter in alters {
-                        push(
-                            alter.destructive,
-                            Statement {
-                                label: alter
-                                    .label
-                                    .clone()
-                                    .unwrap_or_else(|| label.clone()),
-                                sql: alter.sql.clone(),
-                                fails_open: alter.fails_open,
-                            },
-                        );
+                        let statement = Statement {
+                            label: alter
+                                .label
+                                .clone()
+                                .unwrap_or_else(|| label.clone()),
+                            sql: alter.sql.clone(),
+                            fails_open: alter.fails_open,
+                        };
+                        // an index that only the database has is kept
+                        // unless --allow-drop-indexes, and is not
+                        // pending: --apply runs without it
+                        if alter.index_removal && !args.allow_drop_indexes {
+                            kept.push(statement);
+                            continue;
+                        }
+                        push(alter.destructive, statement);
                     }
                 }
                 Some(Resolution::OrReplace { comment, then }) => {
@@ -442,6 +451,7 @@ fn plan(
     Ok(Plan {
         included,
         excluded,
+        kept,
         included_destructive,
     })
 }
@@ -491,10 +501,20 @@ fn report(diff: &Diff, plan: &Plan, assembly: &pull::Assembly) {
             );
         }
     }
+    for statement in &plan.kept {
+        log::warn!(
+            "{}: the database has an index that the project does not; \
+             it was kept. Re-run with --allow-drop-indexes to drop it: {}",
+            statement.label,
+            statement.sql.trim_end()
+        );
+    }
     log::info!(
-        "Plan: {} statement(s) included, {} excluded",
+        "Plan: {} statement(s) included, {} excluded, {} index drop(s) \
+         kept out",
         plan.included.len(),
-        plan.excluded.len()
+        plan.excluded.len(),
+        plan.kept.len()
     );
 }
 
@@ -526,6 +546,16 @@ fn render_script(plan: &Plan, project: &str, source: &str) -> String {
         ));
     } else {
         script.push_str("-- destructive statements: none\n");
+    }
+    if !plan.kept.is_empty() {
+        script.push_str(&format!(
+            "-- indexes kept: {} not in the project (re-run with \
+             --allow-drop-indexes to drop them)\n",
+            plan.kept.len()
+        ));
+        for statement in &plan.kept {
+            script.push_str(&format!("--   {}", statement.sql));
+        }
     }
     if plan.included.is_empty() {
         script.push_str("-- no changes: the database matches the project\n");

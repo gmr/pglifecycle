@@ -4,9 +4,13 @@
 //! [`Resolution::Replace`], the gated drop+recreate fallback the
 //! caller assembles from the build archive's entries.
 //!
-//! Index, trigger, and constraint drops are not gated: they lose no
-//! data and the repo is authoritative. Only data-destructive
-//! statements (DROP COLUMN, ALTER COLUMN TYPE) are.
+//! Trigger and constraint drops are not gated: they lose no data and
+//! the repo is authoritative. Data-destructive statements (DROP
+//! COLUMN, ALTER COLUMN TYPE) are gated by `--allow-drop`. The drop of
+//! an index that the project does not have is gated by
+//! `--allow-drop-indexes`: such an index is often made at runtime, and
+//! one such as HNSW is slow to make again. A changed index is dropped
+//! and made again without a gate.
 
 use serde_json::{Map, Value};
 
@@ -35,6 +39,9 @@ pub(crate) struct Alter {
     /// Withholding this statement can leave the database allowing
     /// access that the project does not
     pub fails_open: bool,
+    /// The statement drops an index that the project does not have;
+    /// deploy keeps the index unless `--allow-drop-indexes` is given
+    pub index_removal: bool,
 }
 
 impl Alter {
@@ -44,6 +51,14 @@ impl Alter {
             destructive: false,
             label: None,
             fails_open: false,
+            index_removal: false,
+        }
+    }
+
+    fn index_removal(sql: String) -> Self {
+        Self {
+            index_removal: true,
+            ..Self::new(sql)
         }
     }
 
@@ -1458,13 +1473,15 @@ fn indexes(
     };
     let target =
         |index: &Index| format!("{schema}.{}", quote_ident(&index.name));
+    let drop = |existing: &Index| {
+        format!("DROP INDEX IF EXISTS {};\n", target(existing))
+    };
     for existing in db_indexes {
         let wanted = repo_indexes.iter().find(|i| i.name == existing.name);
-        if is_group(existing) {
-            alters.push(Alter::new(format!(
-                "DROP INDEX IF EXISTS {};\n",
-                target(existing)
-            )));
+        if wanted.is_none() && existing.parent.is_none() {
+            alters.push(Alter::index_removal(drop(existing)));
+        } else if is_group(existing) {
+            alters.push(Alter::new(drop(existing)));
         } else if in_group(existing) {
             // dropped with the partitioned table's index
         } else {
@@ -1477,10 +1494,7 @@ fn indexes(
                         wanted.comment.as_deref(),
                     )));
                 }
-                _ => alters.push(Alter::new(format!(
-                    "DROP INDEX IF EXISTS {};\n",
-                    target(existing)
-                ))),
+                _ => alters.push(Alter::new(drop(existing))),
             }
         }
     }
@@ -2558,7 +2572,7 @@ mod tests {
     }
 
     #[test]
-    fn indexes_reconcile_without_gating() {
+    fn a_removed_index_is_gated_by_allow_drop_indexes() {
         let mut repo = base_table();
         repo["indexes"] = serde_json::json!([{
             "name": "users_email_idx",
@@ -2580,6 +2594,11 @@ mod tests {
             ]
         );
         assert!(alters.iter().all(|a| !a.destructive));
+        // only the drop of the index that the project does not have
+        assert_eq!(
+            alters.iter().map(|a| a.index_removal).collect::<Vec<_>>(),
+            vec![true, false]
+        );
     }
 
     #[test]
@@ -2605,6 +2624,8 @@ mod tests {
                  $$lookup by email$$;\n",
             ]
         );
+        // a changed index is made again without a gate
+        assert!(alters.iter().all(|a| !a.index_removal));
     }
 
     #[test]
