@@ -743,7 +743,14 @@ impl Builder {
         let Definition::Transform(d) = &item.definition else {
             unreachable!()
         };
-        let name = item.definition.name();
+        // the archive tag keeps the language name as the project writes
+        // it; the SQL quotes it, so that PostgreSQL does not fold its
+        // case. The type is SQL text, which pg_dump qualifies.
+        let name = format!(
+            "FOR {} LANGUAGE {}",
+            d.data_type,
+            quote_ident(&d.language)
+        );
         let elements: Vec<String> = [
             d.from_sql
                 .as_ref()
@@ -5443,6 +5450,35 @@ mod tests {
         // FUNCTION by stripping the leading DROP off this one
         // (deviation 17)
         assert_eq!(drop, "DROP FUNCTION test.bare_zero();\n");
+    }
+
+    #[test]
+    fn renders_transform_with_a_quoted_language() {
+        let item = Item {
+            id: 1,
+            desc: ObjectType::Transform,
+            definition: Definition::Transform(crate::models::Transform {
+                schema: "s".into(),
+                data_type: "s.t".into(),
+                language: "MyLang".into(),
+                from_sql: Some("s.t_from(internal)".into()),
+                to_sql: None,
+                comment: Some("converts".into()),
+            }),
+            dependencies: BTreeSet::new(),
+        };
+        // the tag keeps the name as the project writes it
+        let tag = "FOR s.t LANGUAGE MyLang";
+        assert_eq!(
+            table_defn(&item, libpgdump::ObjectType::Transform, tag),
+            "CREATE TRANSFORM FOR s.t LANGUAGE \"MyLang\" (FROM SQL WITH \
+             FUNCTION s.t_from(internal));\n"
+        );
+        assert_eq!(
+            table_defn(&item, libpgdump::ObjectType::Comment, tag),
+            "COMMENT ON TRANSFORM FOR s.t LANGUAGE \"MyLang\" IS \
+             $$converts$$;\n;\n"
+        );
     }
 
     #[test]
