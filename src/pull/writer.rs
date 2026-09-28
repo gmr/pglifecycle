@@ -292,9 +292,22 @@ impl Writer {
             )?;
         }
         for subscription in &assembly.subscriptions {
+            let mut subscription = subscription.clone();
+            if !self.include_password_hashes
+                && let Some(connection) =
+                    without_password(&subscription.connection)
+            {
+                log::warn!(
+                    "Removed the password from the connection of \
+                     subscription {}; add it before you build, or pull \
+                     with --include-password-hashes",
+                    subscription.name
+                );
+                subscription.connection = connection;
+            }
             self.save(
                 top_level("subscriptions", &subscription.name)?,
-                subscription,
+                &subscription,
             )?;
         }
         let names: Vec<(&str, &str)> = assembly
@@ -708,6 +721,100 @@ fn role_settings(state: &RoleState) -> Option<Vec<Map<String, Value>>> {
     )
 }
 
+/// Remove the password from a libpq connection string, a URI
+/// (`postgresql://user:secret@host/db?password=secret`) or a list of
+/// `keyword = value` pairs. Returns `None` when the string has no
+/// password, or when it is not a connection string that this can read.
+fn without_password(connection: &str) -> Option<String> {
+    for scheme in ["postgresql://", "postgres://"] {
+        if let Some(rest) = connection.strip_prefix(scheme) {
+            return uri_without_password(scheme, rest);
+        }
+    }
+    let mut pairs = Vec::new();
+    let mut found = false;
+    let mut chars = connection.char_indices().peekable();
+    loop {
+        while chars.next_if(|(_, c)| c.is_whitespace()).is_some() {}
+        let Some(&(start, _)) = chars.peek() else {
+            break;
+        };
+        let mut key = String::new();
+        while let Some((_, c)) =
+            chars.next_if(|(_, c)| *c != '=' && !c.is_whitespace())
+        {
+            key.push(c);
+        }
+        while chars.next_if(|(_, c)| c.is_whitespace()).is_some() {}
+        chars.next_if(|(_, c)| *c == '=')?;
+        while chars.next_if(|(_, c)| c.is_whitespace()).is_some() {}
+        let quoted = chars.next_if(|(_, c)| *c == '\'').is_some();
+        let mut end = connection.len();
+        let mut closed = !quoted;
+        while let Some(&(index, c)) = chars.peek() {
+            if !quoted && c.is_whitespace() {
+                end = index;
+                break;
+            }
+            chars.next();
+            if c == '\\' {
+                chars.next();
+            } else if quoted && c == '\'' {
+                closed = true;
+                end = chars.peek().map_or(connection.len(), |(i, _)| *i);
+                break;
+            }
+        }
+        if !closed {
+            return None;
+        }
+        if key == "password" {
+            found = true;
+        } else {
+            pairs.push(&connection[start..end]);
+        }
+    }
+    found.then(|| pairs.join(" "))
+}
+
+/// Remove the password from the user information and from the query
+/// parameters of a connection URI (the text after the scheme)
+fn uri_without_password(scheme: &str, rest: &str) -> Option<String> {
+    let (address, query) = match rest.split_once('?') {
+        Some((address, query)) => (address, Some(query)),
+        None => (rest, None),
+    };
+    let authority_end = address.find('/').unwrap_or(address.len());
+    let (authority, path) = address.split_at(authority_end);
+    let mut found = false;
+    let authority = match authority.rsplit_once('@') {
+        Some((user, host)) => match user.split_once(':') {
+            Some((user, _)) => {
+                found = true;
+                format!("{user}@{host}")
+            }
+            None => authority.to_string(),
+        },
+        None => authority.to_string(),
+    };
+    let query = query.map(|query| {
+        query
+            .split('&')
+            .filter(|parameter| {
+                let password = parameter.split('=').next() == Some("password");
+                found |= password;
+                !password
+            })
+            .collect::<Vec<_>>()
+            .join("&")
+    });
+    let query = match query {
+        Some(query) if !query.is_empty() => format!("?{query}"),
+        _ => String::new(),
+    };
+    found.then(|| format!("{scheme}{authority}{path}{query}"))
+}
+
 fn serialize<T: serde::Serialize>(value: &T) -> Result<Value, String> {
     serde_json::to_value(value)
         .map_err(|e| format!("failed to serialize: {e}"))
@@ -888,6 +995,65 @@ fn walk_directories(root: &Path) -> Result<Vec<PathBuf>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn without_password_removes_a_keyword_password() {
+        assert_eq!(
+            without_password("host=h password=secret dbname=d").as_deref(),
+            Some("host=h dbname=d")
+        );
+        assert_eq!(
+            without_password("host=h password = 'a \\' b' dbname='x y'")
+                .as_deref(),
+            Some("host=h dbname='x y'")
+        );
+        assert_eq!(without_password("host=h dbname=d"), None);
+        assert_eq!(without_password("host=h password='open"), None);
+    }
+
+    #[test]
+    fn without_password_removes_a_uri_password() {
+        assert_eq!(
+            without_password("postgresql://u:secret@h:5432/d").as_deref(),
+            Some("postgresql://u@h:5432/d")
+        );
+        assert_eq!(
+            without_password(
+                "postgres://u@h/d?password=secret&sslmode=require"
+            )
+            .as_deref(),
+            Some("postgres://u@h/d?sslmode=require")
+        );
+        assert_eq!(
+            without_password("postgresql://h/d?password=secret").as_deref(),
+            Some("postgresql://h/d")
+        );
+        assert_eq!(without_password("postgresql://u@h/d"), None);
+    }
+
+    #[test]
+    fn write_catalog_objects_redacts_a_subscription_password() {
+        let assembly = Assembly {
+            subscriptions: vec![models::Subscription {
+                name: String::from("s"),
+                connection: String::from("host=h password=secret"),
+                publications: vec![String::from("p")],
+                parameters: None,
+                comment: None,
+            }],
+            ..Assembly::default()
+        };
+        let mut writer = Writer {
+            ignore: BTreeSet::new(),
+            files: BTreeMap::new(),
+            mode_headers: false,
+            include_password_hashes: false,
+        };
+        writer.write_catalog_objects(&assembly).unwrap();
+        let body = &writer.files[&Path::new("subscriptions").join("s.yaml")];
+        assert!(!body.contains("secret"), "unexpected contents: {body}");
+        assert!(body.contains("host=h"), "unexpected contents: {body}");
+    }
 
     #[test]
     fn safe_component_accepts_normal_identifiers() {

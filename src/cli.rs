@@ -246,7 +246,8 @@ pub struct Pull {
     pub no_roles: bool,
 
     /// Include role password hashes in extracted users (pg_dumpall runs
-    /// with --no-role-passwords by default, omitting them). The hashes
+    /// with --no-role-passwords by default, omitting them), and the
+    /// passwords of user mappings and subscription connections. These
     /// are written to the project, so only enable for trusted repos
     #[arg(long)]
     pub include_password_hashes: bool,
