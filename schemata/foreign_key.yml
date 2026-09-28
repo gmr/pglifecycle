@@ -73,6 +73,16 @@ properties:
       - CASCADE
       - SET NULL
       - SET DEFAULT
+  on_delete_columns:
+    title: On Delete Columns
+    description: >
+      The columns that an on_delete of SET NULL or SET DEFAULT sets, when not
+      all of the foreign key columns (PostgreSQL 15+). Use it for a composite
+      key that shares a column that is not null, such as a tenant id.
+    type: array
+    items:
+      type: string
+    minItems: 1
   on_update:
     title: On Update
     description: Action to take on update of the column value in the referenced table
@@ -116,7 +126,19 @@ additionalProperties: false
 # PostgreSQL rejects a temporal foreign key that names PERIOD on one side
 # only ("foreign key uses PERIOD on the referencing table but not the
 # referenced table"), so the two period properties must occur together.
+#
+# PostgreSQL accepts a column list only after ON DELETE SET NULL or SET
+# DEFAULT ("a column list with SET NULL is only supported for ON DELETE
+# actions"), so on_delete_columns needs one of those.
 dependentSchemas:
+  on_delete_columns:
+    required:
+      - on_delete
+    properties:
+      on_delete:
+        enum:
+          - SET NULL
+          - SET DEFAULT
   period:
     required:
       - references
