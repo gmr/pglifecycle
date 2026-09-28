@@ -18,5 +18,3 @@
 
 CREATE SCHEMA unsupported;
 SET search_path = unsupported, public, pg_catalog;
-
-CREATE ROLE pglifecycle_coverage_reader;
