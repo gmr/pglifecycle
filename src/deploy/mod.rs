@@ -553,8 +553,12 @@ fn render_script(plan: &Plan, project: &str, source: &str) -> String {
              --allow-drop-indexes to drop them)\n",
             plan.kept.len()
         ));
+        // a quoted name can contain a newline, so comment out each
+        // line; else a part of the drop can run
         for statement in &plan.kept {
-            script.push_str(&format!("--   {}", statement.sql));
+            for line in statement.sql.lines() {
+                script.push_str(&format!("--   {line}\n"));
+            }
         }
     }
     if plan.included.is_empty() {
@@ -800,5 +804,28 @@ mod tests {
              matched by the ordered pass despite its named-parameter \
              key diverging from the archive tag"
         );
+    }
+
+    /// A kept index drop with a newline in its quoted name must stay
+    /// fully commented out, so no part of it can run
+    #[test]
+    fn kept_index_drop_with_newline_is_fully_commented() {
+        let plan = Plan {
+            included: Vec::new(),
+            excluded: Vec::new(),
+            kept: vec![Statement {
+                label: "INDEX public.bad".to_string(),
+                sql: "DROP INDEX IF EXISTS public.\"a\nDROP TABLE t; \
+                      --\";\n"
+                    .to_string(),
+                fails_open: false,
+            }],
+            included_destructive: 0,
+        };
+        let script = render_script(&plan, "test", "db");
+        for line in script.lines() {
+            assert!(line.starts_with("--"), "line runs as SQL: {line}");
+        }
+        assert!(script.contains("--   DROP TABLE t; --\";\n"));
     }
 }
