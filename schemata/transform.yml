@@ -5,7 +5,9 @@ title: Transform
 description: >
   Defines a transform, which converts a data type to and from the form a
   procedural language uses. A transform has no owner. The project keeps it
-  in the schema of its data type.
+  in the schema of its data type. When the data type is built-in, the
+  project keeps it in the first schema that its functions name, or in
+  public.
 type: object
 properties:
   schema:
