@@ -1383,8 +1383,10 @@ impl Builder {
             self.item_name(item),
         ];
         if let Some(columns) = &d.columns {
-            let names: Vec<&str> =
-                columns.iter().map(view_column_name).collect();
+            let names: Vec<String> = columns
+                .iter()
+                .map(|c| quote_ident(view_column_name(c)))
+                .collect();
             create.push(format!("({})", names.join(", ")));
         }
         if let Some(method) = &d.table_access_method {
@@ -3131,8 +3133,10 @@ impl Builder {
         create.push("VIEW".into());
         create.push(self.item_name(item));
         if let Some(columns) = &d.columns {
-            let names: Vec<&str> =
-                columns.iter().map(view_column_name).collect();
+            let names: Vec<String> = columns
+                .iter()
+                .map(|c| quote_ident(view_column_name(c)))
+                .collect();
             create.push(format!("({})", names.join(", ")));
         }
         let mut with_options = Vec::new();
@@ -5176,6 +5180,55 @@ mod tests {
             defn,
             "CREATE VIEW public.active_orders WITH (check_option = \
              local, security_barrier = true) AS SELECT 1;\n"
+        );
+    }
+
+    /// A view column name that needs quoting is quoted
+    #[test]
+    fn quotes_view_column_names() {
+        let item = Item {
+            id: 1,
+            desc: ObjectType::View,
+            definition: Definition::View(View {
+                name: "v".into(),
+                schema: "public".into(),
+                owner: "app".into(),
+                sql: None,
+                recursive: None,
+                columns: Some(vec![
+                    ViewColumn::Name("Out Col".into()),
+                    ViewColumn::Name("id".into()),
+                ]),
+                check_option: None,
+                security_barrier: None,
+                query: Some("SELECT 1, 2".into()),
+                comment: None,
+                rules: None,
+            }),
+            dependencies: BTreeSet::new(),
+        };
+        let dump = libpgdump::new("t", "UTF-8", "18.0").unwrap();
+        let mut builder = Builder {
+            dump,
+            dump_id_map: HashMap::new(),
+            text_search_last: HashMap::new(),
+            pending_attaches: Vec::new(),
+            index_attaches: IndexAttaches::default(),
+            text_search_ids: HashMap::new(),
+            text_search_refs: Vec::new(),
+            superuser: "postgres".into(),
+        };
+        builder.dump_item(&item).unwrap();
+        let defn = builder
+            .dump
+            .entries()
+            .iter()
+            .find(|e| e.desc == libpgdump::ObjectType::View)
+            .and_then(|e| e.defn.clone())
+            .expect("a VIEW entry");
+        assert_eq!(
+            defn,
+            "CREATE VIEW public.v (\"Out Col\", id) AS SELECT 1, 2;\n"
         );
     }
 

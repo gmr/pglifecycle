@@ -593,6 +593,8 @@ CREATE TABLE test.quoted_cols (
     "select"    INTEGER CHECK ("select" > 0),
     "Has Space" TEXT COLLATE "C",
     "Total"     INTEGER GENERATED ALWAYS AS ("select" * 2) STORED,
+    -- quoted_cols_touch sets this column
+    last_modified_at TIMESTAMP WITH TIME ZONE,
     PRIMARY KEY ("Id"),
     UNIQUE ("Name") INCLUDE ("Has Space")
 );
