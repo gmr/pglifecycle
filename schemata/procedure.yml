@@ -43,7 +43,6 @@ properties:
           title: Default value for Paramter
           oneOf:
             - type: boolean
-            - type: integer
             - type: "null"
             - type: number
             - type: string

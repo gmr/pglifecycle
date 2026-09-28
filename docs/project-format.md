@@ -256,6 +256,15 @@ revocations:
   `build` creates it as an ordinary table and attaches it with `ALTER
   TABLE ... ATTACH PARTITION`, as `pg_dump` writes it.
 
+- A foreign key can leave out its `name`. The project then uses the
+  name PostgreSQL generates, `<table>_<columns>_fkey`, cut to 63
+  bytes. When that name is already in use, PostgreSQL adds a number,
+  so give such a key its name.
+
+- A primary key or unique constraint on one column can be the column
+  name alone (`primary_key: id`), and an integer default can be a
+  number (`default: 0`). Each is the same as the form `pull` writes.
+
 - An index of a partitioned table has `recurse: false` when it is made
   `ON ONLY` the partitioned table, as `pg_dump` writes it. Each
   partition's index is then in the partition's table file, with the

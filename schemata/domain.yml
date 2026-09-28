@@ -42,7 +42,6 @@ properties:
       is the null value.
     oneOf:
       - type: boolean
-      - type: integer
       - type: "null"
       - type: number
       - type: string

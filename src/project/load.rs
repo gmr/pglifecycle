@@ -636,7 +636,7 @@ impl Loader {
         path: Option<&Path>,
     ) {
         let pending = std::mem::take(&mut self.pending_dependencies);
-        let definition = match to_definition(ot, value.clone()) {
+        let mut definition = match to_definition(ot, value.clone()) {
             Ok(definition) => definition,
             Err(error) => {
                 log::error!(
@@ -658,6 +658,10 @@ impl Loader {
             );
             self.errors += 1;
             return;
+        }
+        // after the round-trip check, which compares what was read
+        if let Definition::Table(table) = &mut definition {
+            normalize_table(table);
         }
         // two definitions collide only when they share an identity:
         // overloaded functions share a name but not a signature
@@ -821,6 +825,71 @@ fn object_name(defn: &Value) -> Result<String, String> {
 }
 
 /// Set a string key on a mapping unless it is already present
+/// Write the parts of a table that the project can give in more than
+/// one form in the form that pull writes, so that deploy compares them
+/// as equal:
+///
+/// - a key given as one column name is a list of one column
+/// - a default given as a number is its text; pull writes a boolean
+///   default as a boolean
+/// - a foreign key with no name gets the name PostgreSQL generates
+fn normalize_table(table: &mut crate::models::Table) {
+    use crate::models::ConstraintColumns;
+    let keys = table
+        .primary_key
+        .iter_mut()
+        .chain(table.unique_constraints.iter_mut().flatten());
+    for key in keys {
+        if let ConstraintColumns::Name(column) = key {
+            *key = ConstraintColumns::Columns(vec![std::mem::take(column)]);
+        }
+    }
+    for column in table.columns.iter_mut().flatten() {
+        if let Some(default @ Value::Number(_)) = &mut column.default {
+            *default = Value::String(default.to_string());
+        }
+    }
+    for fk in table.foreign_keys.iter_mut().flatten() {
+        if fk.name.is_empty() {
+            fk.name =
+                generated_name(&table.name, &fk.columns.join("_"), "fkey");
+        }
+    }
+}
+
+/// The constraint name PostgreSQL generates, `<table>_<columns>_<label>`
+/// cut to 63 bytes by `makeObjectName`: it takes a byte from the longer
+/// of the two names until the name fits, then cuts each name back to a
+/// character boundary. PostgreSQL adds a number when the name is in
+/// use; that case is not known here, so such a key needs its name in
+/// the project.
+fn generated_name(table: &str, columns: &str, label: &str) -> String {
+    const MAX: usize = 63;
+    let available = MAX - label.len() - 2;
+    let (mut table_len, mut columns_len) = (table.len(), columns.len());
+    while table_len + columns_len > available {
+        if table_len > columns_len {
+            table_len -= 1;
+        } else {
+            columns_len -= 1;
+        }
+    }
+    format!(
+        "{}_{}_{label}",
+        clip(table, table_len),
+        clip(columns, columns_len)
+    )
+}
+
+/// The longest start of `name` that is not more than `len` bytes and
+/// ends on a character boundary, as `pg_mbcliplen` gives
+fn clip(name: &str, mut len: usize) -> &str {
+    while !name.is_char_boundary(len) {
+        len -= 1;
+    }
+    &name[..len]
+}
+
 fn inject(defn: &mut Value, key: &str, value: &str) {
     if let Value::Object(map) = defn
         && !map.contains_key(key)
@@ -960,6 +1029,53 @@ mod tests {
 
     /// M6: a second object with the same (desc, schema, name) is
     /// rejected as an error instead of silently duplicating the item
+    #[test]
+    fn generated_foreign_key_name_matches_postgres() {
+        assert_eq!(
+            generated_name("addresses", "user_id", "fkey"),
+            "addresses_user_id_fkey"
+        );
+        // cut to 63 bytes, a character at a time from the longer part:
+        // PostgreSQL 18 names the foreign key of a table of 40 `a` on a
+        // column of 40 `b` the same
+        let name = generated_name(&"a".repeat(40), &"b".repeat(40), "fkey");
+        assert_eq!(name.len(), 63);
+        assert_eq!(
+            name,
+            format!("{}_{}_fkey", "a".repeat(29), "b".repeat(28))
+        );
+        // PostgreSQL balances the byte lengths first, then cuts each
+        // name back to a character boundary: 29 bytes of the table
+        // give 14 two-byte characters
+        let name =
+            generated_name(&"\u{e9}".repeat(20), &"x".repeat(35), "fkey");
+        assert_eq!(
+            name,
+            format!("{}_{}_fkey", "\u{e9}".repeat(14), "x".repeat(28))
+        );
+    }
+
+    #[test]
+    fn normalizes_the_short_forms_of_a_table() {
+        let mut table: crate::models::Table = serde_json::from_value(json!({
+            "name": "t",
+            "schema": "s",
+            "owner": "o",
+            "columns": [{"name": "n", "data_type": "integer", "default": 0}],
+            "primary_key": "n",
+            "foreign_keys": [{
+                "columns": ["n"],
+                "references": {"name": "s.u", "columns": ["id"]},
+            }],
+        }))
+        .unwrap();
+        normalize_table(&mut table);
+        let value = serde_json::to_value(&table).unwrap();
+        assert_eq!(value["primary_key"], json!(["n"]));
+        assert_eq!(value["columns"][0]["default"], json!("0"));
+        assert_eq!(value["foreign_keys"][0]["name"], json!("t_n_fkey"));
+    }
+
     #[test]
     fn duplicate_objects_are_flagged_as_errors() {
         let dir = tempfile::tempdir().unwrap();

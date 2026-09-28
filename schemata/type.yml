@@ -132,7 +132,6 @@ properties:
     description: Value to use instead of NULL to use as a default.
     oneOf:
       - type: boolean
-      - type: integer
       - type: "null"
       - type: number
       - type: string
