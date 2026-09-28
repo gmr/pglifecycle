@@ -28,7 +28,7 @@ WORKDIR="$(mktemp -d)"
 cleanup() {
     rm -rf "${WORKDIR}"
     for i in "${!FIXTURES[@]}"; do
-        psql -d postgres -q -c "DROP DATABASE IF EXISTS parse_coverage_${i}" \
+        bin/drop-database "parse_coverage_${i}" \
             >/dev/null 2>&1 || true
     done
 }
@@ -42,7 +42,7 @@ dumps=()
 for i in "${!FIXTURES[@]}"; do
     db="parse_coverage_${i}"
     echo "==> Creating ${db} from ${FIXTURES[$i]}"
-    psql -d postgres -q -c "DROP DATABASE IF EXISTS ${db}"
+    bin/drop-database "${db}"
     psql -d postgres -q -c "CREATE DATABASE ${db}"
     psql -d "${db}" -q -v ON_ERROR_STOP=1 -f "${FIXTURES[$i]}" \
         >/dev/null

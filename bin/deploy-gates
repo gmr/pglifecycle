@@ -25,9 +25,9 @@ WORKDIR="$(mktemp -d)"
 
 cleanup() {
     rm -rf "$WORKDIR"
-    psql -d postgres -q -c "DROP DATABASE IF EXISTS ${TARGET_DB}" \
+    bin/drop-database "${TARGET_DB}" \
         >/dev/null 2>&1 || true
-    psql -d postgres -q -c "DROP DATABASE IF EXISTS ${SOURCE_DB}" \
+    bin/drop-database "${SOURCE_DB}" \
         >/dev/null 2>&1 || true
 }
 trap cleanup EXIT INT TERM
@@ -42,7 +42,7 @@ echo "==> Building pglifecycle"
 cargo build --quiet
 
 echo "==> Creating ${SOURCE_DB} from fixtures/schema.sql"
-psql -d postgres -q -c "DROP DATABASE IF EXISTS ${SOURCE_DB}"
+bin/drop-database "${SOURCE_DB}"
 psql -d postgres -q -c "CREATE DATABASE ${SOURCE_DB}"
 psql -d "${SOURCE_DB}" -q -v ON_ERROR_STOP=1 -f fixtures/schema.sql
 # a comment-less view (dependency-free so it needs no ordering): the
@@ -57,7 +57,7 @@ pg_dump -d "${SOURCE_DB}" -Fc --schema-only -f "${WORKDIR}/source.dump"
     "${WORKDIR}/project"
 
 echo "==> Gate 1: equivalence (deploy --apply into an empty database)"
-psql -d postgres -q -c "DROP DATABASE IF EXISTS ${TARGET_DB}"
+bin/drop-database "${TARGET_DB}"
 psql -d postgres -q -c "CREATE DATABASE ${TARGET_DB}"
 ./target/debug/pglifecycle deploy --apply -d "${TARGET_DB}" \
     "${WORKDIR}/project"

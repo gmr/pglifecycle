@@ -49,6 +49,9 @@ const DEVIATIONS: &[(&str, &str, &str)] = &[
     ("SERVER", "", "localhost"),
     // Python interpolated a Python list repr into WHEN TAG IN
     ("EVENT TRIGGER", "", "disable_alter_domain"),
+    // deviation 32: Python rendered the connection and the WITH
+    // parameters bare, which does not parse
+    ("SUBSCRIPTION", "", "localhost_test"),
     // Python emitted CREATE INDEX schema.name, which does not parse
     ("INDEX", "test", "empty_table_created_at"),
     ("INDEX", "test", "users_unique_email"),
@@ -156,6 +159,15 @@ const CORRECTED: &[(&str, &str, &str, &str)] = &[
         "",
         "disable_alter_domain",
         "WHEN TAG IN ('ALTER DOMAIN')",
+    ),
+    (
+        "SUBSCRIPTION",
+        "",
+        "localhost_test",
+        "CONNECTION 'host=localhost port=5432 dbname=logical_replication \
+         user=postgres' PUBLICATION all_tables WITH (copy_data = True, \
+         create_slot = True, enabled = True, synchronous_commit = 'on', \
+         connect = True)",
     ),
     (
         "INDEX",

@@ -179,8 +179,8 @@ Ownership is not managed (the script behaves like
 `pg_restore --no-owner`), and roles, users, groups, and tablespaces are
 skipped entirely — they are cluster-level objects a single-database
 dump cannot capture. Aggregates, casts, collations, conversions, event
-triggers, publications, text search objects, default privileges,
-extended statistics, procedures, operators, operator classes and
+triggers, publications, subscriptions, text search objects, default
+privileges, extended statistics, procedures, operators, operator classes and
 families, and access methods are created when
 missing but otherwise only existence-checked: `pull` models them, but
 `deploy` does not compare their definitions yet, so a changed one is
@@ -191,7 +191,7 @@ family is matched by its name and its index method. Text search
 objects are checked per schema: when a schema has any text search
 object in the database, `deploy` creates none of the project's text
 search objects in that schema. Object types `pull` does not yet model
-(transforms, subscriptions, …) are handled the same way. Privileges on
+(transforms, security labels, …) are handled the same way. Privileges on
 created objects are emitted (unless `-x`); privilege changes on objects
 that already exist are not yet diffed.
 
@@ -210,7 +210,7 @@ pglifecycle pull [OPTIONS] DEST
 | --- | --- |
 | `-D, --dump FILE` | Use an existing `pg_dump -Fc` file instead of connecting |
 | `--no-roles` | Skip cluster role/user extraction (role/user extraction is enabled by default for live connections; always skipped with `--dump`) |
-| `--include-password-hashes` | Include role password hashes in users (omitted by default via `pg_dumpall --no-role-passwords`) |
+| `--include-password-hashes` | Include role password hashes in users (omitted by default via `pg_dumpall --no-role-passwords`), and the passwords of user mappings and subscription connections |
 | `--include-mode-headers` | Prefix each generated file with editor mode headers (see below) |
 | `-i, --ignore FILE` | File listing project paths to skip writing |
 | `--force` | Write to `DEST` even if it already exists |
@@ -237,7 +237,7 @@ went missing.
 ```console
 $ pglifecycle pull ./project -d mydb
 ...
-error: 3 dump entries could not be modeled (TRANSFORM, SUBSCRIPTION), so the
+error: 2 dump entries could not be modeled (TRANSFORM, SECURITY LABEL), so the
 generated project would not reproduce the source database.
 The entries were preserved in ./project/remaining.yaml; re-run with
 --allow-unsupported to accept the project as it is.
@@ -362,6 +362,11 @@ are excluded. Password hashes are omitted unless
 `pg_authid`, which managed platforms (e.g. RDS) restrict; when it is
 denied, `pull` falls back to a passwordless roles dump (warning that
 hashes were unavailable) rather than dropping all roles.
+
+A subscription connection string can contain a password, as a
+`password` keyword or in a URI. `pull` removes it by default and
+writes a warning. Add the password to the project before you `build`,
+or pass `--include-password-hashes` to write it.
 
 ### Foreign data wrappers, servers, and foreign tables
 

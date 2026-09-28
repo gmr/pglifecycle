@@ -32,6 +32,7 @@ const MANAGED_DIRS: &[&str] = &[
     "schemata",
     "sequences",
     "statistics",
+    "subscriptions",
     "tables",
     "text_search",
     "types",
