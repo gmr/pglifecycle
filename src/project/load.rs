@@ -760,6 +760,30 @@ fn identity(definition: &Definition) -> String {
     match definition {
         Definition::Function(f) => f.identity(),
         Definition::Procedure(p) => p.identity(),
+        // overloads share a name, and differ in their argument types
+        Definition::Operator(o) => format!(
+            "{}({}, {})",
+            o.name,
+            o.left_arg.as_deref().unwrap_or("NONE"),
+            o.right_arg.as_deref().unwrap_or("NONE")
+        ),
+        Definition::Aggregate(a) => {
+            let types = |args: &[crate::models::Argument]| {
+                args.iter()
+                    .map(|a| a.data_type.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            match a.order_by.as_deref() {
+                Some(order_by) => format!(
+                    "{}({} ORDER BY {})",
+                    a.name,
+                    types(&a.arguments),
+                    types(order_by)
+                ),
+                None => format!("{}({})", a.name, types(&a.arguments)),
+            }
+        }
         // one name can be used once for each index method
         Definition::OperatorClass(c) => {
             format!("{} USING {}", c.name, c.method)
@@ -1050,6 +1074,35 @@ mod tests {
 
     /// M6: a second object with the same (desc, schema, name) is
     /// rejected as an error instead of silently duplicating the item
+    #[test]
+    fn operator_and_aggregate_overloads_have_their_own_identity() {
+        let operator = |right: &str| {
+            to_definition(
+                ObjectType::Operator,
+                json!({"name": "!!!", "schema": "s", "owner": "o",
+                       "function": "f", "right_arg": right}),
+            )
+            .unwrap()
+        };
+        assert_ne!(
+            identity(&operator("integer")),
+            identity(&operator("bigint"))
+        );
+        let aggregate = |data_type: &str| {
+            to_definition(
+                ObjectType::Aggregate,
+                json!({"name": "agg", "schema": "s", "owner": "o",
+                       "sfunc": "f", "state_data_type": data_type,
+                       "arguments": [{"data_type": data_type}]}),
+            )
+            .unwrap()
+        };
+        assert_ne!(
+            identity(&aggregate("integer")),
+            identity(&aggregate("bigint"))
+        );
+    }
+
     #[test]
     fn generated_foreign_key_name_matches_postgres() {
         assert_eq!(

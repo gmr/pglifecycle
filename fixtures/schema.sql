@@ -439,6 +439,9 @@ $$;
 CREATE AGGREGATE test.sum_ints(INTEGER) (
     SFUNC = test.add_ints, STYPE = INTEGER, INITCOND = '0', PARALLEL = SAFE);
 COMMENT ON AGGREGATE test.sum_ints(INTEGER) IS 'Adds integers';
+-- an overload of the same aggregate, with its own comment
+CREATE AGGREGATE test.sum_ints(BIGINT) (SFUNC = int8pl, STYPE = BIGINT);
+COMMENT ON AGGREGATE test.sum_ints(BIGINT) IS 'Adds bigints';
 
 CREATE AGGREGATE test.sum_sorted(INTEGER ORDER BY INTEGER) (
     SFUNC = test.add_ints, STYPE = INTEGER);
@@ -736,6 +739,9 @@ CREATE OPERATOR test.=~= (
     COMMUTATOR = OPERATOR(test.=~=), RESTRICT = eqsel, JOIN = eqjoinsel);
 COMMENT ON OPERATOR test.=~= (INTEGER, INTEGER) IS 'Same parity';
 CREATE OPERATOR test.!!! (FUNCTION = int4um, RIGHTARG = INTEGER);
+-- an overload of the same operator, with its own comment
+CREATE OPERATOR test.!!! (FUNCTION = int8um, RIGHTARG = BIGINT);
+COMMENT ON OPERATOR test.!!! (NONE, BIGINT) IS 'Negates a bigint';
 
 -- Access methods: a table method and an index method, with the
 -- handlers of the built-in ones. A table and a materialized view use
