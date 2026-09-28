@@ -510,9 +510,19 @@ fn collect_keywords(node: &Node, into: &mut Vec<String>) {
     }
 }
 
-/// `a.b.c` → schema `a.b`, name `c` (COLUMN comments use three parts)
+/// `a.b.c` → schema `a.b`, name `c` (COLUMN comments use three parts).
+/// A period in a quoted identifier does not separate the parts.
 fn split_dotted(value: &str) -> QualifiedName {
-    match value.rsplit_once('.') {
+    let mut quoted = false;
+    let mut last = None;
+    for (index, c) in value.char_indices() {
+        match c {
+            '"' => quoted = !quoted,
+            '.' if !quoted => last = Some(index),
+            _ => {}
+        }
+    }
+    match last.map(|index| (&value[..index], &value[index + 1..])) {
         Some((head, tail)) => QualifiedName {
             schema: Some(unquote(head)),
             name: unquote(tail),
@@ -599,6 +609,17 @@ mod tests {
         let mut statements = parser.parse(sql).unwrap();
         assert_eq!(statements.len(), 1, "expected one statement");
         statements.remove(0)
+    }
+
+    #[test]
+    fn comment_on_type_keeps_a_quoted_period() {
+        let Statement::Comment { target, .. } =
+            parse_one("COMMENT ON TYPE \"a.b\".\"c.d\" IS 'x';")
+        else {
+            panic!("expected Comment")
+        };
+        assert_eq!(target.schema.as_deref(), Some("a.b"));
+        assert_eq!(target.name, "c.d");
     }
 
     #[test]
