@@ -263,6 +263,13 @@ revocations:
   call. Parentheses around all of it are also accepted, and `deploy`
   compares the expression without them.
 
+- A generated column's `expression` can leave out the parentheses
+  around all of it, and a generated column with no `kind` is stored.
+  `deploy` compares the expression as text otherwise, so write it as
+  `pull` writes it, with the casts PostgreSQL adds: `lower('X' ||
+  a::text)` is `lower(('X'::text || (a)::text))`. A different text is
+  set again with `SET EXPRESSION` on each deploy.
+
 - A foreign key can leave out its `name`. The project then uses the
   name PostgreSQL generates, `<table>_<columns>_fkey`, cut to 63
   bytes. When that name is already in use, PostgreSQL adds a number,

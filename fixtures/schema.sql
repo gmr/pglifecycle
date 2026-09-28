@@ -819,6 +819,19 @@ CREATE TYPE "gate.dotted"."pair.t" AS (x INTEGER);
 COMMENT ON TYPE "gate.dotted"."pair.t" IS 'A type with a period';
 CREATE CAST ("gate.dotted"."pair.t" AS TEXT) WITH INOUT;
 
+-- Columns whose expressions hold the keywords of a NOT NULL
+-- constraint: a generated IS NOT NULL, nullable and not, and a check
+-- on IS NOT NULL. Each keeps its generated expression or its check,
+-- and only the NOT NULL column is not null.
+CREATE TABLE test.revocations (
+    revoked_at   TIMESTAMPTZ,
+    revoked      BOOLEAN GENERATED ALWAYS AS (revoked_at IS NOT NULL) STORED,
+    revoked_nn   BOOLEAN GENERATED ALWAYS AS (revoked_at IS NOT NULL) STORED
+        NOT NULL,
+    revoked_v    BOOLEAN GENERATED ALWAYS AS (revoked_at IS NOT NULL) VIRTUAL,
+    reason       TEXT CHECK (reason IS NOT NULL OR revoked_at IS NULL)
+);
+
 -- Transforms for the base type: one with both functions and a
 -- comment, and one with only its TO SQL function
 CREATE FUNCTION test.base_int_from_sql(internal) RETURNS internal

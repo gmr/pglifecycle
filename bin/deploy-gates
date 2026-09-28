@@ -137,6 +137,8 @@ ALTER INDEX test.readings_taken ATTACH PARTITION test.readings_2020_by_day;
 CREATE INDEX readings_2021_by_day ON test.readings_2021 (taken DESC);
 ALTER INDEX test.readings_taken ATTACH PARTITION test.readings_2021_by_day;
 COMMENT ON INDEX test.readings_2021_id_idx IS 'drift';
+ALTER TABLE test.revocations ALTER COLUMN revoked
+    SET EXPRESSION AS (revoked_at IS NULL);
 ALTER TABLE test.quoted_cols ALTER COLUMN "Name" DROP DEFAULT;
 ALTER TABLE test.quoted_cols ALTER COLUMN "Name" DROP NOT NULL;
 ALTER TABLE test.quoted_cols ALTER COLUMN "Has Space" SET STATISTICS 50;
@@ -231,6 +233,22 @@ if grep -q '^-- no changes' "${WORKDIR}/replan.sql"; then
     echo "Convergence gate passed: uppercase type names are unchanged"
 else
     echo "Convergence gate FAILED: uppercase type names changed" >&2
+    cat "${WORKDIR}/replan.sql" >&2
+    exit 1
+fi
+# a generated column written without the parentheses and the kind that
+# pull writes: deploy compares the expression without them, and reads
+# no kind as stored, so the plan stays empty
+perl -0pi -e 's/(- name: revoked\n  data_type: (?i:boolean)\n  generated:\n    expression: )\(revoked_at IS NOT NULL\)\n    kind: stored\n/$1revoked_at IS NOT NULL\n/' \
+    "${WORKDIR}/project/tables/test/revocations.yaml"
+grep -q 'expression: revoked_at IS NOT NULL$' \
+    "${WORKDIR}/project/tables/test/revocations.yaml"
+./target/debug/pglifecycle deploy -o "${WORKDIR}/replan.sql" \
+    -d "${TARGET_DB}" "${WORKDIR}/project"
+if grep -q '^-- no changes' "${WORKDIR}/replan.sql"; then
+    echo "Convergence gate passed: a generated column's short form is unchanged"
+else
+    echo "Convergence gate FAILED: a generated column's short form changed" >&2
     cat "${WORKDIR}/replan.sql" >&2
     exit 1
 fi
