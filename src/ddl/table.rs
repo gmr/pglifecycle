@@ -896,6 +896,23 @@ fn column_list(node: &Node, src: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// A referential action, as its keywords, and the columns that `SET
+/// NULL (...)` or `SET DEFAULT (...)` names
+fn key_action(node: &Node, src: &str) -> (String, Option<Vec<String>>) {
+    let mut cursor = node.walk();
+    let verb = node
+        .children(&mut cursor)
+        .filter(|n| n.kind().starts_with("kw_"))
+        .map(|n| n.text(src).to_uppercase())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let columns = node
+        .child_of_kind("opt_column_list")
+        .map(|list| column_list(&list, src))
+        .filter(|columns| !columns.is_empty());
+    (verb, columns)
+}
+
 fn foreign_key(
     elem: &Node,
     src: &str,
@@ -939,17 +956,22 @@ fn foreign_key(
             .map(|e| e.has("kw_deferred"))
     });
     let mut on_delete = None;
+    let mut on_delete_columns = None;
     let mut on_update = None;
     if let Some(actions) = elem.child_of_kind("key_actions") {
-        if let Some(delete) = actions.child_of_kind("key_delete") {
-            on_delete = delete
-                .child_of_kind("key_action")
-                .map(|n| n.text(src).to_uppercase());
+        if let Some(action) = actions
+            .child_of_kind("key_delete")
+            .and_then(|n| n.child_of_kind("key_action"))
+        {
+            let (verb, columns) = key_action(&action, src);
+            on_delete = Some(verb);
+            on_delete_columns = columns;
         }
-        if let Some(update) = actions.child_of_kind("key_update") {
-            on_update = update
-                .child_of_kind("key_action")
-                .map(|n| n.text(src).to_uppercase());
+        if let Some(action) = actions
+            .child_of_kind("key_update")
+            .and_then(|n| n.child_of_kind("key_action"))
+        {
+            on_update = Some(key_action(&action, src).0);
         }
     }
     Ok(ForeignKey {
@@ -971,6 +993,7 @@ fn foreign_key(
             .to_string()
         }),
         on_delete,
+        on_delete_columns,
         on_update,
         deferrable,
         initially_deferred,
@@ -1715,6 +1738,23 @@ mod tests {
         assert_eq!(fk.references.columns, vec!["id"]);
         assert_eq!(fk.on_delete, Some("CASCADE".into()));
         assert_eq!(fk.on_update, Some("CASCADE".into()));
+    }
+
+    #[test]
+    fn parses_foreign_key_set_null_columns() {
+        let Statement::AddConstraint { constraint, .. } = parse_one(
+            "ALTER TABLE ONLY test.files ADD CONSTRAINT files_folder \
+             FOREIGN KEY (tenant, folder) REFERENCES test.folders(tenant, \
+             id) ON DELETE SET NULL (folder) ON UPDATE SET DEFAULT;",
+        ) else {
+            panic!("expected AddConstraint")
+        };
+        let TableConstraint::ForeignKey(fk) = constraint else {
+            panic!("expected ForeignKey")
+        };
+        assert_eq!(fk.on_delete, Some("SET NULL".into()));
+        assert_eq!(fk.on_delete_columns, Some(vec!["folder".into()]));
+        assert_eq!(fk.on_update, Some("SET DEFAULT".into()));
     }
 
     #[test]

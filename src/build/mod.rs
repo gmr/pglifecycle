@@ -3783,6 +3783,16 @@ pub(crate) fn render_foreign_key(fk: &crate::models::ForeignKey) -> String {
     {
         fk_sql.push("ON DELETE".into());
         fk_sql.push(on_delete.clone());
+        if let Some(columns) = &fk.on_delete_columns {
+            fk_sql.push(format!(
+                "({})",
+                columns
+                    .iter()
+                    .map(|c| quote_ident(c))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
     }
     if let Some(on_update) = &fk.on_update
         && on_update != "NO ACTION"
@@ -4405,6 +4415,7 @@ mod tests {
             },
             match_type: None,
             on_delete: Some("CASCADE".into()),
+            on_delete_columns: None,
             on_update: None,
             deferrable: None,
             initially_deferred: None,
@@ -4430,6 +4441,40 @@ mod tests {
             "ALTER TABLE ONLY test.orders ADD CONSTRAINT orders_customer \
              FOREIGN KEY (customer_id) REFERENCES test.customers (id) ON \
              DELETE CASCADE;\n"
+        );
+    }
+
+    #[test]
+    fn renders_foreign_key_set_null_columns() {
+        let mut table = base_table("files");
+        table.foreign_keys = Some(vec![crate::models::ForeignKey {
+            name: "files_folder".into(),
+            columns: vec!["tenant".into(), "folder".into()],
+            references: crate::models::ForeignKeyReference {
+                name: "test.folders".into(),
+                columns: vec!["tenant".into(), "id".into()],
+                period: None,
+            },
+            match_type: None,
+            on_delete: Some("SET NULL".into()),
+            on_delete_columns: Some(vec!["folder".into()]),
+            on_update: None,
+            deferrable: None,
+            initially_deferred: None,
+            period: None,
+            enforced: None,
+            not_valid: None,
+        }]);
+        let item = table_item(1, table);
+        assert_eq!(
+            table_defn(
+                &item,
+                libpgdump::ObjectType::FkConstraint,
+                "files files_folder"
+            ),
+            "ALTER TABLE ONLY test.files ADD CONSTRAINT files_folder \
+             FOREIGN KEY (tenant, folder) REFERENCES test.folders (tenant, \
+             id) ON DELETE SET NULL (folder);\n"
         );
     }
 

@@ -383,6 +383,28 @@ ALTER TABLE legacy_imports
 ALTER TABLE legacy_imports
     ADD CONSTRAINT legacy_imports_reference_nn NOT NULL reference NOT VALID;
 
+-- A tenant-scoped composite foreign key whose ON DELETE clears only
+-- the reference: plain SET NULL would also clear the tenant, which is
+-- not null. The other key sets its column list with SET DEFAULT.
+CREATE TABLE tenant_folders (
+    tenant INT NOT NULL,
+    id     INT NOT NULL,
+    PRIMARY KEY (tenant, id)
+);
+
+CREATE TABLE tenant_files (
+    tenant    INT NOT NULL,
+    id        INT NOT NULL,
+    folder    INT,
+    archive   INT DEFAULT 0,
+    PRIMARY KEY (tenant, id),
+    CONSTRAINT tenant_files_folder FOREIGN KEY (tenant, folder)
+        REFERENCES tenant_folders (tenant, id) ON DELETE SET NULL (folder),
+    CONSTRAINT tenant_files_archive FOREIGN KEY (tenant, archive)
+        REFERENCES tenant_folders (tenant, id)
+        ON DELETE SET DEFAULT (archive) ON UPDATE CASCADE
+);
+
 -- Row-level security. pg_dump writes FORCE inside the TABLE entry, and
 -- ENABLE, each policy and each policy comment as entries of their own.
 -- CURRENT_USER keeps the fixture free of a cluster-wide role; pg_dump

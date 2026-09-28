@@ -444,6 +444,11 @@ pub struct ForeignKey {
     pub match_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub on_delete: Option<String>,
+    /// The columns that `ON DELETE SET NULL` or `SET DEFAULT` sets, when
+    /// not all of them (PostgreSQL 15+). A composite key that shares a
+    /// column that is not null, such as a tenant id, needs this.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub on_delete_columns: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub on_update: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
