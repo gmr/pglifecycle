@@ -561,7 +561,9 @@ fn render_script(plan: &Plan, project: &str, source: &str) -> String {
             }
         }
     }
-    if plan.included.is_empty() {
+    // withheld statements are changes too, so the database matches only
+    // when there are none
+    if plan.included.is_empty() && plan.excluded.is_empty() {
         script.push_str("-- no changes: the database matches the project\n");
     }
     for statement in &plan.included {
