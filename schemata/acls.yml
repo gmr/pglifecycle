@@ -13,12 +13,15 @@ description: >
   A key names its object as `schema.name` (`schema.table.column` for a
   column), with each name as it is, not quoted: `My Schema.My Table`. The
   first period ends the schema name, so a schema name in such a key cannot
-  contain a period.
+  contain a period. In a column key, the last period starts the column
+  name, so a column name cannot contain a period.
 type: object
 properties:
   columns:
     description: >
       Privileges on individual columns, keyed by `schema.table.column`.
+      The table name can contain a period; the schema name and the column
+      name cannot.
     type: object
     propertyNames:
       pattern: ^([^.]+)\.(.+)\.([^.]+)$
