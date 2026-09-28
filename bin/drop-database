@@ -14,7 +14,11 @@ set -euo pipefail
 
 DB="$1"
 
-if psql -d postgres -tAq -c "SELECT 1 FROM pg_database WHERE datname = '${DB}'" \
+# psql quotes the name as a value (:'db') and as an identifier (:"db"),
+# so the name cannot change the SQL. psql does not replace variables
+# in a -c command, thus the SQL goes to psql on stdin.
+if psql -d postgres -tAq -v db="${DB}" \
+    <<<"SELECT 1 FROM pg_database WHERE datname = :'db'" \
     | grep -q 1; then
     psql -d "${DB}" -q -v ON_ERROR_STOP=1 <<'SQL'
 DO $$
@@ -34,4 +38,5 @@ END
 $$;
 SQL
 fi
-psql -d postgres -q -c "DROP DATABASE IF EXISTS ${DB}"
+psql -d postgres -q -v ON_ERROR_STOP=1 -v db="${DB}" \
+    <<<'DROP DATABASE IF EXISTS :"db"'
