@@ -858,28 +858,36 @@ fn normalize_table(table: &mut crate::models::Table) {
 }
 
 /// The constraint name PostgreSQL generates, `<table>_<columns>_<label>`
-/// cut to 63 bytes by `makeObjectName`: it takes a character from the
-/// longer of the two names until the name fits. PostgreSQL adds a
-/// number when the name is in use; that case is not known here, so such
-/// a key needs its name in the project.
+/// cut to 63 bytes by `makeObjectName`: it takes a byte from the longer
+/// of the two names until the name fits, then cuts each name back to a
+/// character boundary. PostgreSQL adds a number when the name is in
+/// use; that case is not known here, so such a key needs its name in
+/// the project.
 fn generated_name(table: &str, columns: &str, label: &str) -> String {
     const MAX: usize = 63;
     let available = MAX - label.len() - 2;
-    let mut table: Vec<char> = table.chars().collect();
-    let mut columns: Vec<char> = columns.chars().collect();
-    let bytes = |c: &[char]| c.iter().map(|c| c.len_utf8()).sum::<usize>();
-    while bytes(&table) + bytes(&columns) > available {
-        if bytes(&table) > bytes(&columns) {
-            table.pop();
+    let (mut table_len, mut columns_len) = (table.len(), columns.len());
+    while table_len + columns_len > available {
+        if table_len > columns_len {
+            table_len -= 1;
         } else {
-            columns.pop();
+            columns_len -= 1;
         }
     }
     format!(
         "{}_{}_{label}",
-        table.iter().collect::<String>(),
-        columns.iter().collect::<String>()
+        clip(table, table_len),
+        clip(columns, columns_len)
     )
+}
+
+/// The longest start of `name` that is not more than `len` bytes and
+/// ends on a character boundary, as `pg_mbcliplen` gives
+fn clip(name: &str, mut len: usize) -> &str {
+    while !name.is_char_boundary(len) {
+        len -= 1;
+    }
+    &name[..len]
 }
 
 fn inject(defn: &mut Value, key: &str, value: &str) {
@@ -1035,6 +1043,15 @@ mod tests {
         assert_eq!(
             name,
             format!("{}_{}_fkey", "a".repeat(29), "b".repeat(28))
+        );
+        // PostgreSQL balances the byte lengths first, then cuts each
+        // name back to a character boundary: 29 bytes of the table
+        // give 14 two-byte characters
+        let name =
+            generated_name(&"\u{e9}".repeat(20), &"x".repeat(35), "fkey");
+        assert_eq!(
+            name,
+            format!("{}_{}_fkey", "\u{e9}".repeat(14), "x".repeat(28))
         );
     }
 
