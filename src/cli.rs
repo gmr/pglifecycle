@@ -124,6 +124,11 @@ pub struct Deploy {
     #[arg(long)]
     pub allow_drop: bool,
 
+    /// Drop indexes that the database has and the project does not.
+    /// Without it, deploy keeps them, such as an index made at runtime
+    #[arg(long)]
+    pub allow_drop_indexes: bool,
+
     /// do not include privileges (grant/revoke)
     #[arg(short = 'x', long)]
     pub no_privileges: bool,

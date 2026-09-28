@@ -188,6 +188,37 @@ else
     cat "${WORKDIR}/replan.sql" >&2
     exit 1
 fi
+# an index made at runtime, which the project does not have: deploy
+# keeps it without --allow-drop-indexes, even with --allow-drop, and
+# --apply runs with it kept; with the flag, deploy drops it
+psql -d "${TARGET_DB}" -q -v ON_ERROR_STOP=1 \
+    -c "CREATE INDEX runtime_users_id ON test.users (id);"
+./target/debug/pglifecycle deploy --apply --allow-drop -d "${TARGET_DB}" \
+    "${WORKDIR}/project"
+./target/debug/pglifecycle deploy -o "${WORKDIR}/replan.sql" \
+    -d "${TARGET_DB}" "${WORKDIR}/project"
+runtime_index="SELECT count(*) FROM pg_indexes
+    WHERE schemaname = 'test' AND indexname = 'runtime_users_id'"
+if [ "$(psql -d "${TARGET_DB}" -tAc "${runtime_index}")" != 1 ] \
+    || ! grep -q '^-- indexes kept: 1 ' "${WORKDIR}/replan.sql" \
+    || ! grep -q '^-- no changes' "${WORKDIR}/replan.sql"; then
+    echo "Convergence gate FAILED: runtime index not kept" >&2
+    cat "${WORKDIR}/replan.sql" >&2
+    exit 1
+fi
+./target/debug/pglifecycle deploy --apply --allow-drop-indexes \
+    -d "${TARGET_DB}" "${WORKDIR}/project"
+./target/debug/pglifecycle deploy -o "${WORKDIR}/replan.sql" \
+    -d "${TARGET_DB}" "${WORKDIR}/project"
+if [ "$(psql -d "${TARGET_DB}" -tAc "${runtime_index}")" != 0 ] \
+    || grep -q '^-- indexes kept' "${WORKDIR}/replan.sql"; then
+    echo "Convergence gate FAILED: runtime index not dropped with" \
+        "--allow-drop-indexes" >&2
+    cat "${WORKDIR}/replan.sql" >&2
+    exit 1
+fi
+echo "Convergence gate passed: runtime index kept, and dropped with" \
+    "--allow-drop-indexes"
 
 echo "==> Gate 3: safety (drops gated without --allow-drop)"
 psql -d "${TARGET_DB}" -q -v ON_ERROR_STOP=1 \
