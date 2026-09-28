@@ -767,23 +767,19 @@ fn identity(definition: &Definition) -> String {
             o.left_arg.as_deref().unwrap_or("NONE"),
             o.right_arg.as_deref().unwrap_or("NONE")
         ),
-        Definition::Aggregate(a) => {
-            let types = |args: &[crate::models::Argument]| {
-                args.iter()
-                    .map(|a| a.data_type.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            };
-            match a.order_by.as_deref() {
-                Some(order_by) => format!(
-                    "{}({} ORDER BY {})",
-                    a.name,
-                    types(&a.arguments),
-                    types(order_by)
-                ),
-                None => format!("{}({})", a.name, types(&a.arguments)),
-            }
-        }
+        // PostgreSQL identifies an ordered-set aggregate by its direct
+        // and ORDER BY argument types together, so `a(integer, bigint)`
+        // and `a(integer ORDER BY bigint)` are the same object
+        Definition::Aggregate(a) => format!(
+            "{}({})",
+            a.name,
+            a.arguments
+                .iter()
+                .chain(a.order_by.iter().flatten())
+                .map(|a| a.data_type.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
         // one name can be used once for each index method
         Definition::OperatorClass(c) => {
             format!("{} USING {}", c.name, c.method)
@@ -1072,8 +1068,9 @@ mod tests {
 
     use super::*;
 
-    /// M6: a second object with the same (desc, schema, name) is
-    /// rejected as an error instead of silently duplicating the item
+    /// Operator and aggregate overloads share a name, but not an
+    /// identity. An ordered-set aggregate has the identity of the
+    /// aggregate with the same argument types in one list
     #[test]
     fn operator_and_aggregate_overloads_have_their_own_identity() {
         let operator = |right: &str| {
@@ -1101,7 +1098,27 @@ mod tests {
             identity(&aggregate("integer")),
             identity(&aggregate("bigint"))
         );
+        let ordered_set = to_definition(
+            ObjectType::Aggregate,
+            json!({"name": "agg", "schema": "s", "owner": "o",
+                   "sfunc": "f", "state_data_type": "integer",
+                   "arguments": [{"data_type": "integer"}],
+                   "order_by": [{"data_type": "bigint"}]}),
+        )
+        .unwrap();
+        let ordinary = to_definition(
+            ObjectType::Aggregate,
+            json!({"name": "agg", "schema": "s", "owner": "o",
+                   "sfunc": "f", "state_data_type": "integer",
+                   "arguments": [{"data_type": "integer"},
+                                 {"data_type": "bigint"}]}),
+        )
+        .unwrap();
+        assert_eq!(identity(&ordered_set), identity(&ordinary));
     }
+
+    /// M6: a second object with the same (desc, schema, name) is
+    /// rejected as an error instead of silently duplicating the item
 
     #[test]
     fn generated_foreign_key_name_matches_postgres() {
