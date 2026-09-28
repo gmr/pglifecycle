@@ -65,6 +65,7 @@ GROUPS: dict[str, list[str]] = {
         'table',
         'tablespace',
         'text_search',
+        'transform',
         'type',
         'view',
     ],
@@ -94,6 +95,7 @@ GROUPS: dict[str, list[str]] = {
         'operators',
         'operator_classes',
         'operator_families',
+        'transforms',
         'types',
     ],
 }
@@ -112,6 +114,7 @@ CONTAINER_MEMBER = {
     'operators': 'operator',
     'operator_classes': 'operator_class',
     'operator_families': 'operator_family',
+    'transforms': 'transform',
     'types': 'type',
 }
 

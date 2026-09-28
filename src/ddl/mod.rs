@@ -128,6 +128,7 @@ pub enum Statement {
     },
     CreatePublication(models::Publication),
     CreateSubscription(models::Subscription),
+    CreateTransform(models::Transform),
     /// ALTER PUBLICATION ... ADD TABLE / ADD TABLES IN SCHEMA
     AddToPublication {
         name: String,
@@ -408,6 +409,7 @@ fn dispatch(node: &Node, src: &str) -> Result<Vec<Statement>, String> {
         "CreatePublicationStmt" => {
             Ok(vec![misc::create_publication(node, src)?])
         }
+        "CreateTransformStmt" => Ok(vec![misc::create_transform(node, src)?]),
         "CreateSubscriptionStmt" => {
             Ok(vec![misc::create_subscription(node, src)?])
         }

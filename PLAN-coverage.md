@@ -892,6 +892,15 @@ subscription by existence only. PostgreSQL does not drop a database
 that has a subscription, so the gates drop their databases with
 `bin/drop-database`. The coverage fixture has `TRANSFORM` left.
 
+**Done since:** `TRANSFORM`. A transform is in the
+`transforms/<schema>.yaml` container of its type's schema, as a cast
+is. It has no owner. It depends on its type, its functions and its
+language, and deploy matches it by existence only. The coverage
+fixture has no gaps left. `SECURITY LABEL` is the only known gap, and
+no fixture can hold it (see item 7). The coverage gate accepts an
+empty list: then pull must succeed on the fixture and write no
+`remaining.yaml`, so a new gap still fails the gate.
+
 ## Effort
 
 Roughly three focused weeks end to end. Phase 0 is a day and

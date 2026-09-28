@@ -276,6 +276,12 @@ impl Writer {
             })
             .collect::<Result<_, String>>()?;
         self.write_container("casts", &casts)?;
+        let transforms: Vec<Value> = assembly
+            .transforms
+            .iter()
+            .map(serialize)
+            .collect::<Result<_, String>>()?;
+        self.write_container("transforms", &transforms)?;
         let conversions: Vec<Value> = assembly
             .conversions
             .iter()
@@ -516,6 +522,7 @@ fn kind(relative: &Path) -> &'static str {
         Some("types") => "type",
         Some("aggregates") => "aggregate",
         Some("casts") => "cast",
+        Some("transforms") => "transform",
         Some("collations") => "collation",
         Some("conversions") => "conversion",
         Some("operators") => "operator",

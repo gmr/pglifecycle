@@ -27,7 +27,8 @@ my-project/
                           # operator_classes, operator_families,
                           # publications,
                           # servers, subscriptions, tablespaces,
-                          # text_search, user_mappings, dml
+                          # text_search, transforms, user_mappings,
+                          # dml
 ```
 
 Objects are structured data, not SQL. A table file, for example:
@@ -267,6 +268,10 @@ revocations:
 - A cast has no schema of its own. `pull` files it in the
   `casts/<schema>.yaml` of the first schema its function or types name,
   or `public` when they are all built-in.
+
+- A transform has no schema and no owner. `pull` files it in the
+  `transforms/<schema>.yaml` of its type, or of the first schema its
+  functions name when the type is built-in, or `public`.
 
 - A publication lists each table as its qualified name, or as a
   mapping that also limits the columns or rows published, and names

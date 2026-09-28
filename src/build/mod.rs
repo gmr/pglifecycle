@@ -305,6 +305,7 @@ impl Builder {
             Definition::AccessMethod(_) => self.dump_access_method(item),
             Definition::Aggregate(_) => self.dump_aggregate(item),
             Definition::Cast(_) => self.dump_cast(item),
+            Definition::Transform(_) => self.dump_transform(item),
             Definition::Collation(_) => self.dump_collation(item),
             Definition::Conversion(_) => self.dump_conversion(item),
             Definition::DefaultPrivileges(_) => {
@@ -736,6 +737,31 @@ impl Builder {
             false,
             Some(name),
         )
+    }
+
+    fn dump_transform(&mut self, item: &Item) -> Result<(), String> {
+        let Definition::Transform(d) = &item.definition else {
+            unreachable!()
+        };
+        let name = item.definition.name();
+        let elements: Vec<String> = [
+            d.from_sql
+                .as_ref()
+                .map(|f| format!("FROM SQL WITH FUNCTION {f}")),
+            d.to_sql
+                .as_ref()
+                .map(|f| format!("TO SQL WITH FUNCTION {f}")),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let create = vec![
+            "CREATE TRANSFORM".into(),
+            name.clone(),
+            format!("({})", elements.join(", ")),
+        ];
+        let drop = vec!["DROP TRANSFORM IF EXISTS".into(), name.clone()];
+        self.add_item_with_comment_target(item, create, drop, true, Some(name))
     }
 
     fn dump_collation(&mut self, item: &Item) -> Result<(), String> {

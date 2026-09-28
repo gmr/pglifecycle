@@ -20,19 +20,3 @@ CREATE SCHEMA unsupported;
 SET search_path = unsupported, public, pg_catalog;
 
 CREATE ROLE pglifecycle_coverage_reader;
-
--- A base type for the transform. fixtures/schema.sql has the same
--- type, where the round-trip gate tests it.
-CREATE TYPE base_int;
-CREATE FUNCTION base_int_in(cstring) RETURNS base_int
-    AS 'int4in' LANGUAGE internal IMMUTABLE STRICT;
-CREATE FUNCTION base_int_out(base_int) RETURNS cstring
-    AS 'int4out' LANGUAGE internal IMMUTABLE STRICT;
-CREATE TYPE base_int (INPUT = base_int_in, OUTPUT = base_int_out,
-    LIKE = integer);
-
--- A transform for the base type
-CREATE FUNCTION base_int_from_sql(internal) RETURNS internal
-    AS 'int4send' LANGUAGE internal IMMUTABLE;
-CREATE TRANSFORM FOR base_int LANGUAGE sql
-    (FROM SQL WITH FUNCTION base_int_from_sql(internal));
