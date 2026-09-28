@@ -187,6 +187,44 @@ else
     cat "${WORKDIR}/replan.sql" >&2
     exit 1
 fi
+# the short forms a project can use: a primary key as one column name,
+# an integer default as a number, and a foreign key with no name, which
+# gets the name PostgreSQL generates. Each loads as pull writes it, so
+# the plan stays empty
+perl -0pi -e 's/primary_key:\n- id\n/primary_key: id\n/; s/- name: addresses_user_id_fkey\n  columns:/- columns:/' \
+    "${WORKDIR}/project/tables/test/addresses.yaml"
+perl -pi -e "s/default: '0'\$/default: 0/" \
+    "${WORKDIR}/project/tables/test/tenant_files.yaml"
+grep -q '^primary_key: id$' "${WORKDIR}/project/tables/test/addresses.yaml"
+! grep -q 'addresses_user_id_fkey' \
+    "${WORKDIR}/project/tables/test/addresses.yaml"
+grep -q 'default: 0$' "${WORKDIR}/project/tables/test/tenant_files.yaml"
+./target/debug/pglifecycle deploy -o "${WORKDIR}/replan.sql" \
+    -d "${TARGET_DB}" "${WORKDIR}/project"
+if grep -q '^-- no changes' "${WORKDIR}/replan.sql"; then
+    echo "Convergence gate passed: short forms are unchanged"
+else
+    echo "Convergence gate FAILED: short forms changed" >&2
+    cat "${WORKDIR}/replan.sql" >&2
+    exit 1
+fi
+# type names written in uppercase, as a style guide can require:
+# PostgreSQL folds them to lowercase, so the plan stays empty
+find "${WORKDIR}/project/tables" -name '*.yaml' -exec perl -pi -e \
+    's/^(\s*data_type: )(text|integer|bigint|boolean)$/$1\U$2/' {} +
+if ! grep -rqE 'data_type: (TEXT|INTEGER)$' "${WORKDIR}/project/tables"; then
+    echo "Convergence gate FAILED: no type was changed to uppercase" >&2
+    exit 1
+fi
+./target/debug/pglifecycle deploy -o "${WORKDIR}/replan.sql" \
+    -d "${TARGET_DB}" "${WORKDIR}/project"
+if grep -q '^-- no changes' "${WORKDIR}/replan.sql"; then
+    echo "Convergence gate passed: uppercase type names are unchanged"
+else
+    echo "Convergence gate FAILED: uppercase type names changed" >&2
+    cat "${WORKDIR}/replan.sql" >&2
+    exit 1
+fi
 # a renamed partition index whose partitioned table has no other
 # change: deploy has to rebuild the group from the partitioned table,
 # because PostgreSQL does not attach a second index for the same parent

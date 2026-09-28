@@ -437,6 +437,9 @@ pub enum ConstraintColumns {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ForeignKey {
+    /// Empty when the project leaves it out: the loader then sets the
+    /// name that PostgreSQL generates (see `project::load`)
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub name: String,
     pub columns: Vec<String>,
     pub references: ForeignKeyReference,

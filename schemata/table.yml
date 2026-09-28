@@ -144,7 +144,6 @@ properties:
           title: Default Value
           oneOf:
             - type: boolean
-            - type: integer
             - type: number
             - type: string
       required:
@@ -573,14 +572,12 @@ properties:
           title: Partition Values From
           description: Used in RANGE partitioning
           oneOf:
-            - type: integer
             - type: number
             - type: string
         for_values_to:
           title: Partition Values To
           description: Used in RANGE partitioning
           oneOf:
-            - type: integer
             - type: number
             - type: string
         for_values_with:

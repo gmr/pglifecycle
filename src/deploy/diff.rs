@@ -502,6 +502,18 @@ fn normalize(value: &mut Value) {
 /// (`varchar(255)`, `numeric(10,2)`) and an array suffix are split
 /// off the base name so the alias can be matched and reattached.
 pub(crate) fn canonical_type(data_type: &str) -> String {
+    // PostgreSQL folds a name that is not quoted to lowercase, so `TEXT`
+    // is `text`; a quoted name keeps its case
+    let mut quoted = false;
+    let data_type: String = data_type
+        .chars()
+        .map(|c| {
+            if c == '"' {
+                quoted = !quoted;
+            }
+            if quoted { c } else { c.to_ascii_lowercase() }
+        })
+        .collect();
     let (body, array) = match data_type.trim_end().strip_suffix("[]") {
         Some(body) => (body.trim_end(), "[]"),
         None => (data_type.trim_end(), ""),
@@ -554,6 +566,18 @@ mod tests {
             zone[]"
         );
         assert_eq!(canonical_type("uuid"), "uuid");
+    }
+
+    #[test]
+    fn canonicalizes_type_case_outside_quotes() {
+        assert_eq!(canonical_type("TEXT"), "text");
+        assert_eq!(canonical_type("INT"), "integer");
+        assert_eq!(canonical_type("VARCHAR(20)[]"), "character varying(20)[]");
+        assert_eq!(
+            canonical_type("TIMESTAMP WITH TIME ZONE"),
+            "timestamp with time zone"
+        );
+        assert_eq!(canonical_type("Public.\"Mood\""), "public.\"Mood\"");
     }
 
     #[test]

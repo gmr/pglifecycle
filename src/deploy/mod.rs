@@ -561,8 +561,19 @@ fn render_script(plan: &Plan, project: &str, source: &str) -> String {
             }
         }
     }
-    if plan.included.is_empty() {
-        script.push_str("-- no changes: the database matches the project\n");
+    // withheld statements are changes too, so the database matches only
+    // when there are none; a kept index is a difference that deploy
+    // does not change, so do not say that the database matches
+    if plan.included.is_empty() && plan.excluded.is_empty() {
+        if plan.kept.is_empty() {
+            script
+                .push_str("-- no changes: the database matches the project\n");
+        } else {
+            script.push_str(
+                "-- no changes: only the kept indexes are different from \
+                 the project\n",
+            );
+        }
     }
     for statement in &plan.included {
         script
