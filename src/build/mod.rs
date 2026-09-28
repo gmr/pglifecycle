@@ -135,6 +135,11 @@
 //!     constant. The Python wrapped every body in `$$` and newlines,
 //!     and a built-in function name with newlines names no function.
 //!     No test-project function is internal.
+//! 32. A subscription renders its connection as a string constant, its
+//!     publications as identifiers and its parameters inside `WITH
+//!     (...)`. The Python rendered the connection and the parameters
+//!     bare, which does not parse. A `slot_name` of `NONE` renders as
+//!     the keyword, because as a string it names a slot.
 
 mod acls;
 
@@ -1724,13 +1729,31 @@ impl Builder {
             "SUBSCRIPTION".into(),
             self.item_name(item),
             "CONNECTION".into(),
-            d.connection.clone(),
+            postgres_value(&Value::String(d.connection.clone())),
             "PUBLICATION".into(),
-            d.publications.join(", "),
+            d.publications
+                .iter()
+                .map(|p| quote_ident(p))
+                .collect::<Vec<_>>()
+                .join(", "),
         ];
-        if let Some(parameters) = &d.parameters {
-            create.push("WITH".into());
-            create.push(render_parameters(parameters));
+        if let Some(parameters) =
+            d.parameters.as_ref().filter(|p| !p.is_empty())
+        {
+            let options: Vec<String> = parameters
+                .iter()
+                .map(|(key, value)| match value {
+                    // NONE is a keyword: as a string it names a slot
+                    Value::String(slot)
+                        if key == "slot_name"
+                            && slot.eq_ignore_ascii_case("none") =>
+                    {
+                        format!("{key} = NONE")
+                    }
+                    value => format!("{key} = {}", postgres_value(value)),
+                })
+                .collect();
+            create.push(format!("WITH ({})", options.join(", ")));
         }
         let drop =
             vec!["DROP SUBSCRIPTION IF EXISTS".into(), self.item_name(item)];
@@ -4143,14 +4166,6 @@ fn render_publication_parameters(parameters: &Map<String, Value>) -> String {
         .join(", ")
 }
 
-fn render_parameters(parameters: &Map<String, Value>) -> String {
-    parameters
-        .iter()
-        .map(|(k, v)| format!("{k} = {}", postgres_value(v)))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
@@ -5104,6 +5119,29 @@ mod tests {
             .filter_map(|e| e.tag.clone())
             .collect();
         assert_eq!(rules, vec!["active_orders no_delete".to_string()]);
+    }
+
+    #[test]
+    fn renders_subscription_slot_name_none_as_keyword() {
+        let item = Item {
+            id: 1,
+            desc: ObjectType::Subscription,
+            definition: Definition::Subscription(
+                serde_json::from_value(serde_json::json!({
+                    "name": "s",
+                    "connection": "dbname=x",
+                    "publications": ["p", "P Two"],
+                    "parameters": {"connect": false, "slot_name": "NONE"},
+                }))
+                .unwrap(),
+            ),
+            dependencies: BTreeSet::new(),
+        };
+        assert_eq!(
+            table_defn(&item, libpgdump::ObjectType::Subscription, "s"),
+            "CREATE SUBSCRIPTION s CONNECTION 'dbname=x' PUBLICATION p, \
+             \"P Two\" WITH (connect = False, slot_name = NONE);\n"
+        );
     }
 
     #[test]

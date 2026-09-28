@@ -13,7 +13,8 @@ use crate::models::{
     EventTrigger, EventTriggerFilter, FilteredPublicationTable, Language,
     Operator, OperatorClass, OperatorClassFunction, OperatorClassOperator,
     OperatorFamily, Publication, PublicationTable, Rule, Statistics,
-    TextSearchConfig, TextSearchDict, TextSearchParser, TextSearchTemplate,
+    Subscription, TextSearchConfig, TextSearchDict, TextSearchParser,
+    TextSearchTemplate,
 };
 
 /// A text search object and the schema it belongs to
@@ -914,6 +915,79 @@ pub(crate) fn create_publication(
     }))
 }
 
+/// The subscription options that take a boolean. pg_dump writes some
+/// of them as `on` or `off`.
+const SUBSCRIPTION_BOOLEANS: &[&str] = &[
+    "binary",
+    "connect",
+    "copy_data",
+    "create_slot",
+    "disable_on_error",
+    "enabled",
+    "failover",
+    "password_required",
+    "run_as_owner",
+    "two_phase",
+];
+
+/// CREATE SUBSCRIPTION → Subscription. pg_dump writes each option that
+/// is not at its default, and always `connect = false` and the slot
+/// name, so every option is kept as written.
+pub(crate) fn create_subscription(
+    node: &Node,
+    src: &str,
+) -> Result<Statement, String> {
+    if node.child_of_kind("kw_server").is_some() {
+        return Ok(Statement::Unsupported(String::from(
+            "CREATE SUBSCRIPTION ... SERVER",
+        )));
+    }
+    let name = node
+        .child_of_kind("name")
+        .map(|n| unquote(n.text(src)))
+        .ok_or_else(|| String::from("CREATE SUBSCRIPTION without a name"))?;
+    let connection = node
+        .child_of_kind("Sconst")
+        .map(|n| string_value(&n, src))
+        .ok_or_else(|| {
+            String::from("CREATE SUBSCRIPTION without a connection")
+        })?;
+    let publications = node
+        .child_of_kind("name_list")
+        .map(|list| {
+            list.find_all("name")
+                .iter()
+                .map(|n| unquote(n.text(src)))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut parameters = Map::new();
+    let options = node
+        .child_of_kind("opt_definition")
+        .and_then(|n| n.child_of_kind("definition"))
+        .map(|n| definition(&n, src))
+        .unwrap_or_default();
+    for (key, value) in options {
+        let value = value.unwrap_or_default();
+        let value = if SUBSCRIPTION_BOOLEANS.contains(&key.as_str()) {
+            Value::Bool(matches!(
+                value.to_lowercase().as_str(),
+                "" | "true" | "on" | "1"
+            ))
+        } else {
+            Value::String(value)
+        };
+        parameters.insert(key, value);
+    }
+    Ok(Statement::CreateSubscription(Subscription {
+        name,
+        connection,
+        publications,
+        parameters: (!parameters.is_empty()).then_some(parameters),
+        comment: None,
+    }))
+}
+
 /// ALTER PUBLICATION ... ADD, the form pg_dump writes for each table
 /// and schema
 pub(crate) fn alter_publication(
@@ -1062,6 +1136,25 @@ mod tests {
         let mut statements = parser.parse(sql).unwrap();
         assert_eq!(statements.len(), 1, "expected one statement");
         statements.remove(0)
+    }
+
+    #[test]
+    fn parses_create_subscription() {
+        let Statement::CreateSubscription(sub) = parse_one(
+            "CREATE SUBSCRIPTION s CONNECTION 'dbname=x host=h' \
+             PUBLICATION p, \"P Two\" WITH (connect = false, \
+             slot_name = NONE, two_phase = on, streaming = parallel);",
+        ) else {
+            panic!("expected CreateSubscription")
+        };
+        assert_eq!(sub.name, "s");
+        assert_eq!(sub.connection, "dbname=x host=h");
+        assert_eq!(sub.publications, vec!["p", "P Two"]);
+        let parameters = sub.parameters.unwrap();
+        assert_eq!(parameters["connect"], Value::Bool(false));
+        assert_eq!(parameters["slot_name"], Value::String("NONE".into()));
+        assert_eq!(parameters["two_phase"], Value::Bool(true));
+        assert_eq!(parameters["streaming"], Value::String("parallel".into()));
     }
 
     #[test]

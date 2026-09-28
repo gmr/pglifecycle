@@ -299,6 +299,12 @@ fn existence_index(assembly: &Assembly) -> BTreeSet<(String, String, String)> {
         .chain(assembly.publications.iter().map(|d| {
             (ObjectType::Publication, Definition::Publication(d.clone()))
         }))
+        .chain(assembly.subscriptions.iter().map(|d| {
+            (
+                ObjectType::Subscription,
+                Definition::Subscription(d.clone()),
+            )
+        }))
         .chain(assembly.text_search.iter().map(|d| {
             (ObjectType::TextSearch, Definition::TextSearch(d.clone()))
         }))

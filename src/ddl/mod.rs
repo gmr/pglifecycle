@@ -127,6 +127,7 @@ pub enum Statement {
         enabled: Option<String>,
     },
     CreatePublication(models::Publication),
+    CreateSubscription(models::Subscription),
     /// ALTER PUBLICATION ... ADD TABLE / ADD TABLES IN SCHEMA
     AddToPublication {
         name: String,
@@ -406,6 +407,9 @@ fn dispatch(node: &Node, src: &str) -> Result<Vec<Statement>, String> {
         }
         "CreatePublicationStmt" => {
             Ok(vec![misc::create_publication(node, src)?])
+        }
+        "CreateSubscriptionStmt" => {
+            Ok(vec![misc::create_subscription(node, src)?])
         }
         "AlterPublicationStmt" => {
             Ok(vec![misc::alter_publication(node, src)?])

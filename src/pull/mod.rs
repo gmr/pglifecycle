@@ -59,6 +59,7 @@ pub const MODELED_DESCS: &[libpgdump::ObjectType] = {
         OT::Publication,
         OT::PublicationTable,
         OT::PublicationTablesInSchema,
+        OT::Subscription,
         OT::TextSearchConfiguration,
         OT::TextSearchDictionary,
         OT::TextSearchParser,
@@ -491,6 +492,7 @@ pub struct Assembly {
     pub conversions: Vec<models::Conversion>,
     pub event_triggers: Vec<models::EventTrigger>,
     pub publications: Vec<models::Publication>,
+    pub subscriptions: Vec<models::Subscription>,
     /// One per schema, as the project stores them
     pub text_search: Vec<models::TextSearch>,
     pub default_privileges: Vec<models::DefaultPrivileges>,
@@ -583,6 +585,7 @@ impl Assembly {
                     .sum(),
             ),
             ("publications", self.publications.len()),
+            ("subscriptions", self.subscriptions.len()),
             ("event triggers", self.event_triggers.len()),
             ("default privileges", self.default_privileges.len()),
             ("statistics", self.statistics.len()),
@@ -1121,6 +1124,9 @@ impl Assembly {
             Statement::CreatePublication(publication) => {
                 self.publications.push(publication);
             }
+            Statement::CreateSubscription(subscription) => {
+                self.subscriptions.push(subscription);
+            }
             Statement::AddToPublication {
                 name,
                 tables,
@@ -1628,6 +1634,12 @@ impl Assembly {
                 .iter_mut()
                 .find(|p| p.name == *name)
                 .map(|p| p.comment = Some(comment.clone()))
+                .is_some(),
+            "SUBSCRIPTION" => self
+                .subscriptions
+                .iter_mut()
+                .find(|s| s.name == *name)
+                .map(|s| s.comment = Some(comment.clone()))
                 .is_some(),
             kind if kind.starts_with("TEXT SEARCH ") => {
                 let kind = kind.trim_start_matches("TEXT SEARCH ");

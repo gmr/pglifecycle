@@ -36,10 +36,3 @@ CREATE FUNCTION base_int_from_sql(internal) RETURNS internal
     AS 'int4send' LANGUAGE internal IMMUTABLE;
 CREATE TRANSFORM FOR base_int LANGUAGE sql
     (FROM SQL WITH FUNCTION base_int_from_sql(internal));
-
--- A subscription that does not connect, so it needs no publisher. Its
--- name must match bin/coverage-gate, which drops it before it drops
--- the database.
-CREATE SUBSCRIPTION pglifecycle_coverage_sub
-    CONNECTION 'dbname=pglifecycle_nowhere' PUBLICATION nowhere
-    WITH (connect = false);

@@ -63,6 +63,63 @@ properties:
           The value of this parameter overrides the synchronous_commit setting.
         enum: [on, remote_apply, remote_write, local, off]
         default: off
+      binary:
+        title: Binary
+        description: >
+          Specifies whether the subscription requests the publisher to send
+          the data in binary format.
+        type: boolean
+        default: false
+      streaming:
+        title: Streaming
+        description: >
+          Specifies whether to enable streaming of in-progress transactions.
+        oneOf:
+          - type: boolean
+          - enum: ["on", "off", parallel]
+        default: parallel
+      two_phase:
+        title: Two Phase
+        description: >
+          Specifies whether two-phase commit is enabled for this
+          subscription.
+        type: boolean
+        default: false
+      disable_on_error:
+        title: Disable on Error
+        description: >
+          Specifies whether the subscription is disabled automatically when
+          an error occurs on the subscriber.
+        type: boolean
+        default: false
+      password_required:
+        title: Password Required
+        description: >
+          Specifies whether the connection to the publisher must use a
+          password.
+        type: boolean
+        default: true
+      run_as_owner:
+        title: Run as Owner
+        description: >
+          Specifies whether replication runs as the subscription owner,
+          and not as the owner of each table.
+        type: boolean
+        default: false
+      failover:
+        title: Failover
+        description: >
+          Specifies whether the replication slot is synchronized to the
+          standby servers of the publisher.
+        type: boolean
+        default: false
+      origin:
+        title: Origin
+        description: >
+          Specifies whether to request only the changes that have no
+          origin (none), or all changes (any).
+        enum: [any, none]
+        default: any
       connect:
         title: Connect
         description: >

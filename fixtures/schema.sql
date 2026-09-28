@@ -743,3 +743,12 @@ CREATE FUNCTION test.base_int_out(test.base_int) RETURNS cstring
 CREATE TYPE test.base_int (INPUT = test.base_int_in,
     OUTPUT = test.base_int_out, LIKE = integer);
 COMMENT ON TYPE test.base_int IS 'An integer with its own I/O';
+
+-- A subscription that does not connect, so it needs no publisher.
+-- pg_dump writes each option that is not at its default. PostgreSQL
+-- does not drop a database that has a subscription, so the gates drop
+-- their databases with bin/drop-database.
+CREATE SUBSCRIPTION gate_sub
+    CONNECTION 'dbname=pglifecycle_nowhere' PUBLICATION gate_pub, "Gate Pub"
+    WITH (connect = false, binary = true, streaming = off, origin = none);
+COMMENT ON SUBSCRIPTION gate_sub IS 'A subscription with no publisher';

@@ -291,6 +291,12 @@ impl Writer {
                 publication,
             )?;
         }
+        for subscription in &assembly.subscriptions {
+            self.save(
+                top_level("subscriptions", &subscription.name)?,
+                subscription,
+            )?;
+        }
         let names: Vec<(&str, &str)> = assembly
             .procedures
             .iter()

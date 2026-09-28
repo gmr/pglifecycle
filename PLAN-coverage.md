@@ -883,6 +883,15 @@ function; and pull wrote `INTERNALLENGTH` as a string, which the
 schema does not accept. The coverage fixture has `TRANSFORM` and
 `SUBSCRIPTION` left.
 
+**Done since:** `SUBSCRIPTION`. pull keeps every option that pg_dump
+writes, and pg_dump always writes `connect = false` and the slot
+name, so a restore does not connect to the publisher. build now
+quotes the connection string and puts the options in parentheses; the
+Python rendered both bare, which does not parse. deploy matches a
+subscription by existence only. PostgreSQL does not drop a database
+that has a subscription, so the gates drop their databases with
+`bin/drop-database`. The coverage fixture has `TRANSFORM` left.
+
 ## Effort
 
 Roughly three focused weeks end to end. Phase 0 is a day and

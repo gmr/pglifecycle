@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Drop a scratch database for the gates:
+#
+#   bin/drop-database NAME
+#
+# PostgreSQL does not drop a database that has a subscription, and
+# DROP SUBSCRIPTION with a slot name tries to drop the slot on the
+# publisher. The gate subscriptions have no publisher, so this removes
+# the slot name of each subscription and drops it, and then drops the
+# database. A database that does not exist is not an error.
+#
+# Uses the PGHOST, PGPORT and PGUSER of the caller.
+set -euo pipefail
+
+DB="$1"
+
+if psql -d postgres -tAq -c "SELECT 1 FROM pg_database WHERE datname = '${DB}'" \
+    | grep -q 1; then
+    psql -d "${DB}" -q -v ON_ERROR_STOP=1 <<'SQL'
+DO $$
+DECLARE
+    sub name;
+BEGIN
+    FOR sub IN
+        SELECT subname FROM pg_subscription s
+          JOIN pg_database d ON d.oid = s.subdbid
+         WHERE d.datname = current_database()
+    LOOP
+        EXECUTE format('ALTER SUBSCRIPTION %I DISABLE', sub);
+        EXECUTE format('ALTER SUBSCRIPTION %I SET (slot_name = NONE)', sub);
+        EXECUTE format('DROP SUBSCRIPTION %I', sub);
+    END LOOP;
+END
+$$;
+SQL
+fi
+psql -d postgres -q -c "DROP DATABASE IF EXISTS ${DB}"
