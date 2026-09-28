@@ -1074,8 +1074,9 @@ mod tests {
 
     /// Operator and aggregate overloads share a name, but not an
     /// identity. A type alias gives the same identity as its canonical
-    /// name, and a typmod does not change it. An ordered-set aggregate has the identity of the
-    /// aggregate with the same argument types in one list
+    /// name, and a typmod does not change it. An ordered-set aggregate
+    /// has the identity of the aggregate with the same argument types in
+    /// one list
     #[test]
     fn operator_and_aggregate_overloads_have_their_own_identity() {
         let operator = |right: &str| {
