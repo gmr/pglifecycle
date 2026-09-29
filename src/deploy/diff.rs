@@ -9,9 +9,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde_json::Value;
 
 use crate::constants::ObjectType;
-use crate::models::Definition;
+use crate::models::{Definition, Subscription};
 use crate::project::Project;
-use crate::pull::Assembly;
+use crate::pull::{Assembly, without_password};
 
 /// Identity of a database object on either side of the diff
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -244,13 +244,13 @@ fn compare(desc: ObjectType) -> Compare {
         ObjectType::OperatorFamily => Compare::Existence,
         ObjectType::ProceduralLanguage => Compare::Definition,
         ObjectType::Procedure => Compare::Definition,
-        ObjectType::Publication => Compare::Existence,
+        ObjectType::Publication => Compare::Definition,
         ObjectType::Role => Compare::Skip,
         ObjectType::Schema => Compare::Definition,
         ObjectType::Sequence => Compare::Definition,
         ObjectType::Server => Compare::Definition,
         ObjectType::Statistics => Compare::Existence,
-        ObjectType::Subscription => Compare::Existence,
+        ObjectType::Subscription => Compare::Definition,
         ObjectType::Table => Compare::Definition,
         ObjectType::Tablespace => Compare::Skip,
         ObjectType::TextSearch => Compare::Existence,
@@ -299,7 +299,19 @@ pub fn diff(project: &Project, assembly: &Assembly) -> Diff {
                             ),
                             (_, db) => db,
                         };
-                        if normalized(&item.definition) == normalized(&db) {
+                        // pull removes a password from a connection
+                        let compared = match (&item.definition, &db) {
+                            (
+                                Definition::Subscription(repo),
+                                Definition::Subscription(db),
+                            ) => Some(Definition::Subscription(
+                                without_redacted_password(repo, db),
+                            )),
+                            _ => None,
+                        };
+                        if normalized(&item.definition)
+                            == normalized(compared.as_ref().unwrap_or(&db))
+                        {
                             Change::Unchanged
                         } else {
                             changed.insert(item.id, db);
@@ -544,6 +556,14 @@ fn normalized(definition: &Definition) -> Value {
             canonical = Definition::Procedure(procedure.canonical());
             &canonical
         }
+        Definition::Publication(publication) => {
+            canonical = Definition::Publication(publication.canonical());
+            &canonical
+        }
+        Definition::Subscription(subscription) => {
+            canonical = Definition::Subscription(subscription.canonical());
+            &canonical
+        }
         // default privileges compare by the privileges they give, so
         // the same privileges declared two ways are not a change
         Definition::DefaultPrivileges(defaults) => {
@@ -558,6 +578,23 @@ fn normalized(definition: &Definition) -> Value {
     let mut value = serde_json::to_value(definition).unwrap_or(Value::Null);
     normalize(&mut value);
     value
+}
+
+/// The database subscription without the password in its connection
+/// when the project connection has none. Pull removes the password, so
+/// a project that does not carry one does not remove or change it (as
+/// `alter::keep_redacted_password` does for a user mapping).
+pub(crate) fn without_redacted_password(
+    repo: &Subscription,
+    db: &Subscription,
+) -> Subscription {
+    let mut db = db.clone();
+    if without_password(&repo.connection).is_none()
+        && let Some(connection) = without_password(&db.connection)
+    {
+        db.connection = connection;
+    }
+    db
 }
 
 fn normalize(value: &mut Value) {

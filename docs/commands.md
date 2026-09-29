@@ -223,6 +223,35 @@ Ownership is not managed (the script behaves like
 skipped entirely — they are cluster-level objects a single-database
 dump cannot capture.
 
+A publication changes in place: one `ALTER PUBLICATION ... SET` gives
+all its tables and schemas, and `SET (...)` gives its parameters. The
+tables, their columns, the schemas and the `publish` operations are
+compared as sets, a table name as PostgreSQL resolves it, and a
+parameter written at its default is the same as none. A row filter is
+compared without the parentheses that enclose all of it; other than
+that, it is compared as text, and PostgreSQL writes it back in its own
+form, so write it as `pull` does. A change to or from `all_tables`
+drops and makes the publication again (with `--allow-drop`). A change
+to `publish_via_partition_root` is applied with a warning: a subscriber
+of a partitioned table can copy rows two times or lose rows.
+
+A subscription changes in place: `CONNECTION`, `SET PUBLICATION ...
+WITH (refresh = false)`, `SET (...)` and its comment. Deploy runs in
+one transaction, and a refresh cannot, so after a change to the
+publications, run `ALTER SUBSCRIPTION ... REFRESH PUBLICATION` by hand.
+The options that only `CREATE SUBSCRIPTION` reads (`connect`,
+`create_slot`, `copy_data`) are not compared, nor is `enabled`, which
+`pg_dump` does not write; deploy never enables or disables a
+subscription. A change to `slot_name`, `two_phase` or `failover` is
+reported and not made, as it needs the subscription disabled, the
+publisher, or a statement outside a transaction; the script carries
+the statement to run as a comment. A connection that the project gives
+without a password keeps the password the database has. The drop of a
+subscription that only the database has (with `--allow-drop`) first
+disables it and removes its slot name, as `DROP SUBSCRIPTION` cannot
+drop a slot in a transaction: the publisher keeps the slot, and the
+report gives the statement that drops it there.
+
 `deploy` creates these object types when they are missing, but only
 checks that they exist. `pull` models them, but `deploy` does not
 compare their definitions yet, so a changed one is left as the
@@ -237,9 +266,7 @@ database has it, and one that only the database has is kept:
 - operators, matched by name and argument types
 - operator classes, matched by name and index method
 - operator families, matched by name and index method
-- publications
 - statistics (extended statistics)
-- subscriptions
 - text search objects, checked per schema: when a schema has any text
   search object in the database, `deploy` creates none of the
   project's text search objects in that schema

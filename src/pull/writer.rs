@@ -732,7 +732,7 @@ fn role_settings(state: &RoleState) -> Option<Vec<Map<String, Value>>> {
 /// (`postgresql://user:secret@host/db?password=secret`) or a list of
 /// `keyword = value` pairs. Returns `None` when the string has no
 /// password, or when it is not a connection string that this can read.
-fn without_password(connection: &str) -> Option<String> {
+pub(crate) fn without_password(connection: &str) -> Option<String> {
     for scheme in ["postgresql://", "postgres://"] {
         if let Some(rest) = connection.strip_prefix(scheme) {
             return uri_without_password(scheme, rest);

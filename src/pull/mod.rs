@@ -9,6 +9,8 @@
 mod update;
 mod writer;
 
+pub(crate) use writer::without_password;
+
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write;
 use std::io::IsTerminal;

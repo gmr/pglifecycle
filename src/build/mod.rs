@@ -4220,7 +4220,7 @@ pub(crate) fn render_aggregate_signature(
 }
 
 /// One table in a publication's FOR clause
-fn render_publication_table(
+pub(crate) fn render_publication_table(
     table: &crate::models::PublicationTable,
 ) -> String {
     use crate::models::PublicationTable;
@@ -4243,7 +4243,9 @@ fn render_publication_table(
 
 /// A publication's WITH options. `publish` is a list of operations in
 /// the project and one comma-separated string in SQL.
-fn render_publication_parameters(parameters: &Map<String, Value>) -> String {
+pub(crate) fn render_publication_parameters(
+    parameters: &Map<String, Value>,
+) -> String {
     parameters
         .iter()
         .map(|(k, v)| match v {
