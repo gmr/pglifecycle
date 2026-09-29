@@ -59,6 +59,7 @@ destructive statements are pending).
 | `--allow-drop` | Include destructive statements in the script |
 | `--allow-drop-indexes` | Drop indexes that the database has and the project does not (kept by default) |
 | `-x, --no-privileges` | Do not include GRANT/REVOKE |
+| `-O, --no-owner` | Do not set the owners of objects |
 | `--error-file FILE` | Where to record failures and their DDL (default `pglifecycle-errors.log`) |
 | `-T, --exclude-table PATTERN` | Exclude tables/views/sequences matching `PATTERN` (repeatable; conflicts with `--dump`) |
 | `-N, --exclude-schema PATTERN` | Exclude schemas matching `PATTERN` (repeatable; conflicts with `--dump`) |
@@ -218,10 +219,33 @@ again; like a drop, they are gated. When they revoke a grant, the
 script header warns that the database can allow access the project
 does not. With `-x`, deploy does not change default privileges.
 
-Ownership is not managed (the script behaves like
-`pg_restore --no-owner`), and roles, users, groups, and tablespaces are
-skipped entirely — they are cluster-level objects a single-database
-dump cannot capture.
+deploy gives each object the owner that the project names, as
+pg_restore does. The connecting role owns what the script creates, so
+the script sets the owner with `ALTER … OWNER TO` directly after each
+CREATE. An object that the database has with another owner gets the
+same statement in place; it is not destructive. The owner is not part
+of the definition comparison, so a changed owner never causes a
+rebuild. deploy does not compare the owner of a type that it only
+checks for existence (the list below). Each owner role must exist, and
+each owner must have CREATE on the schema of its objects. A connecting
+role that is not a superuser must be a member of each owner role with
+the SET and INHERIT options (`GRANT` gives both by default to a role
+that has the INHERIT attribute). The statements after an owner change
+need the privileges of the owner: for example, CREATE TABLE in a new
+schema, and the indexes, comments and grants of a new table. To change
+the owner of an object that the database has, the connecting role must
+also have the privileges of its current owner. To change the owner of
+a schema, the connecting role must have CREATE on the database. A type
+whose model has no owner (for example publications,
+subscriptions and event triggers) keeps the connecting role as owner.
+So does most of what the project writes as raw `sql`: as pg_restore
+does, deploy sets no owner for an archive entry with no DROP statement.
+A new object gets the default privileges of the connecting role, not
+those of its owner; its grants come from the project. With `-O`, deploy
+does not set or compare owners (as `pg_restore --no-owner`).
+
+Roles, users, groups, and tablespaces are skipped entirely — they are
+cluster-level objects a single-database dump cannot capture.
 
 A publication changes in place: one `ALTER PUBLICATION ... SET` gives
 all its tables and schemas, and `SET (...)` gives its parameters. The
