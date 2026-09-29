@@ -304,10 +304,19 @@ pub fn diff(project: &Project, assembly: &Assembly) -> Diff {
                 }
             }
             Compare::Existence => {
-                if existing.contains(&definition_existence_key(
-                    item.desc,
-                    &item.definition,
-                )) {
+                let key =
+                    definition_existence_key(item.desc, &item.definition);
+                // a raw statement has no structured input types, so it
+                // matches any object of its type, schema and bare name
+                let found = if item.definition.raw_sql() {
+                    let bare = existence_key(&key.0, &key.1, &key.2);
+                    existing
+                        .iter()
+                        .any(|k| existence_key(&k.0, &k.1, &k.2) == bare)
+                } else {
+                    existing.contains(&key)
+                };
+                if found {
                     Change::Undiffable
                 } else {
                     Change::Added
