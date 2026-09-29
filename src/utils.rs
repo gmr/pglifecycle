@@ -221,6 +221,17 @@ fn skip_quoted(
     bytes.len()
 }
 
+/// A routine name, quoted, with the argument list that may follow it
+/// kept as written: `Quoted Fn(integer)` is `"Quoted Fn"(integer)`
+pub fn quote_routine_name(name: &str) -> String {
+    match name.split_once('(') {
+        Some((base, arguments)) => {
+            format!("{}({arguments}", quote_ident(base))
+        }
+        None => quote_ident(name),
+    }
+}
+
 /// Quote a PostgreSQL identifier (object name, etc)
 pub fn quote_ident(value: &str) -> String {
     let is_safe_shape = !value.is_empty()
@@ -354,6 +365,16 @@ mod tests {
         assert_eq!(postgres_value(&json!(5)), "5");
         assert_eq!(postgres_value(&json!(true)), "True");
         assert_eq!(postgres_value(&json!(["a", ["b"]])), "ARRAY['a', ['b']]");
+    }
+
+    #[test]
+    fn quotes_a_routine_name_and_keeps_its_arguments() {
+        assert_eq!(
+            quote_routine_name("Quoted Fn(integer, text)"),
+            "\"Quoted Fn\"(integer, text)"
+        );
+        assert_eq!(quote_routine_name("f()"), "f()");
+        assert_eq!(quote_routine_name("Bare"), "\"Bare\"");
     }
 
     #[test]
