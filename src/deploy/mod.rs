@@ -54,6 +54,12 @@ pub fn deploy(args: &cli::Deploy) -> Result<(), String> {
     )?;
     let task = progress::spinner("Diffing project against database");
     let mut diff = diff::diff(&project, &assembly);
+    // --no-privileges keeps the default privileges that a dump has
+    if args.no_privileges {
+        diff.removed.retain(|key, _| {
+            key.desc != constants::ObjectType::DefaultPrivileges
+        });
+    }
     let groups = partition_index_groups(&project, &mut diff);
     let resolutions = resolutions(&project, &diff, &groups);
     task.finish();
@@ -206,9 +212,11 @@ struct Plan {
 }
 
 /// Assemble the ordered plan: DROPs for database-only objects first
-/// (reverse snapshot order), then the repo archive's entries in
-/// topological order — plain CREATEs for added objects, in-place
-/// ALTERs where a renderer exists, gated drop+recreate otherwise
+/// (reverse snapshot order), then changed default privileges (those in
+/// a new schema directly after its CREATE SCHEMA), then the repo
+/// archive's entries in topological order — plain CREATEs for added
+/// objects, in-place ALTERs where a renderer exists, gated
+/// drop+recreate otherwise
 fn plan(
     diff: &Diff,
     resolutions: &BTreeMap<usize, Resolution>,
@@ -257,7 +265,7 @@ fn plan(
                 Statement {
                     label: key.to_string(),
                     sql: drop_sql(key, diff.removed.get(key)),
-                    fails_open: false,
+                    fails_open: drop_fails_open(diff.removed.get(key)),
                 },
             );
         }
@@ -272,9 +280,67 @@ fn plan(
                 Statement {
                     label: key.to_string(),
                     sql: drop_sql(key, Some(definition)),
-                    fails_open: false,
+                    fails_open: drop_fails_open(Some(definition)),
                 },
             );
+        }
+    }
+    // PostgreSQL applies default privileges only when it creates an
+    // object, and the DEFAULT ACL entries of the archive come after the
+    // objects. Thus emit changed default privileges before the objects
+    // that this deploy creates, so that they get the defaults of the
+    // project. The role of a changed item is in the database already,
+    // but a schema can be new: a statement IN SCHEMA of a schema that
+    // this deploy creates comes directly after its CREATE SCHEMA, and
+    // the others come before the archive entries. This also covers the
+    // defaults of a role with no declarations, which make no archive
+    // entry
+    let defaults: Vec<usize> = diff
+        .changed
+        .iter()
+        .filter(|(_, database)| {
+            matches!(database, Definition::DefaultPrivileges(_))
+        })
+        .map(|(id, _)| *id)
+        .collect();
+    let new_schemas: HashSet<&str> = output
+        .dump
+        .entries()
+        .iter()
+        .filter(|entry| entry.desc == libpgdump::ObjectType::Schema)
+        .filter(|entry| {
+            output
+                .item_ids
+                .get(&entry.dump_id)
+                .and_then(|id| diff.items.get(id))
+                == Some(&Change::Added)
+        })
+        .filter_map(|entry| entry.tag.as_deref())
+        .collect();
+    let mut after_schema: HashMap<&str, Vec<(bool, Statement)>> =
+        HashMap::new();
+    if !args.no_privileges {
+        for id in &defaults {
+            if let Some(Resolution::Statements(alters)) = resolutions.get(id) {
+                for alter in alters {
+                    let statement = Statement {
+                        label: alter.label.clone().unwrap_or_default(),
+                        sql: alter.sql.clone(),
+                        fails_open: alter.fails_open,
+                    };
+                    match alter
+                        .schema
+                        .as_deref()
+                        .and_then(|schema| new_schemas.get(schema).copied())
+                    {
+                        Some(schema) => after_schema
+                            .entry(schema)
+                            .or_default()
+                            .push((alter.destructive, statement)),
+                        None => push(alter.destructive, statement),
+                    }
+                }
+            }
         }
     }
     // dump_id -> entry, for resolving a child entry's owning items
@@ -297,6 +363,10 @@ fn plan(
             continue;
         }
         let direct = output.item_ids.get(&entry.dump_id);
+        // changed default privileges are emitted above
+        if direct.is_some_and(|id| defaults.contains(id)) {
+            continue;
+        }
         let owners: Vec<usize> = match direct {
             Some(id) => vec![*id],
             None => {
@@ -339,6 +409,18 @@ fn plan(
                     fails_open: false,
                 },
             );
+            // the changed default privileges in a new schema
+            if entry.desc == libpgdump::ObjectType::Schema {
+                let statements = entry
+                    .tag
+                    .as_deref()
+                    .and_then(|tag| after_schema.remove(tag));
+                for (destructive, statement) in
+                    statements.into_iter().flatten()
+                {
+                    push(destructive, statement);
+                }
+            }
             continue;
         }
         if !changes.contains(&Change::Changed)
@@ -604,7 +686,10 @@ fn render_script(plan: &Plan, project: &str, source: &str) -> String {
 
 /// `DROP <type> IF EXISTS <name>` for a database-only object. User
 /// mappings are keyed by their user but dropped per server, so they
-/// render from the definition; everything else needs only the key.
+/// render from the definition. Default privileges have no DROP: the
+/// REVOKE and GRANT statements that give the role the built-in
+/// privileges again take their place. Everything else needs only the
+/// key.
 ///
 /// DROP SUBSCRIPTION cannot run in a transaction block when the
 /// subscription has a replication slot, because it drops the slot on
@@ -612,6 +697,12 @@ fn render_script(plan: &Plan, project: &str, source: &str) -> String {
 /// and removes the slot name first. The publisher keeps the slot, and
 /// [`report`] says so.
 fn drop_sql(key: &ObjectKey, definition: Option<&Definition>) -> String {
+    if let Some(Definition::DefaultPrivileges(defaults)) = definition {
+        return alter::default_privileges::removal(defaults)
+            .into_iter()
+            .map(|alter| alter.sql)
+            .collect();
+    }
     if let Some(Definition::Subscription(subscription)) = definition
         && let Some(slot) = subscription.slot_name()
     {
@@ -673,6 +764,20 @@ fn drop_sql(key: &ObjectKey, definition: Option<&Definition>) -> String {
     format!("DROP {} IF EXISTS {qualified};\n", key.desc.as_str())
 }
 
+/// Withholding the drop of a database-only object can leave the
+/// database allowing access that the project does not: the removal of
+/// default privileges that REVOKEs a grant
+fn drop_fails_open(definition: Option<&Definition>) -> bool {
+    match definition {
+        Some(Definition::DefaultPrivileges(defaults)) => {
+            alter::default_privileges::removal(defaults)
+                .iter()
+                .any(|alter| alter.fails_open)
+        }
+        _ => false,
+    }
+}
+
 /// The key a removed object is looked up under when matching archive
 /// entries for drop ordering: functions use the tag-shaped signature
 /// ([`diff::function_tag_name`]) so they compare equal to
@@ -715,6 +820,15 @@ fn entry_key(entry: &libpgdump::Entry) -> Option<ObjectKey> {
         OT::Type => constants::ObjectType::Type,
         OT::UserMapping => constants::ObjectType::UserMapping,
         OT::View => constants::ObjectType::View,
+        // a DEFAULT ACL entry is tagged by its object type; the item is
+        // the role, which is the entry's owner
+        OT::DefaultAcl => {
+            return Some(ObjectKey {
+                desc: constants::ObjectType::DefaultPrivileges,
+                schema: String::new(),
+                name: entry.owner.clone()?,
+            });
+        }
         _ => return None,
     };
     let schema = match desc {
@@ -940,6 +1054,331 @@ mod tests {
             .map(|key| key.to_string())
             .collect();
         assert_eq!(keys, vec!["PUBLICATION pub", "SUBSCRIPTION sub"]);
+    }
+
+    /// The default privileges of a role that only the database has are
+    /// keyed by the owner of their DEFAULT ACL entries, and their
+    /// removal is withheld without --allow-drop, with a warning
+    #[test]
+    fn removed_default_privileges_are_withheld_and_fail_open() {
+        let defaults: crate::models::DefaultPrivileges =
+            serde_json::from_value(serde_json::json!({
+                "name": "app",
+                "grants": [{"object_type": "TABLES", "grantee": "PUBLIC",
+                            "privileges": ["SELECT"]}],
+            }))
+            .expect("default privileges deserialize");
+        let definition = Definition::DefaultPrivileges(defaults);
+        let key = ObjectKey::new(
+            constants::ObjectType::DefaultPrivileges,
+            &definition,
+        );
+        let mut diff = Diff {
+            items: BTreeMap::new(),
+            changed: BTreeMap::new(),
+            removed: BTreeMap::new(),
+        };
+        diff.removed.insert(key.clone(), definition);
+        let mut snapshot =
+            libpgdump::new("test", "UTF8", "18.0").expect("new dump");
+        snapshot
+            .add_entry(
+                libpgdump::ObjectType::DefaultAcl,
+                None,
+                Some("DEFAULT PRIVILEGES FOR TABLES"),
+                Some("app"),
+                None,
+                None,
+                None,
+                &[],
+            )
+            .expect("add default acl entry");
+        let entry = snapshot
+            .entries()
+            .iter()
+            .find(|e| e.desc == libpgdump::ObjectType::DefaultAcl)
+            .expect("default acl entry");
+        assert_eq!(entry_key(entry), Some(key.clone()));
+        let output = build::BuildOutput {
+            dump: libpgdump::new("test", "UTF8", "18.0")
+                .expect("new output dump"),
+            item_ids: std::collections::HashMap::new(),
+        };
+        let cli = cli::Cli::parse_from(["pglifecycle", "deploy", "proj"]);
+        let args = match cli.action {
+            cli::Action::Deploy(deploy) => deploy,
+            _ => unreachable!("parsed the deploy subcommand"),
+        };
+        let plan = plan(&diff, &BTreeMap::new(), &output, &snapshot, &args)
+            .expect("plan succeeds");
+        assert!(plan.included.is_empty());
+        assert_eq!(plan.excluded.len(), 1);
+        assert_eq!(plan.excluded[0].label, "DEFAULT PRIVILEGES app");
+        assert!(plan.excluded[0].fails_open);
+        assert_eq!(
+            plan.excluded[0].sql,
+            "ALTER DEFAULT PRIVILEGES FOR ROLE app REVOKE SELECT ON TABLES \
+             FROM PUBLIC;\n"
+        );
+    }
+
+    /// A project role with no declarations makes no archive entry. When
+    /// the database has other defaults for it, the plan still gives
+    /// back the built-in ones, and does not gate them
+    #[test]
+    fn changed_default_privileges_with_no_entry_are_planned() {
+        let defaults = |value: serde_json::Value| {
+            serde_json::from_value::<crate::models::DefaultPrivileges>(value)
+                .expect("default privileges deserialize")
+        };
+        let repo = defaults(serde_json::json!({"name": "app"}));
+        let db = defaults(serde_json::json!({
+            "name": "app",
+            "grants": [{"object_type": "TABLES", "grantee": "PUBLIC",
+                        "privileges": ["SELECT"]}],
+        }));
+        let mut diff = Diff {
+            items: BTreeMap::new(),
+            changed: BTreeMap::new(),
+            removed: BTreeMap::new(),
+        };
+        diff.items.insert(0, Change::Changed);
+        diff.changed
+            .insert(0, Definition::DefaultPrivileges(db.clone()));
+        let resolutions = BTreeMap::from([(
+            0,
+            alter::default_privileges::default_privileges(&repo, &db),
+        )]);
+        let output = build::BuildOutput {
+            dump: libpgdump::new("test", "UTF8", "18.0")
+                .expect("new output dump"),
+            item_ids: std::collections::HashMap::new(),
+        };
+        let snapshot =
+            libpgdump::new("test", "UTF8", "18.0").expect("new dump");
+        let parse = |argv: &[&str]| match cli::Cli::parse_from(argv).action {
+            cli::Action::Deploy(deploy) => deploy,
+            _ => unreachable!("parsed the deploy subcommand"),
+        };
+        let args = parse(&["pglifecycle", "deploy", "proj"]);
+        let plan = plan(&diff, &resolutions, &output, &snapshot, &args)
+            .expect("plan succeeds");
+        assert!(plan.excluded.is_empty());
+        assert_eq!(plan.included.len(), 1);
+        assert_eq!(plan.included[0].label, "DEFAULT PRIVILEGES app ON TABLES");
+        assert_eq!(
+            plan.included[0].sql,
+            "ALTER DEFAULT PRIVILEGES FOR ROLE app REVOKE SELECT ON TABLES \
+             FROM PUBLIC;\n"
+        );
+        // --no-privileges leaves default privileges as they are
+        let args = parse(&["pglifecycle", "deploy", "-x", "proj"]);
+        let unchanged =
+            super::plan(&diff, &resolutions, &output, &snapshot, &args)
+                .expect("plan succeeds");
+        assert!(unchanged.included.is_empty());
+    }
+
+    /// PostgreSQL applies default privileges only when it creates an
+    /// object, so changed default privileges go before a table that
+    /// the same deploy creates, and only once, not again at their
+    /// DEFAULT ACL entry
+    #[test]
+    fn changed_default_privileges_go_before_new_objects() {
+        let defaults = |value: serde_json::Value| {
+            serde_json::from_value::<crate::models::DefaultPrivileges>(value)
+                .expect("default privileges deserialize")
+        };
+        let repo = defaults(serde_json::json!({
+            "name": "app",
+            "grants": [{"object_type": "SEQUENCES", "grantee": "PUBLIC",
+                        "privileges": ["USAGE"]}],
+        }));
+        let db = defaults(serde_json::json!({
+            "name": "app",
+            "grants": [
+                {"object_type": "SEQUENCES", "grantee": "PUBLIC",
+                 "privileges": ["USAGE"]},
+                {"object_type": "TABLES", "grantee": "PUBLIC",
+                 "privileges": ["SELECT"]},
+            ],
+        }));
+        let mut diff = Diff {
+            items: BTreeMap::new(),
+            changed: BTreeMap::new(),
+            removed: BTreeMap::new(),
+        };
+        diff.items.insert(0, Change::Changed);
+        diff.items.insert(1, Change::Added);
+        diff.changed
+            .insert(0, Definition::DefaultPrivileges(db.clone()));
+        let resolutions = BTreeMap::from([(
+            0,
+            alter::default_privileges::default_privileges(&repo, &db),
+        )]);
+        let mut dump =
+            libpgdump::new("test", "UTF8", "18.0").expect("new output dump");
+        let table = dump
+            .add_entry(
+                libpgdump::ObjectType::Table,
+                Some("public"),
+                Some("t"),
+                Some("app"),
+                Some("CREATE TABLE public.t (id integer);\n"),
+                None,
+                None,
+                &[],
+            )
+            .expect("add table entry");
+        let acl = dump
+            .add_entry(
+                libpgdump::ObjectType::DefaultAcl,
+                None,
+                Some("DEFAULT PRIVILEGES FOR SEQUENCES"),
+                Some("app"),
+                Some(
+                    "ALTER DEFAULT PRIVILEGES FOR ROLE app GRANT USAGE ON \
+                     SEQUENCES TO PUBLIC;\n",
+                ),
+                None,
+                None,
+                &[],
+            )
+            .expect("add default acl entry");
+        let output = build::BuildOutput {
+            dump,
+            item_ids: std::collections::HashMap::from([(acl, 0), (table, 1)]),
+        };
+        let snapshot =
+            libpgdump::new("test", "UTF8", "18.0").expect("new dump");
+        let args = match cli::Cli::parse_from(["pglifecycle", "deploy", "p"])
+            .action
+        {
+            cli::Action::Deploy(deploy) => deploy,
+            _ => unreachable!("parsed the deploy subcommand"),
+        };
+        let plan = plan(&diff, &resolutions, &output, &snapshot, &args)
+            .expect("plan succeeds");
+        let sql: Vec<&str> =
+            plan.included.iter().map(|s| s.sql.as_str()).collect();
+        assert_eq!(
+            sql,
+            [
+                "ALTER DEFAULT PRIVILEGES FOR ROLE app REVOKE SELECT ON \
+                 TABLES FROM PUBLIC;\n",
+                "CREATE TABLE public.t (id integer);\n",
+            ]
+        );
+    }
+
+    /// ALTER DEFAULT PRIVILEGES IN SCHEMA fails when the schema does not
+    /// exist. A changed statement in a schema that the same deploy
+    /// creates goes directly after its CREATE SCHEMA, before the tables
+    /// of that schema and only once. A statement in a schema that the
+    /// database has goes before the archive entries
+    #[test]
+    fn changed_default_privileges_in_a_new_schema_follow_it() {
+        let defaults = |value: serde_json::Value| {
+            serde_json::from_value::<crate::models::DefaultPrivileges>(value)
+                .expect("default privileges deserialize")
+        };
+        let repo = defaults(serde_json::json!({
+            "name": "app",
+            "grants": [{"schema": "fresh", "object_type": "TABLES",
+                        "grantee": "reader", "privileges": ["SELECT"]}],
+        }));
+        let db = defaults(serde_json::json!({
+            "name": "app",
+            "grants": [{"schema": "public", "object_type": "TABLES",
+                        "grantee": "PUBLIC", "privileges": ["SELECT"]}],
+        }));
+        let mut diff = Diff {
+            items: BTreeMap::new(),
+            changed: BTreeMap::new(),
+            removed: BTreeMap::new(),
+        };
+        diff.items.insert(0, Change::Changed);
+        diff.items.insert(1, Change::Added);
+        diff.items.insert(2, Change::Added);
+        diff.changed
+            .insert(0, Definition::DefaultPrivileges(db.clone()));
+        let resolutions = BTreeMap::from([(
+            0,
+            alter::default_privileges::default_privileges(&repo, &db),
+        )]);
+        let mut dump =
+            libpgdump::new("test", "UTF8", "18.0").expect("new output dump");
+        let schema = dump
+            .add_entry(
+                libpgdump::ObjectType::Schema,
+                None,
+                Some("fresh"),
+                Some("app"),
+                Some("CREATE SCHEMA fresh;\n"),
+                None,
+                None,
+                &[],
+            )
+            .expect("add schema entry");
+        let table = dump
+            .add_entry(
+                libpgdump::ObjectType::Table,
+                Some("fresh"),
+                Some("t"),
+                Some("app"),
+                Some("CREATE TABLE fresh.t (id integer);\n"),
+                None,
+                None,
+                &[schema],
+            )
+            .expect("add table entry");
+        let acl = dump
+            .add_entry(
+                libpgdump::ObjectType::DefaultAcl,
+                Some("fresh"),
+                Some("DEFAULT PRIVILEGES FOR TABLES"),
+                Some("app"),
+                Some(
+                    "ALTER DEFAULT PRIVILEGES FOR ROLE app IN SCHEMA fresh \
+                     GRANT SELECT ON TABLES TO reader;\n",
+                ),
+                None,
+                None,
+                &[schema],
+            )
+            .expect("add default acl entry");
+        let output = build::BuildOutput {
+            dump,
+            item_ids: std::collections::HashMap::from([
+                (acl, 0),
+                (schema, 1),
+                (table, 2),
+            ]),
+        };
+        let snapshot =
+            libpgdump::new("test", "UTF8", "18.0").expect("new dump");
+        let args = match cli::Cli::parse_from(["pglifecycle", "deploy", "p"])
+            .action
+        {
+            cli::Action::Deploy(deploy) => deploy,
+            _ => unreachable!("parsed the deploy subcommand"),
+        };
+        let plan = plan(&diff, &resolutions, &output, &snapshot, &args)
+            .expect("plan succeeds");
+        assert!(plan.excluded.is_empty());
+        let sql: Vec<&str> =
+            plan.included.iter().map(|s| s.sql.as_str()).collect();
+        assert_eq!(
+            sql,
+            [
+                "ALTER DEFAULT PRIVILEGES FOR ROLE app IN SCHEMA public \
+                 REVOKE SELECT ON TABLES FROM PUBLIC;\n",
+                "CREATE SCHEMA fresh;\n",
+                "ALTER DEFAULT PRIVILEGES FOR ROLE app IN SCHEMA fresh \
+                 GRANT SELECT ON TABLES TO reader;\n",
+                "CREATE TABLE fresh.t (id integer);\n",
+            ]
+        );
     }
 
     /// A database-only procedure is keyed by its archive tag, so it
