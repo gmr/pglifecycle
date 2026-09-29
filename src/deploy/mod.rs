@@ -456,6 +456,31 @@ fn plan(
             );
         }
     }
+    // the defaults of a role with no declarations make no archive
+    // entry, so the loop above does not see them. When the database
+    // has other defaults for the role, emit the statements that give
+    // back the built-in ones here
+    let built: HashSet<usize> = output.item_ids.values().copied().collect();
+    for (id, database) in &diff.changed {
+        if args.no_privileges
+            || built.contains(id)
+            || !matches!(database, Definition::DefaultPrivileges(_))
+        {
+            continue;
+        }
+        if let Some(Resolution::Statements(alters)) = resolutions.get(id) {
+            for alter in alters {
+                push(
+                    alter.destructive,
+                    Statement {
+                        label: alter.label.clone().unwrap_or_default(),
+                        sql: alter.sql.clone(),
+                        fails_open: alter.fails_open,
+                    },
+                );
+            }
+        }
+    }
     Ok(Plan {
         included,
         excluded,
@@ -945,6 +970,63 @@ mod tests {
             "ALTER DEFAULT PRIVILEGES FOR ROLE app REVOKE SELECT ON TABLES \
              FROM PUBLIC;\n"
         );
+    }
+
+    /// A project role with no declarations makes no archive entry. When
+    /// the database has other defaults for it, the plan still gives
+    /// back the built-in ones, and does not gate them
+    #[test]
+    fn changed_default_privileges_with_no_entry_are_planned() {
+        let defaults = |value: serde_json::Value| {
+            serde_json::from_value::<crate::models::DefaultPrivileges>(value)
+                .expect("default privileges deserialize")
+        };
+        let repo = defaults(serde_json::json!({"name": "app"}));
+        let db = defaults(serde_json::json!({
+            "name": "app",
+            "grants": [{"object_type": "TABLES", "grantee": "PUBLIC",
+                        "privileges": ["SELECT"]}],
+        }));
+        let mut diff = Diff {
+            items: BTreeMap::new(),
+            changed: BTreeMap::new(),
+            removed: BTreeMap::new(),
+        };
+        diff.items.insert(0, Change::Changed);
+        diff.changed
+            .insert(0, Definition::DefaultPrivileges(db.clone()));
+        let resolutions = BTreeMap::from([(
+            0,
+            alter::default_privileges::default_privileges(&repo, &db),
+        )]);
+        let output = build::BuildOutput {
+            dump: libpgdump::new("test", "UTF8", "18.0")
+                .expect("new output dump"),
+            item_ids: std::collections::HashMap::new(),
+        };
+        let snapshot =
+            libpgdump::new("test", "UTF8", "18.0").expect("new dump");
+        let parse = |argv: &[&str]| match cli::Cli::parse_from(argv).action {
+            cli::Action::Deploy(deploy) => deploy,
+            _ => unreachable!("parsed the deploy subcommand"),
+        };
+        let args = parse(&["pglifecycle", "deploy", "proj"]);
+        let plan = plan(&diff, &resolutions, &output, &snapshot, &args)
+            .expect("plan succeeds");
+        assert!(plan.excluded.is_empty());
+        assert_eq!(plan.included.len(), 1);
+        assert_eq!(plan.included[0].label, "DEFAULT PRIVILEGES app ON TABLES");
+        assert_eq!(
+            plan.included[0].sql,
+            "ALTER DEFAULT PRIVILEGES FOR ROLE app REVOKE SELECT ON TABLES \
+             FROM PUBLIC;\n"
+        );
+        // --no-privileges leaves default privileges as they are
+        let args = parse(&["pglifecycle", "deploy", "-x", "proj"]);
+        let unchanged =
+            super::plan(&diff, &resolutions, &output, &snapshot, &args)
+                .expect("plan succeeds");
+        assert!(unchanged.included.is_empty());
     }
 
     /// A database-only procedure is keyed by its archive tag, so it

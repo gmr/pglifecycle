@@ -145,6 +145,21 @@ if [ "$(psql -d "${TARGET_DB}" -tAc "${monitor_acl}")" != 0 ]; then
 fi
 expect_empty_plan "database-only default privileges revoked"
 
+# a role of the project with no declarations makes no archive entry.
+# deploy gives back the built-in defaults, without --allow-drop
+printf -- '---\nname: postgres\n' > "${dp_file}"
+./target/debug/pglifecycle deploy --apply -d "${TARGET_DB}" \
+    "${WORKDIR}/project"
+owner_acl="SELECT count(*) FROM pg_default_acl
+    WHERE defaclrole = 'postgres'::regrole"
+if [ "$(psql -d "${TARGET_DB}" -tAc "${owner_acl}")" != 0 ]; then
+    echo "Convergence gate FAILED: built-in default privileges were not" \
+        "given back" >&2
+    default_acls "${TARGET_DB}" >&2
+    exit 1
+fi
+expect_empty_plan "built-in default privileges given back"
+
 # the fixture's default privileges again, for the steps after this one
 cp "${WORKDIR}/default-privileges.orig.yaml" "${dp_file}"
 ./target/debug/pglifecycle deploy --apply -d "${TARGET_DB}" \
