@@ -270,6 +270,28 @@ revocations:
   a::text)` is `lower(('X'::text || (a)::text))`. A different text is
   set again with `SET EXPRESSION` on each deploy.
 
+- A function's or procedure's `sql_body` (a `RETURN` expression or a
+  `BEGIN ATOMIC` block) is not kept as it is written. PostgreSQL
+  parses it and keeps the parsed form, and `pull` writes that form.
+  `deploy` compares the body as text, so a `sql_body` written in any
+  other form gets a `CREATE OR REPLACE` on each deploy. This does no
+  harm, but the plan is never empty. Write the body as `pull` writes
+  it:
+
+    | Written | As PostgreSQL keeps it and `pull` writes it |
+    | --- | --- |
+    | `RETURN 'a'` | `RETURN 'a'::text` |
+    | `RETURN pg_catalog.lower(x)` | `RETURN lower(x)` |
+    | <code>RETURN lower(x) &#124;&#124; s.g() &#124;&#124; 'y'</code> | <code>RETURN ((lower(x) &#124;&#124; s.g()) &#124;&#124; 'y'::text)</code> |
+    | `SELECT pg_catalog.abs(x) + pg_catalog.int4(1);` | `SELECT (abs(x) + 1);` |
+
+  PostgreSQL removes the `pg_catalog.` schema, adds the casts and
+  parentheses it infers, and evaluates a cast of a constant. A name in
+  any other schema keeps its schema (`s.g()`). A body in `definition`
+  (`AS $$ ... $$`) is kept as it is written, so this does not apply to
+  it. To get the form for a body, create the function in a scratch
+  database and `pull` it.
+
 - A foreign key can leave out its `name`. The project then uses the
   name PostgreSQL generates, `<table>_<columns>_fkey`, cut to 63
   bytes. When that name is already in use, PostgreSQL adds a number,
