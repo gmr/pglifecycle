@@ -212,9 +212,10 @@ struct Plan {
 }
 
 /// Assemble the ordered plan: DROPs for database-only objects first
-/// (reverse snapshot order), then the repo archive's entries in
-/// topological order — plain CREATEs for added objects, in-place
-/// ALTERs where a renderer exists, gated drop+recreate otherwise
+/// (reverse snapshot order), then changed default privileges, then the
+/// repo archive's entries in topological order — plain CREATEs for
+/// added objects, in-place ALTERs where a renderer exists, gated
+/// drop+recreate otherwise
 fn plan(
     diff: &Diff,
     resolutions: &BTreeMap<usize, Resolution>,
@@ -283,6 +284,37 @@ fn plan(
             );
         }
     }
+    // PostgreSQL applies default privileges only when it creates an
+    // object, and the DEFAULT ACL entries of the archive come after the
+    // objects. Thus emit changed default privileges before the archive
+    // entries, so the objects that this deploy creates get the defaults
+    // of the project. The role and the schema of a changed item are in
+    // the database already. This also covers the defaults of a role
+    // with no declarations, which make no archive entry
+    let defaults: Vec<usize> = diff
+        .changed
+        .iter()
+        .filter(|(_, database)| {
+            matches!(database, Definition::DefaultPrivileges(_))
+        })
+        .map(|(id, _)| *id)
+        .collect();
+    if !args.no_privileges {
+        for id in &defaults {
+            if let Some(Resolution::Statements(alters)) = resolutions.get(id) {
+                for alter in alters {
+                    push(
+                        alter.destructive,
+                        Statement {
+                            label: alter.label.clone().unwrap_or_default(),
+                            sql: alter.sql.clone(),
+                            fails_open: alter.fails_open,
+                        },
+                    );
+                }
+            }
+        }
+    }
     // dump_id -> entry, for resolving a child entry's owning items
     // through intermediate non-item entries (e.g. a COMMENT ON TRIGGER
     // depends on the TRIGGER entry, which is itself a child of the table
@@ -303,6 +335,10 @@ fn plan(
             continue;
         }
         let direct = output.item_ids.get(&entry.dump_id);
+        // changed default privileges are emitted above
+        if direct.is_some_and(|id| defaults.contains(id)) {
+            continue;
+        }
         let owners: Vec<usize> = match direct {
             Some(id) => vec![*id],
             None => {
@@ -454,31 +490,6 @@ fn plan(
                     fails_open: false,
                 },
             );
-        }
-    }
-    // the defaults of a role with no declarations make no archive
-    // entry, so the loop above does not see them. When the database
-    // has other defaults for the role, emit the statements that give
-    // back the built-in ones here
-    let built: HashSet<usize> = output.item_ids.values().copied().collect();
-    for (id, database) in &diff.changed {
-        if args.no_privileges
-            || built.contains(id)
-            || !matches!(database, Definition::DefaultPrivileges(_))
-        {
-            continue;
-        }
-        if let Some(Resolution::Statements(alters)) = resolutions.get(id) {
-            for alter in alters {
-                push(
-                    alter.destructive,
-                    Statement {
-                        label: alter.label.clone().unwrap_or_default(),
-                        sql: alter.sql.clone(),
-                        fails_open: alter.fails_open,
-                    },
-                );
-            }
         }
     }
     Ok(Plan {
@@ -1027,6 +1038,98 @@ mod tests {
             super::plan(&diff, &resolutions, &output, &snapshot, &args)
                 .expect("plan succeeds");
         assert!(unchanged.included.is_empty());
+    }
+
+    /// PostgreSQL applies default privileges only when it creates an
+    /// object, so changed default privileges go before a table that
+    /// the same deploy creates, and only once, not again at their
+    /// DEFAULT ACL entry
+    #[test]
+    fn changed_default_privileges_go_before_new_objects() {
+        let defaults = |value: serde_json::Value| {
+            serde_json::from_value::<crate::models::DefaultPrivileges>(value)
+                .expect("default privileges deserialize")
+        };
+        let repo = defaults(serde_json::json!({
+            "name": "app",
+            "grants": [{"object_type": "SEQUENCES", "grantee": "PUBLIC",
+                        "privileges": ["USAGE"]}],
+        }));
+        let db = defaults(serde_json::json!({
+            "name": "app",
+            "grants": [
+                {"object_type": "SEQUENCES", "grantee": "PUBLIC",
+                 "privileges": ["USAGE"]},
+                {"object_type": "TABLES", "grantee": "PUBLIC",
+                 "privileges": ["SELECT"]},
+            ],
+        }));
+        let mut diff = Diff {
+            items: BTreeMap::new(),
+            changed: BTreeMap::new(),
+            removed: BTreeMap::new(),
+        };
+        diff.items.insert(0, Change::Changed);
+        diff.items.insert(1, Change::Added);
+        diff.changed
+            .insert(0, Definition::DefaultPrivileges(db.clone()));
+        let resolutions = BTreeMap::from([(
+            0,
+            alter::default_privileges::default_privileges(&repo, &db),
+        )]);
+        let mut dump =
+            libpgdump::new("test", "UTF8", "18.0").expect("new output dump");
+        let table = dump
+            .add_entry(
+                libpgdump::ObjectType::Table,
+                Some("public"),
+                Some("t"),
+                Some("app"),
+                Some("CREATE TABLE public.t (id integer);\n"),
+                None,
+                None,
+                &[],
+            )
+            .expect("add table entry");
+        let acl = dump
+            .add_entry(
+                libpgdump::ObjectType::DefaultAcl,
+                None,
+                Some("DEFAULT PRIVILEGES FOR SEQUENCES"),
+                Some("app"),
+                Some(
+                    "ALTER DEFAULT PRIVILEGES FOR ROLE app GRANT USAGE ON \
+                     SEQUENCES TO PUBLIC;\n",
+                ),
+                None,
+                None,
+                &[],
+            )
+            .expect("add default acl entry");
+        let output = build::BuildOutput {
+            dump,
+            item_ids: std::collections::HashMap::from([(acl, 0), (table, 1)]),
+        };
+        let snapshot =
+            libpgdump::new("test", "UTF8", "18.0").expect("new dump");
+        let args = match cli::Cli::parse_from(["pglifecycle", "deploy", "p"])
+            .action
+        {
+            cli::Action::Deploy(deploy) => deploy,
+            _ => unreachable!("parsed the deploy subcommand"),
+        };
+        let plan = plan(&diff, &resolutions, &output, &snapshot, &args)
+            .expect("plan succeeds");
+        let sql: Vec<&str> =
+            plan.included.iter().map(|s| s.sql.as_str()).collect();
+        assert_eq!(
+            sql,
+            [
+                "ALTER DEFAULT PRIVILEGES FOR ROLE app REVOKE SELECT ON \
+                 TABLES FROM PUBLIC;\n",
+                "CREATE TABLE public.t (id integer);\n",
+            ]
+        );
     }
 
     /// A database-only procedure is keyed by its archive tag, so it

@@ -73,6 +73,39 @@ then
 fi
 expect_empty_plan "default privilege drift converged"
 
+# PostgreSQL applies default privileges only when it creates an object.
+# The database grants SELECT on new tables to PUBLIC, the project does
+# not, and the same deploy creates a table: the REVOKE must come before
+# the CREATE TABLE, or the new table stays readable by PUBLIC
+psql -d "${TARGET_DB}" -q -v ON_ERROR_STOP=1 -c \
+    "ALTER DEFAULT PRIVILEGES IN SCHEMA public
+         GRANT SELECT ON TABLES TO PUBLIC;"
+mkdir -p "${WORKDIR}/project/tables/public"
+cat > "${WORKDIR}/project/tables/public/dp_probe.yaml" <<'YAML'
+---
+name: dp_probe
+schema: public
+owner: postgres
+sql: CREATE TABLE public.dp_probe (id integer NOT NULL);
+YAML
+./target/debug/pglifecycle deploy --apply -d "${TARGET_DB}" \
+    "${WORKDIR}/project"
+public_select="SELECT has_table_privilege('public', 'public.dp_probe',
+    'SELECT')"
+if [ "$(psql -d "${TARGET_DB}" -tAc "${public_select}")" != f ] \
+    || [ "$(default_acls "${TARGET_DB}")" \
+        != "$(default_acls "${SOURCE_DB}")" ]; then
+    echo "Convergence gate FAILED: a table made in the same deploy got" \
+        "the default privileges of the database" >&2
+    psql -d "${TARGET_DB}" -tAc "SELECT relacl FROM pg_class
+        WHERE oid = 'public.dp_probe'::regclass" >&2
+    default_acls "${TARGET_DB}" >&2
+    exit 1
+fi
+rm "${WORKDIR}/project/tables/public/dp_probe.yaml"
+psql -d "${TARGET_DB}" -q -v ON_ERROR_STOP=1 -c "DROP TABLE public.dp_probe;"
+expect_empty_plan "default privileges changed before a new table"
+
 # the project grants every table privilege to pg_monitor as a list,
 # with the grant option, and takes TRUNCATE away from the owner.
 # pg_dump writes the first as ALL, and the second as REVOKE ALL and a
