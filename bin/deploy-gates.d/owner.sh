@@ -1,9 +1,9 @@
 # Sourced by bin/deploy-gates (gate 2). deploy gives each object the
 # owner that the project names. A new object gets ALTER ... OWNER TO
-# after its CREATE. An object that the database has with another owner
-# gets ALTER ... OWNER TO in place, without --allow-drop. With
-# --no-owner, deploy does not change owners. The role name needs
-# quoting.
+# after its CREATE, and its ACL agrees with the project. An object
+# that the database has with another owner gets ALTER ... OWNER TO in
+# place, without --allow-drop. With --no-owner, deploy does not change
+# owners. The role name needs quoting.
 
 # $1 is a query that must return t, $2 says what the step checks
 expect_owner() {
@@ -55,6 +55,11 @@ returns: integer
 language: sql
 definition: ' SELECT n;'
 YAML
+# grants of the project on the new schema and table
+perl -pi -e 's/^  schemata:\n/$&    gate_own:\n    - USAGE\n/;
+    s/^  tables:\n/$&    gate_own.t:\n    - SELECT\n/' \
+    "${WORKDIR}/project/roles/PUBLIC.yaml"
+grep -q '^    gate_own.t:$' "${WORKDIR}/project/roles/PUBLIC.yaml"
 ./target/debug/pglifecycle deploy --apply -d "${TARGET_DB}" \
     "${WORKDIR}/project"
 expect_owner "SELECT
@@ -69,6 +74,30 @@ expect_owner "SELECT
     pg_get_userbyid(proowner) = 'Gate Owner'
     FROM pg_proc WHERE oid = 'gate_own.f(integer)'::regprocedure" \
     "the new function does not have the owner of the project"
+# the ACL of each new object: the privileges of the owner, and the
+# grants of the project, which the owner gives. The connecting role
+# creates the objects, so its default privileges apply, as they do for
+# pg_restore: the project revokes EXECUTE on functions from PUBLIC for
+# postgres, thus the function has no PUBLIC grant
+expect_owner "WITH owner(id) AS (
+    SELECT oid FROM pg_roles WHERE rolname = 'Gate Owner'),
+acls(acl, expected) AS (
+    SELECT coalesce(nspacl, acldefault('n', nspowner)),
+           acldefault('n', id) || makeaclitem(0, id, 'USAGE', false)
+      FROM pg_namespace, owner WHERE nspname = 'gate_own'
+    UNION ALL
+    SELECT coalesce(relacl, acldefault('r', relowner)),
+           acldefault('r', id) || makeaclitem(0, id, 'SELECT', false)
+      FROM pg_class, owner WHERE oid = 'gate_own.t'::regclass
+    UNION ALL
+    SELECT coalesce(proacl, acldefault('f', proowner)),
+           ARRAY[makeaclitem(id, id, 'EXECUTE', false)]
+      FROM pg_proc, owner WHERE oid = 'gate_own.f(integer)'::regprocedure
+)
+SELECT count(*) = 3 AND bool_and(
+    ARRAY(SELECT a::text FROM unnest(acl) AS a ORDER BY 1)
+    = ARRAY(SELECT a::text FROM unnest(expected) AS a ORDER BY 1))
+FROM acls" "the ACL of a new object does not agree with the project"
 expect_empty_plan "new objects have the owner of the project"
 
 # owner drift on objects that the database has: deploy sets the owner
