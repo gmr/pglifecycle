@@ -226,7 +226,9 @@ handled the same way. An object that the project writes as a raw `sql`
 statement is also only checked for existence, whatever its type:
 `pull` writes the structured fields, so the two never compare equal.
 A raw statement has no structured input types, so it is matched by
-its type, schema and name, and any overload of that name counts.
+its type, schema and name, and any overload of that name counts. A
+raw cast is the exception: it must have its source and target types,
+and it is matched by them.
 
 Privileges on created objects are emitted (unless `-x`); privilege
 changes on objects that already exist are not yet diffed.

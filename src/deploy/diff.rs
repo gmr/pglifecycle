@@ -306,13 +306,8 @@ pub fn diff(project: &Project, assembly: &Assembly) -> Diff {
             Compare::Existence => {
                 let key =
                     definition_existence_key(item.desc, &item.definition);
-                // a raw statement has no structured input types, so it
-                // matches any object of its type, schema and bare name
                 let found = if item.definition.raw_sql() {
-                    let bare = existence_key(&key.0, &key.1, &key.2);
-                    existing
-                        .iter()
-                        .any(|k| existence_key(&k.0, &k.1, &k.2) == bare)
+                    raw_exists(&existing, item.desc, &key)
                 } else {
                     existing.contains(&key)
                 };
@@ -363,6 +358,29 @@ fn take_raw(
         })
         .cloned()?;
     database.remove(&found)
+}
+
+/// Whether the database has the object that a raw `sql` item of an
+/// existence-checked type stands for. A raw statement can have no
+/// structured input types, so any object of its type, schema and bare
+/// name matches. A cast key, `(source AS target)`, has no bare name,
+/// and the cast schema requires both types, so a cast matches only by
+/// its full key.
+fn raw_exists(
+    existing: &BTreeSet<(String, String, String)>,
+    desc: ObjectType,
+    key: &(String, String, String),
+) -> bool {
+    if existing.contains(key) {
+        return true;
+    }
+    if desc == ObjectType::Cast {
+        return false;
+    }
+    let bare = existence_key(&key.0, &key.1, &key.2);
+    existing
+        .iter()
+        .any(|k| existence_key(&k.0, &k.1, &k.2) == bare)
 }
 
 /// Every object the snapshot parsed into a model, with its type
@@ -741,6 +759,34 @@ mod tests {
             existence_key("AGGREGATE", "test", "sum(integer)"),
             existence_key("AGGREGATE", "test", "max(integer)")
         );
+    }
+
+    #[test]
+    fn raw_cast_matches_only_its_own_types() {
+        let key = |desc: &str, schema: &str, name: &str| {
+            (desc.to_string(), schema.to_string(), name.to_string())
+        };
+        let existing = BTreeSet::from([
+            key("CAST", "", "(test.point_pair AS text)"),
+            key("PROCEDURE", "test", "p(integer)"),
+        ]);
+        // a different cast does not stand for the raw cast
+        assert!(!raw_exists(
+            &existing,
+            ObjectType::Cast,
+            &key("CAST", "", "(test.point_pair AS character varying)")
+        ));
+        assert!(raw_exists(
+            &existing,
+            ObjectType::Cast,
+            &key("CAST", "", "(test.point_pair AS text)")
+        ));
+        // a raw procedure with no parameters matches by its bare name
+        assert!(raw_exists(
+            &existing,
+            ObjectType::Procedure,
+            &key("PROCEDURE", "test", "p()")
+        ));
     }
 
     #[test]
