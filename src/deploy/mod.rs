@@ -504,9 +504,12 @@ fn report(diff: &Diff, plan: &Plan, assembly: &pull::Assembly) {
             );
         }
     }
+    // a withheld drop keeps the subscription and its slot, so give the
+    // note only when the plan includes the drop
     for (key, definition) in &diff.removed {
         if let Definition::Subscription(subscription) = definition
             && let Some(slot) = subscription.slot_name()
+            && plan.included.iter().any(|s| s.label == key.to_string())
         {
             log::warn!(
                 "{key}: the drop does not drop the replication slot {slot} \

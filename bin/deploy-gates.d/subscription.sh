@@ -122,12 +122,19 @@ CREATE SUBSCRIPTION gate_sub_slotless
     WITH (connect = false, slot_name = NONE);
 SQL
 ./target/debug/pglifecycle deploy -o "${WORKDIR}/subscription.sql" \
-    -d "${TARGET_DB}" "${WORKDIR}/project"
+    -d "${TARGET_DB}" "${WORKDIR}/project" 2>"${WORKDIR}/subscription.err"
 if ! grep -q '^-- destructive statements: 2 excluded' \
         "${WORKDIR}/subscription.sql" \
     || grep -q '^DROP SUBSCRIPTION' "${WORKDIR}/subscription.sql"; then
     echo "Convergence gate FAILED: subscription drops were not withheld" >&2
     cat "${WORKDIR}/subscription.sql" >&2
+    exit 1
+fi
+# the withheld drop keeps the slot, so there is no slot to clean up
+if grep -q 'pg_drop_replication_slot' "${WORKDIR}/subscription.err"; then
+    echo "Convergence gate FAILED: a withheld drop has a note to drop" \
+        "the replication slot" >&2
+    cat "${WORKDIR}/subscription.err" >&2
     exit 1
 fi
 ./target/debug/pglifecycle deploy --apply --allow-drop -d "${TARGET_DB}" \
