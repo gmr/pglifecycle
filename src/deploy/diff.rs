@@ -147,12 +147,16 @@ fn function_key_name(function: &crate::models::Function) -> String {
 /// drop-ordering pass (`entry_key` in `mod.rs`) keys snapshot entries
 /// by their literal tag, which does not carry argument names, so it
 /// cannot be compared against [`function_key_name`]'s identity
-/// signature directly; this gives that pass a key in the same shape.
+/// signature directly; this gives that pass a key in the same shape. A
+/// name that has its argument list and no `parameters` keeps its list,
+/// as `build` does.
 pub(crate) fn function_tag_name(function: &crate::models::Function) -> String {
-    let args: Vec<String> = function
-        .parameters
+    let parameters = function.parameters.as_deref().unwrap_or_default();
+    if parameters.is_empty() && function.name.contains('(') {
+        return function.name.clone();
+    }
+    let args: Vec<String> = parameters
         .iter()
-        .flatten()
         .filter(|p| p.mode != "OUT" && p.mode != "TABLE")
         .map(|p| identity_type(&p.data_type))
         .collect();
@@ -1009,6 +1013,22 @@ mod tests {
         assert_eq!(
             ObjectKey::new(ObjectType::Procedure, &p).name,
             "archive_before(integer, integer)"
+        );
+        // a name that has its argument list and no parameters keeps
+        // its list, and a bare name gets an empty list
+        let named = |name: &str| {
+            procedure(serde_json::json!({
+                "name": name, "schema": "test", "owner": "postgres",
+                "language": "sql", "definition": "SELECT 1",
+            }))
+        };
+        assert_eq!(
+            ObjectKey::new(ObjectType::Procedure, &named("q(integer)")).name,
+            "q(integer)"
+        );
+        assert_eq!(
+            ObjectKey::new(ObjectType::Procedure, &named("q")).name,
+            "q()"
         );
     }
 
