@@ -504,6 +504,20 @@ fn report(diff: &Diff, plan: &Plan, assembly: &pull::Assembly) {
             );
         }
     }
+    for (key, definition) in &diff.removed {
+        if let Definition::Subscription(subscription) = definition
+            && let Some(slot) = subscription.slot_name()
+        {
+            log::warn!(
+                "{key}: the drop does not drop the replication slot {slot} \
+                 on the publisher, as that cannot run in a transaction \
+                 block. If the publisher has the slot, it keeps WAL there \
+                 until you drop it on the publisher: SELECT \
+                 pg_drop_replication_slot({})",
+                crate::utils::postgres_value(&slot.into())
+            );
+        }
+    }
     for statement in &plan.kept {
         log::warn!(
             "{}: the database has an index that the project does not; \
@@ -588,7 +602,26 @@ fn render_script(plan: &Plan, project: &str, source: &str) -> String {
 /// `DROP <type> IF EXISTS <name>` for a database-only object. User
 /// mappings are keyed by their user but dropped per server, so they
 /// render from the definition; everything else needs only the key.
+///
+/// DROP SUBSCRIPTION cannot run in a transaction block when the
+/// subscription has a replication slot, because it drops the slot on
+/// the publisher. Deploy runs in one, so it disables the subscription
+/// and removes the slot name first. The publisher keeps the slot, and
+/// [`report`] says so.
 fn drop_sql(key: &ObjectKey, definition: Option<&Definition>) -> String {
+    if let Some(Definition::Subscription(subscription)) = definition
+        && let Some(slot) = subscription.slot_name()
+    {
+        let name = quote_ident(&subscription.name);
+        // PostgreSQL permits only a-z, 0-9 and _ in a slot name, so it
+        // cannot end the comment
+        return format!(
+            "-- the publisher keeps the replication slot {slot}\n\
+             ALTER SUBSCRIPTION {name} DISABLE;\n\
+             ALTER SUBSCRIPTION {name} SET (slot_name = NONE);\n\
+             DROP SUBSCRIPTION IF EXISTS {name};\n"
+        );
+    }
     if let Some(Definition::UserMapping(mapping)) = definition {
         return mapping
             .servers
@@ -663,9 +696,11 @@ fn entry_key(entry: &libpgdump::Entry) -> Option<ObjectKey> {
         OT::Function => constants::ObjectType::Function,
         OT::MaterializedView => constants::ObjectType::MaterializedView,
         OT::ProceduralLanguage => constants::ObjectType::ProceduralLanguage,
+        OT::Publication => constants::ObjectType::Publication,
         OT::Schema => constants::ObjectType::Schema,
         OT::Sequence => constants::ObjectType::Sequence,
         OT::ForeignServer | OT::Server => constants::ObjectType::Server,
+        OT::Subscription => constants::ObjectType::Subscription,
         OT::Table => constants::ObjectType::Table,
         OT::Type => constants::ObjectType::Type,
         OT::UserMapping => constants::ObjectType::UserMapping,
@@ -676,8 +711,10 @@ fn entry_key(entry: &libpgdump::Entry) -> Option<ObjectKey> {
         constants::ObjectType::Extension
         | constants::ObjectType::ForeignDataWrapper
         | constants::ObjectType::ProceduralLanguage
+        | constants::ObjectType::Publication
         | constants::ObjectType::Schema
         | constants::ObjectType::Server
+        | constants::ObjectType::Subscription
         | constants::ObjectType::UserMapping => String::new(),
         _ => entry.namespace.clone().unwrap_or_default(),
     };
@@ -834,6 +871,65 @@ mod tests {
              matched by the ordered pass despite its named-parameter \
              key diverging from the archive tag"
         );
+    }
+
+    /// A removed subscription with a slot drops in a transaction: it
+    /// loses its slot name first, so DROP SUBSCRIPTION does not go to
+    /// the publisher. One with no slot drops at once.
+    #[test]
+    fn removed_subscription_drops_in_a_transaction() {
+        let subscription = |slot: Option<&str>| {
+            let mut json = serde_json::json!({
+                "name": "Sub",
+                "connection": "dbname=elsewhere",
+                "publications": ["pub"],
+            });
+            if let Some(slot) = slot {
+                json["parameters"] = serde_json::json!({"slot_name": slot});
+            }
+            Definition::Subscription(
+                serde_json::from_value(json).expect("subscription"),
+            )
+        };
+        let key = |definition: &Definition| {
+            ObjectKey::new(constants::ObjectType::Subscription, definition)
+        };
+        let slotted = subscription(None);
+        assert_eq!(
+            drop_sql(&key(&slotted), Some(&slotted)),
+            "-- the publisher keeps the replication slot Sub\n\
+             ALTER SUBSCRIPTION \"Sub\" DISABLE;\n\
+             ALTER SUBSCRIPTION \"Sub\" SET (slot_name = NONE);\n\
+             DROP SUBSCRIPTION IF EXISTS \"Sub\";\n"
+        );
+        let slotless = subscription(Some("NONE"));
+        assert_eq!(
+            drop_sql(&key(&slotless), Some(&slotless)),
+            "DROP SUBSCRIPTION IF EXISTS \"Sub\";\n"
+        );
+    }
+
+    /// Publication and subscription entries key as their models do,
+    /// with no schema, so a removed one drops in dependency order
+    #[test]
+    fn publication_and_subscription_entries_have_keys() {
+        let mut snapshot =
+            libpgdump::new("test", "UTF8", "18.0").expect("new dump");
+        for (desc, tag) in [
+            (libpgdump::ObjectType::Publication, "pub"),
+            (libpgdump::ObjectType::Subscription, "sub"),
+        ] {
+            snapshot
+                .add_entry(desc, None, Some(tag), None, None, None, None, &[])
+                .expect("add entry");
+        }
+        let keys: Vec<String> = snapshot
+            .entries()
+            .iter()
+            .filter_map(entry_key)
+            .map(|key| key.to_string())
+            .collect();
+        assert_eq!(keys, vec!["PUBLICATION pub", "SUBSCRIPTION sub"]);
     }
 
     /// A kept index drop with a newline in its quoted name must stay

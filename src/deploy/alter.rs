@@ -17,6 +17,9 @@
 //! `alter/publication.rs`, so that work on separate types does not
 //! change the same lines.
 
+mod publication;
+mod subscription;
+
 use serde_json::{Map, Value};
 
 use crate::build;
@@ -219,6 +222,12 @@ pub(crate) fn resolve_with(
         (Definition::Server(repo), Definition::Server(db)) => server(repo, db),
         (Definition::UserMapping(repo), Definition::UserMapping(db)) => {
             user_mapping(repo, db)
+        }
+        (Definition::Publication(repo), Definition::Publication(db)) => {
+            publication::publication(repo, db)
+        }
+        (Definition::Subscription(repo), Definition::Subscription(db)) => {
+            subscription::subscription(repo, db)
         }
         _ => Resolution::Replace,
     }
@@ -2045,6 +2054,12 @@ fn push_comment(
     if repo != db {
         alters.push(Alter::new(comment_on(desc, name, repo.as_deref())));
     }
+}
+
+/// `text` as SQL comment lines. A quoted name can contain a newline, so
+/// each line is commented out; else a part of the text can run.
+fn sql_comment(text: &str) -> String {
+    text.lines().map(|line| format!("-- {line}\n")).collect()
 }
 
 /// Push an `ALTER ... OPTIONS (...)` alter when `repo` and `db`
