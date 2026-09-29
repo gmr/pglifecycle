@@ -231,7 +231,7 @@ fn compare(desc: ObjectType) -> Compare {
         ObjectType::Cast => Compare::Existence,
         ObjectType::Collation => Compare::Existence,
         ObjectType::Conversion => Compare::Existence,
-        ObjectType::DefaultPrivileges => Compare::Existence,
+        ObjectType::DefaultPrivileges => Compare::Definition,
         ObjectType::Domain => Compare::Definition,
         ObjectType::EventTrigger => Compare::Existence,
         ObjectType::Extension => Compare::Definition,
@@ -543,6 +543,15 @@ fn normalized(definition: &Definition) -> Value {
         Definition::Procedure(procedure) => {
             canonical = Definition::Procedure(procedure.canonical());
             &canonical
+        }
+        // default privileges compare by the privileges they give, so
+        // the same privileges declared two ways are not a change
+        Definition::DefaultPrivileges(defaults) => {
+            let acl: Vec<_> =
+                super::alter::default_privileges::effective(defaults)
+                    .into_iter()
+                    .collect();
+            return serde_json::to_value(acl).unwrap_or(Value::Null);
         }
         other => other,
     };

@@ -17,6 +17,8 @@
 //! `alter/publication.rs`, so that work on separate types does not
 //! change the same lines.
 
+pub(crate) mod default_privileges;
+
 use serde_json::{Map, Value};
 
 use crate::build;
@@ -49,6 +51,9 @@ pub(crate) struct Alter {
     /// The statement drops an index that the project does not have;
     /// deploy keeps the index unless `--allow-drop-indexes` is given
     pub index_removal: bool,
+    /// The schema that the statement names and that must exist before
+    /// it runs (ALTER DEFAULT PRIVILEGES IN SCHEMA)
+    pub schema: Option<String>,
 }
 
 impl Alter {
@@ -59,6 +64,7 @@ impl Alter {
             label: None,
             fails_open: false,
             index_removal: false,
+            schema: None,
         }
     }
 
@@ -225,6 +231,10 @@ pub(crate) fn resolve_with(
         (Definition::UserMapping(repo), Definition::UserMapping(db)) => {
             user_mapping(repo, db)
         }
+        (
+            Definition::DefaultPrivileges(repo),
+            Definition::DefaultPrivileges(db),
+        ) => default_privileges::default_privileges(repo, db),
         _ => Resolution::Replace,
     }
 }
