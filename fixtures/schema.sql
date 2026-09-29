@@ -876,6 +876,17 @@ CREATE FUNCTION "Quoted Schema".quoted_fn(n INTEGER) RETURNS INTEGER
  SELECT n;
 $$;
 REVOKE EXECUTE ON FUNCTION "Quoted Schema".quoted_fn(INTEGER) FROM PUBLIC;
+-- routines whose names and parameter names need quoting
+CREATE FUNCTION "Quoted Schema"."Quoted Fn"("Count" INTEGER) RETURNS INTEGER
+    LANGUAGE sql IMMUTABLE AS $$
+ SELECT "Count";
+$$;
+COMMENT ON FUNCTION "Quoted Schema"."Quoted Fn"(INTEGER) IS 'A quoted function';
+REVOKE EXECUTE ON FUNCTION "Quoted Schema"."Quoted Fn"(INTEGER) FROM PUBLIC;
+CREATE PROCEDURE "Quoted Schema"."Quoted Proc"() LANGUAGE sql AS $$
+ SELECT 1;
+$$;
+COMMENT ON PROCEDURE "Quoted Schema"."Quoted Proc"() IS 'A quoted procedure';
 
 -- Transforms for the base type: one with both functions and a
 -- comment, and one with only its TO SQL function

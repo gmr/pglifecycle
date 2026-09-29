@@ -473,9 +473,13 @@ impl Builder {
                 quote_ident(tag)
             } else if desc == "FUNCTION" || desc == "PROCEDURE" {
                 if namespace.is_empty() {
-                    tag.to_string()
+                    crate::utils::quote_routine_name(tag)
                 } else {
-                    format!("{}.{}", quote_ident(namespace), tag)
+                    format!(
+                        "{}.{}",
+                        quote_ident(namespace),
+                        crate::utils::quote_routine_name(tag)
+                    )
                 }
             } else if namespace.is_empty() {
                 quote_ident(tag)
@@ -1143,7 +1147,7 @@ impl Builder {
                         .map(|p| {
                             let mut value = vec![p.mode.clone()];
                             if let Some(name) = &p.name {
-                                value.push(name.clone());
+                                value.push(quote_ident(name));
                             }
                             value.push(p.data_type.clone());
                             if defaults && let Some(default) = &p.default {
@@ -1154,7 +1158,8 @@ impl Builder {
                         })
                         .collect()
                 };
-                let base = d.name.split('(').next().unwrap_or_default();
+                let base =
+                    quote_ident(d.name.split('(').next().unwrap_or_default());
                 drop_name =
                     Some(format!("{base}({})", render(false).join(", ")));
                 let func_name = format!("{base}({})", render(true).join(", "));
@@ -1164,9 +1169,11 @@ impl Builder {
             // embedded `(argtypes)` signature (the on-disk convention for
             // disambiguating overloads); only a bare, unparenthesized
             // name needs `()` appended for a true zero-argument function
-            _ if d.name.contains('(') => (d.name.clone(), None),
+            _ if d.name.contains('(') => {
+                (crate::utils::quote_routine_name(&d.name), None)
+            }
             _ => {
-                let func_name = format!("{}()", d.name);
+                let func_name = format!("{}()", quote_ident(&d.name));
                 let comment_target = if d.schema.is_empty() {
                     func_name.clone()
                 } else {

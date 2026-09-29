@@ -601,10 +601,26 @@ fn drop_sql(key: &ObjectKey, definition: Option<&Definition>) -> String {
             })
             .collect();
     }
-    // function keys are identity signatures and must not be quoted
-    // wholesale; everything else gets identifier quoting
-    let name = match key.desc {
-        constants::ObjectType::Function => key.name.clone(),
+    // a function is named by its quoted name and its input types,
+    // which is all that DROP FUNCTION reads; a function key is an
+    // identity signature, so it is not quoted whole
+    let name = match (key.desc, definition) {
+        (_, Some(Definition::Function(f))) => {
+            let types: Vec<&str> = f
+                .parameters
+                .iter()
+                .flatten()
+                .filter(|p| p.mode != "OUT" && p.mode != "TABLE")
+                .map(|p| p.data_type.as_str())
+                .collect();
+            let base = f.name.split('(').next().unwrap_or_default();
+            if f.parameters.is_none() && f.name.contains('(') {
+                crate::utils::quote_routine_name(&f.name)
+            } else {
+                format!("{}({})", quote_ident(base), types.join(", "))
+            }
+        }
+        (constants::ObjectType::Function, _) => key.name.clone(),
         _ => quote_ident(&key.name),
     };
     let qualified = if key.schema.is_empty() {

@@ -139,6 +139,8 @@ ALTER INDEX test.readings_taken ATTACH PARTITION test.readings_2021_by_day;
 COMMENT ON INDEX test.readings_2021_id_idx IS 'drift';
 ALTER TABLE test.revocations ALTER COLUMN revoked
     SET EXPRESSION AS (revoked_at IS NULL);
+CREATE FUNCTION test."Stray Fn"("Arg" INTEGER) RETURNS INTEGER
+    LANGUAGE sql AS 'SELECT 1';
 ALTER TABLE test.quoted_cols ALTER COLUMN "Name" DROP DEFAULT;
 ALTER TABLE test.quoted_cols ALTER COLUMN "Name" DROP NOT NULL;
 ALTER TABLE test.quoted_cols ALTER COLUMN "Has Space" SET STATISTICS 50;
