@@ -226,10 +226,17 @@ CREATE. An object that the database has with another owner gets the
 same statement in place; it is not destructive. The owner is not part
 of the definition comparison, so a changed owner never causes a
 rebuild. deploy does not compare the owner of a type that it only
-checks for existence (the list below). Each owner role must exist. A
-connecting role that is not a superuser must be able to `SET ROLE` to
-each owner, and each owner must have CREATE on the schema of its
-objects. A type whose model has no owner (for example publications,
+checks for existence (the list below). Each owner role must exist, and
+each owner must have CREATE on the schema of its objects. A connecting
+role that is not a superuser must be a member of each owner role with
+the SET and INHERIT options (`GRANT` gives both by default to a role
+that has the INHERIT attribute). The statements after an owner change
+need the privileges of the owner: for example, CREATE TABLE in a new
+schema, and the indexes, comments and grants of a new table. To change
+the owner of an object that the database has, the connecting role must
+also have the privileges of its current owner. To change the owner of
+a schema, the connecting role must have CREATE on the database. A type
+whose model has no owner (for example publications,
 subscriptions and event triggers) keeps the connecting role as owner.
 So does most of what the project writes as raw `sql`: as pg_restore
 does, deploy sets no owner for an archive entry with no DROP statement.
