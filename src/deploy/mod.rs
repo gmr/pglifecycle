@@ -482,8 +482,9 @@ fn report(diff: &Diff, plan: &Plan, assembly: &pull::Assembly) {
     if undiffable > 0 {
         log::warn!(
             "{undiffable} object(s) exist in both the project and the \
-             database but their types cannot be compared yet; they were \
-             left untouched"
+             database but cannot be compared: their type is only checked \
+             for existence, or the project writes them as raw sql; they \
+             were left untouched"
         );
     }
     for statement in &plan.excluded {

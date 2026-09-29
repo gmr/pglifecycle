@@ -11,6 +11,11 @@
 //! `--allow-drop-indexes`: such an index is often made at runtime, and
 //! one such as HNSW is slow to make again. A changed index is dropped
 //! and made again without a gate.
+//!
+//! The resolver of a type that moves to definition comparison (see
+//! `diff::compare`) goes in its own file under `alter/`, for example
+//! `alter/publication.rs`, so that work on separate types does not
+//! change the same lines.
 
 use serde_json::{Map, Value};
 
