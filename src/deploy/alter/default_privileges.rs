@@ -9,6 +9,9 @@
 //! default privileges of a role that the project does not have is
 //! gated, as the drop of each database-only object is (see
 //! [`removal`]).
+//!
+//! New in the Rust implementation: the Python implementation had no
+//! `deploy` command, so no Python file ports to this module.
 
 use std::collections::BTreeMap;
 
