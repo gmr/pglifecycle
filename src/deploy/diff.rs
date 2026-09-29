@@ -202,6 +202,14 @@ pub struct Diff {
     /// to their database-side definition (some drops, e.g. user
     /// mappings, need more than the key to render)
     pub removed: BTreeMap<ObjectKey, Definition>,
+    /// Inventory item ids whose project definition names an owner:
+    /// deploy gives each one that it creates this owner
+    pub owned: BTreeSet<usize>,
+    /// Inventory item ids that the database has with another owner
+    /// than the project. The owner is not part of the definition
+    /// comparison: `ALTER ... OWNER TO` changes it in place for every
+    /// type
+    pub owner_changed: BTreeSet<usize>,
 }
 
 /// How deploy compares the objects of one type
@@ -267,7 +275,14 @@ pub fn diff(project: &Project, assembly: &Assembly) -> Diff {
     let existing = existence_index(assembly);
     let mut items = BTreeMap::new();
     let mut changed = BTreeMap::new();
+    let mut owned = BTreeSet::new();
+    let mut owner_changed = BTreeSet::new();
     for item in &project.inventory {
+        if compare(item.desc) != Compare::Skip
+            && item.definition.owner().is_some()
+        {
+            owned.insert(item.id);
+        }
         let change = match compare(item.desc) {
             Compare::Skip => {
                 log::debug!(
@@ -299,6 +314,13 @@ pub fn diff(project: &Project, assembly: &Assembly) -> Diff {
                             ),
                             (_, db) => db,
                         };
+                        // a dump made without owners gives none to
+                        // compare
+                        if db.owner().is_some_and(|owner| !owner.is_empty())
+                            && item.definition.owner() != db.owner()
+                        {
+                            owner_changed.insert(item.id);
+                        }
                         if normalized(&item.definition) == normalized(&db) {
                             Change::Unchanged
                         } else {
@@ -329,6 +351,8 @@ pub fn diff(project: &Project, assembly: &Assembly) -> Diff {
         items,
         changed,
         removed: database,
+        owned,
+        owner_changed,
     }
 }
 
@@ -563,8 +587,7 @@ fn normalized(definition: &Definition) -> Value {
 fn normalize(value: &mut Value) {
     match value {
         Value::Object(map) => {
-            // ownership is out of deploy's scope (a flat SQL script
-            // cannot apply pg_restore-style ownership anyway)
+            // the owner is compared on its own (`Diff::owner_changed`)
             map.remove("owner");
             for (key, child) in map.iter_mut() {
                 if (key == "data_type" || key == "returns")

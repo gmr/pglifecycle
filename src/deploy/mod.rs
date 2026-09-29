@@ -400,12 +400,27 @@ fn plan(
         let Some(defn) = entry.defn.clone() else {
             continue;
         };
+        // the connecting role owns what the script creates, so an item
+        // that names an owner gets it after its CREATE
+        let owner = direct
+            .filter(|id| !args.no_owner && diff.owned.contains(id))
+            .and_then(|_| owner_sql(entry));
+        // an object that the database has with another owner gets the
+        // owner in place; a rebuild sets it after its CREATE
+        let reown = direct
+            .filter(|id| diff.owner_changed.contains(id))
+            .and(owner.clone())
+            .map(|sql| Statement {
+                label: label.clone(),
+                sql,
+                fails_open: false,
+            });
         if changes.iter().all(|c| *c == Change::Added) {
             push(
                 false,
                 Statement {
                     label,
-                    sql: defn,
+                    sql: format!("{defn}{}", owner.unwrap_or_default()),
                     fails_open: false,
                 },
             );
@@ -428,13 +443,16 @@ fn plan(
                 .iter()
                 .all(|c| matches!(c, Change::Added | Change::Changed))
         {
+            if let Some(statement) = reown {
+                push(false, statement);
+            }
             continue;
         }
         // the object's own entry: emit its in-place statements,
         // re-issue it as CREATE OR REPLACE, or lead with its DROP for
         // the drop+recreate fallback
         if let Some(id) = direct {
-            match resolutions.get(id) {
+            let rebuilt = match resolutions.get(id) {
                 Some(Resolution::Statements(alters)) => {
                     for alter in alters {
                         let statement = Statement {
@@ -454,6 +472,7 @@ fn plan(
                         }
                         push(alter.destructive, statement);
                     }
+                    false
                 }
                 Some(Resolution::OrReplace { comment, then }) => {
                     push(
@@ -493,6 +512,7 @@ fn plan(
                             },
                         );
                     }
+                    false
                 }
                 _ => {
                     let mut sql = String::new();
@@ -500,6 +520,9 @@ fn plan(
                         sql.push_str(drop);
                     }
                     sql.push_str(&defn);
+                    if let Some(owner) = &owner {
+                        sql.push_str(owner);
+                    }
                     push(
                         true,
                         Statement {
@@ -508,7 +531,11 @@ fn plan(
                             fails_open: false,
                         },
                     );
+                    true
                 }
+            };
+            if let Some(statement) = reown.filter(|_| !rebuilt) {
+                push(false, statement);
             }
             continue;
         }
@@ -820,6 +847,53 @@ fn entry_label(entry: &libpgdump::Entry) -> String {
     }
 }
 
+/// `ALTER <object> OWNER TO <owner>` for an archive entry, as pg_restore
+/// writes it (`_getObjectDescription`). The object of a type that needs
+/// a signature is its DROP statement without `DROP `. An entry with no
+/// owner or no DROP statement, or of a type that has no owner of its
+/// own (a cast, for example), gives None
+fn owner_sql(entry: &libpgdump::Entry) -> Option<String> {
+    let owner = entry.owner.as_deref().filter(|owner| !owner.is_empty())?;
+    let drop = entry.drop_stmt.as_deref().filter(|drop| !drop.is_empty())?;
+    let desc = entry.desc.as_str();
+    let object = match desc {
+        "COLLATION"
+        | "CONVERSION"
+        | "DOMAIN"
+        | "FOREIGN TABLE"
+        | "MATERIALIZED VIEW"
+        | "SEQUENCE"
+        | "STATISTICS"
+        | "TABLE"
+        | "TEXT SEARCH DICTIONARY"
+        | "TEXT SEARCH CONFIGURATION"
+        | "TYPE"
+        | "VIEW"
+        | "PROCEDURAL LANGUAGE"
+        | "SCHEMA"
+        | "EVENT TRIGGER"
+        | "FOREIGN DATA WRAPPER"
+        | "SERVER"
+        | "PUBLICATION"
+        | "SUBSCRIPTION" => {
+            let tag = quote_ident(entry.tag.as_deref()?);
+            match entry.namespace.as_deref() {
+                Some(namespace) if !namespace.is_empty() => {
+                    format!("{desc} {}.{tag}", quote_ident(namespace))
+                }
+                _ => format!("{desc} {tag}"),
+            }
+        }
+        "AGGREGATE" | "FUNCTION" | "OPERATOR" | "OPERATOR CLASS"
+        | "OPERATOR FAMILY" | "PROCEDURE" => drop
+            .strip_prefix("DROP ")?
+            .trim_end_matches(['\n', ';'])
+            .to_string(),
+        _ => return None,
+    };
+    Some(format!("ALTER {object} OWNER TO {};\n", quote_ident(owner)))
+}
+
 /// Human-readable comparison source for the header and logs
 fn source_label(args: &cli::Deploy) -> String {
     match &args.dump {
@@ -835,7 +909,7 @@ fn source_label(args: &cli::Deploy) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use clap::Parser;
 
@@ -888,6 +962,8 @@ mod tests {
             items: BTreeMap::new(),
             changed: BTreeMap::new(),
             removed: BTreeMap::new(),
+            owned: BTreeSet::new(),
+            owner_changed: BTreeSet::new(),
         };
         diff.removed
             .insert(dep_key.clone(), Definition::Function(dep_fn));
@@ -978,6 +1054,8 @@ mod tests {
             items: BTreeMap::new(),
             changed: BTreeMap::new(),
             removed: BTreeMap::new(),
+            owned: BTreeSet::new(),
+            owner_changed: BTreeSet::new(),
         };
         diff.removed.insert(key.clone(), definition);
         let mut snapshot =
@@ -1042,6 +1120,8 @@ mod tests {
             items: BTreeMap::new(),
             changed: BTreeMap::new(),
             removed: BTreeMap::new(),
+            owned: BTreeSet::new(),
+            owner_changed: BTreeSet::new(),
         };
         diff.items.insert(0, Change::Changed);
         diff.changed
@@ -1108,6 +1188,8 @@ mod tests {
             items: BTreeMap::new(),
             changed: BTreeMap::new(),
             removed: BTreeMap::new(),
+            owned: BTreeSet::new(),
+            owner_changed: BTreeSet::new(),
         };
         diff.items.insert(0, Change::Changed);
         diff.items.insert(1, Change::Added);
@@ -1197,6 +1279,8 @@ mod tests {
             items: BTreeMap::new(),
             changed: BTreeMap::new(),
             removed: BTreeMap::new(),
+            owned: BTreeSet::new(),
+            owner_changed: BTreeSet::new(),
         };
         diff.items.insert(0, Change::Changed);
         diff.items.insert(1, Change::Added);
@@ -1349,5 +1433,149 @@ mod tests {
             assert!(line.starts_with("--"), "line runs as SQL: {line}");
         }
         assert!(script.contains("--   DROP TABLE t; --\";\n"));
+    }
+
+    fn owner_entry(
+        desc: libpgdump::ObjectType,
+        namespace: Option<&str>,
+        tag: &str,
+        drop: Option<&str>,
+    ) -> libpgdump::Entry {
+        let mut dump =
+            libpgdump::new("test", "UTF8", "18.0").expect("new dump");
+        let id = dump
+            .add_entry(
+                desc,
+                namespace,
+                Some(tag),
+                Some("Gate Owner"),
+                Some("CREATE ...;\n"),
+                drop,
+                None,
+                &[],
+            )
+            .expect("add entry");
+        dump.entries()
+            .iter()
+            .find(|entry| entry.dump_id == id)
+            .expect("the added entry")
+            .clone()
+    }
+
+    /// The owner statement has the form that pg_restore writes: the
+    /// qualified, quoted name, or the DROP statement of a type that
+    /// needs a signature. A type with no owner of its own, or an entry
+    /// with no DROP statement, gets none
+    #[test]
+    fn owner_statements_have_the_pg_restore_form() {
+        use libpgdump::ObjectType as OT;
+        let sql = |entry: libpgdump::Entry| owner_sql(&entry);
+        assert_eq!(
+            sql(owner_entry(
+                OT::Table,
+                Some("My Schema"),
+                "t",
+                Some("DROP TABLE \"My Schema\".t;\n"),
+            ))
+            .as_deref(),
+            Some("ALTER TABLE \"My Schema\".t OWNER TO \"Gate Owner\";\n")
+        );
+        assert_eq!(
+            sql(owner_entry(
+                OT::Schema,
+                None,
+                "app",
+                Some("DROP SCHEMA app;\n"),
+            ))
+            .as_deref(),
+            Some("ALTER SCHEMA app OWNER TO \"Gate Owner\";\n")
+        );
+        assert_eq!(
+            sql(owner_entry(
+                OT::Function,
+                Some("test"),
+                "f(n integer)",
+                Some("DROP FUNCTION test.f(n integer);\n"),
+            ))
+            .as_deref(),
+            Some(
+                "ALTER FUNCTION test.f(n integer) OWNER TO \"Gate Owner\";\n"
+            )
+        );
+        assert_eq!(
+            sql(owner_entry(
+                OT::Cast,
+                None,
+                "CAST (text AS integer)",
+                Some("DROP CAST (text AS integer);\n"),
+            )),
+            None
+        );
+        assert_eq!(sql(owner_entry(OT::Table, Some("test"), "t", None)), None);
+    }
+
+    /// A new object gets its owner after its CREATE, and an object that
+    /// the database has with another owner gets it in place, which is
+    /// not destructive. With --no-owner, deploy sets no owner
+    #[test]
+    fn owners_are_set_after_create_and_in_place() {
+        let mut dump =
+            libpgdump::new("test", "UTF8", "18.0").expect("new output dump");
+        let mut table = |name: &str| {
+            dump.add_entry(
+                libpgdump::ObjectType::Table,
+                Some("public"),
+                Some(name),
+                Some("app"),
+                Some(&format!("CREATE TABLE public.{name} ();\n")),
+                Some(&format!("DROP TABLE public.{name};\n")),
+                None,
+                &[],
+            )
+            .expect("add table entry")
+        };
+        let added = table("added");
+        let kept = table("kept");
+        let output = build::BuildOutput {
+            dump,
+            item_ids: HashMap::from([(added, 0), (kept, 1)]),
+        };
+        let diff = Diff {
+            items: BTreeMap::from([
+                (0, Change::Added),
+                (1, Change::Unchanged),
+            ]),
+            changed: BTreeMap::new(),
+            removed: BTreeMap::new(),
+            owned: BTreeSet::from([0, 1]),
+            owner_changed: BTreeSet::from([1]),
+        };
+        let snapshot =
+            libpgdump::new("test", "UTF8", "18.0").expect("new dump");
+        let plan_with = |argv: &[&str]| {
+            let args = match cli::Cli::parse_from(argv).action {
+                cli::Action::Deploy(deploy) => deploy,
+                _ => unreachable!("parsed the deploy subcommand"),
+            };
+            plan(&diff, &BTreeMap::new(), &output, &snapshot, &args)
+                .expect("plan succeeds")
+        };
+        let owned = plan_with(&["pglifecycle", "deploy", "p"]);
+        let sql: Vec<&str> =
+            owned.included.iter().map(|s| s.sql.as_str()).collect();
+        assert_eq!(
+            sql,
+            [
+                "CREATE TABLE public.added ();\nALTER TABLE public.added \
+                 OWNER TO app;\n",
+                "ALTER TABLE public.kept OWNER TO app;\n",
+            ]
+        );
+        assert!(owned.excluded.is_empty());
+        assert_eq!(owned.included_destructive, 0);
+        let unowned = plan_with(&["pglifecycle", "deploy", "-O", "p"]);
+        let sql: Vec<&str> =
+            unowned.included.iter().map(|s| s.sql.as_str()).collect();
+        assert_eq!(sql, ["CREATE TABLE public.added ();\n"]);
     }
 }
