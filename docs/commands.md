@@ -195,22 +195,43 @@ the stderr report says the same.
 Ownership is not managed (the script behaves like
 `pg_restore --no-owner`), and roles, users, groups, and tablespaces are
 skipped entirely — they are cluster-level objects a single-database
-dump cannot capture. Aggregates, casts, transforms, collations,
-conversions, event triggers, publications, subscriptions, text search
-objects, default privileges, extended statistics, procedures,
-operators, operator classes and families, and access methods are
-created when missing but otherwise only existence-checked: `pull` models them, but
-`deploy` does not compare their definitions yet, so a changed one is
-left as the database has it. An aggregate or procedure is matched by
-its name and input types, and an operator by its name and argument
-types, so each overload is checked on its own. An operator class or
-family is matched by its name and its index method. Text search
-objects are checked per schema: when a schema has any text search
-object in the database, `deploy` creates none of the project's text
-search objects in that schema. Object types `pull` does not yet model
-(security labels, …) are handled the same way. Privileges on
-created objects are emitted (unless `-x`); privilege changes on objects
-that already exist are not yet diffed.
+dump cannot capture.
+
+`deploy` creates these object types when they are missing, but only
+checks that they exist. `pull` models them, but `deploy` does not
+compare their definitions yet, so a changed one is left as the
+database has it, and one that only the database has is kept:
+
+- access methods
+- aggregates, matched by name and input types
+- casts
+- collations
+- conversions
+- default privileges
+- event triggers
+- operators, matched by name and argument types
+- operator classes, matched by name and index method
+- operator families, matched by name and index method
+- procedures, matched by name and input types
+- publications
+- statistics (extended statistics)
+- subscriptions
+- text search objects, checked per schema: when a schema has any text
+  search object in the database, `deploy` creates none of the
+  project's text search objects in that schema
+- transforms
+
+Object types `pull` does not yet model (security labels, …) are
+handled the same way. An object that the project writes as a raw `sql`
+statement is also only checked for existence, whatever its type:
+`pull` writes the structured fields, so the two never compare equal.
+A raw statement has no structured input types, so it is matched by
+its type, schema and name, and any overload of that name counts. A
+raw cast is the exception: it must have its source and target types,
+and it is matched by them.
+
+Privileges on created objects are emitted (unless `-x`); privilege
+changes on objects that already exist are not yet diffed.
 
 ## pull
 

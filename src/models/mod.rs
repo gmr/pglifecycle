@@ -208,6 +208,30 @@ impl Definition {
             _ => None,
         }
     }
+
+    /// The object is written as a raw `sql` statement, not as the
+    /// structured fields
+    pub fn raw_sql(&self) -> bool {
+        let sql = match self {
+            Definition::Aggregate(d) => &d.sql,
+            Definition::Cast(d) => &d.sql,
+            Definition::Collation(d) => &d.sql,
+            Definition::Conversion(d) => &d.sql,
+            Definition::Domain(d) => &d.sql,
+            Definition::EventTrigger(d) => &d.sql,
+            Definition::Function(d) => &d.sql,
+            Definition::MaterializedView(d) => &d.sql,
+            Definition::Operator(d) => &d.sql,
+            Definition::Procedure(d) => &d.sql,
+            Definition::Sequence(d) => &d.sql,
+            Definition::Table(d) => &d.sql,
+            Definition::TextSearch(d) => &d.sql,
+            Definition::Type(d) => &d.sql,
+            Definition::View(d) => &d.sql,
+            _ => return false,
+        };
+        sql.is_some()
+    }
 }
 
 /// An item in the project inventory

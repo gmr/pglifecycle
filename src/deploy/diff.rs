@@ -26,17 +26,94 @@ pub struct ObjectKey {
 
 impl ObjectKey {
     pub fn new(desc: ObjectType, definition: &Definition) -> Self {
-        let name = match definition {
-            Definition::Function(f) => function_key_name(f),
-            _ => definition.name(),
-        };
-        // extension names are database-unique; their schema field is
-        // the installation target, not part of their identity
-        let schema = match definition {
-            Definition::Extension(_) => String::new(),
-            _ => definition.schema().unwrap_or_default().to_string(),
-        };
+        let (schema, name) = object_identity(definition);
         Self { desc, schema, name }
+    }
+}
+
+/// The schema and name that identify an object. A function is named by
+/// its identity signature, since the bare name is ambiguous across
+/// overloads. An extension name is unique in the database, and its
+/// schema field is the installation target, so it is not part of the
+/// identity. A cast or a transform has no schema: the project files it
+/// under one, and pull picks one from its types, so the two need not
+/// agree. A cast's name, `(source AS target)`, keeps its canonical
+/// types, so `int4` matches the `integer` pg_dump writes. An aggregate
+/// is identified by its name and its input types, so one overload does
+/// not stand for another. The aggregate and operator names remove
+/// typmods, as PostgreSQL does not keep them in an argument type (see
+/// [`identity_type`]).
+fn object_identity(definition: &Definition) -> (String, String) {
+    match definition {
+        Definition::Function(f) => (f.schema.clone(), function_key_name(f)),
+        Definition::Extension(e) => (String::new(), e.name.clone()),
+        Definition::Aggregate(aggregate) => {
+            let types = |args: &[crate::models::Argument]| {
+                args.iter()
+                    .map(|a| identity_type(&a.data_type))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            let direct = types(&aggregate.arguments);
+            let signature = match aggregate.order_by.as_deref() {
+                Some(order_by) => {
+                    format!("{direct} ORDER BY {}", types(order_by))
+                }
+                None if direct.is_empty() => String::from("*"),
+                None => direct,
+            };
+            (
+                aggregate.schema.clone(),
+                format!("{}({signature})", aggregate.name),
+            )
+        }
+        // overloads are separate objects, keyed by their input types
+        Definition::Procedure(procedure) => (
+            procedure.schema.clone(),
+            function_tag_name(&procedure.as_function()),
+        ),
+        Definition::Operator(operator) => (
+            operator.schema.clone(),
+            format!(
+                "{}({}, {})",
+                operator.name,
+                identity_type(operator.left_arg.as_deref().unwrap_or("NONE")),
+                identity_type(operator.right_arg.as_deref().unwrap_or("NONE"))
+            ),
+        ),
+        // one name can be used once for each index method
+        Definition::OperatorClass(class) => (
+            class.schema.clone(),
+            format!("{} USING {}", class.name, class.method),
+        ),
+        Definition::OperatorFamily(family) => (
+            family.schema.clone(),
+            format!("{} USING {}", family.name, family.method),
+        ),
+        Definition::Transform(transform) => (
+            String::new(),
+            format!(
+                "FOR {} LANGUAGE {}",
+                canonical_type(&transform.data_type),
+                transform.language
+            ),
+        ),
+        Definition::Cast(cast) => (
+            String::new(),
+            format!(
+                "({} AS {})",
+                canonical_type(
+                    cast.source_type.as_deref().unwrap_or_default()
+                ),
+                canonical_type(
+                    cast.target_type.as_deref().unwrap_or_default()
+                )
+            ),
+        ),
+        _ => (
+            definition.schema().unwrap_or_default().to_string(),
+            definition.name(),
+        ),
     }
 }
 
@@ -122,16 +199,63 @@ pub struct Diff {
     pub removed: BTreeMap<ObjectKey, Definition>,
 }
 
-/// Object types deploy does not manage: roles, users, and groups
-/// require cluster-level access pg_dump does not capture, and
-/// tablespaces are likewise absent from a single-database dump —
-/// diffing them would re-create them on every run
-const SKIPPED: &[ObjectType] = &[
-    ObjectType::Group,
-    ObjectType::Role,
-    ObjectType::Tablespace,
-    ObjectType::User,
-];
+/// How deploy compares the objects of one type
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Compare {
+    /// Compare the definitions; a difference is a change, and an
+    /// object that only the database has is removed
+    Definition,
+    /// Check only that the object exists: a changed definition is left
+    /// as the database has it, and a database-only object is kept
+    Existence,
+    /// Out of deploy's scope: roles, users, and groups require
+    /// cluster-level access pg_dump does not capture, and tablespaces
+    /// are likewise absent from a single-database dump — diffing them
+    /// would re-create them on every run
+    Skip,
+}
+
+/// How deploy compares each object type. A type moves from
+/// `Existence` to `Definition` when deploy can reconcile its changes
+/// (`alter::resolve_with`) and drop it in dependency order
+/// (`entry_key` and `drop_sql` in `mod.rs`).
+fn compare(desc: ObjectType) -> Compare {
+    match desc {
+        ObjectType::AccessMethod => Compare::Existence,
+        ObjectType::Aggregate => Compare::Existence,
+        ObjectType::Cast => Compare::Existence,
+        ObjectType::Collation => Compare::Existence,
+        ObjectType::Conversion => Compare::Existence,
+        ObjectType::DefaultPrivileges => Compare::Existence,
+        ObjectType::Domain => Compare::Definition,
+        ObjectType::EventTrigger => Compare::Existence,
+        ObjectType::Extension => Compare::Definition,
+        ObjectType::ForeignDataWrapper => Compare::Definition,
+        ObjectType::Function => Compare::Definition,
+        ObjectType::Group => Compare::Skip,
+        ObjectType::MaterializedView => Compare::Definition,
+        ObjectType::Operator => Compare::Existence,
+        ObjectType::OperatorClass => Compare::Existence,
+        ObjectType::OperatorFamily => Compare::Existence,
+        ObjectType::ProceduralLanguage => Compare::Definition,
+        ObjectType::Procedure => Compare::Existence,
+        ObjectType::Publication => Compare::Existence,
+        ObjectType::Role => Compare::Skip,
+        ObjectType::Schema => Compare::Definition,
+        ObjectType::Sequence => Compare::Definition,
+        ObjectType::Server => Compare::Definition,
+        ObjectType::Statistics => Compare::Existence,
+        ObjectType::Subscription => Compare::Existence,
+        ObjectType::Table => Compare::Definition,
+        ObjectType::Tablespace => Compare::Skip,
+        ObjectType::TextSearch => Compare::Existence,
+        ObjectType::Transform => Compare::Existence,
+        ObjectType::Type => Compare::Definition,
+        ObjectType::User => Compare::Skip,
+        ObjectType::UserMapping => Compare::Definition,
+        ObjectType::View => Compare::Definition,
+    }
+}
 
 pub fn diff(project: &Project, assembly: &Assembly) -> Diff {
     let mut database = database_index(assembly);
@@ -139,40 +263,60 @@ pub fn diff(project: &Project, assembly: &Assembly) -> Diff {
     let mut items = BTreeMap::new();
     let mut changed = BTreeMap::new();
     for item in &project.inventory {
-        let change = if SKIPPED.contains(&item.desc) {
-            log::debug!(
-                "Skipping {} {}: not managed by deploy",
-                item.desc.as_str(),
-                item.definition.name()
-            );
-            Change::Skipped
-        } else if modeled(item.desc) {
-            let key = ObjectKey::new(item.desc, &item.definition);
-            match database.remove(&key) {
-                None => Change::Added,
-                Some(db) => {
-                    let db = match (&item.definition, db) {
-                        (Definition::Table(repo), Definition::Table(db)) => {
-                            Definition::Table(
+        let change = match compare(item.desc) {
+            Compare::Skip => {
+                log::debug!(
+                    "Skipping {} {}: not managed by deploy",
+                    item.desc.as_str(),
+                    item.definition.name()
+                );
+                Change::Skipped
+            }
+            // pull writes the structured fields, so a raw statement
+            // never compares equal: it is only checked for existence
+            Compare::Definition if item.definition.raw_sql() => {
+                match take_raw(&mut database, item.desc, &item.definition) {
+                    Some(_) => Change::Undiffable,
+                    None => Change::Added,
+                }
+            }
+            Compare::Definition => {
+                let key = ObjectKey::new(item.desc, &item.definition);
+                match database.remove(&key) {
+                    None => Change::Added,
+                    Some(db) => {
+                        let db = match (&item.definition, db) {
+                            (
+                                Definition::Table(repo),
+                                Definition::Table(db),
+                            ) => Definition::Table(
                                 db.without_unmanaged_security(repo),
-                            )
+                            ),
+                            (_, db) => db,
+                        };
+                        if normalized(&item.definition) == normalized(&db) {
+                            Change::Unchanged
+                        } else {
+                            changed.insert(item.id, db);
+                            Change::Changed
                         }
-                        (_, db) => db,
-                    };
-                    if normalized(&item.definition) == normalized(&db) {
-                        Change::Unchanged
-                    } else {
-                        changed.insert(item.id, db);
-                        Change::Changed
                     }
                 }
             }
-        } else if existing
-            .contains(&definition_existence_key(item.desc, &item.definition))
-        {
-            Change::Undiffable
-        } else {
-            Change::Added
+            Compare::Existence => {
+                let key =
+                    definition_existence_key(item.desc, &item.definition);
+                let found = if item.definition.raw_sql() {
+                    raw_exists(&existing, item.desc, &key)
+                } else {
+                    existing.contains(&key)
+                };
+                if found {
+                    Change::Undiffable
+                } else {
+                    Change::Added
+                }
+            }
         };
         items.insert(item.id, change);
     }
@@ -183,86 +327,165 @@ pub fn diff(project: &Project, assembly: &Assembly) -> Diff {
     }
 }
 
-/// Object types the [`Assembly`] parses into models; everything else
-/// lands in `Assembly::remaining` and can only be existence-checked
-fn modeled(desc: ObjectType) -> bool {
-    matches!(
-        desc,
-        ObjectType::Domain
-            | ObjectType::Extension
-            | ObjectType::ForeignDataWrapper
-            | ObjectType::Function
-            | ObjectType::MaterializedView
-            | ObjectType::ProceduralLanguage
-            | ObjectType::Schema
-            | ObjectType::Sequence
-            | ObjectType::Server
-            | ObjectType::Table
-            | ObjectType::Type
-            | ObjectType::UserMapping
-            | ObjectType::View
-    )
-}
-
-/// `ObjectKey → Definition` for every object the snapshot modeled
-fn database_index(assembly: &Assembly) -> BTreeMap<ObjectKey, Definition> {
-    let mut index = BTreeMap::new();
-    let mut insert = |desc: ObjectType, definition: Definition| {
-        index.insert(ObjectKey::new(desc, &definition), definition);
+/// Remove the database object that a raw `sql` item stands for, and
+/// return it. The item's key is tried first. A raw function has no
+/// parameter list, so its key can differ from the database key: then
+/// the first object of the same type, schema and bare name matches, as
+/// in [`existence_key`].
+fn take_raw(
+    database: &mut BTreeMap<ObjectKey, Definition>,
+    desc: ObjectType,
+    definition: &Definition,
+) -> Option<Definition> {
+    let key = ObjectKey::new(desc, definition);
+    if let Some(db) = database.remove(&key) {
+        return Some(db);
+    }
+    let bare = |name: &str| {
+        name.split('(')
+            .next()
+            .unwrap_or(name)
+            .trim_end()
+            .to_string()
     };
-    for d in &assembly.schemas {
-        insert(ObjectType::Schema, Definition::Schema(d.clone()));
-    }
-    for d in &assembly.extensions {
-        insert(ObjectType::Extension, Definition::Extension(d.clone()));
-    }
-    for d in &assembly.languages {
-        insert(
-            ObjectType::ProceduralLanguage,
-            Definition::Language(d.clone()),
-        );
-    }
-    for d in &assembly.domains {
-        insert(ObjectType::Domain, Definition::Domain(d.clone()));
-    }
-    for d in &assembly.types {
-        insert(ObjectType::Type, Definition::Type(d.clone()));
-    }
-    for d in &assembly.sequences {
-        insert(ObjectType::Sequence, Definition::Sequence(d.clone()));
-    }
-    for d in &assembly.tables {
-        insert(ObjectType::Table, Definition::Table(d.clone()));
-    }
-    for d in &assembly.views {
-        insert(ObjectType::View, Definition::View(d.clone()));
-    }
-    for d in &assembly.materialized_views {
-        insert(
-            ObjectType::MaterializedView,
-            Definition::MaterializedView(d.clone()),
-        );
-    }
-    for d in &assembly.functions {
-        insert(ObjectType::Function, Definition::Function(d.clone()));
-    }
-    for d in &assembly.foreign_data_wrappers {
-        insert(
-            ObjectType::ForeignDataWrapper,
-            Definition::ForeignDataWrapper(d.clone()),
-        );
-    }
-    for d in &assembly.servers {
-        insert(ObjectType::Server, Definition::Server(d.clone()));
-    }
-    for d in &assembly.user_mappings {
-        insert(ObjectType::UserMapping, Definition::UserMapping(d.clone()));
-    }
-    index
+    let name = bare(&key.name);
+    let found = database
+        .keys()
+        .find(|k| {
+            k.desc == key.desc
+                && k.schema == key.schema
+                && bare(&k.name) == name
+        })
+        .cloned()?;
+    database.remove(&found)
 }
 
-/// Existence-only index over the snapshot entries that were not
-/// parsed into models (`Assembly::remaining`)
+/// Whether the database has the object that a raw `sql` item of an
+/// existence-checked type stands for. A raw statement can have no
+/// structured input types, so any object of its type, schema and bare
+/// name matches. A cast key, `(source AS target)`, has no bare name,
+/// and the cast schema requires both types, so a cast matches only by
+/// its full key.
+fn raw_exists(
+    existing: &BTreeSet<(String, String, String)>,
+    desc: ObjectType,
+    key: &(String, String, String),
+) -> bool {
+    if existing.contains(key) {
+        return true;
+    }
+    if desc == ObjectType::Cast {
+        return false;
+    }
+    let bare = existence_key(&key.0, &key.1, &key.2);
+    existing
+        .iter()
+        .any(|k| existence_key(&k.0, &k.1, &k.2) == bare)
+}
+
+/// Every object the snapshot parsed into a model, with its type
+fn snapshot_definitions(assembly: &Assembly) -> Vec<(ObjectType, Definition)> {
+    fn all<'a, T: Clone + 'a>(
+        desc: ObjectType,
+        items: &'a [T],
+        wrap: fn(T) -> Definition,
+    ) -> impl Iterator<Item = (ObjectType, Definition)> + 'a {
+        items.iter().map(move |d| (desc, wrap(d.clone())))
+    }
+    use ObjectType as O;
+    let a = assembly;
+    std::iter::empty()
+        .chain(all(O::Schema, &a.schemas, Definition::Schema))
+        .chain(all(O::Extension, &a.extensions, Definition::Extension))
+        .chain(all(
+            O::ProceduralLanguage,
+            &a.languages,
+            Definition::Language,
+        ))
+        .chain(all(O::Domain, &a.domains, Definition::Domain))
+        .chain(all(O::Type, &a.types, Definition::Type))
+        .chain(all(O::Sequence, &a.sequences, Definition::Sequence))
+        .chain(all(O::Table, &a.tables, Definition::Table))
+        .chain(all(O::View, &a.views, Definition::View))
+        .chain(all(
+            O::MaterializedView,
+            &a.materialized_views,
+            Definition::MaterializedView,
+        ))
+        .chain(all(O::Function, &a.functions, Definition::Function))
+        .chain(all(
+            O::ForeignDataWrapper,
+            &a.foreign_data_wrappers,
+            Definition::ForeignDataWrapper,
+        ))
+        .chain(all(O::Server, &a.servers, Definition::Server))
+        .chain(all(
+            O::UserMapping,
+            &a.user_mappings,
+            Definition::UserMapping,
+        ))
+        .chain(all(O::Aggregate, &a.aggregates, Definition::Aggregate))
+        .chain(all(O::Cast, &a.casts, Definition::Cast))
+        .chain(all(O::Transform, &a.transforms, Definition::Transform))
+        .chain(all(O::Collation, &a.collations, Definition::Collation))
+        .chain(all(O::Conversion, &a.conversions, Definition::Conversion))
+        .chain(all(
+            O::EventTrigger,
+            &a.event_triggers,
+            Definition::EventTrigger,
+        ))
+        .chain(all(
+            O::Publication,
+            &a.publications,
+            Definition::Publication,
+        ))
+        .chain(all(
+            O::Subscription,
+            &a.subscriptions,
+            Definition::Subscription,
+        ))
+        .chain(all(O::TextSearch, &a.text_search, Definition::TextSearch))
+        .chain(all(O::Procedure, &a.procedures, Definition::Procedure))
+        .chain(all(O::Operator, &a.operators, Definition::Operator))
+        .chain(all(O::Statistics, &a.statistics, Definition::Statistics))
+        .chain(all(
+            O::OperatorFamily,
+            &a.operator_families,
+            Definition::OperatorFamily,
+        ))
+        .chain(all(
+            O::OperatorClass,
+            &a.operator_classes,
+            Definition::OperatorClass,
+        ))
+        .chain(all(
+            O::AccessMethod,
+            &a.access_methods,
+            Definition::AccessMethod,
+        ))
+        .chain(all(
+            O::DefaultPrivileges,
+            &a.default_privileges,
+            Definition::DefaultPrivileges,
+        ))
+        .collect()
+}
+
+/// `ObjectKey → Definition` for every snapshot object whose type is
+/// compared by definition
+fn database_index(assembly: &Assembly) -> BTreeMap<ObjectKey, Definition> {
+    snapshot_definitions(assembly)
+        .into_iter()
+        .filter(|(desc, _)| compare(*desc) == Compare::Definition)
+        .map(|(desc, definition)| {
+            (ObjectKey::new(desc, &definition), definition)
+        })
+        .collect()
+}
+
+/// Existence-only index over the snapshot objects whose type is
+/// compared by existence, and the entries that were not parsed into
+/// models (`Assembly::remaining`)
 fn existence_index(assembly: &Assembly) -> BTreeSet<(String, String, String)> {
     let remaining = assembly.remaining.iter().filter_map(|r| {
         let tag = r.tag.as_deref()?;
@@ -272,176 +495,20 @@ fn existence_index(assembly: &Assembly) -> BTreeSet<(String, String, String)> {
             tag,
         ))
     });
-    // types pull models but deploy does not compare yet: they are
-    // matched by existence, like the entries it cannot model at all
-    let modeled = assembly
-        .aggregates
-        .iter()
-        .map(|d| (ObjectType::Aggregate, Definition::Aggregate(d.clone())))
-        .chain(
-            assembly
-                .casts
-                .iter()
-                .map(|d| (ObjectType::Cast, Definition::Cast(d.clone()))),
-        )
-        .chain(assembly.transforms.iter().map(|d| {
-            (ObjectType::Transform, Definition::Transform(d.clone()))
-        }))
-        .chain(assembly.collations.iter().map(|d| {
-            (ObjectType::Collation, Definition::Collation(d.clone()))
-        }))
-        .chain(assembly.conversions.iter().map(|d| {
-            (ObjectType::Conversion, Definition::Conversion(d.clone()))
-        }))
-        .chain(assembly.event_triggers.iter().map(|d| {
-            (
-                ObjectType::EventTrigger,
-                Definition::EventTrigger(d.clone()),
-            )
-        }))
-        .chain(assembly.publications.iter().map(|d| {
-            (ObjectType::Publication, Definition::Publication(d.clone()))
-        }))
-        .chain(assembly.subscriptions.iter().map(|d| {
-            (
-                ObjectType::Subscription,
-                Definition::Subscription(d.clone()),
-            )
-        }))
-        .chain(assembly.text_search.iter().map(|d| {
-            (ObjectType::TextSearch, Definition::TextSearch(d.clone()))
-        }))
-        .chain(assembly.procedures.iter().map(|d| {
-            (ObjectType::Procedure, Definition::Procedure(d.clone()))
-        }))
-        .chain(
-            assembly.operators.iter().map(|d| {
-                (ObjectType::Operator, Definition::Operator(d.clone()))
-            }),
-        )
-        .chain(assembly.statistics.iter().map(|d| {
-            (ObjectType::Statistics, Definition::Statistics(d.clone()))
-        }))
-        .chain(assembly.operator_families.iter().map(|d| {
-            (
-                ObjectType::OperatorFamily,
-                Definition::OperatorFamily(d.clone()),
-            )
-        }))
-        .chain(assembly.operator_classes.iter().map(|d| {
-            (
-                ObjectType::OperatorClass,
-                Definition::OperatorClass(d.clone()),
-            )
-        }))
-        .chain(assembly.access_methods.iter().map(|d| {
-            (
-                ObjectType::AccessMethod,
-                Definition::AccessMethod(d.clone()),
-            )
-        }))
-        .chain(assembly.default_privileges.iter().map(|d| {
-            (
-                ObjectType::DefaultPrivileges,
-                Definition::DefaultPrivileges(d.clone()),
-            )
-        }))
+    let modeled = snapshot_definitions(assembly)
+        .into_iter()
+        .filter(|(desc, _)| compare(*desc) == Compare::Existence)
         .map(|(desc, definition)| definition_existence_key(desc, &definition));
     remaining.chain(modeled).collect()
 }
 
-/// [`existence_key`] for a model. A cast has no schema: the project
-/// files it under one, and pull picks one from its types, so the two
-/// need not agree and the key leaves it out. Its name, `(source AS
-/// target)`, is kept whole, since stripping an argument list would
-/// leave every cast the same empty name, and its types canonical, so
-/// `int4` matches the `integer` pg_dump writes. An aggregate is
-/// identified by its name and its input types, so its key keeps its
-/// canonical types and one overload does not stand for another. The
-/// aggregate and operator keys remove typmods, as PostgreSQL does not
-/// keep them in an argument type (see [`identity_type`]).
+/// [`existence_key`] for a model: its [`ObjectKey`] as a tuple
 fn definition_existence_key(
     desc: ObjectType,
     definition: &Definition,
 ) -> (String, String, String) {
-    match definition {
-        Definition::Aggregate(aggregate) => {
-            let types = |args: &[crate::models::Argument]| {
-                args.iter()
-                    .map(|a| identity_type(&a.data_type))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            };
-            let direct = types(&aggregate.arguments);
-            let signature = match aggregate.order_by.as_deref() {
-                Some(order_by) => {
-                    format!("{direct} ORDER BY {}", types(order_by))
-                }
-                None if direct.is_empty() => String::from("*"),
-                None => direct,
-            };
-            (
-                desc.as_str().to_string(),
-                aggregate.schema.clone(),
-                format!("{}({signature})", aggregate.name),
-            )
-        }
-        // overloads are separate objects, keyed by their input types
-        Definition::Procedure(procedure) => (
-            desc.as_str().to_string(),
-            procedure.schema.clone(),
-            function_tag_name(&procedure.as_function()),
-        ),
-        Definition::Operator(operator) => (
-            desc.as_str().to_string(),
-            operator.schema.clone(),
-            format!(
-                "{}({}, {})",
-                operator.name,
-                identity_type(operator.left_arg.as_deref().unwrap_or("NONE")),
-                identity_type(operator.right_arg.as_deref().unwrap_or("NONE"))
-            ),
-        ),
-        // one name can be used once for each index method
-        Definition::OperatorClass(class) => (
-            desc.as_str().to_string(),
-            class.schema.clone(),
-            format!("{} USING {}", class.name, class.method),
-        ),
-        Definition::OperatorFamily(family) => (
-            desc.as_str().to_string(),
-            family.schema.clone(),
-            format!("{} USING {}", family.name, family.method),
-        ),
-        // a transform has no schema, and pull and the project may file
-        // it under different ones
-        Definition::Transform(transform) => (
-            desc.as_str().to_string(),
-            String::new(),
-            format!(
-                "FOR {} LANGUAGE {}",
-                canonical_type(&transform.data_type),
-                transform.language
-            ),
-        ),
-        Definition::Cast(cast) => {
-            let name = format!(
-                "({} AS {})",
-                canonical_type(
-                    cast.source_type.as_deref().unwrap_or_default()
-                ),
-                canonical_type(
-                    cast.target_type.as_deref().unwrap_or_default()
-                )
-            );
-            (desc.as_str().to_string(), String::new(), name)
-        }
-        _ => existence_key(
-            desc.as_str(),
-            definition.schema().unwrap_or_default(),
-            &definition.name(),
-        ),
-    }
+    let key = ObjectKey::new(desc, definition);
+    (desc.as_str().to_string(), key.schema, key.name)
 }
 
 /// Match key for existence-only comparison; argument lists are
@@ -695,6 +762,34 @@ mod tests {
     }
 
     #[test]
+    fn raw_cast_matches_only_its_own_types() {
+        let key = |desc: &str, schema: &str, name: &str| {
+            (desc.to_string(), schema.to_string(), name.to_string())
+        };
+        let existing = BTreeSet::from([
+            key("CAST", "", "(test.point_pair AS text)"),
+            key("PROCEDURE", "test", "p(integer)"),
+        ]);
+        // a different cast does not stand for the raw cast
+        assert!(!raw_exists(
+            &existing,
+            ObjectType::Cast,
+            &key("CAST", "", "(test.point_pair AS character varying)")
+        ));
+        assert!(raw_exists(
+            &existing,
+            ObjectType::Cast,
+            &key("CAST", "", "(test.point_pair AS text)")
+        ));
+        // a raw procedure with no parameters matches by its bare name
+        assert!(raw_exists(
+            &existing,
+            ObjectType::Procedure,
+            &key("PROCEDURE", "test", "p()")
+        ));
+    }
+
+    #[test]
     fn function_returns_alias_is_not_a_change() {
         let f = |returns: &str| -> Definition {
             Definition::Function(
@@ -743,5 +838,73 @@ mod tests {
                 &Definition::Function(server)
             )
         );
+    }
+
+    fn function(json: serde_json::Value) -> Definition {
+        Definition::Function(
+            serde_json::from_value(json).expect("function deserializes"),
+        )
+    }
+
+    #[test]
+    fn raw_function_takes_its_overload_by_bare_name() {
+        // a raw function has no parameter list, so its key is `f()`
+        // and the database key is `f(n integer)`
+        let db = function(serde_json::json!({
+            "name": "f",
+            "schema": "test",
+            "owner": "postgres",
+            "parameters": [
+                {"mode": "IN", "name": "n", "data_type": "integer"}
+            ],
+            "returns": "integer",
+            "language": "sql",
+            "definition": "SELECT n",
+        }));
+        let raw = function(serde_json::json!({
+            "name": "f",
+            "schema": "test",
+            "owner": "postgres",
+            "sql": "CREATE FUNCTION test.f(n integer) RETURNS integer \
+                    LANGUAGE sql AS $$SELECT n$$",
+        }));
+        assert!(raw.raw_sql());
+        let mut database = BTreeMap::new();
+        database.insert(ObjectKey::new(ObjectType::Function, &db), db);
+        assert!(take_raw(&mut database, ObjectType::Function, &raw).is_some());
+        // the database object is taken, so it is not dropped
+        assert!(database.is_empty());
+    }
+
+    #[test]
+    fn raw_table_takes_its_key() {
+        let db = Definition::Table(table("users", None));
+        let raw = Definition::Table(
+            serde_json::from_value(serde_json::json!({
+                "name": "users",
+                "schema": "test",
+                "owner": "postgres",
+                "sql": "CREATE TABLE test.users (id integer)",
+            }))
+            .expect("table deserializes"),
+        );
+        let other = Definition::Table(table("users", None));
+        let mut database = BTreeMap::new();
+        database.insert(ObjectKey::new(ObjectType::Table, &db), db);
+        assert!(take_raw(&mut database, ObjectType::Table, &raw).is_some());
+        // a second lookup finds nothing: the item was a match only once
+        assert!(take_raw(&mut database, ObjectType::Table, &other).is_none());
+    }
+
+    #[test]
+    fn skipped_types_are_not_compared() {
+        for desc in [
+            ObjectType::Group,
+            ObjectType::Role,
+            ObjectType::Tablespace,
+            ObjectType::User,
+        ] {
+            assert_eq!(compare(desc), Compare::Skip);
+        }
     }
 }

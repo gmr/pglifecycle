@@ -38,6 +38,20 @@ dump_schema() {
         | grep -v '^\\\(un\)\{0,1\}restrict '
 }
 
+# Plan the project against the target and require an empty plan; $1
+# says what the step checks
+expect_empty_plan() {
+    ./target/debug/pglifecycle deploy -o "${WORKDIR}/replan.sql" \
+        -d "${TARGET_DB}" "${WORKDIR}/project"
+    if grep -q '^-- no changes' "${WORKDIR}/replan.sql"; then
+        echo "Convergence gate passed: $1"
+    else
+        echo "Convergence gate FAILED: $1" >&2
+        cat "${WORKDIR}/replan.sql" >&2
+        exit 1
+    fi
+}
+
 echo "==> Building pglifecycle"
 cargo build --quiet
 
@@ -301,6 +315,14 @@ if [ "$(psql -d "${TARGET_DB}" -tAc "${runtime_index}")" != 0 ] \
 fi
 echo "Convergence gate passed: runtime index kept, and dropped with" \
     "--allow-drop-indexes"
+# the convergence steps for each object type, one file each, so that
+# work on separate types does not change the same lines. Each step
+# starts and ends with the target converged to the project
+for step in bin/deploy-gates.d/*.sh; do
+    echo "==> Gate 2 step: ${step##*/}"
+    # shellcheck source=/dev/null
+    source "${step}"
+done
 
 echo "==> Gate 3: safety (drops gated without --allow-drop)"
 psql -d "${TARGET_DB}" -q -v ON_ERROR_STOP=1 \
