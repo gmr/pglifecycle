@@ -424,6 +424,75 @@ pub struct Publication {
     pub comment: Option<String>,
 }
 
+/// The operations that a publication publishes by default, in the
+/// order that pg_dump writes them
+const PUBLISH_ALL: [&str; 4] = ["insert", "update", "delete", "truncate"];
+
+impl Publication {
+    /// The value that PostgreSQL uses for a parameter that is not given
+    pub fn parameter_default(key: &str) -> Option<Value> {
+        match key {
+            "publish" => Some(Value::Array(
+                PUBLISH_ALL.iter().map(|op| Value::from(*op)).collect(),
+            )),
+            "publish_via_partition_root" => Some(Value::Bool(false)),
+            "publish_generated_columns" => Some(Value::from("none")),
+            _ => None,
+        }
+    }
+
+    /// The same publication in the form deploy compares. The tables,
+    /// their columns, the schemas and the operations are sets, so each
+    /// is in a fixed order. A table name is written as PostgreSQL
+    /// resolves it, and a parameter at its default is absent. A row
+    /// filter loses the parentheses that enclose all of it, which
+    /// pg_dump adds; other than that, it is compared as text.
+    pub fn canonical(&self) -> Publication {
+        let mut tables: Vec<PublicationTable> = self
+            .tables
+            .iter()
+            .flatten()
+            .map(PublicationTable::canonical)
+            .collect();
+        tables.sort_by(|a, b| a.name().cmp(b.name()));
+        let mut schemas = self.schemas.clone().unwrap_or_default();
+        schemas.sort();
+        schemas.dedup();
+        let mut parameters = Map::new();
+        for (key, value) in self.parameters.iter().flatten() {
+            let value = match (key.as_str(), value) {
+                ("publish", Value::Array(operations)) => {
+                    let operations: Vec<String> = operations
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_lowercase)
+                        .collect();
+                    Value::Array(
+                        PUBLISH_ALL
+                            .iter()
+                            .filter(|op| operations.iter().any(|o| o == *op))
+                            .map(|op| Value::from(*op))
+                            .collect(),
+                    )
+                }
+                (_, Value::String(value)) => Value::from(value.to_lowercase()),
+                (_, value) => value.clone(),
+            };
+            if Some(&value) != Self::parameter_default(key).as_ref() {
+                parameters.insert(key.clone(), value);
+            }
+        }
+        Publication {
+            name: self.name.clone(),
+            tables: (!tables.is_empty()).then_some(tables),
+            schemas: (!schemas.is_empty()).then_some(schemas),
+            all_tables: self.all_tables.filter(|all| *all),
+            parameters: (!parameters.is_empty()).then_some(parameters),
+            comment: self.comment.clone(),
+        }
+    }
+}
+
 /// A table in a publication: its qualified name, or the name with the
 /// columns and row filter the publication limits it to
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -440,6 +509,63 @@ impl PublicationTable {
             PublicationTable::Filtered(table) => &table.name,
         }
     }
+
+    /// The table as [`Publication::canonical`] compares it: the name as
+    /// PostgreSQL resolves it, the columns in name order, and the row
+    /// filter without the parentheses that enclose all of it
+    fn canonical(&self) -> PublicationTable {
+        let name = canonical_relation(self.name());
+        let PublicationTable::Filtered(table) = self else {
+            return PublicationTable::Name(name);
+        };
+        let columns = table.columns.clone().filter(|c| !c.is_empty()).map(
+            |mut columns| {
+                columns.sort();
+                columns.dedup();
+                columns
+            },
+        );
+        let row_filter = table
+            .row_filter
+            .as_deref()
+            .map(|f| crate::utils::strip_outer_parens(f).to_string());
+        if columns.is_none() && row_filter.is_none() {
+            return PublicationTable::Name(name);
+        }
+        PublicationTable::Filtered(FilteredPublicationTable {
+            name,
+            columns,
+            row_filter,
+        })
+    }
+}
+
+/// A qualified relation name as PostgreSQL resolves it: a name that is
+/// not quoted folds to lowercase, and each part is quoted only when it
+/// must be, so `"test"."replicated"` and `TEST.replicated` are the same
+fn canonical_relation(name: &str) -> String {
+    let mut parts = vec![String::new()];
+    let mut quoted = false;
+    let mut chars = name.trim().chars().peekable();
+    while let Some(c) = chars.next() {
+        let part = parts.last_mut().expect("one part at least");
+        match c {
+            '"' if quoted && chars.peek() == Some(&'"') => {
+                chars.next();
+                part.push('"');
+            }
+            '"' => quoted = !quoted,
+            '.' if !quoted => parts.push(String::new()),
+            c if quoted => part.push(c),
+            c if c.is_whitespace() => {}
+            c => part.push(c.to_ascii_lowercase()),
+        }
+    }
+    parts
+        .iter()
+        .map(|part| crate::utils::quote_ident(part))
+        .collect::<Vec<_>>()
+        .join(".")
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -521,6 +647,88 @@ pub struct Subscription {
     pub parameters: Option<Map<String, Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
+}
+
+/// The subscription options that the catalog does not keep, as only
+/// CREATE SUBSCRIPTION reads them, and `enabled`, which pg_dump does
+/// not write: a subscription restores disabled
+const SUBSCRIPTION_CREATE_ONLY: [&str; 4] =
+    ["connect", "copy_data", "create_slot", "enabled"];
+
+impl Subscription {
+    /// The value that PostgreSQL 18 uses for an option that is not
+    /// given. The slot name is the subscription name, so it is not here.
+    pub fn parameter_default(key: &str) -> Option<Value> {
+        match key {
+            "binary" | "disable_on_error" | "failover" | "run_as_owner"
+            | "two_phase" => Some(Value::Bool(false)),
+            "password_required" => Some(Value::Bool(true)),
+            "origin" => Some(Value::from("any")),
+            "streaming" => Some(Value::from("parallel")),
+            "synchronous_commit" => Some(Value::from("off")),
+            _ => None,
+        }
+    }
+
+    /// The name of the replication slot, or `None` for `slot_name =
+    /// NONE`. The slot has the name of the subscription unless the
+    /// project gives another one.
+    pub fn slot_name(&self) -> Option<&str> {
+        match self.parameters.as_ref().and_then(|p| p.get("slot_name")) {
+            Some(Value::String(slot)) if slot.eq_ignore_ascii_case("none") => {
+                None
+            }
+            Some(Value::String(slot)) => Some(slot),
+            _ => Some(&self.name),
+        }
+    }
+
+    /// The same subscription in the form deploy compares: the
+    /// publications are a set, so they are in name order, and an option
+    /// at its default, an option that the catalog does not keep, and a
+    /// slot name that is the subscription name are absent. Streaming
+    /// and synchronous commit given as a boolean are `on` or `off`, as
+    /// pg_dump writes them.
+    pub fn canonical(&self) -> Subscription {
+        let mut parameters = Map::new();
+        for (key, value) in self.parameters.iter().flatten() {
+            if SUBSCRIPTION_CREATE_ONLY.contains(&key.as_str()) {
+                continue;
+            }
+            let value = match (key.as_str(), value) {
+                ("streaming" | "synchronous_commit", Value::Bool(on)) => {
+                    Value::from(if *on { "on" } else { "off" })
+                }
+                // NONE is a keyword; any other slot name keeps its case
+                ("slot_name", Value::String(slot))
+                    if slot.eq_ignore_ascii_case("none") =>
+                {
+                    Value::from("NONE")
+                }
+                ("slot_name", value) => value.clone(),
+                (_, Value::String(value)) => Value::from(value.to_lowercase()),
+                (_, value) => value.clone(),
+            };
+            if Some(&value) != Self::parameter_default(key).as_ref() {
+                parameters.insert(key.clone(), value);
+            }
+        }
+        if parameters.get("slot_name").and_then(Value::as_str)
+            == Some(self.name.as_str())
+        {
+            parameters.shift_remove("slot_name");
+        }
+        let mut publications = self.publications.clone();
+        publications.sort();
+        publications.dedup();
+        Subscription {
+            name: self.name.clone(),
+            connection: self.connection.clone(),
+            publications,
+            parameters: (!parameters.is_empty()).then_some(parameters),
+            comment: self.comment.clone(),
+        }
+    }
 }
 
 /// Represents a transform, which converts a data type for a
