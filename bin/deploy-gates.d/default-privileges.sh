@@ -106,6 +106,63 @@ rm "${WORKDIR}/project/tables/public/dp_probe.yaml"
 psql -d "${TARGET_DB}" -q -v ON_ERROR_STOP=1 -c "DROP TABLE public.dp_probe;"
 expect_empty_plan "default privileges changed before a new table"
 
+# a changed grant names a schema that the same deploy creates. ALTER
+# DEFAULT PRIVILEGES IN SCHEMA fails if the schema does not exist, and
+# the grant must come before the tables of that schema
+cp "${dp_file}" "${WORKDIR}/default-privileges.step.yaml"
+cat > "${dp_file}" <<'YAML'
+---
+name: postgres
+grants:
+  - schema: test
+    object_type: TABLES
+    grantee: PUBLIC
+    privileges: [SELECT]
+  - schema: test
+    object_type: SEQUENCES
+    grantee: PUBLIC
+    privileges: [USAGE]
+  - schema: dp_new
+    object_type: TABLES
+    grantee: pg_monitor
+    privileges: [SELECT]
+revocations:
+  - object_type: FUNCTIONS
+    grantee: PUBLIC
+    privileges: [EXECUTE]
+YAML
+cat > "${WORKDIR}/project/schemata/dp_new.yaml" <<'YAML'
+---
+name: dp_new
+owner: postgres
+YAML
+mkdir -p "${WORKDIR}/project/tables/dp_new"
+cat > "${WORKDIR}/project/tables/dp_new/dp_probe.yaml" <<'YAML'
+---
+name: dp_probe
+schema: dp_new
+owner: postgres
+sql: CREATE TABLE dp_new.dp_probe (id integer NOT NULL);
+YAML
+./target/debug/pglifecycle deploy --apply -d "${TARGET_DB}" \
+    "${WORKDIR}/project"
+monitor_select="SELECT has_table_privilege('pg_monitor', 'dp_new.dp_probe',
+    'SELECT')"
+if [ "$(psql -d "${TARGET_DB}" -tAc "${monitor_select}")" != t ]; then
+    echo "Convergence gate FAILED: a table made in a new schema did not" \
+        "get the default privileges of the project" >&2
+    psql -d "${TARGET_DB}" -tAc "SELECT relacl FROM pg_class
+        WHERE oid = 'dp_new.dp_probe'::regclass" >&2
+    default_acls "${TARGET_DB}" >&2
+    exit 1
+fi
+expect_empty_plan "default privileges in a new schema"
+cp "${WORKDIR}/default-privileges.step.yaml" "${dp_file}"
+rm -r "${WORKDIR}/project/schemata/dp_new.yaml" \
+    "${WORKDIR}/project/tables/dp_new"
+psql -d "${TARGET_DB}" -q -v ON_ERROR_STOP=1 -c "DROP SCHEMA dp_new CASCADE;"
+expect_empty_plan "default privileges in a new schema removed"
+
 # the project grants every table privilege to pg_monitor as a list,
 # with the grant option, and takes TRUNCATE away from the owner.
 # pg_dump writes the first as ALL, and the second as REVOKE ALL and a

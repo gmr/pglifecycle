@@ -212,9 +212,10 @@ struct Plan {
 }
 
 /// Assemble the ordered plan: DROPs for database-only objects first
-/// (reverse snapshot order), then changed default privileges, then the
-/// repo archive's entries in topological order — plain CREATEs for
-/// added objects, in-place ALTERs where a renderer exists, gated
+/// (reverse snapshot order), then changed default privileges (those in
+/// a new schema directly after its CREATE SCHEMA), then the repo
+/// archive's entries in topological order — plain CREATEs for added
+/// objects, in-place ALTERs where a renderer exists, gated
 /// drop+recreate otherwise
 fn plan(
     diff: &Diff,
@@ -286,11 +287,14 @@ fn plan(
     }
     // PostgreSQL applies default privileges only when it creates an
     // object, and the DEFAULT ACL entries of the archive come after the
-    // objects. Thus emit changed default privileges before the archive
-    // entries, so the objects that this deploy creates get the defaults
-    // of the project. The role and the schema of a changed item are in
-    // the database already. This also covers the defaults of a role
-    // with no declarations, which make no archive entry
+    // objects. Thus emit changed default privileges before the objects
+    // that this deploy creates, so that they get the defaults of the
+    // project. The role of a changed item is in the database already,
+    // but a schema can be new: a statement IN SCHEMA of a schema that
+    // this deploy creates comes directly after its CREATE SCHEMA, and
+    // the others come before the archive entries. This also covers the
+    // defaults of a role with no declarations, which make no archive
+    // entry
     let defaults: Vec<usize> = diff
         .changed
         .iter()
@@ -299,18 +303,42 @@ fn plan(
         })
         .map(|(id, _)| *id)
         .collect();
+    let new_schemas: HashSet<&str> = output
+        .dump
+        .entries()
+        .iter()
+        .filter(|entry| entry.desc == libpgdump::ObjectType::Schema)
+        .filter(|entry| {
+            output
+                .item_ids
+                .get(&entry.dump_id)
+                .and_then(|id| diff.items.get(id))
+                == Some(&Change::Added)
+        })
+        .filter_map(|entry| entry.tag.as_deref())
+        .collect();
+    let mut after_schema: HashMap<&str, Vec<(bool, Statement)>> =
+        HashMap::new();
     if !args.no_privileges {
         for id in &defaults {
             if let Some(Resolution::Statements(alters)) = resolutions.get(id) {
                 for alter in alters {
-                    push(
-                        alter.destructive,
-                        Statement {
-                            label: alter.label.clone().unwrap_or_default(),
-                            sql: alter.sql.clone(),
-                            fails_open: alter.fails_open,
-                        },
-                    );
+                    let statement = Statement {
+                        label: alter.label.clone().unwrap_or_default(),
+                        sql: alter.sql.clone(),
+                        fails_open: alter.fails_open,
+                    };
+                    match alter
+                        .schema
+                        .as_deref()
+                        .and_then(|schema| new_schemas.get(schema).copied())
+                    {
+                        Some(schema) => after_schema
+                            .entry(schema)
+                            .or_default()
+                            .push((alter.destructive, statement)),
+                        None => push(alter.destructive, statement),
+                    }
                 }
             }
         }
@@ -381,6 +409,18 @@ fn plan(
                     fails_open: false,
                 },
             );
+            // the changed default privileges in a new schema
+            if entry.desc == libpgdump::ObjectType::Schema {
+                let statements = entry
+                    .tag
+                    .as_deref()
+                    .and_then(|tag| after_schema.remove(tag));
+                for (destructive, statement) in
+                    statements.into_iter().flatten()
+                {
+                    push(destructive, statement);
+                }
+            }
             continue;
         }
         if !changes.contains(&Change::Changed)
@@ -1128,6 +1168,116 @@ mod tests {
                 "ALTER DEFAULT PRIVILEGES FOR ROLE app REVOKE SELECT ON \
                  TABLES FROM PUBLIC;\n",
                 "CREATE TABLE public.t (id integer);\n",
+            ]
+        );
+    }
+
+    /// ALTER DEFAULT PRIVILEGES IN SCHEMA fails when the schema does not
+    /// exist. A changed statement in a schema that the same deploy
+    /// creates goes directly after its CREATE SCHEMA, before the tables
+    /// of that schema and only once. A statement in a schema that the
+    /// database has goes before the archive entries
+    #[test]
+    fn changed_default_privileges_in_a_new_schema_follow_it() {
+        let defaults = |value: serde_json::Value| {
+            serde_json::from_value::<crate::models::DefaultPrivileges>(value)
+                .expect("default privileges deserialize")
+        };
+        let repo = defaults(serde_json::json!({
+            "name": "app",
+            "grants": [{"schema": "fresh", "object_type": "TABLES",
+                        "grantee": "reader", "privileges": ["SELECT"]}],
+        }));
+        let db = defaults(serde_json::json!({
+            "name": "app",
+            "grants": [{"schema": "public", "object_type": "TABLES",
+                        "grantee": "PUBLIC", "privileges": ["SELECT"]}],
+        }));
+        let mut diff = Diff {
+            items: BTreeMap::new(),
+            changed: BTreeMap::new(),
+            removed: BTreeMap::new(),
+        };
+        diff.items.insert(0, Change::Changed);
+        diff.items.insert(1, Change::Added);
+        diff.items.insert(2, Change::Added);
+        diff.changed
+            .insert(0, Definition::DefaultPrivileges(db.clone()));
+        let resolutions = BTreeMap::from([(
+            0,
+            alter::default_privileges::default_privileges(&repo, &db),
+        )]);
+        let mut dump =
+            libpgdump::new("test", "UTF8", "18.0").expect("new output dump");
+        let schema = dump
+            .add_entry(
+                libpgdump::ObjectType::Schema,
+                None,
+                Some("fresh"),
+                Some("app"),
+                Some("CREATE SCHEMA fresh;\n"),
+                None,
+                None,
+                &[],
+            )
+            .expect("add schema entry");
+        let table = dump
+            .add_entry(
+                libpgdump::ObjectType::Table,
+                Some("fresh"),
+                Some("t"),
+                Some("app"),
+                Some("CREATE TABLE fresh.t (id integer);\n"),
+                None,
+                None,
+                &[schema],
+            )
+            .expect("add table entry");
+        let acl = dump
+            .add_entry(
+                libpgdump::ObjectType::DefaultAcl,
+                Some("fresh"),
+                Some("DEFAULT PRIVILEGES FOR TABLES"),
+                Some("app"),
+                Some(
+                    "ALTER DEFAULT PRIVILEGES FOR ROLE app IN SCHEMA fresh \
+                     GRANT SELECT ON TABLES TO reader;\n",
+                ),
+                None,
+                None,
+                &[schema],
+            )
+            .expect("add default acl entry");
+        let output = build::BuildOutput {
+            dump,
+            item_ids: std::collections::HashMap::from([
+                (acl, 0),
+                (schema, 1),
+                (table, 2),
+            ]),
+        };
+        let snapshot =
+            libpgdump::new("test", "UTF8", "18.0").expect("new dump");
+        let args = match cli::Cli::parse_from(["pglifecycle", "deploy", "p"])
+            .action
+        {
+            cli::Action::Deploy(deploy) => deploy,
+            _ => unreachable!("parsed the deploy subcommand"),
+        };
+        let plan = plan(&diff, &resolutions, &output, &snapshot, &args)
+            .expect("plan succeeds");
+        assert!(plan.excluded.is_empty());
+        let sql: Vec<&str> =
+            plan.included.iter().map(|s| s.sql.as_str()).collect();
+        assert_eq!(
+            sql,
+            [
+                "ALTER DEFAULT PRIVILEGES FOR ROLE app IN SCHEMA public \
+                 REVOKE SELECT ON TABLES FROM PUBLIC;\n",
+                "CREATE SCHEMA fresh;\n",
+                "ALTER DEFAULT PRIVILEGES FOR ROLE app IN SCHEMA fresh \
+                 GRANT SELECT ON TABLES TO reader;\n",
+                "CREATE TABLE fresh.t (id integer);\n",
             ]
         );
     }

@@ -265,6 +265,7 @@ fn statements(role: &str, wanted: &Acl, existing: &Acl) -> Vec<Alter> {
                 matches!(action, Action::Revoke | Action::RevokeGrantOption);
             Alter {
                 fails_open: revoke,
+                schema: (!schema.is_empty()).then_some(schema),
                 ..Alter::new(sql).labeled(&label)
             }
         })
