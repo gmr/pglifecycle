@@ -193,4 +193,52 @@ impl Procedure {
     pub fn identity(&self) -> String {
         self.as_function().identity()
     }
+
+    /// The same procedure in the form deploy compares, where each field
+    /// that a file can write in more than one way has the form that
+    /// pull writes. PostgreSQL keeps no typmod in a parameter type,
+    /// folds the language name and a setting name to lower case, and
+    /// `INVOKER` is the default security. pull reads a default and a
+    /// setting value as text, and an empty parameter list as absent.
+    pub fn canonical(&self) -> Procedure {
+        let text = |value: &Value| match value {
+            Value::Number(_) | Value::Bool(_) => {
+                Value::String(value.to_string())
+            }
+            other => other.clone(),
+        };
+        let identity_type = crate::deploy::identity_type;
+        Procedure {
+            parameters: self
+                .parameters
+                .as_ref()
+                .filter(|parameters| !parameters.is_empty())
+                .map(|parameters| {
+                    parameters
+                        .iter()
+                        .map(|p| FunctionParameter {
+                            data_type: identity_type(&p.data_type),
+                            default: p.default.as_ref().map(text),
+                            ..p.clone()
+                        })
+                        .collect()
+                }),
+            language: self.language.as_ref().map(|l| l.to_lowercase()),
+            transform_types: self
+                .transform_types
+                .as_ref()
+                .map(|types| types.iter().map(|t| identity_type(t)).collect()),
+            security: self
+                .security
+                .clone()
+                .filter(|s| !s.eq_ignore_ascii_case("INVOKER")),
+            configuration: self.configuration.as_ref().map(|settings| {
+                settings
+                    .iter()
+                    .map(|(name, value)| (name.to_lowercase(), text(value)))
+                    .collect()
+            }),
+            ..self.clone()
+        }
+    }
 }

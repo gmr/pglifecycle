@@ -122,6 +122,16 @@ reconciled in place where PostgreSQL can express it:
   view's rules are reconciled after it. A `sql_body` is compared as
   text with the form PostgreSQL keeps, so write it as `pull` writes
   it (see [Project format](project-format.md)).
+- **Procedures** — `CREATE OR REPLACE PROCEDURE`, as for functions,
+  with the comment set after it. A procedure is matched by its name
+  and input types, so a changed input type makes the new procedure
+  and drops the old one. PostgreSQL does not let `CREATE OR REPLACE`
+  rename a parameter, change the `OUT` or `INOUT` parameters, or
+  remove a default, so such a change falls back. A type alias, a type
+  modifier (`varchar(20)` is `character varying`), the language name
+  in upper case, `security: INVOKER` (the default), and a default or
+  setting value written as a number are not changes. The body is
+  compared as text in the form that `pull` writes.
 - **Sequences** — a single `ALTER SEQUENCE` of the changed options.
 - **Domains** — set/drop default; a base-type or constraint change
   falls back.
@@ -227,7 +237,6 @@ database has it, and one that only the database has is kept:
 - operators, matched by name and argument types
 - operator classes, matched by name and index method
 - operator families, matched by name and index method
-- procedures, matched by name and input types
 - publications
 - statistics (extended statistics)
 - subscriptions

@@ -142,18 +142,23 @@ fn function_key_name(function: &crate::models::Function) -> String {
 }
 
 /// The function's parameter *types* only, in the format pg_dump's
-/// archive TOC tag uses (no argument names or modes). `deploy`'s
+/// archive TOC tag uses (no argument names, modes or typmods, see
+/// [`identity_type`]). It is also the identity of a procedure. `deploy`'s
 /// drop-ordering pass (`entry_key` in `mod.rs`) keys snapshot entries
 /// by their literal tag, which does not carry argument names, so it
 /// cannot be compared against [`function_key_name`]'s identity
-/// signature directly; this gives that pass a key in the same shape.
+/// signature directly; this gives that pass a key in the same shape. A
+/// name that has its argument list and no `parameters` keeps its list,
+/// as `build` does.
 pub(crate) fn function_tag_name(function: &crate::models::Function) -> String {
-    let args: Vec<String> = function
-        .parameters
+    let parameters = function.parameters.as_deref().unwrap_or_default();
+    if parameters.is_empty() && function.name.contains('(') {
+        return function.name.clone();
+    }
+    let args: Vec<String> = parameters
         .iter()
-        .flatten()
         .filter(|p| p.mode != "OUT" && p.mode != "TABLE")
-        .map(|p| canonical_type(&p.data_type))
+        .map(|p| identity_type(&p.data_type))
         .collect();
     format!("{}({})", function.name, args.join(", "))
 }
@@ -238,7 +243,7 @@ fn compare(desc: ObjectType) -> Compare {
         ObjectType::OperatorClass => Compare::Existence,
         ObjectType::OperatorFamily => Compare::Existence,
         ObjectType::ProceduralLanguage => Compare::Definition,
-        ObjectType::Procedure => Compare::Existence,
+        ObjectType::Procedure => Compare::Definition,
         ObjectType::Publication => Compare::Existence,
         ObjectType::Role => Compare::Skip,
         ObjectType::Schema => Compare::Definition,
@@ -533,6 +538,10 @@ fn normalized(definition: &Definition) -> Value {
     let definition = match definition {
         Definition::Table(table) => {
             canonical = Definition::Table(table.canonical());
+            &canonical
+        }
+        Definition::Procedure(procedure) => {
+            canonical = Definition::Procedure(procedure.canonical());
             &canonical
         }
         // default privileges compare by the privileges they give, so
@@ -903,6 +912,133 @@ mod tests {
         assert!(take_raw(&mut database, ObjectType::Table, &raw).is_some());
         // a second lookup finds nothing: the item was a match only once
         assert!(take_raw(&mut database, ObjectType::Table, &other).is_none());
+    }
+
+    fn procedure(json: serde_json::Value) -> Definition {
+        Definition::Procedure(
+            serde_json::from_value(json).expect("procedure deserializes"),
+        )
+    }
+
+    #[test]
+    fn procedure_short_forms_are_not_a_change() {
+        // as pull writes it
+        let pulled = procedure(serde_json::json!({
+            "name": "p",
+            "schema": "test",
+            "owner": "postgres",
+            "parameters": [
+                {"mode": "IN", "name": "label",
+                 "data_type": "character varying"},
+                {"mode": "INOUT", "name": "n", "data_type": "integer",
+                 "default": "0"},
+                {"mode": "IN", "name": "flag", "data_type": "boolean",
+                 "default": "true"},
+            ],
+            "language": "plpgsql",
+            "configuration": {
+                "search_path": "test",
+                "statement_timeout": "1000",
+            },
+            "definition": "BEGIN\n  n := 1;\nEND;",
+        }));
+        // as a person writes it
+        let written = procedure(serde_json::json!({
+            "name": "p",
+            "schema": "test",
+            "owner": "app",
+            "parameters": [
+                {"mode": "IN", "name": "label", "data_type": "VARCHAR(20)"},
+                {"mode": "INOUT", "name": "n", "data_type": "int4",
+                 "default": 0},
+                {"mode": "IN", "name": "flag", "data_type": "BOOL",
+                 "default": true},
+            ],
+            "language": "PLPGSQL",
+            "security": "INVOKER",
+            "configuration": {
+                "statement_timeout": 1000,
+                "Search_Path": "test",
+            },
+            "definition": "BEGIN\n  n := 1;\nEND;",
+        }));
+        assert_eq!(normalized(&written), normalized(&pulled));
+        assert_eq!(
+            ObjectKey::new(ObjectType::Procedure, &written),
+            ObjectKey::new(ObjectType::Procedure, &pulled)
+        );
+        // pull writes no parameters for an empty list
+        let bare = |parameters: Option<serde_json::Value>| {
+            let mut value = serde_json::json!({
+                "name": "q", "schema": "test", "owner": "postgres",
+                "language": "sql", "sql_body": "BEGIN ATOMIC\n SELECT 1;\nEND",
+            });
+            if let Some(parameters) = parameters {
+                value["parameters"] = parameters;
+            }
+            procedure(value)
+        };
+        assert_eq!(
+            normalized(&bare(Some(serde_json::json!([])))),
+            normalized(&bare(None))
+        );
+    }
+
+    #[test]
+    fn procedure_changes_are_changes() {
+        let p = |security: &str, body: &str| {
+            procedure(serde_json::json!({
+                "name": "p", "schema": "test", "owner": "postgres",
+                "language": "sql", "security": security,
+                "definition": body,
+            }))
+        };
+        assert_ne!(
+            normalized(&p("DEFINER", "SELECT 1;")),
+            normalized(&p("INVOKER", "SELECT 1;"))
+        );
+        assert_ne!(
+            normalized(&p("DEFINER", "SELECT 1;")),
+            normalized(&p("DEFINER", "SELECT 2;"))
+        );
+    }
+
+    #[test]
+    fn procedure_key_is_the_archive_tag() {
+        // pg_dump tags a procedure with its input types: an INOUT
+        // parameter is one, an OUT parameter is not
+        let p = procedure(serde_json::json!({
+            "name": "archive_before",
+            "schema": "test",
+            "owner": "postgres",
+            "parameters": [
+                {"mode": "IN", "name": "days", "data_type": "integer"},
+                {"mode": "INOUT", "name": "archived", "data_type": "integer"},
+                {"mode": "OUT", "name": "total", "data_type": "bigint"},
+            ],
+            "language": "sql",
+            "definition": "SELECT 1, 2",
+        }));
+        assert_eq!(
+            ObjectKey::new(ObjectType::Procedure, &p).name,
+            "archive_before(integer, integer)"
+        );
+        // a name that has its argument list and no parameters keeps
+        // its list, and a bare name gets an empty list
+        let named = |name: &str| {
+            procedure(serde_json::json!({
+                "name": name, "schema": "test", "owner": "postgres",
+                "language": "sql", "definition": "SELECT 1",
+            }))
+        };
+        assert_eq!(
+            ObjectKey::new(ObjectType::Procedure, &named("q(integer)")).name,
+            "q(integer)"
+        );
+        assert_eq!(
+            ObjectKey::new(ObjectType::Procedure, &named("q")).name,
+            "q()"
+        );
     }
 
     #[test]
