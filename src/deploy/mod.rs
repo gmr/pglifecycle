@@ -54,6 +54,12 @@ pub fn deploy(args: &cli::Deploy) -> Result<(), String> {
     )?;
     let task = progress::spinner("Diffing project against database");
     let mut diff = diff::diff(&project, &assembly);
+    // --no-privileges keeps the default privileges that a dump has
+    if args.no_privileges {
+        diff.removed.retain(|key, _| {
+            key.desc != constants::ObjectType::DefaultPrivileges
+        });
+    }
     let groups = partition_index_groups(&project, &mut diff);
     let resolutions = resolutions(&project, &diff, &groups);
     task.finish();
@@ -257,7 +263,7 @@ fn plan(
                 Statement {
                     label: key.to_string(),
                     sql: drop_sql(key, diff.removed.get(key)),
-                    fails_open: false,
+                    fails_open: drop_fails_open(diff.removed.get(key)),
                 },
             );
         }
@@ -272,7 +278,7 @@ fn plan(
                 Statement {
                     label: key.to_string(),
                     sql: drop_sql(key, Some(definition)),
-                    fails_open: false,
+                    fails_open: drop_fails_open(Some(definition)),
                 },
             );
         }
@@ -587,8 +593,17 @@ fn render_script(plan: &Plan, project: &str, source: &str) -> String {
 
 /// `DROP <type> IF EXISTS <name>` for a database-only object. User
 /// mappings are keyed by their user but dropped per server, so they
-/// render from the definition; everything else needs only the key.
+/// render from the definition. Default privileges have no DROP: the
+/// REVOKE and GRANT statements that give the role the built-in
+/// privileges again take their place. Everything else needs only the
+/// key.
 fn drop_sql(key: &ObjectKey, definition: Option<&Definition>) -> String {
+    if let Some(Definition::DefaultPrivileges(defaults)) = definition {
+        return alter::default_privileges::removal(defaults)
+            .into_iter()
+            .map(|alter| alter.sql)
+            .collect();
+    }
     if let Some(Definition::UserMapping(mapping)) = definition {
         return mapping
             .servers
@@ -632,6 +647,20 @@ fn drop_sql(key: &ObjectKey, definition: Option<&Definition>) -> String {
     format!("DROP {} IF EXISTS {qualified};\n", key.desc.as_str())
 }
 
+/// Withholding the drop of a database-only object can leave the
+/// database allowing access that the project does not: the removal of
+/// default privileges that REVOKEs a grant
+fn drop_fails_open(definition: Option<&Definition>) -> bool {
+    match definition {
+        Some(Definition::DefaultPrivileges(defaults)) => {
+            alter::default_privileges::removal(defaults)
+                .iter()
+                .any(|alter| alter.fails_open)
+        }
+        _ => false,
+    }
+}
+
 /// The key a removed object is looked up under when matching archive
 /// entries for drop ordering: functions use the tag-shaped signature
 /// ([`diff::function_tag_name`]) so they compare equal to
@@ -670,6 +699,15 @@ fn entry_key(entry: &libpgdump::Entry) -> Option<ObjectKey> {
         OT::Type => constants::ObjectType::Type,
         OT::UserMapping => constants::ObjectType::UserMapping,
         OT::View => constants::ObjectType::View,
+        // a DEFAULT ACL entry is tagged by its object type; the item is
+        // the role, which is the entry's owner
+        OT::DefaultAcl => {
+            return Some(ObjectKey {
+                desc: constants::ObjectType::DefaultPrivileges,
+                schema: String::new(),
+                name: entry.owner.clone()?,
+            });
+        }
         _ => return None,
     };
     let schema = match desc {
@@ -833,6 +871,72 @@ mod tests {
              dependency), which requires the removed main() to be \
              matched by the ordered pass despite its named-parameter \
              key diverging from the archive tag"
+        );
+    }
+
+    /// The default privileges of a role that only the database has are
+    /// keyed by the owner of their DEFAULT ACL entries, and their
+    /// removal is withheld without --allow-drop, with a warning
+    #[test]
+    fn removed_default_privileges_are_withheld_and_fail_open() {
+        let defaults: crate::models::DefaultPrivileges =
+            serde_json::from_value(serde_json::json!({
+                "name": "app",
+                "grants": [{"object_type": "TABLES", "grantee": "PUBLIC",
+                            "privileges": ["SELECT"]}],
+            }))
+            .expect("default privileges deserialize");
+        let definition = Definition::DefaultPrivileges(defaults);
+        let key = ObjectKey::new(
+            constants::ObjectType::DefaultPrivileges,
+            &definition,
+        );
+        let mut diff = Diff {
+            items: BTreeMap::new(),
+            changed: BTreeMap::new(),
+            removed: BTreeMap::new(),
+        };
+        diff.removed.insert(key.clone(), definition);
+        let mut snapshot =
+            libpgdump::new("test", "UTF8", "18.0").expect("new dump");
+        snapshot
+            .add_entry(
+                libpgdump::ObjectType::DefaultAcl,
+                None,
+                Some("DEFAULT PRIVILEGES FOR TABLES"),
+                Some("app"),
+                None,
+                None,
+                None,
+                &[],
+            )
+            .expect("add default acl entry");
+        let entry = snapshot
+            .entries()
+            .iter()
+            .find(|e| e.desc == libpgdump::ObjectType::DefaultAcl)
+            .expect("default acl entry");
+        assert_eq!(entry_key(entry), Some(key.clone()));
+        let output = build::BuildOutput {
+            dump: libpgdump::new("test", "UTF8", "18.0")
+                .expect("new output dump"),
+            item_ids: std::collections::HashMap::new(),
+        };
+        let cli = cli::Cli::parse_from(["pglifecycle", "deploy", "proj"]);
+        let args = match cli.action {
+            cli::Action::Deploy(deploy) => deploy,
+            _ => unreachable!("parsed the deploy subcommand"),
+        };
+        let plan = plan(&diff, &BTreeMap::new(), &output, &snapshot, &args)
+            .expect("plan succeeds");
+        assert!(plan.included.is_empty());
+        assert_eq!(plan.excluded.len(), 1);
+        assert_eq!(plan.excluded[0].label, "DEFAULT PRIVILEGES app");
+        assert!(plan.excluded[0].fails_open);
+        assert_eq!(
+            plan.excluded[0].sql,
+            "ALTER DEFAULT PRIVILEGES FOR ROLE app REVOKE SELECT ON TABLES \
+             FROM PUBLIC;\n"
         );
     }
 

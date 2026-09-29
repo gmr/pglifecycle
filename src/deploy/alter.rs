@@ -17,6 +17,8 @@
 //! `alter/publication.rs`, so that work on separate types does not
 //! change the same lines.
 
+pub(crate) mod default_privileges;
+
 use serde_json::{Map, Value};
 
 use crate::build;
@@ -220,6 +222,10 @@ pub(crate) fn resolve_with(
         (Definition::UserMapping(repo), Definition::UserMapping(db)) => {
             user_mapping(repo, db)
         }
+        (
+            Definition::DefaultPrivileges(repo),
+            Definition::DefaultPrivileges(db),
+        ) => default_privileges::default_privileges(repo, db),
         _ => Resolution::Replace,
     }
 }

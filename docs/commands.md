@@ -192,6 +192,22 @@ database keeps the old policy, which can allow more than the project
 does. The script header names each one with a `-- WARNING:` line, and
 the stderr report says the same.
 
+Default privileges compare by the privileges that they give to each
+role, schema and object type, not by the statements as written. `ALL`
+is the full list of the object type (for tables, the PostgreSQL 17
+list with `MAINTAIN`), `ROUTINES` is `FUNCTIONS`, the case of a
+privilege and of `PUBLIC` is not a difference, and neither is the
+order. The built-in privileges count too: the owner has all of them,
+and `PUBLIC` has `EXECUTE` on functions and `USAGE` on types, so
+`REVOKE EXECUTE` matches the `REVOKE ALL` that pg_dump writes. deploy
+emits `ALTER DEFAULT PRIVILEGES FOR ROLE … GRANT` or `… REVOKE` for
+the difference only. They change only the objects that the role makes
+later, so neither is gated. A role whose default privileges only the
+database has gets the statements that give it the built-in privileges
+again; like a drop, they are gated. When they revoke a grant, the
+script header warns that the database can allow access the project
+does not. With `-x`, deploy does not change default privileges.
+
 Ownership is not managed (the script behaves like
 `pg_restore --no-owner`), and roles, users, groups, and tablespaces are
 skipped entirely — they are cluster-level objects a single-database
@@ -207,7 +223,6 @@ database has it, and one that only the database has is kept:
 - casts
 - collations
 - conversions
-- default privileges
 - event triggers
 - operators, matched by name and argument types
 - operator classes, matched by name and index method
