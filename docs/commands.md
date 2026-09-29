@@ -119,7 +119,9 @@ reconciled in place where PostgreSQL can express it:
   database has it.
 - **Functions and views** — `CREATE OR REPLACE` (a function whose
   return type changed must be dropped first, so it falls back). A
-  view's rules are reconciled after it.
+  view's rules are reconciled after it. A `sql_body` is compared as
+  text with the form PostgreSQL keeps, so write it as `pull` writes
+  it (see [Project format](project-format.md)).
 - **Sequences** — a single `ALTER SEQUENCE` of the changed options.
 - **Domains** — set/drop default; a base-type or constraint change
   falls back.
