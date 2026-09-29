@@ -36,6 +36,8 @@ use crate::utils::{
     dollar_quote, postgres_value, quote_ident, raw_value, user_mapping_subject,
 };
 
+mod procedure;
+
 /// One reconciliation statement
 pub(crate) struct Alter {
     pub sql: String,
@@ -215,6 +217,9 @@ pub(crate) fn resolve_with(
             }
         }
         (Definition::View(repo), Definition::View(db)) => view(repo, db),
+        (Definition::Procedure(repo), Definition::Procedure(db)) => {
+            procedure::procedure(repo, db)
+        }
         (
             Definition::ForeignDataWrapper(repo),
             Definition::ForeignDataWrapper(db),

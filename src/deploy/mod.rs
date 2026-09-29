@@ -635,11 +635,16 @@ fn drop_sql(key: &ObjectKey, definition: Option<&Definition>) -> String {
             })
             .collect();
     }
-    // a function is named by its quoted name and its input types,
-    // which is all that DROP FUNCTION reads; a function key is an
-    // identity signature, so it is not quoted whole
-    let name = match (key.desc, definition) {
-        (_, Some(Definition::Function(f))) => {
+    // a function or a procedure is named by its quoted name and its
+    // input types, which is all that DROP FUNCTION reads; a function key
+    // is an identity signature, so it is not quoted whole
+    let routine = match definition {
+        Some(Definition::Function(f)) => Some(f.clone()),
+        Some(Definition::Procedure(p)) => Some(p.as_function()),
+        _ => None,
+    };
+    let name = match (key.desc, routine) {
+        (_, Some(f)) => {
             let types: Vec<&str> = f
                 .parameters
                 .iter()
@@ -668,7 +673,8 @@ fn drop_sql(key: &ObjectKey, definition: Option<&Definition>) -> String {
 /// The key a removed object is looked up under when matching archive
 /// entries for drop ordering: functions use the tag-shaped signature
 /// ([`diff::function_tag_name`]) so they compare equal to
-/// `entry_key`'s output; everything else uses its own key unchanged
+/// `entry_key`'s output; everything else uses its own key unchanged (a
+/// procedure key is already tag-shaped, see `diff::object_identity`)
 fn drop_match_key(key: &ObjectKey, definition: &Definition) -> ObjectKey {
     match definition {
         Definition::Function(f) => ObjectKey {
@@ -696,6 +702,7 @@ fn entry_key(entry: &libpgdump::Entry) -> Option<ObjectKey> {
         OT::Function => constants::ObjectType::Function,
         OT::MaterializedView => constants::ObjectType::MaterializedView,
         OT::ProceduralLanguage => constants::ObjectType::ProceduralLanguage,
+        OT::Procedure => constants::ObjectType::Procedure,
         OT::Publication => constants::ObjectType::Publication,
         OT::Schema => constants::ObjectType::Schema,
         OT::Sequence => constants::ObjectType::Sequence,
@@ -930,6 +937,52 @@ mod tests {
             .map(|key| key.to_string())
             .collect();
         assert_eq!(keys, vec!["PUBLICATION pub", "SUBSCRIPTION sub"]);
+    }
+
+    /// A database-only procedure is keyed by its archive tag, so it
+    /// drops in dependency order, and its drop quotes its names and
+    /// has its input types only
+    #[test]
+    fn removed_procedure_drops_by_its_tag() {
+        let procedure: crate::models::Procedure =
+            serde_json::from_value(serde_json::json!({
+                "name": "Stray Proc",
+                "schema": "Quoted Schema",
+                "owner": "postgres",
+                "parameters": [
+                    {"mode": "IN", "name": "Arg", "data_type": "integer"},
+                    {"mode": "OUT", "name": "b", "data_type": "text"},
+                ],
+                "language": "sql",
+                "definition": "SELECT 'x'",
+            }))
+            .expect("procedure deserializes");
+        let definition = Definition::Procedure(procedure);
+        let key =
+            ObjectKey::new(constants::ObjectType::Procedure, &definition);
+        let mut snapshot =
+            libpgdump::new("test", "UTF8", "18.0").expect("new dump");
+        snapshot
+            .add_entry(
+                libpgdump::ObjectType::Procedure,
+                Some("Quoted Schema"),
+                Some("Stray Proc(integer)"),
+                None,
+                None,
+                None,
+                None,
+                &[],
+            )
+            .expect("add procedure entry");
+        assert_eq!(
+            snapshot.entries().iter().rev().find_map(entry_key),
+            Some(drop_match_key(&key, &definition))
+        );
+        assert_eq!(
+            drop_sql(&key, Some(&definition)),
+            "DROP PROCEDURE IF EXISTS \"Quoted Schema\".\"Stray \
+             Proc\"(integer);\n"
+        );
     }
 
     /// A kept index drop with a newline in its quoted name must stay
