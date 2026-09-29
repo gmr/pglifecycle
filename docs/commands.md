@@ -96,6 +96,9 @@ reconciled in place where PostgreSQL can express it:
   group is removed, deploy drops the partitioned table's index, then
   makes all of them again and attaches them. A change to the comment
   only does not rebuild the group.
+  A changed generated expression is set with `ALTER COLUMN ... SET
+  EXPRESSION` (PostgreSQL 17 and later); a change between stored and
+  virtual, or to or from a plain column, falls back.
   Identity columns are added, and their `ALWAYS`/`BY DEFAULT` behavior
   and sequence options changed, with `ALTER COLUMN`; renaming an
   identity's sequence falls back. A `NOT VALID` check, foreign key or

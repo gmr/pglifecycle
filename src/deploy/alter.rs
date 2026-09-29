@@ -19,9 +19,9 @@ use crate::deploy::diff::canonical_type;
 use crate::models::{
     CheckConstraint, Column, ColumnDefault, ColumnGenerated, ColumnNotNull,
     Definition, Domain, ExcludeConstraint, Extension, ForeignDataWrapper,
-    ForeignKey, Function, Index, NotNullConstraint, Policy, ReplicaIdentity,
-    Rule, Schema, Sequence, SequenceOptions, Server, Table, Trigger, Type,
-    UserMapping, View, ViewColumn,
+    ForeignKey, Function, GeneratedKind, Index, NotNullConstraint, Policy,
+    ReplicaIdentity, Rule, Schema, Sequence, SequenceOptions, Server, Table,
+    Trigger, Type, UserMapping, View, ViewColumn,
 };
 use crate::project::split_sql_name;
 use crate::utils::{
@@ -862,13 +862,33 @@ fn alter_column(
     // recreate the table, and its rows, to change a sequence option.
     let identities = is_identity_or_none(&repo.generated)
         && is_identity_or_none(&db.generated);
+    // a generated column whose expression alone changed is changed in
+    // place (PostgreSQL 17+); a change of kind, or to or from a plain
+    // column, needs a rebuild
+    let expression =
+        match (generated_expression(repo), generated_expression(db)) {
+            (Some(wanted), Some(existing)) if wanted.1 == existing.1 => {
+                (wanted.0 != existing.0).then_some(wanted.0)
+            }
+            (None, None) => None,
+            _ => return false,
+        };
     if repo.collation != db.collation
-        || (!identities && repo.generated != db.generated)
+        || (!identities
+            && expression.is_none()
+            && generated_expression(repo).is_none()
+            && repo.generated != db.generated)
         || repo.check_constraint != db.check_constraint
     {
         return false;
     }
     let column = quote_ident(&repo.name);
+    if let Some(expression) = expression {
+        alters.push(Alter::new(format!(
+            "ALTER TABLE {table} ALTER COLUMN {column} SET EXPRESSION AS \
+             ({expression});\n"
+        )));
+    }
     // DROP IDENTITY goes first: PostgreSQL rejects SET DEFAULT and DROP
     // NOT NULL on a column that is still an identity. The statements
     // that depend on the drop are gated with it, so a script without
@@ -1046,6 +1066,19 @@ fn column_attributes(
         alters
             .push(Alter::new(format!("{prefix} SET ({});\n", set.join(", "))));
     }
+}
+
+/// The expression of a generated column, without the parentheses that
+/// enclose all of it, and its kind. A kind the project leaves out is
+/// stored, as the build renders it. `None` for a plain or identity
+/// column.
+fn generated_expression(column: &Column) -> Option<(&str, GeneratedKind)> {
+    let generated = column.generated.as_ref()?;
+    let expression = generated.expression.as_deref()?;
+    Some((
+        crate::utils::strip_outer_parens(expression),
+        generated.kind.unwrap_or(GeneratedKind::Stored),
+    ))
 }
 
 fn is_identity_or_none(generated: &Option<ColumnGenerated>) -> bool {
@@ -2599,6 +2632,45 @@ mod tests {
             alters.iter().map(|a| a.index_removal).collect::<Vec<_>>(),
             vec![true, false]
         );
+    }
+
+    #[test]
+    fn a_changed_generated_expression_is_set_in_place() {
+        let generated = |expression: &str, kind: Option<&str>| {
+            let mut column = serde_json::json!({
+                "name": "revoked",
+                "data_type": "boolean",
+                "generated": {"expression": expression},
+            });
+            if let Some(kind) = kind {
+                column["generated"]["kind"] = kind.into();
+            }
+            column
+        };
+        let with = |column| {
+            let mut table = base_table();
+            table["columns"] = serde_json::json!([column]);
+            parse_table(table)
+        };
+        // no enclosing parentheses and no kind: the same column
+        let alters = statements(table(
+            &with(generated("revoked_at IS NOT NULL", None)),
+            &with(generated("(revoked_at IS NOT NULL)", Some("stored"))),
+        ));
+        assert!(sql(&alters).is_empty(), "{:?}", sql(&alters));
+        // another expression: SET EXPRESSION, not a rebuild
+        let alters = statements(table(
+            &with(generated("(revoked_at IS NULL)", Some("stored"))),
+            &with(generated("(revoked_at IS NOT NULL)", Some("stored"))),
+        ));
+        assert_eq!(
+            sql(&alters),
+            vec![
+                "ALTER TABLE test.users ALTER COLUMN revoked SET EXPRESSION \
+                 AS (revoked_at IS NULL);\n"
+            ]
+        );
+        assert!(alters.iter().all(|a| !a.destructive));
     }
 
     #[test]

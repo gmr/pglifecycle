@@ -224,38 +224,49 @@ pub(crate) fn column(node: &Node, src: &str) -> Column {
         options: None,
         comment: None,
     };
+    // each keyword test looks at the constraint's own children: an
+    // expression below it can hold the same keywords, as a generated
+    // column or a check on `x IS NOT NULL` does
+    let own = |constraint: &Node, kind: &str| {
+        constraint.child_of_kind(kind).is_some()
+    };
     for constraint in node.find_all("ColConstraintElem") {
-        if constraint.has("kw_default") {
+        if own(&constraint, "kw_default") {
             if let Some(expr) = constraint.child_of_kind("b_expr") {
                 column.default =
                     Some(serde_json::Value::String(expr.text(src).into()));
             }
-        } else if constraint.has("kw_not") && constraint.has("kw_null") {
+        } else if own(&constraint, "kw_not") && own(&constraint, "kw_null") {
             column.nullable = Some(false);
-        } else if constraint.has("kw_check") {
+        } else if own(&constraint, "kw_check") {
             if let Some(expr) = constraint.find("a_expr") {
                 column.check_constraint = Some(expr.text(src).to_string());
             }
-        } else if constraint.has("kw_identity") {
+        } else if own(&constraint, "kw_identity") {
             // the column parser has no table, so a sequence name here
             // is kept as written rather than compared with the one
             // PostgreSQL would generate. pg_dump never writes this
             // inline form; it writes the ALTER TABLE handled below.
             column.generated =
                 Some(identity(&constraint, src, None, &column.name));
-        } else if constraint.has("kw_generated")
-            && let Some(expr) = constraint.find("a_expr")
+        } else if own(&constraint, "kw_generated")
+            && let Some(expr) = constraint.child_of_kind("a_expr")
         {
             // PostgreSQL 18 made VIRTUAL the default, so pg_dump
             // writes the keyword only for a stored column; an absent
             // one means virtual rather than unknown
             column.generated = Some(ColumnGenerated {
                 expression: Some(expr.text(src).to_string()),
-                kind: Some(if constraint.has("kw_stored") {
-                    GeneratedKind::Stored
-                } else {
-                    GeneratedKind::Virtual
-                }),
+                kind: Some(
+                    if constraint
+                        .child_of_kind("opt_virtual_or_stored")
+                        .is_some_and(|kind| kind.has("kw_stored"))
+                    {
+                        GeneratedKind::Stored
+                    } else {
+                        GeneratedKind::Virtual
+                    },
+                ),
                 sequence: None,
                 sequence_behavior: None,
                 sequence_options: None,
@@ -275,7 +286,7 @@ pub(crate) fn column(node: &Node, src: &str) -> Column {
         let Some(elem) = qual.child_of_kind("ColConstraintElem") else {
             continue;
         };
-        if !(elem.has("kw_not") && elem.has("kw_null")) {
+        if !(own(&elem, "kw_not") && own(&elem, "kw_null")) {
             continue;
         }
         // pg_dump prints the name only when it is not the generated
@@ -1757,6 +1768,27 @@ mod tests {
         assert_eq!(fk.on_delete, Some("SET NULL".into()));
         assert_eq!(fk.on_delete_columns, Some(vec!["folder".into()]));
         assert_eq!(fk.on_update, Some("SET DEFAULT".into()));
+    }
+
+    #[test]
+    fn a_generated_is_not_null_is_not_a_not_null_constraint() {
+        let Statement::CreateTable(table) = parse_one(
+            "CREATE TABLE s.t (a integer, b boolean GENERATED ALWAYS AS \
+             ((a IS NOT NULL)) STORED, c integer CHECK (c IS NOT NULL));",
+        ) else {
+            panic!("expected CreateTable")
+        };
+        let columns = table.columns.unwrap();
+        assert_eq!(columns[1].nullable, None);
+        assert_eq!(
+            columns[1].generated.as_ref().unwrap().expression.as_deref(),
+            Some("(a IS NOT NULL)")
+        );
+        assert_eq!(columns[2].nullable, None);
+        assert_eq!(
+            columns[2].check_constraint.as_deref(),
+            Some("c IS NOT NULL")
+        );
     }
 
     #[test]
