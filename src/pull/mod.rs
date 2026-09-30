@@ -1442,15 +1442,6 @@ impl Assembly {
             Statement::CreateRole(def) => self.merge_role(def, true),
             Statement::AlterRole(def) => self.merge_role(def, false),
             Statement::AlterRoleSetting { role, name, value } => {
-                // a single element stays a scalar; a list (e.g.
-                // search_path) keeps its elements so it round-trips as
-                // `SET search_path TO a, b` rather than one bogus value
-                let value = match value.as_slice() {
-                    [single] => Value::String(single.clone()),
-                    _ => Value::Array(
-                        value.into_iter().map(Value::String).collect(),
-                    ),
-                };
                 self.role(&role).settings.insert(name, value);
             }
             Statement::RoleMembership {
@@ -3724,7 +3715,9 @@ mod tests {
     /// Role settings survive the full pull → write → load → build
     /// path: emitted in the schema's array-of-objects shape (so the
     /// project validates and loads), then rendered back as
-    /// `ALTER ROLE ... SET` entries in the build archive
+    /// `ALTER ROLE ... SET` entries in the build archive. pg_dumpall
+    /// writes each element of a list setting as its own string
+    /// constant, and the build writes them back in the same form.
     #[test]
     fn role_settings_round_trip_through_build() {
         use clap::Parser;
@@ -3735,7 +3728,10 @@ mod tests {
         assembly
             .ingest_roles(
                 "CREATE ROLE app;\n\
-                 ALTER ROLE app SET search_path TO test, public;\n\
+                 ALTER ROLE app SET search_path TO '$user', 'my schema', \
+                 'public';\n\
+                 ALTER ROLE app SET temp_tablespaces TO 'a,b';\n\
+                 ALTER ROLE app SET application_name TO 'x, y';\n\
                  ALTER ROLE app SET work_mem TO '64MB';\n",
             )
             .unwrap();
@@ -3774,16 +3770,19 @@ mod tests {
             .expect("app role");
         assert_eq!(
             role.settings,
-            Some(vec![
-                serde_json::from_value(serde_json::json!({
-                    "search_path": ["test", "public"]
-                }))
-                .unwrap(),
-                serde_json::from_value(serde_json::json!({
-                    "work_mem": "64MB"
-                }))
-                .unwrap(),
-            ])
+            Some(
+                [
+                    serde_json::json!({"application_name": "x, y"}),
+                    serde_json::json!({
+                        "search_path": ["$user", "my schema", "public"]
+                    }),
+                    serde_json::json!({"temp_tablespaces": ["a,b"]}),
+                    serde_json::json!({"work_mem": "64MB"}),
+                ]
+                .into_iter()
+                .map(|s| serde_json::from_value(s).unwrap())
+                .collect()
+            )
         );
 
         let archive = dir.path().join("settings.dump");
@@ -3798,7 +3797,10 @@ mod tests {
         assert_eq!(
             settings,
             vec![
-                "ALTER ROLE app SET search_path TO test, public;\n",
+                "ALTER ROLE app SET application_name TO 'x, y';\n",
+                "ALTER ROLE app SET search_path TO '$user', 'my schema', \
+                 'public';\n",
+                "ALTER ROLE app SET temp_tablespaces TO 'a,b';\n",
                 "ALTER ROLE app SET work_mem TO '64MB';\n",
             ]
         );

@@ -39,37 +39,60 @@ pub fn validate_object(obj_type: &str, name: &str, data: &Value) -> bool {
         );
         valid = false;
     }
-    if matches!(obj_type, "function" | "procedure") {
-        valid &= routine_settings(obj_type, name, data);
+    // (path, name, value) of each setting of a routine, a role or a
+    // user
+    let settings: Vec<(String, &String, &Value)> =
+        match obj_type {
+            "function" | "procedure" => data["configuration"]
+                .as_object()
+                .into_iter()
+                .flatten()
+                .map(|(k, v)| (format!("/configuration/{k}"), k, v))
+                .collect(),
+            "role" | "user" => data["settings"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .enumerate()
+                .flat_map(|(i, object)| {
+                    object.as_object().into_iter().flatten().map(
+                        move |(k, v)| (format!("/settings/{i}/{k}"), k, v),
+                    )
+                })
+                .collect(),
+            _ => vec![],
+        };
+    for (path, setting, value) in settings {
+        if let Some(error) = setting_error(setting, value) {
+            log::error!(
+                "Validation error for {obj_type} {name}: {error} at {path}"
+            );
+            valid = false;
+        }
     }
     valid
 }
 
-/// Log each routine setting that has a form PostgreSQL does not keep.
+/// The error for a setting that has a form PostgreSQL does not keep.
 /// For a setting that PostgreSQL keeps as a list, one string with a
-/// comma is one name, not a list. pg_dump writes each other setting as
-/// one string, so a list for it does not pull back as a list.
-fn routine_settings(obj_type: &str, name: &str, data: &Value) -> bool {
-    let mut valid = true;
-    let settings = data["configuration"].as_object().into_iter().flatten();
-    for (setting, value) in settings {
-        let error = match (is_list_setting(setting), value) {
-            (true, Value::String(text)) if text.contains(',') => format!(
-                "{setting} is a list: write each name as a list item, \
-                 not one string with commas"
-            ),
-            (false, Value::Array(_)) => format!(
-                "{setting} is not a list: write its value as one string"
-            ),
-            _ => continue,
-        };
-        log::error!(
-            "Validation error for {obj_type} {name}: {error} at \
-             /configuration/{setting}"
-        );
-        valid = false;
+/// comma is one name, not a list. pg_dump and pg_dumpall write each
+/// other setting as one string, so a list for it does not pull back as
+/// a list. SET takes no empty list.
+fn setting_error(setting: &str, value: &Value) -> Option<String> {
+    match (is_list_setting(setting), value) {
+        (true, Value::Array(items)) if items.is_empty() => Some(format!(
+            "{setting} is an empty list: write at least one name, or \
+             write '' for an empty value"
+        )),
+        (true, Value::String(text)) if text.contains(',') => Some(format!(
+            "{setting} is a list: write each name as a list item, not one \
+             string with commas"
+        )),
+        (false, Value::Array(_)) => Some(format!(
+            "{setting} is not a list: write its value as one string"
+        )),
+        _ => None,
     }
-    valid
 }
 
 /// Load a schema by object type stem, merging `$package_schema`
@@ -307,6 +330,36 @@ mod tests {
             assert!(routine(kind, "statement_timeout", json!(1000)));
             assert!(routine(kind, "enable_seqscan", json!(false)));
             assert!(!routine(kind, "DateStyle", json!(["iso", "mdy"])));
+            assert!(!routine(kind, "search_path", json!([])));
+        }
+    }
+
+    /// The settings of a role or a user have the same forms as the
+    /// settings of a routine
+    #[test]
+    fn role_settings_are_lists_only_where_postgres_keeps_lists() {
+        let role = |kind: &str, name: &str, value: Value| {
+            let data = json!({
+                "name": "r",
+                "settings": [{"work_mem": "64MB"}, {name: value}],
+            });
+            validate_object(kind, "r", &data)
+        };
+        for kind in ["role", "user"] {
+            assert!(role(kind, "search_path", json!(["$user", "my schema"])));
+            assert!(role(kind, "search_path", json!("pg_catalog")));
+            assert!(role(kind, "search_path", json!(["a,b"])));
+            assert!(role(kind, "search_path", json!("")));
+            assert!(!role(kind, "search_path", json!("$user, public")));
+            assert!(!role(kind, "Search_Path", json!("pg_catalog,a")));
+            assert!(!role(kind, "temp_tablespaces", json!("a, b")));
+            assert!(!role(kind, "search_path", json!([1])));
+            assert!(!role(kind, "search_path", json!({"a": "b"})));
+            assert!(!role(kind, "search_path", json!([])));
+            assert!(role(kind, "DateStyle", json!("iso, mdy")));
+            assert!(role(kind, "statement_timeout", json!(1000)));
+            assert!(role(kind, "enable_seqscan", json!(false)));
+            assert!(!role(kind, "DateStyle", json!(["iso", "mdy"])));
         }
     }
 

@@ -174,12 +174,13 @@ fn apply_common_option(function: &mut Function, node: &Node, src: &str) {
     }
 }
 
-/// The name and the value of a SET clause, `name TO value [, ...]`.
-/// pg_dump writes each element of a list setting as its own string
-/// constant, so a value with more than one element is a list of them.
-/// A list setting whose one element has a comma is also a list, because
-/// the project refuses that setting as one string with a comma.
-fn setting(node: &Node, src: &str) -> Option<(String, Value)> {
+/// The name and the value of a SET clause, `name TO value [, ...]`, of
+/// a routine or of ALTER ROLE. pg_dump and pg_dumpall write each element
+/// of a list setting as its own string constant, so a value with more
+/// than one element is a list of them. A list setting whose one element
+/// has a comma is also a list, because the project refuses that setting
+/// as one string with a comma.
+pub(crate) fn setting(node: &Node, src: &str) -> Option<(String, Value)> {
     let set = node.find("generic_set")?;
     // mixed-case GUC names (e.g. "IntervalStyle") are quoted by pg_dump
     let name = unquote(set.find("var_name")?.text(src));

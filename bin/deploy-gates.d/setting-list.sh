@@ -10,6 +10,10 @@
 #    REPLACE sets the list again.
 # 3. A list setting written as one string with a comma is refused,
 #    because PostgreSQL reads it as one name.
+# 4. A boolean setting converges. PostgreSQL keeps the text of a value
+#    as SET gives it, for a boolean setting too, and the build writes a
+#    YAML boolean as True or False, which PostgreSQL keeps as true or
+#    false.
 
 # $1 is a query that must return t, $2 says what the step checks
 expect_setting() {
@@ -96,3 +100,32 @@ echo "Convergence gate passed: a list setting as one string is refused"
 mv "${WORKDIR}/project/procedures/test/list_path_proc.yaml.bak" \
     "${WORKDIR}/project/procedures/test/list_path_proc.yaml"
 expect_empty_plan "the list setting step leaves the database unchanged"
+
+cat > "${WORKDIR}/project/functions/test/bool_settings.yaml" <<'YAML'
+---
+name: bool_settings
+schema: test
+owner: postgres
+returns: integer
+language: sql
+configuration:
+  enable_seqscan: false
+  jit: true
+  enable_hashjoin: 'off'
+  myext.flag: true
+definition: ' SELECT 1;'
+YAML
+./target/debug/pglifecycle deploy --apply -d "${TARGET_DB}" \
+    "${WORKDIR}/project"
+if [ "$(psql -d "${TARGET_DB}" -tAc "SELECT proconfig
+        = ARRAY['enable_seqscan=false', 'jit=true', 'enable_hashjoin=off',
+                'myext.flag=true']
+        FROM pg_proc WHERE oid = 'test.bool_settings()'::regprocedure")" \
+        != t ]; then
+    echo "Convergence gate FAILED: the boolean settings are not the" \
+        "text that PostgreSQL keeps" >&2
+    psql -d "${TARGET_DB}" -tAc "SELECT proconfig FROM pg_proc
+        WHERE proname = 'bool_settings'" >&2
+    exit 1
+fi
+expect_empty_plan "boolean settings converge"

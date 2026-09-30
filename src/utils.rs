@@ -267,9 +267,10 @@ pub fn postgres_value(value: &Value) -> String {
     render_value(value, false)
 }
 
-/// Return the value of a routine's SET clause. A list is one string
-/// constant for each element, `'a', 'b'`, as pg_dump writes it: SET
-/// takes no array, and one string is one element.
+/// Return the value of the SET clause of a routine, a role or a user.
+/// A list is one string constant for each element, `'a', 'b'`, as
+/// pg_dump and pg_dumpall write it: SET takes no array, and one string
+/// is one element.
 pub fn setting_value(value: &Value) -> String {
     match value {
         Value::Array(items) => items

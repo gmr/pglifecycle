@@ -394,8 +394,60 @@ fn outside_items() -> Vec<Item> {
                 .unwrap(),
             ),
         ),
+        // deviation 37
+        item(
+            5,
+            ObjectType::Role,
+            Definition::Role(
+                serde_json::from_value(serde_json::json!({
+                    "name": "app",
+                    "settings": [
+                        {"search_path": ["$user", "my schema", "public"]},
+                        {"application_name": "it's"},
+                        {"enable_seqscan": false},
+                        {"statement_timeout": 1000},
+                    ],
+                }))
+                .unwrap(),
+            ),
+        ),
+        item(
+            6,
+            ObjectType::User,
+            Definition::User(
+                serde_json::from_value(serde_json::json!({
+                    "name": "App User",
+                    "settings": [{"temp_tablespaces": ["a,b"]}],
+                }))
+                .unwrap(),
+            ),
+        ),
     ]
 }
+
+/// (desc, tag, defns) of the setting entries of the roles and users
+/// that [`outside_items`] give, in the order of the build
+const OUTSIDE_SETTINGS: &[(&str, &str, &[&str])] = &[
+    // deviation 37: each element of a list setting is its own string
+    // constant. The Python wrote each element bare, which does not
+    // parse for `$user` or a name with a space
+    (
+        "ROLE",
+        "app",
+        &[
+            "ALTER ROLE app SET search_path TO '$user', 'my schema', \
+             'public';\n",
+            "ALTER ROLE app SET application_name TO $$it's$$;\n",
+            "ALTER ROLE app SET enable_seqscan TO False;\n",
+            "ALTER ROLE app SET statement_timeout TO 1000;\n",
+        ],
+    ),
+    (
+        "USER",
+        "App User",
+        &["ALTER USER \"App User\" SET temp_tablespaces TO 'a,b';\n"],
+    ),
+];
 
 /// (desc, namespace, tag, defn, drop) of the corrected entries that
 /// [`outside_items`] give
@@ -691,6 +743,19 @@ fn corrects_objects_outside_the_test_project() {
             *drop,
             "{desc} {tag} drop"
         );
+    }
+    for (desc, tag, defns) in OUTSIDE_SETTINGS {
+        let settings: Vec<&str> = output
+            .dump
+            .entries()
+            .iter()
+            .filter(|e| {
+                e.desc.as_str() == *desc && e.tag.as_deref() == Some(*tag)
+            })
+            .filter_map(|e| e.defn.as_deref())
+            .filter(|defn| defn.starts_with("ALTER "))
+            .collect();
+        assert_eq!(settings, *defns, "{desc} {tag} settings");
     }
 }
 

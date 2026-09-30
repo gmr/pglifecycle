@@ -169,6 +169,17 @@
 //!     so a SECURITY DEFINER function searched pg_temp first. The
 //!     project refuses a list setting written as one string with a
 //!     comma. No test-project routine has a setting.
+//! 37. A role's or user's setting renders as a routine's setting does
+//!     (see 36): each element of a list is its own string constant,
+//!     `ALTER ROLE app SET search_path TO '$user', 'public'`, as
+//!     pg_dumpall writes it. The Python wrote each element bare, which
+//!     does not parse for `$user` or for a name with a space or a
+//!     capital letter. A boolean renders as `True` or `False` and a
+//!     number renders bare, as for a routine; the Python refused both.
+//!     The project refuses a list setting written as one string with a
+//!     comma, and an empty list for each setting of a routine, a role
+//!     or a user, which rendered a SET with no value. No test-project
+//!     role or user has a setting.
 
 mod acls;
 
@@ -1697,7 +1708,7 @@ impl Builder {
                 let defn = vec![format!(
                     "ALTER {keyword} {} SET {setting} TO {}",
                     quote_ident(name),
-                    render_setting_value(value)
+                    setting_value(value)
                 )];
                 self.add_entry(
                     keyword,
@@ -3278,24 +3289,6 @@ fn push_role_options(
         push_bool_option(sql, "LOGIN", options.login);
     }
     push_bool_option(sql, "SUPERUSER", options.superuser);
-}
-
-/// `ALTER ROLE ... SET guc TO value` value rendering: a list (e.g.
-/// `search_path`) joins its elements bare, a scalar renders as a
-/// single-quoted literal
-fn render_setting_value(value: &Value) -> String {
-    match value {
-        Value::Array(items) => items
-            .iter()
-            .map(|item| match item {
-                Value::String(s) => s.clone(),
-                other => other.to_string(),
-            })
-            .collect::<Vec<_>>()
-            .join(", "),
-        Value::String(s) => postgres_value(&Value::String(s.clone())),
-        other => other.to_string(),
-    }
 }
 
 /// DEFAULT clause rendering: strings that look like SQL expressions

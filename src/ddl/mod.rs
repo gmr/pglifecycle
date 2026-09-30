@@ -210,12 +210,12 @@ pub enum Statement {
     /// ALTER ROLE ... WITH options — the assembly merges these into
     /// the role created by CREATE ROLE
     AlterRole(RoleDef),
-    /// ALTER ROLE `role` SET `name` TO `value` — `value` keeps the
-    /// parsed elements (a single scalar or a list like `search_path`)
+    /// ALTER ROLE `role` SET `name` TO `value` — `value` is a string
+    /// or a list, as for a routine's setting
     AlterRoleSetting {
         role: String,
         name: String,
-        value: Vec<String>,
+        value: serde_json::Value,
     },
     /// Parsed successfully but not (yet) a supported statement type
     Unsupported(String),
