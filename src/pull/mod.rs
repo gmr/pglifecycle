@@ -280,6 +280,10 @@ pub fn snapshot(
     style: libpgfmt::style::Style,
 ) -> Result<(Assembly, libpgdump::Dump), String> {
     let mut temp_dump: Option<tempfile::NamedTempFile> = None;
+    let source = match dump_path {
+        Some(path) => Source::File(path),
+        None => Source::Connection,
+    };
     let dump_path = match dump_path {
         Some(path) => path.to_path_buf(),
         None => {
@@ -299,11 +303,9 @@ pub fn snapshot(
     log::info!("Loading dump from {}", dump_path.display());
     let task = progress::spinner("Loading dump");
     let dump = libpgdump::load(&dump_path)
-        .map_err(|e| load_error(&dump_path, &e))
-        .and_then(|dump| check_session(&dump).map(|()| dump))
-        .map_err(|e| {
-            format!("failed to load dump {}: {e}", dump_path.display())
-        })?;
+        .map_err(|e| load_error(&dump_path, &e, &source))
+        .and_then(|dump| check_session(&dump, &source).map(|()| dump))
+        .map_err(|e| source.load_failure(&e))?;
     task.finish();
     drop(temp_dump);
     let mut assembly = Assembly::default();
@@ -325,33 +327,63 @@ pub fn snapshot(
     Ok((assembly, dump))
 }
 
+/// Where the archive of a snapshot comes from. It selects the text of
+/// the error when pull cannot read the archive.
+enum Source<'a> {
+    /// A `--dump` file of the user
+    File(&'a Path),
+    /// A live connection. pull dumps the database into a temporary
+    /// file, thus an error does not name the file.
+    Connection,
+}
+
+impl Source<'_> {
+    /// The error when pull cannot load the archive, with `error` as the
+    /// cause
+    fn load_failure(&self, error: &str) -> String {
+        match self {
+            Source::File(path) => {
+                format!("failed to load dump {}: {error}", path.display())
+            }
+            Source::Connection => {
+                format!("failed to load the dump of the database: {error}")
+            }
+        }
+    }
+}
+
+/// The command that makes a dump file that pull can read
+const DUMP_COMMAND: &str = "PGOPTIONS='-c standard_conforming_strings=on' \
+                            pg_dump -E UTF8 -Fc --schema-only -d DBNAME \
+                            -f FILE";
+
 /// The encoding and the `standard_conforming_strings` setting of the
 /// session that made the archive, as its ENCODING and STDSTRINGS
 /// entries record them. pull reads the text as UTF-8, and each string
 /// literal with `standard_conforming_strings` on, so an archive with
 /// other settings is refused. pull and deploy dump with these settings
-/// (see [`pgdump::dump`]). Thus only a dump file, or a connection string
-/// with `options` that replace the PGOPTIONS of the dump, can have
-/// other settings.
+/// (see [`pgdump::dump`]). Thus only a dump file, or a connection with
+/// an `options` value that replaces the PGOPTIONS of the dump, can have
+/// other settings. libpq uses PGOPTIONS only when the connection string
+/// (`--dbname`) and its service in pg_service.conf do not set
+/// `options`.
 ///
 /// A transcode of the archive is not possible: libpgdump reads each
 /// string as UTF-8, thus the text of an archive in another encoding
 /// is lost before pull can transcode it.
-fn check_session(dump: &libpgdump::Dump) -> Result<(), String> {
+fn check_session(
+    dump: &libpgdump::Dump,
+    source: &Source,
+) -> Result<(), String> {
     use libpgdump::ObjectType as OT;
     for entry in dump.entries() {
         let value = entry.defn.as_deref().and_then(set_value);
         match (&entry.desc, value) {
             (OT::Encoding, Some(encoding)) if !is_utf8(&encoding) => {
-                return Err(encoding_error(&encoding));
+                return Err(encoding_error(&encoding, source));
             }
             (OT::StdStrings, Some(setting)) if setting != "on" => {
-                return Err(format!(
-                    "the dump was made with standard_conforming_strings \
-                     {setting}, and pglifecycle reads only a dump made \
-                     with it on. Make the dump again with \
-                     PGOPTIONS='-c standard_conforming_strings=on'"
-                ));
+                return Err(stdstrings_error(&setting, source));
             }
             _ => {}
         }
@@ -362,21 +394,58 @@ fn check_session(dump: &libpgdump::Dump) -> Result<(), String> {
 /// The error for an archive that libpgdump cannot load. The usual
 /// cause of text that is not UTF-8 is an archive in another encoding,
 /// thus the error names the encoding that the archive records.
-fn load_error(path: &Path, error: &libpgdump::Error) -> String {
+fn load_error(
+    path: &Path,
+    error: &libpgdump::Error,
+    source: &Source,
+) -> String {
     if let libpgdump::Error::InvalidUtf8(_) = error
         && let Some(encoding) = recorded_encoding(path)
         && !is_utf8(&encoding)
     {
-        return encoding_error(&encoding);
+        return encoding_error(&encoding, source);
     }
     error.to_string()
 }
 
-fn encoding_error(encoding: &str) -> String {
-    format!(
+/// The error for an archive in another encoding. pull runs pg_dump with
+/// `-E UTF8`, and that replaces the `client_encoding` of an `options`
+/// value, thus the error of a live connection has no advice.
+fn encoding_error(encoding: &str, source: &Source) -> String {
+    let error = format!(
         "the dump is in the {encoding} encoding, and pglifecycle reads \
-         only a dump in UTF8. Make the dump again with pg_dump -E UTF8"
-    )
+         only a dump in UTF8"
+    );
+    match source {
+        Source::File(_) => {
+            format!("{error}. Make the dump again with {DUMP_COMMAND}")
+        }
+        Source::Connection => error,
+    }
+}
+
+/// The error for an archive that was made with
+/// `standard_conforming_strings` `setting`
+fn stdstrings_error(setting: &str, source: &Source) -> String {
+    let error = format!(
+        "the dump was made with standard_conforming_strings {setting}, \
+         and pglifecycle reads only a dump made with it on"
+    );
+    match source {
+        Source::File(_) => format!(
+            "{error}. Make the dump again with {DUMP_COMMAND}. An options \
+             value in the connection string or in the service replaces \
+             PGOPTIONS; if the connection has one, add \
+             -c standard_conforming_strings=on to the end of it"
+        ),
+        Source::Connection => format!(
+            "{error}. pglifecycle sets it on in PGOPTIONS, but an options \
+             value in the connection string (--dbname) or in the service \
+             (pg_service.conf) replaces PGOPTIONS. To use this \
+             connection, add -c standard_conforming_strings=on to the end \
+             of that options value"
+        ),
+    }
 }
 
 /// Whether an encoding name is UTF8. PostgreSQL ignores case and the
@@ -4005,29 +4074,90 @@ mod tests {
         dump
     }
 
+    /// A `--dump` file of the user
+    fn file() -> Source<'static> {
+        Source::File(Path::new("mydb.dump"))
+    }
+
     #[test]
     fn check_session_accepts_utf8_with_standard_strings() {
-        assert_eq!(check_session(&session_dump("UTF8", "on")), Ok(()));
-        // the spelling of the build of a project
-        assert_eq!(check_session(&session_dump("UTF-8", "on")), Ok(()));
+        for source in [file(), Source::Connection] {
+            let dump = session_dump("UTF8", "on");
+            assert_eq!(check_session(&dump, &source), Ok(()));
+            // the spelling of the build of a project
+            let dump = session_dump("UTF-8", "on");
+            assert_eq!(check_session(&dump, &source), Ok(()));
+        }
     }
 
     #[test]
     fn check_session_refuses_another_encoding() {
-        let error = check_session(&session_dump("LATIN1", "on")).unwrap_err();
+        let error =
+            check_session(&session_dump("LATIN1", "on"), &file()).unwrap_err();
         assert!(
-            error.contains("LATIN1 encoding") && error.contains("-E UTF8"),
+            error.contains("LATIN1 encoding")
+                && error.contains(
+                    "PGOPTIONS='-c standard_conforming_strings=on' \
+                     pg_dump -E UTF8 -Fc --schema-only -d DBNAME -f FILE"
+                ),
             "unexpected error: {error}"
         );
     }
 
     #[test]
     fn check_session_refuses_standard_strings_off() {
-        let error = check_session(&session_dump("UTF8", "off")).unwrap_err();
+        let error =
+            check_session(&session_dump("UTF8", "off"), &file()).unwrap_err();
         assert!(
             error.contains("standard_conforming_strings off")
-                && error.contains("-c standard_conforming_strings=on"),
+                && error.contains(
+                    "PGOPTIONS='-c standard_conforming_strings=on' \
+                     pg_dump -E UTF8 -Fc --schema-only -d DBNAME -f FILE"
+                )
+                && error.contains("options value"),
             "unexpected error: {error}"
+        );
+    }
+
+    /// For a live connection, PGOPTIONS already has the setting on.
+    /// Only an options value of the connection string or of a service
+    /// can replace it, thus the error tells the user to change that
+    /// value.
+    #[test]
+    fn check_session_names_the_options_of_a_connection() {
+        let dump = session_dump("UTF8", "off");
+        let error = check_session(&dump, &Source::Connection).unwrap_err();
+        assert!(
+            error.contains("standard_conforming_strings off")
+                && error.contains("--dbname")
+                && error.contains("pg_service.conf")
+                && error.contains(
+                    "add -c standard_conforming_strings=on to the end of \
+                     that options value"
+                )
+                && !error.contains("Make the dump again"),
+            "unexpected error: {error}"
+        );
+        let dump = session_dump("LATIN1", "on");
+        let error = check_session(&dump, &Source::Connection).unwrap_err();
+        assert!(
+            error.contains("LATIN1 encoding")
+                && !error.contains("Make the dump again"),
+            "unexpected error: {error}"
+        );
+    }
+
+    /// The error names a dump file of the user, and not the temporary
+    /// file of a live connection
+    #[test]
+    fn load_failure_names_only_the_file_of_the_user() {
+        assert_eq!(
+            file().load_failure("bad"),
+            "failed to load dump mydb.dump: bad"
+        );
+        assert_eq!(
+            Source::Connection.load_failure("bad"),
+            "failed to load the dump of the database: bad"
         );
     }
 
