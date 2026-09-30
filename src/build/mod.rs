@@ -140,6 +140,12 @@
 //!     (...)`. The Python rendered the connection and the parameters
 //!     bare, which does not parse. A `slot_name` of `NONE` renders as
 //!     the keyword, because as a string it names a slot.
+//! 33. A text search mapping renders its token type in lowercase, as
+//!     PostgreSQL reads a name that is not in quotes, and as deploy
+//!     compares it. Each token type of a parser is in lowercase, so
+//!     the quoted `"URL"` of a project token `URL` failed with `token
+//!     type "URL" does not exist`. The Python rendered no mappings.
+//!     No test-project mapping has an uppercase token type.
 
 mod acls;
 
@@ -2671,6 +2677,9 @@ impl Builder {
                 } else {
                     "ALTER"
                 };
+                // a token type as PostgreSQL reads one: folded to
+                // lowercase, as every token type of a parser is. In
+                // quotes, `URL` names no token type (deviation 33)
                 for (token, dictionaries) in config.mappings.iter().flatten() {
                     let last = create.len() - 1;
                     create[last].push(';');
@@ -2678,7 +2687,7 @@ impl Builder {
                         "ALTER TEXT SEARCH CONFIGURATION {} {verb} MAPPING \
                          FOR {} WITH {}",
                         qualified(&config.name),
-                        quote_ident(token),
+                        quote_ident(&token.to_ascii_lowercase()),
                         dictionaries.join(", ")
                     ));
                 }
@@ -5891,6 +5900,31 @@ mod tests {
             "{}",
             defn("parsed")
         );
+    }
+
+    /// PostgreSQL folds a token type that is not in quotes to
+    /// lowercase, and every token type of a parser is lowercase. A
+    /// quoted `"URL"` names no token type (deviation 33).
+    #[test]
+    fn renders_token_types_in_lowercase() {
+        let item = text_search(
+            0,
+            "s",
+            json!([
+                {"name": "parsed", "parser": "pg_catalog.default",
+                 "mappings": {"URL": ["simple"], "Int": ["simple"]}},
+            ]),
+        );
+        let output = assemble(&text_search_project(vec![item])).unwrap();
+        let defn = output
+            .dump
+            .entries()
+            .iter()
+            .find(|e| e.tag.as_deref() == Some("parsed"))
+            .and_then(|e| e.defn.clone())
+            .expect("a TEXT SEARCH CONFIGURATION entry");
+        assert!(defn.contains("ADD MAPPING FOR url WITH simple"), "{defn}");
+        assert!(defn.contains("ADD MAPPING FOR int WITH simple"), "{defn}");
     }
 
     /// Two schemas whose configurations use a dictionary of the other

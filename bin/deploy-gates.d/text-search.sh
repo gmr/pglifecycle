@@ -18,6 +18,8 @@
 #    rolls back, so no other change of the script stays.
 # 5. Objects that only the database has are withheld without
 #    --allow-drop and dropped with it, each before what it uses.
+# 6. A configuration whose token types are in uppercase is made, as
+#    PostgreSQL folds them to lowercase. The plan is empty.
 
 # $1 is a query that must return t, $2 says what the step checks
 expect_text_search() {
@@ -257,3 +259,24 @@ expect_text_search "SELECT NOT EXISTS (SELECT FROM pg_ts_parser
     AND NOT EXISTS (SELECT FROM pg_ts_config WHERE cfgname = 'stray_cfg')" \
     "the database-only text search objects were not dropped"
 expect_empty_plan "database-only text search objects are dropped"
+
+# token types in uppercase: the build writes each as PostgreSQL reads
+# it, and deploy compares them in lowercase
+cat > "${text_search}/upper.yaml" <<'YAML'
+---
+schema: public
+configurations:
+- name: gate_upper
+  parser: pg_catalog.default
+  mappings:
+    URL:
+    - simple
+    ASCIIWord:
+    - simple
+YAML
+./target/debug/pglifecycle deploy --apply -d "${TARGET_DB}" \
+    "${WORKDIR}/project"
+expect_text_search "SELECT ($(ts_mappings public.gate_upper))
+        = 'asciiword=simple;url=simple'" \
+    "the configuration with uppercase token types was not made"
+expect_empty_plan "uppercase token types are unchanged"

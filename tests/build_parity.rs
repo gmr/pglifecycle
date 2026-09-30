@@ -10,6 +10,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
+use pglifecycle::constants::ObjectType;
+use pglifecycle::models::{Definition, Item};
 use pglifecycle::{build, project};
 
 type Key = (String, String, String);
@@ -299,6 +301,50 @@ const RECOVERED_COMMENTS: &[(&str, &str)] = &[
     ("custom_snowball", "Copied from the snowball template"),
 ];
 
+/// The objects of the deviations that no test-project object shows
+fn outside_items() -> Vec<Item> {
+    let item = |id, desc, definition| Item {
+        id,
+        desc,
+        definition,
+        dependencies: BTreeSet::new(),
+    };
+    vec![
+        // deviation 33
+        item(
+            0,
+            ObjectType::TextSearch,
+            Definition::TextSearch(
+                serde_json::from_value(serde_json::json!({
+                    "schema": "test",
+                    "configurations": [{
+                        "name": "urls",
+                        "parser": "pg_catalog.default",
+                        "mappings": {"URL": ["simple"]},
+                    }],
+                }))
+                .unwrap(),
+            ),
+        ),
+    ]
+}
+
+/// (desc, namespace, tag, defn, drop) of the corrected entries that
+/// [`outside_items`] give
+const OUTSIDE_CORRECTED: &[(&str, &str, &str, &str, &str)] = &[
+    // deviation 33: a token type as PostgreSQL reads one. The Python
+    // rendered no mappings, and a quoted "URL" names no token type
+    (
+        "TEXT SEARCH CONFIGURATION",
+        "test",
+        "urls",
+        "CREATE TEXT SEARCH CONFIGURATION test.urls (PARSER = \
+         pg_catalog.default); ALTER TEXT SEARCH CONFIGURATION test.urls \
+         ADD MAPPING FOR url WITH simple;\n",
+        "DROP TEXT SEARCH CONFIGURATION IF EXISTS test.urls;\n",
+    ),
+];
+
 fn build_archive() -> libpgdump::Dump {
     let project = project::load(Path::new("test-project")).unwrap();
     let dir = tempfile::tempdir().unwrap();
@@ -496,6 +542,36 @@ fn matches_python_build_output() {
     // column comments + 1 ACL + 1 FK CONSTRAINT (deviation 14)
     // - 1 create: false role
     assert_eq!(dump.entries().len(), 77);
+}
+
+/// The deviations that no test-project object shows, asserted on a
+/// project of the objects that [`outside_items`] give
+#[test]
+fn corrects_objects_outside_the_test_project() {
+    let project = project::Project {
+        name: "outside".into(),
+        encoding: "UTF8".into(),
+        stdstrings: true,
+        superuser: "postgres".into(),
+        default_schema: "public".into(),
+        path: std::path::PathBuf::new(),
+        inventory: outside_items(),
+    };
+    let output = build::assemble(&project).unwrap();
+    for (desc, namespace, tag, defn, drop) in OUTSIDE_CORRECTED {
+        let entry = output
+            .dump
+            .entries()
+            .iter()
+            .find(|e| {
+                e.desc.as_str() == *desc
+                    && e.namespace.as_deref().unwrap_or_default() == *namespace
+                    && e.tag.as_deref().unwrap_or_default() == *tag
+            })
+            .unwrap_or_else(|| panic!("missing entry {desc} {tag}"));
+        assert_eq!(entry.defn.as_deref(), Some(*defn), "{desc} {tag} defn");
+        assert_eq!(entry.drop_stmt.as_deref(), Some(*drop), "{desc} {tag}");
+    }
 }
 
 #[test]
