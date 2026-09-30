@@ -17,8 +17,13 @@
 //! `alter/publication.rs`, so that work on separate types does not
 //! change the same lines.
 
+pub(crate) mod access_method;
+pub(crate) mod collation;
+pub(crate) mod conversion;
 pub(crate) mod default_privileges;
+pub(crate) mod event_trigger;
 mod publication;
+pub(crate) mod statistics;
 mod subscription;
 
 use serde_json::{Map, Value};
@@ -243,6 +248,21 @@ pub(crate) fn resolve_with(
             Definition::DefaultPrivileges(repo),
             Definition::DefaultPrivileges(db),
         ) => default_privileges::default_privileges(repo, db),
+        (Definition::Statistics(repo), Definition::Statistics(db)) => {
+            statistics::statistics(repo, db)
+        }
+        (Definition::EventTrigger(repo), Definition::EventTrigger(db)) => {
+            event_trigger::event_trigger(repo, db)
+        }
+        (Definition::Collation(repo), Definition::Collation(db)) => {
+            collation::collation(repo, db)
+        }
+        (Definition::Conversion(repo), Definition::Conversion(db)) => {
+            conversion::conversion(repo, db)
+        }
+        (Definition::AccessMethod(repo), Definition::AccessMethod(db)) => {
+            access_method::access_method(repo, db)
+        }
         _ => Resolution::Replace,
     }
 }

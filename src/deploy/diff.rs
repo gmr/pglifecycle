@@ -234,14 +234,14 @@ enum Compare {
 /// (`entry_key` and `drop_sql` in `mod.rs`).
 fn compare(desc: ObjectType) -> Compare {
     match desc {
-        ObjectType::AccessMethod => Compare::Existence,
+        ObjectType::AccessMethod => Compare::Definition,
         ObjectType::Aggregate => Compare::Existence,
         ObjectType::Cast => Compare::Existence,
-        ObjectType::Collation => Compare::Existence,
-        ObjectType::Conversion => Compare::Existence,
+        ObjectType::Collation => Compare::Definition,
+        ObjectType::Conversion => Compare::Definition,
         ObjectType::DefaultPrivileges => Compare::Definition,
         ObjectType::Domain => Compare::Definition,
-        ObjectType::EventTrigger => Compare::Existence,
+        ObjectType::EventTrigger => Compare::Definition,
         ObjectType::Extension => Compare::Definition,
         ObjectType::ForeignDataWrapper => Compare::Definition,
         ObjectType::Function => Compare::Definition,
@@ -257,7 +257,7 @@ fn compare(desc: ObjectType) -> Compare {
         ObjectType::Schema => Compare::Definition,
         ObjectType::Sequence => Compare::Definition,
         ObjectType::Server => Compare::Definition,
-        ObjectType::Statistics => Compare::Existence,
+        ObjectType::Statistics => Compare::Definition,
         ObjectType::Subscription => Compare::Definition,
         ObjectType::Table => Compare::Definition,
         ObjectType::Tablespace => Compare::Skip,
@@ -586,6 +586,36 @@ fn normalized(definition: &Definition) -> Value {
         }
         Definition::Subscription(subscription) => {
             canonical = Definition::Subscription(subscription.canonical());
+            &canonical
+        }
+        Definition::Statistics(statistics) => {
+            canonical = Definition::Statistics(
+                super::alter::statistics::canonical(statistics),
+            );
+            &canonical
+        }
+        Definition::EventTrigger(trigger) => {
+            canonical = Definition::EventTrigger(
+                super::alter::event_trigger::canonical(trigger),
+            );
+            &canonical
+        }
+        Definition::Collation(collation) => {
+            canonical = Definition::Collation(
+                super::alter::collation::canonical(collation),
+            );
+            &canonical
+        }
+        Definition::Conversion(conversion) => {
+            canonical = Definition::Conversion(
+                super::alter::conversion::canonical(conversion),
+            );
+            &canonical
+        }
+        Definition::AccessMethod(method) => {
+            canonical = Definition::AccessMethod(
+                super::alter::access_method::canonical(method),
+            );
             &canonical
         }
         // default privileges compare by the privileges they give, so
@@ -1099,6 +1129,58 @@ mod tests {
             ObjectKey::new(ObjectType::Procedure, &named("q")).name,
             "q()"
         );
+    }
+
+    #[test]
+    fn objects_with_no_data_compare_in_canonical_form() {
+        let statistics = |owner: &str, kinds: serde_json::Value| {
+            Definition::Statistics(
+                serde_json::from_value(serde_json::json!({
+                    "name": "s", "schema": "test", "owner": owner,
+                    "table": "test.t", "kinds": kinds,
+                    "elements": ["a", "b"],
+                }))
+                .expect("statistics deserialize"),
+            )
+        };
+        assert_eq!(
+            normalized(&statistics(
+                "app",
+                serde_json::json!(["mcv", "dependencies", "ndistinct"])
+            )),
+            normalized(&statistics(
+                "postgres",
+                serde_json::json!(["ndistinct", "dependencies", "mcv"])
+            ))
+        );
+        let trigger = |tags: serde_json::Value| {
+            Definition::EventTrigger(
+                serde_json::from_value(serde_json::json!({
+                    "name": "e", "event": "ddl_command_start",
+                    "filter": {"tags": tags}, "function": "test.f()",
+                }))
+                .expect("event trigger deserializes"),
+            )
+        };
+        assert_eq!(
+            normalized(&trigger(serde_json::json!([
+                "drop table",
+                "ALTER TABLE"
+            ]))),
+            normalized(&trigger(serde_json::json!([
+                "ALTER TABLE",
+                "DROP TABLE"
+            ])))
+        );
+        for desc in [
+            ObjectType::AccessMethod,
+            ObjectType::Collation,
+            ObjectType::Conversion,
+            ObjectType::EventTrigger,
+            ObjectType::Statistics,
+        ] {
+            assert_eq!(compare(desc), Compare::Definition);
+        }
     }
 
     #[test]

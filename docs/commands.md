@@ -276,21 +276,50 @@ disables it and removes its slot name, as `DROP SUBSCRIPTION` cannot
 drop a slot in a transaction: the publisher keeps the slot, and the
 report gives the statement that drops it there.
 
+Statistics, event triggers, collations, conversions and access methods
+compare by definition. These changes are made in place, without
+`--allow-drop`: the statistics target (`ALTER STATISTICS ... SET
+STATISTICS`), the state of an event trigger (`ALTER EVENT TRIGGER ...
+ENABLE [REPLICA | ALWAYS]` or `DISABLE`), the comment, and the owner of
+statistics, a collation or a conversion. PostgreSQL has no ALTER for the
+other settings, so a change to one of them drops and makes the object
+again, only with `--allow-drop`. These objects hold no data, but an
+object can depend on one: for example, a column that uses a collation.
+Then the drop fails, and deploy rolls back all of its changes; deploy
+does not use `CASCADE`. One that only the database has is dropped, also
+only with `--allow-drop`. An event trigger or an access method needs a
+superuser. Values that can be written two ways compare as the same:
+
+- statistics: the table as PostgreSQL resolves the name, the kinds as a
+  set (all three are the same as none), the columns as a set (a name in
+  parentheses is a column), and a target of -1 as none. An expression
+  loses the parentheses that enclose all of it, and compares with no
+  spaces and in lowercase, other than in quotes; PostgreSQL writes an
+  expression back in its own form (for example with casts), so write it
+  as `pull` does.
+- event triggers: the tags as a set, in any case; ORIGIN, the default
+  state, as none; the function name as PostgreSQL resolves it.
+- collations: `libc` and `deterministic: true`, the defaults, as none;
+  the same `lc_collate` and `lc_ctype` as one `locale`; a simple ICU
+  locale such as `en_US` in its standard form, `en-US`. The version is
+  not compared. A collation made `FROM` another is only checked for
+  existence, as `pull` writes the settings that it copied.
+- conversions: `default: false` as none; an encoding by the name that
+  PostgreSQL resolves it to (`utf-8` and `Unicode` are `UTF8`); the
+  function name as PostgreSQL resolves it, with no `pg_catalog.`.
+- access methods: the type in any case; the handler as for a
+  conversion function.
+
 `deploy` creates these object types when they are missing, but only
 checks that they exist. `pull` models them, but `deploy` does not
 compare their definitions yet, so a changed one is left as the
 database has it, and one that only the database has is kept:
 
-- access methods
 - aggregates, matched by name and input types
 - casts
-- collations
-- conversions
-- event triggers
 - operators, matched by name and argument types
 - operator classes, matched by name and index method
 - operator families, matched by name and index method
-- statistics (extended statistics)
 - text search objects, checked per schema: when a schema has any text
   search object in the database, `deploy` creates none of the
   project's text search objects in that schema

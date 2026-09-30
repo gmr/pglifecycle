@@ -210,11 +210,14 @@ impl Definition {
     }
 
     /// The object is written as a raw `sql` statement, not as the
-    /// structured fields
+    /// structured fields. A collation made `FROM` another counts as one:
+    /// pg_dump writes the settings that it copied, so the two never
+    /// compare equal
     pub fn raw_sql(&self) -> bool {
         let sql = match self {
             Definition::Aggregate(d) => &d.sql,
             Definition::Cast(d) => &d.sql,
+            Definition::Collation(d) if d.copy_from.is_some() => return true,
             Definition::Collation(d) => &d.sql,
             Definition::Conversion(d) => &d.sql,
             Definition::Domain(d) => &d.sql,

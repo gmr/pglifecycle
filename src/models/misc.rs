@@ -543,7 +543,7 @@ impl PublicationTable {
 /// A qualified relation name as PostgreSQL resolves it: a name that is
 /// not quoted folds to lowercase, and each part is quoted only when it
 /// must be, so `"test"."replicated"` and `TEST.replicated` are the same
-fn canonical_relation(name: &str) -> String {
+pub(crate) fn canonical_relation(name: &str) -> String {
     let mut parts = vec![String::new()];
     let mut quoted = false;
     let mut chars = name.trim().chars().peekable();
