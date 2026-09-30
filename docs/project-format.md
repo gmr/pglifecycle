@@ -281,10 +281,36 @@ revocations:
 
 - An index column that is an expression, such as a cast for an HNSW
   index, is written without parentheses around all of it:
-  `expression: (embedding)::halfvec(1536)`. `build` adds them, because
-  `CREATE INDEX` needs them for an expression that is not a function
-  call. Parentheses around all of it are also accepted, and `deploy`
-  compares the expression without them.
+  `expression: (embedding)::public.halfvec(1536)`. `build` adds them,
+  because `CREATE INDEX` needs them for an expression that is not a
+  function call. Parentheses around all of it are also accepted, and
+  `deploy` compares the expression without them.
+
+  The type of a cast can be a type alias, and it can be in uppercase:
+  `(label)::VARCHAR(20)` compares equal to
+  `(label)::character varying(20)`, which PostgreSQL writes. `deploy`
+  compares the remaining text of the expression as it is, so write it
+  as `pull` writes it. Give a type that is not a built-in type its
+  schema, as `pull` writes it: `(embedding)::public.halfvec(1536)`.
+  The deploy script runs with the empty `search_path` of `pg_restore`,
+  so a type with no schema is not found and the script fails.
+
+- A storage parameter (`storage_parameters` of a table, a
+  materialized view or an index) can be a YAML number or boolean:
+  `fillfactor: 90` and `autovacuum_enabled: false`. PostgreSQL keeps
+  each value as text, and `pull` writes the text (`'90'`). `deploy`
+  compares the value that PostgreSQL reads. A boolean and the words
+  `true`, `false`, `on`, `off`, `yes` and `no` (in any case) are
+  booleans, so `false` and `'off'` are equal. A number is its value,
+  so `0.1` and `'0.10'` are equal. `1` and `0` compare as numbers, not
+  as booleans.
+
+- A `collation` (of a column, a domain, a type, an index column, an
+  exclusion constraint or a partition key) can leave out the
+  `pg_catalog` schema: `'"C"'` and `pg_catalog."C"` are one
+  collation, because PostgreSQL always searches `pg_catalog`. A
+  name that is not quoted is in lowercase, as in SQL: `C` is the
+  collation `c`, which does not exist, so write `'"C"'`.
 
 - A generated column's `expression` can leave out the parentheses
   around all of it, and a generated column with no `kind` is stored.

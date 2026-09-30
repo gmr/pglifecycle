@@ -11,6 +11,52 @@ fn true_only(value: Option<bool>) -> Option<bool> {
     value.filter(|value| *value)
 }
 
+/// Storage parameters with each value as the text of the value that
+/// PostgreSQL reads. PostgreSQL keeps each value as text, and pull
+/// writes that text, but a project can give a YAML number or boolean.
+///
+/// - A boolean, and the words true, false, on, off, yes and no in any
+///   case, are `true` or `false`. PostgreSQL reads each of these words
+///   as a boolean, and an option with more values (such as
+///   `vacuum_index_cleanup`) reads them as a boolean too.
+/// - A number is the text of its value, so `0.1` and `0.10` are equal.
+///   1 and 0 are numbers here, although a boolean option also accepts
+///   them.
+/// - Other text stays as it is.
+pub(crate) fn canonical_storage_parameters(
+    parameters: Option<Map<String, Value>>,
+) -> Option<Map<String, Value>> {
+    let value = |value: Value| {
+        let text = match value {
+            Value::String(text) => text,
+            other => other.to_string(),
+        };
+        let text = match text.to_ascii_lowercase().as_str() {
+            "true" | "on" | "yes" => String::from("true"),
+            "false" | "off" | "no" => String::from("false"),
+            _ => match text.parse::<f64>() {
+                Ok(number) if number.is_finite() => number.to_string(),
+                _ => text,
+            },
+        };
+        Value::String(text)
+    };
+    parameters.map(|parameters| {
+        parameters
+            .into_iter()
+            .map(|(key, parameter)| (key, value(parameter)))
+            .collect()
+    })
+}
+
+/// A collation as PostgreSQL finds it (see
+/// [`crate::deploy::canonical_collation`])
+fn canonical_collation(collation: &mut Option<String>) {
+    if let Some(name) = collation {
+        *name = crate::deploy::canonical_collation(name);
+    }
+}
+
 /// Represents a table
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -157,10 +203,14 @@ impl Table {
     /// as [`Self::with_canonical_not_nulls`] moves them, and every value
     /// written at its default read as absent. A file may state a
     /// default (`forced: false`, `command: ALL`), which pull never
-    /// writes, and the two have to compare equal.
+    /// writes, and the two have to compare equal. A value that
+    /// PostgreSQL keeps in another form than the project can write it
+    /// (a storage parameter, a collation, the type of a cast in an index
+    /// expression) is in the form that PostgreSQL reads.
     pub fn canonical(&self) -> Table {
         let mut table = self.with_canonical_not_nulls();
         for column in table.columns.iter_mut().flatten() {
+            canonical_collation(&mut column.collation);
             if let Some(options) = column
                 .generated
                 .as_mut()
@@ -201,6 +251,19 @@ impl Table {
         // pg_dump always writes the method, and btree is the default
         for exclude in table.exclude_constraints.iter_mut().flatten() {
             exclude.method.get_or_insert_with(|| String::from("btree"));
+            for element in &mut exclude.elements {
+                canonical_collation(&mut element.collation);
+            }
+        }
+        table.storage_parameters =
+            canonical_storage_parameters(table.storage_parameters.take());
+        if let Some(indexes) = &mut table.indexes {
+            *indexes = indexes.iter().map(Index::canonical).collect();
+        }
+        for column in table.partition.iter_mut().flat_map(|p| &mut p.columns) {
+            if let TablePartitionColumn::Detailed { collation, .. } = column {
+                canonical_collation(collation);
+            }
         }
         table.with_canonical_policies()
     }
@@ -578,6 +641,25 @@ pub struct Index {
     pub comment: Option<String>,
 }
 
+impl Index {
+    /// The same index in the form deploy compares: the storage
+    /// parameters and the collations in the form that PostgreSQL
+    /// reads, and the type of each cast in an expression in the form
+    /// that PostgreSQL writes
+    pub fn canonical(&self) -> Index {
+        let mut index = self.clone();
+        index.storage_parameters =
+            canonical_storage_parameters(index.storage_parameters.take());
+        for column in index.columns.iter_mut().flatten() {
+            canonical_collation(&mut column.collation);
+            if let Some(expression) = &mut column.expression {
+                *expression = crate::deploy::canonical_casts(expression);
+            }
+        }
+        index
+    }
+}
+
 /// Represents a column in an index on a table
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -891,6 +973,160 @@ mod tests {
             ),
             (&None, &None, &None)
         );
+    }
+
+    /// A table with `value` added to its fields, and one index
+    fn with_fields(value: serde_json::Value) -> Table {
+        let mut base = serde_json::json!({
+            "name": "t", "schema": "s", "owner": "o",
+            "columns": [{"name": "label", "data_type": "text"}],
+            "indexes": [{"name": "i", "columns": [{"name": "label"}]}],
+        });
+        base.as_object_mut()
+            .unwrap()
+            .extend(value.as_object().unwrap().clone());
+        serde_json::from_value(base).unwrap()
+    }
+
+    /// The same table with `parameters` as the storage parameters of
+    /// the table and of its index
+    fn with_parameters(parameters: serde_json::Value) -> Table {
+        let mut table = with_fields(serde_json::json!({
+            "storage_parameters": parameters.clone(),
+        }));
+        table.indexes.as_mut().unwrap()[0].storage_parameters =
+            Some(serde_json::from_value(parameters).unwrap());
+        table
+    }
+
+    /// PostgreSQL keeps a storage parameter as text, and pull writes
+    /// the text. A number or a boolean in the project compares equal
+    /// to that text, and a boolean compares by its value.
+    #[test]
+    fn storage_parameters_compare_by_value() {
+        let same = |a, b| {
+            assert_eq!(
+                with_parameters(a).canonical(),
+                with_parameters(b).canonical()
+            )
+        };
+        same(
+            serde_json::json!({"fillfactor": 90, "autovacuum_enabled": false}),
+            serde_json::json!({"fillfactor": "90", "autovacuum_enabled": "false"}),
+        );
+        same(
+            serde_json::json!({"autovacuum_enabled": false}),
+            serde_json::json!({"autovacuum_enabled": "OFF"}),
+        );
+        same(
+            serde_json::json!({"autovacuum_enabled": true}),
+            serde_json::json!({"autovacuum_enabled": "on"}),
+        );
+        same(
+            serde_json::json!({"vacuum_index_cleanup": "yes"}),
+            serde_json::json!({"vacuum_index_cleanup": "True"}),
+        );
+        same(
+            serde_json::json!({"autovacuum_vacuum_scale_factor": 0.1}),
+            serde_json::json!({"autovacuum_vacuum_scale_factor": "0.10"}),
+        );
+        let different = |a, b| {
+            assert_ne!(
+                with_parameters(a).canonical(),
+                with_parameters(b).canonical()
+            )
+        };
+        different(
+            serde_json::json!({"fillfactor": 90}),
+            serde_json::json!({"fillfactor": "70"}),
+        );
+        different(
+            serde_json::json!({"autovacuum_enabled": false}),
+            serde_json::json!({"autovacuum_enabled": "on"}),
+        );
+        // 1 and 0 are also numbers, so they are not read as booleans
+        different(
+            serde_json::json!({"autovacuum_enabled": true}),
+            serde_json::json!({"autovacuum_enabled": "1"}),
+        );
+        different(
+            serde_json::json!({"buffering": "auto"}),
+            serde_json::json!({"buffering": "on"}),
+        );
+    }
+
+    /// A collation compares as PostgreSQL finds it: pg_catalog is
+    /// always searched, and a name that is not quoted is in lowercase
+    #[test]
+    fn collations_compare_as_postgresql_finds_them() {
+        let table = |collation: &str| {
+            let mut table = with_fields(serde_json::json!({
+                "exclude_constraints": [{
+                    "name": "x",
+                    "elements": [{"name": "label", "operator": "="}],
+                }],
+                "partition": {
+                    "type": "list",
+                    "columns": [{"name": "label"}],
+                },
+            }));
+            let collation = Some(String::from(collation));
+            table.columns.as_mut().unwrap()[0].collation = collation.clone();
+            table.indexes.as_mut().unwrap()[0].columns.as_mut().unwrap()[0]
+                .collation = collation.clone();
+            table.exclude_constraints.as_mut().unwrap()[0].elements[0]
+                .collation = collation.clone();
+            table.partition.as_mut().unwrap().columns[0] =
+                TablePartitionColumn::Detailed {
+                    name: Some("label".into()),
+                    expression: None,
+                    collation,
+                    opclass: None,
+                };
+            table.canonical()
+        };
+        assert_eq!(table("\"C\""), table("pg_catalog.\"C\""));
+        assert_eq!(table("\"POSIX\""), table("PG_CATALOG.\"POSIX\""));
+        assert_eq!(table("s.plain_c"), table("S.\"plain_c\""));
+        // `C` is the collation `c`, which is not `"C"`
+        assert_ne!(table("C"), table("\"C\""));
+        assert_ne!(table("\"C\""), table("\"POSIX\""));
+        assert_ne!(table("s.\"C\""), table("\"C\""));
+    }
+
+    /// The type of a cast in an index expression compares in the form
+    /// that PostgreSQL writes. Text in quotes keeps its form.
+    #[test]
+    fn index_cast_types_compare_in_standard_form() {
+        let table = |expression: &str| {
+            let mut table = with_fields(serde_json::json!({}));
+            table.indexes.as_mut().unwrap()[0].columns =
+                Some(vec![IndexColumn {
+                    name: None,
+                    expression: Some(expression.into()),
+                    collation: None,
+                    opclass: None,
+                    direction: None,
+                    null_placement: None,
+                }]);
+            table.canonical()
+        };
+        let same = |a, b| assert_eq!(table(a), table(b));
+        same("(label)::varchar(20)", "(label)::character varying(20)");
+        same("(label)::VARCHAR(20)", "(label)::character varying(20)");
+        same("(n)::pg_catalog.int8", "(n)::bigint");
+        same("(n)::int4[]", "(n)::integer[]");
+        same(
+            "lower((label)::varchar)",
+            "lower((label)::character varying)",
+        );
+        let different = |a, b| assert_ne!(table(a), table(b));
+        different("(label)::varchar(30)", "(label)::character varying(20)");
+        different("(label)::text", "(label)::character varying(20)");
+        different("(n)::public.int4", "(n)::integer");
+        // a string literal and a quoted name keep their text
+        different("('a::int4'::text)", "('a::integer'::text)");
+        different("(\"a::int4\")::text", "(\"a::integer\")::text");
     }
 
     /// A project written before row security was modeled leaves the

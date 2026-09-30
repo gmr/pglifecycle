@@ -65,3 +65,18 @@ pub struct MaterializedView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
 }
+
+impl MaterializedView {
+    /// The same materialized view in the form deploy compares: the
+    /// storage parameters and the indexes as `Table::canonical` has them
+    pub fn canonical(&self) -> MaterializedView {
+        let mut view = self.clone();
+        view.storage_parameters = super::table::canonical_storage_parameters(
+            view.storage_parameters.take(),
+        );
+        if let Some(indexes) = &mut view.indexes {
+            *indexes = indexes.iter().map(super::Index::canonical).collect();
+        }
+        view
+    }
+}

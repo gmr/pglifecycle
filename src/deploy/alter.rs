@@ -30,7 +30,7 @@ pub(crate) mod text_search;
 use serde_json::{Map, Value};
 
 use crate::build;
-use crate::deploy::diff::canonical_type;
+use crate::deploy::diff::{canonical_collation, canonical_type};
 use crate::models::{
     CheckConstraint, Column, ColumnDefault, ColumnGenerated, ColumnNotNull,
     Definition, Domain, ExcludeConstraint, Extension, ForeignDataWrapper,
@@ -47,7 +47,7 @@ mod procedure;
 
 pub(crate) mod aggregate;
 pub(crate) mod cast;
-mod names;
+pub(crate) mod names;
 pub(crate) mod operator;
 pub(crate) mod operator_class;
 pub(crate) mod transform;
@@ -1760,9 +1760,11 @@ fn domain(repo: &Domain, db: &Domain) -> Resolution {
         (Some(r), Some(d)) => canonical_type(r) != canonical_type(d),
         (r, d) => r != d,
     };
+    let collation =
+        |domain: &Domain| domain.collation.as_deref().map(canonical_collation);
     if repo.sql != db.sql
         || data_type_changed
-        || repo.collation != db.collation
+        || collation(repo) != collation(db)
         || repo.check_constraints != db.check_constraints
     {
         return Resolution::Replace;
@@ -3232,6 +3234,59 @@ mod tests {
             domain(&repo, &db),
             Resolution::Statements(ref alters) if alters.is_empty()
         ));
+    }
+
+    #[test]
+    fn domain_collation_compares_as_postgresql_finds_it() {
+        let db: Domain = serde_json::from_value(serde_json::json!({
+            "name": "d", "schema": "test", "owner": "postgres",
+            "data_type": "text", "collation": "pg_catalog.\"C\"",
+        }))
+        .unwrap();
+        let mut repo = db.clone();
+        repo.collation = Some("\"C\"".into());
+        assert!(matches!(
+            domain(&repo, &db),
+            Resolution::Statements(ref alters) if alters.is_empty()
+        ));
+        repo.collation = Some("\"POSIX\"".into());
+        assert!(matches!(domain(&repo, &db), Resolution::Replace));
+    }
+
+    /// A table in the forms that a person writes, with a changed
+    /// comment: only the comment is set, and the table and its index
+    /// are not made again
+    #[test]
+    fn written_forms_change_only_the_comment() {
+        let mut db = base_table();
+        db["storage_parameters"] = serde_json::json!(
+            {"fillfactor": "90", "autovacuum_enabled": "false"}
+        );
+        db["columns"][1]["collation"] = "pg_catalog.\"C\"".into();
+        db["indexes"] = serde_json::json!([{
+            "name": "users_email",
+            "columns": [
+                {"expression": "(email)::character varying(20)"},
+                {"name": "email", "collation": "\"POSIX\""},
+            ],
+            "storage_parameters": {"fillfactor": "80"},
+        }]);
+        let mut repo = db.clone();
+        repo["storage_parameters"] =
+            serde_json::json!({"fillfactor": 90, "autovacuum_enabled": false});
+        repo["columns"][1]["collation"] = "\"C\"".into();
+        repo["indexes"][0]["columns"][0]["expression"] =
+            "(email)::varchar(20)".into();
+        repo["indexes"][0]["columns"][1]["collation"] =
+            "pg_catalog.\"POSIX\"".into();
+        repo["indexes"][0]["storage_parameters"] =
+            serde_json::json!({"fillfactor": 80});
+        repo["comment"] = "Users".into();
+        let alters = statements(table(&parse_table(repo), &parse_table(db)));
+        assert_eq!(
+            sql(&alters),
+            vec!["COMMENT ON TABLE test.users IS $$Users$$;\n"]
+        );
     }
 
     #[test]
