@@ -396,7 +396,24 @@ definition: SELECT current_user::text;
   function. One name can be a string (`search_path: pg_catalog`). A
   list for any other setting is also an error: `pg_dump` writes the
   value of such a setting as one string, so write it as one string
-  (`DateStyle: iso, mdy`).
+  (`DateStyle: iso, mdy`). An empty list is an error, because SET
+  needs a value. For an empty value, write an empty string
+  (`search_path: ''`).
+
+- A role's or user's `settings` sets each setting when the role starts
+  a session (`ALTER ROLE ... SET`). It has one object for each
+  setting, and each value has the forms of a routine's
+  `configuration`. `build` writes each item of a list as its own
+  string constant, `ALTER ROLE app SET search_path TO '$user',
+  'public'`, as `pg_dumpall` does:
+
+```yaml
+---
+name: app
+settings:
+- search_path: [$user, public]
+- work_mem: 64MB
+```
 
 - A foreign key can leave out its `name`. The project then uses the
   name PostgreSQL generates, `<table>_<columns>_fkey`, cut to 63

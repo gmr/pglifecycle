@@ -5,8 +5,10 @@
 #
 # psql runs the script with other settings: client_encoding LATIN1,
 # standard_conforming_strings off, xmloption document and
-# check_function_bodies on. The step does not use deploy --apply,
-# because these settings also change the pg_dump that deploy plans with.
+# check_function_bodies on. The step runs the script with psql.
+# deploy --apply runs it in the same way, but deploy also dumps the
+# database, and the dump has its own session settings (see
+# pull-session.sh).
 # The script makes a LANGUAGE sql function before the table that its
 # body reads, a column with an xml default that is not a document, a
 # column with a default that has a backslash, and a comment that has a

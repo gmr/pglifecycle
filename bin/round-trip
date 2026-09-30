@@ -8,7 +8,8 @@
 #   of both databases -> diff is empty
 #
 # Plus a second restore with ownership applied, which the comparing
-# restore cannot check because it runs --no-owner.
+# restore cannot check because it runs --no-owner, and a round trip of
+# the settings of a role and a user, which pull reads from pg_dumpall.
 #
 # Requires a PostgreSQL superuser connection (defaults target the
 # compose.yaml container; override with PGHOST/PGPORT/PGUSER) and the
@@ -36,10 +37,19 @@ export PGHOST PGPORT PGUSER
 SOURCE_DB="${NAME}_source"
 RESTORED_DB="${NAME}_restored"
 OWNED_DB="${NAME}_owned"
+SETTINGS_ROLE="${NAME}_settings"
+SETTINGS_USER="${NAME} Settings User"
 WORKDIR="$(mktemp -d)"
+
+drop_settings_roles() {
+    psql -d postgres -q -v ON_ERROR_STOP=1 \
+        -c "DROP ROLE IF EXISTS \"${SETTINGS_ROLE}\"" \
+        -c "DROP ROLE IF EXISTS \"${SETTINGS_USER}\""
+}
 
 cleanup() {
     rm -rf "$WORKDIR"
+    drop_settings_roles >/dev/null 2>&1 || true
     bin/drop-database "${RESTORED_DB}" \
         >/dev/null 2>&1 || true
     bin/drop-database "${OWNED_DB}" \
@@ -116,5 +126,59 @@ if diff -u "${WORKDIR}/source.sql" "${WORKDIR}/restored.sql"; then
     echo "Round-trip gate passed: schema diff is empty"
 else
     echo "Round-trip gate FAILED: schemas differ" >&2
+    exit 1
+fi
+
+# Roles are cluster objects, so pull reads them with pg_dumpall only
+# when it connects to a database, and the steps above do not see them.
+# A role and a user get settings that need quotes, a list setting with
+# one name that has a comma, and a string with a comma for a setting
+# that is not a list. The settings that the build restores must be the
+# settings that pull read. Each name of a list is quoted in
+# pg_db_role_setting, so the comparison is exact.
+echo "==> Role settings: pull with pg_dumpall, build, restore"
+drop_settings_roles
+psql -d postgres -q -v ON_ERROR_STOP=1 <<SQL
+CREATE ROLE "${SETTINGS_ROLE}";
+ALTER ROLE "${SETTINGS_ROLE}" SET search_path TO "\$user", "my schema", public;
+ALTER ROLE "${SETTINGS_ROLE}" SET application_name TO 'x, y';
+ALTER ROLE "${SETTINGS_ROLE}" SET enable_seqscan TO off;
+ALTER ROLE "${SETTINGS_ROLE}" SET "DateStyle" TO 'iso, mdy';
+CREATE USER "${SETTINGS_USER}";
+ALTER ROLE "${SETTINGS_USER}" SET temp_tablespaces TO 'pg_default', 'a,b';
+ALTER ROLE "${SETTINGS_USER}" SET search_path TO '';
+SQL
+role_settings() {
+    psql -d postgres -tA -v ON_ERROR_STOP=1 -c "
+        SELECT setrole::regrole::text AS role, s
+          FROM pg_db_role_setting, unnest(setconfig) AS s
+         WHERE setdatabase = 0
+           AND setrole::regrole::text IN (
+               quote_ident('${SETTINGS_ROLE}'),
+               quote_ident('${SETTINGS_USER}'))
+         ORDER BY role, s"
+}
+role_settings > "${WORKDIR}/role-settings-source.txt"
+./target/debug/pglifecycle pull -d "${SOURCE_DB}" "${WORKDIR}/roles"
+./target/debug/pglifecycle build "${WORKDIR}/roles" \
+    "${WORKDIR}/roles.dump"
+pg_restore -l "${WORKDIR}/roles.dump" \
+    | grep -E " (ROLE|USER)  (${SETTINGS_ROLE}|${SETTINGS_USER}) " \
+    > "${WORKDIR}/roles.list"
+drop_settings_roles
+# pg_restore cannot set the owner of a ROLE or a USER entry, so the
+# restore runs --no-owner
+pg_restore -d postgres --no-owner --exit-on-error \
+    -L "${WORKDIR}/roles.list" "${WORKDIR}/roles.dump"
+role_settings > "${WORKDIR}/role-settings-restored.txt"
+if [ ! -s "${WORKDIR}/role-settings-source.txt" ]; then
+    echo "Role settings gate FAILED: the roles have no settings" >&2
+    exit 1
+fi
+if diff -u "${WORKDIR}/role-settings-source.txt" \
+        "${WORKDIR}/role-settings-restored.txt"; then
+    echo "Role settings gate passed: the restored settings are the same"
+else
+    echo "Role settings gate FAILED: role settings differ" >&2
     exit 1
 fi

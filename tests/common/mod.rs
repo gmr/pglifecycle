@@ -38,6 +38,55 @@ pub fn mutated_archive(path: &std::path::Path) {
     build_archive(path, true);
 }
 
+/// The fixtures dump as a session with other settings makes it: the
+/// ENCODING entry records `encoding`, and the STDSTRINGS entry records
+/// `stdstrings`. With `latin1_text`, a comment has the LATIN1 byte of
+/// é, which is not UTF-8.
+pub fn session_archive(
+    path: &std::path::Path,
+    encoding: &str,
+    stdstrings: &str,
+    latin1_text: bool,
+) {
+    fixture_archive(path);
+    let mut dump = libpgdump::load(path).expect("load archive");
+    let ids: Vec<(i32, OT)> = dump
+        .entries()
+        .iter()
+        .map(|entry| (entry.dump_id, entry.desc.clone()))
+        .collect();
+    for (id, desc) in ids {
+        let defn = match desc {
+            OT::Encoding => format!("SET client_encoding = '{encoding}';\n"),
+            OT::StdStrings => {
+                format!("SET standard_conforming_strings = '{stdstrings}';\n")
+            }
+            _ => continue,
+        };
+        dump.get_entry_mut(id).unwrap().defn = Some(defn);
+    }
+    if latin1_text {
+        add(
+            &mut dump,
+            OT::Comment,
+            "",
+            "SCHEMA test",
+            "COMMENT ON SCHEMA test IS 'caf#';",
+        );
+    }
+    dump.save(path).expect("save archive");
+    if latin1_text {
+        // the same length, thus the length before the string is correct
+        let mut bytes = std::fs::read(path).unwrap();
+        let at = bytes
+            .windows(4)
+            .position(|window| window == b"caf#")
+            .expect("the comment is in the archive");
+        bytes[at + 3] = 0xe9;
+        std::fs::write(path, bytes).unwrap();
+    }
+}
+
 pub fn build_archive(path: &std::path::Path, mutated: bool) {
     let mut dump = libpgdump::new("fixtures", "UTF8", "18.0").unwrap();
     add(

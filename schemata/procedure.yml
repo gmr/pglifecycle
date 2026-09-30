@@ -78,7 +78,7 @@ properties:
       A value is a string, a number or a boolean. A setting that PostgreSQL keeps
       as a list of names, such as search_path, is a list of strings, one name for
       each item. For such a setting, one string with a comma is an error, because
-      PostgreSQL reads it as one name.
+      PostgreSQL reads it as one name. A list has at least one item.
     type: object
     propertyNames:
       pattern: ^[A-Za-z_][A-Za-z0-9_\.]*$
@@ -86,6 +86,7 @@ properties:
       oneOf:
         - type: [string, number, boolean]
         - type: array
+          minItems: 1
           items:
             type: string
   definition:

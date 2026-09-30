@@ -298,9 +298,12 @@ pub fn snapshot(
     };
     log::info!("Loading dump from {}", dump_path.display());
     let task = progress::spinner("Loading dump");
-    let dump = libpgdump::load(&dump_path).map_err(|e| {
-        format!("failed to load dump {}: {e}", dump_path.display())
-    })?;
+    let dump = libpgdump::load(&dump_path)
+        .map_err(|e| load_error(&dump_path, &e))
+        .and_then(|dump| check_session(&dump).map(|()| dump))
+        .map_err(|e| {
+            format!("failed to load dump {}: {e}", dump_path.display())
+        })?;
     task.finish();
     drop(temp_dump);
     let mut assembly = Assembly::default();
@@ -320,6 +323,106 @@ pub fn snapshot(
     }
     assembly.format_sql(style);
     Ok((assembly, dump))
+}
+
+/// The encoding and the `standard_conforming_strings` setting of the
+/// session that made the archive, as its ENCODING and STDSTRINGS
+/// entries record them. pull reads the text as UTF-8, and each string
+/// literal with `standard_conforming_strings` on, so an archive with
+/// other settings is refused. pull and deploy dump with these settings
+/// (see [`pgdump::dump`]). Thus only a dump file, or a connection string
+/// with `options` that replace the PGOPTIONS of the dump, can have
+/// other settings.
+///
+/// A transcode of the archive is not possible: libpgdump reads each
+/// string as UTF-8, thus the text of an archive in another encoding
+/// is lost before pull can transcode it.
+fn check_session(dump: &libpgdump::Dump) -> Result<(), String> {
+    use libpgdump::ObjectType as OT;
+    for entry in dump.entries() {
+        let value = entry.defn.as_deref().and_then(set_value);
+        match (&entry.desc, value) {
+            (OT::Encoding, Some(encoding)) if !is_utf8(&encoding) => {
+                return Err(encoding_error(&encoding));
+            }
+            (OT::StdStrings, Some(setting)) if setting != "on" => {
+                return Err(format!(
+                    "the dump was made with standard_conforming_strings \
+                     {setting}, and pglifecycle reads only a dump made \
+                     with it on. Make the dump again with \
+                     PGOPTIONS='-c standard_conforming_strings=on'"
+                ));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// The error for an archive that libpgdump cannot load. The usual
+/// cause of text that is not UTF-8 is an archive in another encoding,
+/// thus the error names the encoding that the archive records.
+fn load_error(path: &Path, error: &libpgdump::Error) -> String {
+    if let libpgdump::Error::InvalidUtf8(_) = error
+        && let Some(encoding) = recorded_encoding(path)
+        && !is_utf8(&encoding)
+    {
+        return encoding_error(&encoding);
+    }
+    error.to_string()
+}
+
+fn encoding_error(encoding: &str) -> String {
+    format!(
+        "the dump is in the {encoding} encoding, and pglifecycle reads \
+         only a dump in UTF8. Make the dump again with pg_dump -E UTF8"
+    )
+}
+
+/// Whether an encoding name is UTF8. PostgreSQL ignores case and the
+/// characters that are not letters or digits, thus UTF-8 is UTF8.
+fn is_utf8(encoding: &str) -> bool {
+    let name: String = encoding
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|c| c.to_ascii_uppercase())
+        .collect();
+    name == "UTF8"
+}
+
+/// The encoding that the ENCODING entry of an archive records, found
+/// in the bytes of the archive, for an archive that libpgdump cannot
+/// load. pg_dump writes the ENCODING entry first, and it does not
+/// compress the table of contents, thus the entry is near the start
+/// of a custom or tar archive, and of the toc.dat file of a directory
+/// archive.
+fn recorded_encoding(path: &Path) -> Option<String> {
+    use std::io::Read;
+    const LIMIT: u64 = 64 * 1024;
+    let path = if path.is_dir() {
+        path.join("toc.dat")
+    } else {
+        path.to_path_buf()
+    };
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(LIMIT)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    encoding_in(&bytes)
+}
+
+/// The value of the first `SET client_encoding = '...'` in `bytes`
+fn encoding_in(bytes: &[u8]) -> Option<String> {
+    const NEEDLE: &[u8] = b"SET client_encoding = '";
+    let start = bytes
+        .windows(NEEDLE.len())
+        .position(|window| window == NEEDLE)?
+        + NEEDLE.len();
+    let length = bytes[start..].iter().position(|&b| b == b'\'')?;
+    let value = std::str::from_utf8(&bytes[start..start + length]).ok()?;
+    (!value.is_empty()).then(|| value.to_string())
 }
 
 /// Dump cluster roles via pg_dumpall and merge them into `assembly`
@@ -1442,15 +1545,6 @@ impl Assembly {
             Statement::CreateRole(def) => self.merge_role(def, true),
             Statement::AlterRole(def) => self.merge_role(def, false),
             Statement::AlterRoleSetting { role, name, value } => {
-                // a single element stays a scalar; a list (e.g.
-                // search_path) keeps its elements so it round-trips as
-                // `SET search_path TO a, b` rather than one bogus value
-                let value = match value.as_slice() {
-                    [single] => Value::String(single.clone()),
-                    _ => Value::Array(
-                        value.into_iter().map(Value::String).collect(),
-                    ),
-                };
                 self.role(&role).settings.insert(name, value);
             }
             Statement::RoleMembership {
@@ -3724,7 +3818,9 @@ mod tests {
     /// Role settings survive the full pull → write → load → build
     /// path: emitted in the schema's array-of-objects shape (so the
     /// project validates and loads), then rendered back as
-    /// `ALTER ROLE ... SET` entries in the build archive
+    /// `ALTER ROLE ... SET` entries in the build archive. pg_dumpall
+    /// writes each element of a list setting as its own string
+    /// constant, and the build writes them back in the same form.
     #[test]
     fn role_settings_round_trip_through_build() {
         use clap::Parser;
@@ -3735,7 +3831,10 @@ mod tests {
         assembly
             .ingest_roles(
                 "CREATE ROLE app;\n\
-                 ALTER ROLE app SET search_path TO test, public;\n\
+                 ALTER ROLE app SET search_path TO '$user', 'my schema', \
+                 'public';\n\
+                 ALTER ROLE app SET temp_tablespaces TO 'a,b';\n\
+                 ALTER ROLE app SET application_name TO 'x, y';\n\
                  ALTER ROLE app SET work_mem TO '64MB';\n",
             )
             .unwrap();
@@ -3774,16 +3873,19 @@ mod tests {
             .expect("app role");
         assert_eq!(
             role.settings,
-            Some(vec![
-                serde_json::from_value(serde_json::json!({
-                    "search_path": ["test", "public"]
-                }))
-                .unwrap(),
-                serde_json::from_value(serde_json::json!({
-                    "work_mem": "64MB"
-                }))
-                .unwrap(),
-            ])
+            Some(
+                [
+                    serde_json::json!({"application_name": "x, y"}),
+                    serde_json::json!({
+                        "search_path": ["$user", "my schema", "public"]
+                    }),
+                    serde_json::json!({"temp_tablespaces": ["a,b"]}),
+                    serde_json::json!({"work_mem": "64MB"}),
+                ]
+                .into_iter()
+                .map(|s| serde_json::from_value(s).unwrap())
+                .collect()
+            )
         );
 
         let archive = dir.path().join("settings.dump");
@@ -3798,7 +3900,10 @@ mod tests {
         assert_eq!(
             settings,
             vec![
-                "ALTER ROLE app SET search_path TO test, public;\n",
+                "ALTER ROLE app SET application_name TO 'x, y';\n",
+                "ALTER ROLE app SET search_path TO '$user', 'my schema', \
+                 'public';\n",
+                "ALTER ROLE app SET temp_tablespaces TO 'a,b';\n",
                 "ALTER ROLE app SET work_mem TO '64MB';\n",
             ]
         );
@@ -3882,5 +3987,64 @@ mod tests {
                 "GRANT pg_read_all_data TO alice;\n",
             ]
         );
+    }
+
+    /// A dump with the ENCODING and STDSTRINGS entries that `encoding`
+    /// and `stdstrings` give
+    fn session_dump(encoding: &str, stdstrings: &str) -> libpgdump::Dump {
+        let mut dump = libpgdump::new("fixtures", encoding, "18.0").unwrap();
+        let entry = dump
+            .entries()
+            .iter()
+            .find(|e| e.desc == OT::StdStrings)
+            .map(|e| e.dump_id)
+            .unwrap();
+        dump.get_entry_mut(entry).unwrap().defn = Some(format!(
+            "SET standard_conforming_strings = '{stdstrings}';\n"
+        ));
+        dump
+    }
+
+    #[test]
+    fn check_session_accepts_utf8_with_standard_strings() {
+        assert_eq!(check_session(&session_dump("UTF8", "on")), Ok(()));
+        // the spelling of the build of a project
+        assert_eq!(check_session(&session_dump("UTF-8", "on")), Ok(()));
+    }
+
+    #[test]
+    fn check_session_refuses_another_encoding() {
+        let error = check_session(&session_dump("LATIN1", "on")).unwrap_err();
+        assert!(
+            error.contains("LATIN1 encoding") && error.contains("-E UTF8"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn check_session_refuses_standard_strings_off() {
+        let error = check_session(&session_dump("UTF8", "off")).unwrap_err();
+        assert!(
+            error.contains("standard_conforming_strings off")
+                && error.contains("-c standard_conforming_strings=on"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn is_utf8_ignores_case_and_punctuation() {
+        assert!(is_utf8("UTF8"));
+        assert!(is_utf8("utf-8"));
+        assert!(!is_utf8("LATIN1"));
+        assert!(!is_utf8("SQL_ASCII"));
+    }
+
+    #[test]
+    fn encoding_in_finds_the_value_among_other_bytes() {
+        let mut bytes = b"PGDMP\x01\xe9\xff".to_vec();
+        bytes.extend_from_slice(b"SET client_encoding = 'LATIN1';\n\xe9");
+        assert_eq!(encoding_in(&bytes).as_deref(), Some("LATIN1"));
+        assert_eq!(encoding_in(b"PGDMP\xe9 no entry"), None);
+        assert_eq!(encoding_in(b"SET client_encoding = '"), None);
     }
 }

@@ -3,7 +3,8 @@
 
 use tree_sitter::Node;
 
-use crate::ddl::object::{string_value, unstring};
+use crate::ddl::function::setting;
+use crate::ddl::object::string_value;
 use crate::ddl::{
     Acl, AclTarget, MembershipGrant, NodeExt, Privilege, RoleDef, Statement,
     any_name, column_elems, qualified_name, truncate, unquote, unquote_role,
@@ -219,28 +220,13 @@ pub(crate) fn role_setting(
             "AlterRoleSetStmt: IN DATABASE".into(),
         ));
     }
-    let set = node.find("generic_set").ok_or_else(|| {
+    let (name, value) = setting(node, src).ok_or_else(|| {
         format!(
             "unsupported ALTER ROLE SET: {}",
             truncate(node.text(src), 80)
         )
     })?;
-    // mixed-case / dotted GUC names are quoted by pg_dump
-    // (e.g. "TimeZone"); store the bare identifier
-    let name = set
-        .find("var_name")
-        .map(|n| unquote(n.text(src)))
-        .ok_or_else(|| String::from("ALTER ROLE SET without a setting"))?;
-    let values: Vec<String> = set
-        .find_all("var_value")
-        .iter()
-        .map(|v| unstring(v.text(src)))
-        .collect();
-    Ok(Statement::AlterRoleSetting {
-        role,
-        name,
-        value: values,
-    })
+    Ok(Statement::AlterRoleSetting { role, name, value })
 }
 
 /// Map a privilege_target's keywords onto the ACL target kind;
@@ -736,7 +722,46 @@ mod tests {
         };
         assert_eq!(role, "app_user");
         assert_eq!(name, "search_path");
-        assert_eq!(value, vec!["test", "public"]);
+        assert_eq!(value, serde_json::json!(["test", "public"]));
+    }
+
+    /// The value of a role setting as pg_dumpall writes it
+    fn role_setting_value(sql: &str) -> serde_json::Value {
+        let Statement::AlterRoleSetting { value, .. } = parse_one(sql) else {
+            panic!("expected AlterRoleSetting")
+        };
+        value
+    }
+
+    /// pg_dumpall writes each element of a list setting as its own
+    /// string constant. A list setting whose one element has a comma
+    /// stays a list, as for a routine, because the string form of it
+    /// is refused
+    #[test]
+    fn role_setting_list_is_one_item_for_each_element() {
+        assert_eq!(
+            role_setting_value(
+                "ALTER ROLE app SET search_path TO '$user', 'my schema', \
+                 'public';"
+            ),
+            serde_json::json!(["$user", "my schema", "public"])
+        );
+        assert_eq!(
+            role_setting_value(
+                "ALTER ROLE app SET temp_tablespaces TO 'a,b';"
+            ),
+            serde_json::json!(["a,b"])
+        );
+        assert_eq!(
+            role_setting_value("ALTER ROLE app SET search_path TO '';"),
+            serde_json::json!("")
+        );
+        assert_eq!(
+            role_setting_value(
+                "ALTER ROLE app SET application_name TO 'x, y';"
+            ),
+            serde_json::json!("x, y")
+        );
     }
 
     #[test]
@@ -749,7 +774,7 @@ mod tests {
             panic!("expected AlterRoleSetting")
         };
         assert_eq!(name, "TimeZone");
-        assert_eq!(value, vec!["UTC"]);
+        assert_eq!(value, serde_json::json!("UTC"));
     }
 
     #[test]
