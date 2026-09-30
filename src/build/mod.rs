@@ -5664,7 +5664,7 @@ mod tests {
         operator
             .as_object_mut()
             .unwrap()
-            .extend(fields.as_object().unwrap().clone().into_iter());
+            .extend(fields.as_object().unwrap().clone());
         let item = Item {
             id: 1,
             desc: ObjectType::Operator,
