@@ -609,6 +609,10 @@ fn normalized(definition: &Definition) -> Value {
             canonical = Definition::Table(table.canonical());
             &canonical
         }
+        Definition::MaterializedView(view) => {
+            canonical = Definition::MaterializedView(view.canonical());
+            &canonical
+        }
         Definition::Procedure(procedure) => {
             canonical = Definition::Procedure(procedure.canonical());
             &canonical
@@ -734,6 +738,10 @@ fn normalize(value: &mut Value) {
                     && let Some(data_type) = child.as_str()
                 {
                     *child = Value::String(canonical_type(data_type));
+                } else if key == "collation"
+                    && let Some(collation) = child.as_str()
+                {
+                    *child = Value::String(canonical_collation(collation));
                 } else {
                     normalize(child);
                 }
@@ -796,6 +804,68 @@ pub(crate) fn canonical_type(data_type: &str) -> String {
         other => other,
     };
     format!("{canonical}{modifier}{array}")
+}
+
+/// A collation name as PostgreSQL finds it. PostgreSQL always searches
+/// pg_catalog, so `"C"` and `pg_catalog."C"` are one collation, and
+/// pull writes the two forms in different places (`pg_catalog."C"` for
+/// a column, `"C"` for an index column). A part that is not quoted is
+/// in lowercase, so `C` is the collation `c`, which is not `"C"`.
+pub(crate) fn canonical_collation(collation: &str) -> String {
+    super::alter::names::name(collation)
+}
+
+/// An index expression with the type of each cast (`::type`) in the
+/// form that [`canonical_type`] gives, which is the form PostgreSQL
+/// writes: `(a)::varchar(20)` is `(a)::character varying(20)`. Text in
+/// a string literal or in a quoted name stays as it is. This changes
+/// only the type names: deploy compares the remaining text as it is.
+pub(crate) fn canonical_casts(expression: &str) -> String {
+    let mut result = String::with_capacity(expression.len());
+    let mut chars = expression.chars().peekable();
+    let mut quote = None;
+    while let Some(c) = chars.next() {
+        result.push(c);
+        match (quote, c) {
+            (Some(open), c) if c == open => quote = None,
+            (Some(_), _) => {}
+            (None, '\'' | '"') => quote = Some(c),
+            (None, ':') if chars.peek() == Some(&':') => {
+                result.push(chars.next().unwrap());
+                // the type name: parts that are quoted or not, with a
+                // `.` between them. A modifier or `[]` after the name
+                // stays as it is.
+                let mut name = String::new();
+                loop {
+                    match chars.peek() {
+                        Some('"') => {
+                            name.push(chars.next().unwrap());
+                            for c in chars.by_ref() {
+                                name.push(c);
+                                if c == '"' {
+                                    break;
+                                }
+                            }
+                        }
+                        Some(&c)
+                            if c.is_alphanumeric()
+                                || c == '_'
+                                || c == '$'
+                                || c == '.' =>
+                        {
+                            name.push(chars.next().unwrap());
+                        }
+                        _ => break,
+                    }
+                }
+                if !name.is_empty() {
+                    result.push_str(&canonical_type(&name));
+                }
+            }
+            _ => {}
+        }
+    }
+    result
 }
 
 /// A type as it identifies an argument: [`canonical_type`] without
@@ -895,6 +965,78 @@ mod tests {
         assert_ne!(
             normalized(&Definition::Table(a)),
             normalized(&Definition::Table(b))
+        );
+    }
+
+    #[test]
+    fn canonicalizes_cast_types_only() {
+        assert_eq!(
+            canonical_casts("(a)::varchar(20)"),
+            "(a)::character varying(20)"
+        );
+        assert_eq!(
+            canonical_casts("((a)::INT4 + (b)::pg_catalog.int8)"),
+            "((a)::integer + (b)::bigint)"
+        );
+        assert_eq!(canonical_casts("(a)::bool[]"), "(a)::boolean[]");
+        assert_eq!(
+            canonical_casts("(a)::Public.\"My Type\""),
+            "(a)::public.\"My Type\""
+        );
+        // a string literal with a doubled quote, and a quoted name
+        assert_eq!(
+            canonical_casts("('it''s::int4'::text || \"x::int4\")"),
+            "('it''s::int4'::text || \"x::int4\")"
+        );
+        // the other text keeps its case
+        assert_eq!(canonical_casts("LOWER((a)::TEXT)"), "LOWER((a)::text)");
+    }
+
+    #[test]
+    fn materialized_view_written_forms_are_not_a_change() {
+        let view = |fillfactor: Value, expression: &str| {
+            Definition::MaterializedView(
+                serde_json::from_value(serde_json::json!({
+                    "name": "m", "schema": "test", "owner": "postgres",
+                    "query": "SELECT 1 AS n",
+                    "storage_parameters": {"fillfactor": fillfactor},
+                    "indexes": [{
+                        "name": "m_n",
+                        "columns": [{"expression": expression}],
+                        "storage_parameters": {"fillfactor": fillfactor},
+                    }],
+                }))
+                .unwrap(),
+            )
+        };
+        assert_eq!(
+            normalized(&view(90.into(), "(n)::int8")),
+            normalized(&view("90".into(), "(n)::bigint"))
+        );
+        assert_ne!(
+            normalized(&view(70.into(), "(n)::bigint")),
+            normalized(&view("90".into(), "(n)::bigint"))
+        );
+    }
+
+    #[test]
+    fn collation_without_pg_catalog_is_not_a_change() {
+        let domain = |collation: &str| {
+            Definition::Domain(
+                serde_json::from_value(serde_json::json!({
+                    "name": "d", "schema": "test", "owner": "postgres",
+                    "data_type": "text", "collation": collation,
+                }))
+                .unwrap(),
+            )
+        };
+        assert_eq!(
+            normalized(&domain("\"C\"")),
+            normalized(&domain("pg_catalog.\"C\""))
+        );
+        assert_ne!(
+            normalized(&domain("\"C\"")),
+            normalized(&domain("\"POSIX\""))
         );
     }
 
