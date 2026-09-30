@@ -68,9 +68,9 @@ primary_key:
   checks such a body when it creates the function, so the function
   must come after each function, aggregate, table, view or sequence
   that the body uses. pull writes these entries for views,
-  materialized views, functions and procedures. A restore does not
-  check a string body (`AS $$ ... $$`), and PostgreSQL does not record
-  what one uses, so pull writes no entries for it.
+  materialized views, functions and procedures. A restore and a deploy
+  do not check a string body (`AS $$ ... $$`), and PostgreSQL does not
+  record what one uses, so pull writes no entries for it.
 - An entry names an object as `schema.name`. A function or aggregate
   entry also gives the argument types of one overload, as
   pull writes them: `test.f(integer, text)`, or `test.agg(*)` for an
@@ -314,6 +314,38 @@ revocations:
   (`AS $$ ... $$`) is kept as it is written, so this does not apply to
   it. To get the form for a body, create the function in a scratch
   database and `pull` it.
+
+- A function's or procedure's `configuration` sets each setting when
+  the routine starts. A value is a string, a number or a boolean. A
+  setting that PostgreSQL keeps as a list of names is a list, with one
+  name for each item. These settings are `search_path`,
+  `temp_tablespaces`, `local_preload_libraries`,
+  `session_preload_libraries`, `shared_preload_libraries`,
+  `oauth_validator_libraries`, `output_plugin_libraries` and
+  `unix_socket_directories`. Write each name as it is, with no quotes
+  in it (`$user`, `My Schema`). `build` writes each item as its own
+  string constant, `SET search_path = 'pg_catalog', 'pg_temp'`, as
+  `pg_dump` does, and `pull` writes a value with more than one name as
+  a list:
+
+```yaml
+---
+name: whoami
+returns: text
+language: sql
+security: DEFINER
+configuration:
+  search_path: [pg_catalog, pg_temp]
+definition: SELECT current_user::text;
+```
+
+  For one of these settings, one string with a comma is an error. As
+  one string, `pg_catalog, pg_temp` names one schema, so PostgreSQL
+  searches `pg_temp` first, which is not safe for a `SECURITY DEFINER`
+  function. One name can be a string (`search_path: pg_catalog`). A
+  list for any other setting is also an error: `pg_dump` writes the
+  value of such a setting as one string, so write it as one string
+  (`DateStyle: iso, mdy`).
 
 - A foreign key can leave out its `name`. The project then uses the
   name PostgreSQL generates, `<table>_<columns>_fkey`, cut to 63

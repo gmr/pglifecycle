@@ -267,6 +267,20 @@ pub fn postgres_value(value: &Value) -> String {
     render_value(value, false)
 }
 
+/// Return the value of a routine's SET clause. A list is one string
+/// constant for each element, `'a', 'b'`, as pg_dump writes it: SET
+/// takes no array, and one string is one element.
+pub fn setting_value(value: &Value) -> String {
+    match value {
+        Value::Array(items) => items
+            .iter()
+            .map(postgres_value)
+            .collect::<Vec<_>>()
+            .join(", "),
+        other => postgres_value(other),
+    }
+}
+
 fn render_value(value: &Value, nested: bool) -> String {
     match value {
         Value::String(s) if s.contains('\'') => dollar_quote(s),
@@ -365,6 +379,22 @@ mod tests {
         assert_eq!(postgres_value(&json!(5)), "5");
         assert_eq!(postgres_value(&json!(true)), "True");
         assert_eq!(postgres_value(&json!(["a", ["b"]])), "ARRAY['a', ['b']]");
+    }
+
+    /// A list renders one string constant for each element, as
+    /// pg_dump writes it, and not as an array, which SET rejects
+    #[test]
+    fn renders_setting_values() {
+        assert_eq!(
+            setting_value(&json!(["pg_catalog", "pg_temp"])),
+            "'pg_catalog', 'pg_temp'"
+        );
+        assert_eq!(
+            setting_value(&json!(["my schema", "$user", "it's", ""])),
+            "'my schema', '$user', $$it's$$, ''"
+        );
+        assert_eq!(setting_value(&json!("pg_catalog")), "'pg_catalog'");
+        assert_eq!(setting_value(&json!(1000)), "1000");
     }
 
     #[test]

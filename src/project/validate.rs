@@ -6,6 +6,7 @@ use std::sync::{Mutex, OnceLock};
 use include_dir::{Dir, include_dir};
 use serde_json::Value;
 
+use crate::models::is_list_setting;
 use crate::yamlio;
 
 static SCHEMATA: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/schemata");
@@ -35,6 +36,36 @@ pub fn validate_object(obj_type: &str, name: &str, data: &Value) -> bool {
         log::error!(
             "Validation error for {obj_type} {name}: {error} at {}",
             error.instance_path()
+        );
+        valid = false;
+    }
+    if matches!(obj_type, "function" | "procedure") {
+        valid &= routine_settings(obj_type, name, data);
+    }
+    valid
+}
+
+/// Log each routine setting that has a form PostgreSQL does not keep.
+/// For a setting that PostgreSQL keeps as a list, one string with a
+/// comma is one name, not a list. pg_dump writes each other setting as
+/// one string, so a list for it does not pull back as a list.
+fn routine_settings(obj_type: &str, name: &str, data: &Value) -> bool {
+    let mut valid = true;
+    let settings = data["configuration"].as_object().into_iter().flatten();
+    for (setting, value) in settings {
+        let error = match (is_list_setting(setting), value) {
+            (true, Value::String(text)) if text.contains(',') => format!(
+                "{setting} is a list: write each name as a list item, \
+                 not one string with commas"
+            ),
+            (false, Value::Array(_)) => format!(
+                "{setting} is not a list: write its value as one string"
+            ),
+            _ => continue,
+        };
+        log::error!(
+            "Validation error for {obj_type} {name}: {error} at \
+             /configuration/{setting}"
         );
         valid = false;
     }
@@ -242,6 +273,41 @@ mod tests {
         assert!(!routine("procedure", &["definition", "sql"]));
         assert!(!routine("procedure", &["object_file", "sql_body"]));
         assert!(!routine("procedure", &["object_file", "definition"]));
+    }
+
+    /// A setting value is a string, a number, a boolean or a list of
+    /// strings. A setting that PostgreSQL keeps as a list, written as
+    /// one string with a comma, is one name to PostgreSQL, so it is
+    /// refused. A list for a setting that PostgreSQL keeps as one
+    /// string does not pull back as a list, so it is refused too.
+    #[test]
+    fn routine_settings_are_lists_only_where_postgres_keeps_lists() {
+        let routine = |kind: &str, name: &str, value: Value| {
+            let mut data = json!({
+                "schema": "test", "name": "r", "owner": "app",
+                "language": "sql", "definition": "SELECT 1",
+                "configuration": {name: value},
+            });
+            if kind == "function" {
+                data["returns"] = json!("integer");
+            }
+            validate_object(kind, "r", &data)
+        };
+        for kind in ["function", "procedure"] {
+            assert!(routine(kind, "search_path", json!(["pg_catalog", "a"])));
+            assert!(routine(kind, "search_path", json!("pg_catalog")));
+            assert!(routine(kind, "search_path", json!(["a,b"])));
+            assert!(routine(kind, "search_path", json!("")));
+            assert!(!routine(kind, "search_path", json!("pg_catalog, a")));
+            assert!(!routine(kind, "Search_Path", json!("pg_catalog,a")));
+            assert!(!routine(kind, "temp_tablespaces", json!("a, b")));
+            assert!(!routine(kind, "search_path", json!([1])));
+            assert!(!routine(kind, "search_path", json!({"a": "b"})));
+            assert!(routine(kind, "DateStyle", json!("iso, mdy")));
+            assert!(routine(kind, "statement_timeout", json!(1000)));
+            assert!(routine(kind, "enable_seqscan", json!(false)));
+            assert!(!routine(kind, "DateStyle", json!(["iso", "mdy"])));
+        }
     }
 
     #[test]

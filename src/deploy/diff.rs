@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde_json::Value;
 
 use crate::constants::ObjectType;
-use crate::models::{Definition, Subscription};
+use crate::models::{Definition, Function, Subscription, canonical_settings};
 use crate::project::Project;
 use crate::pull::{Assembly, without_password};
 
@@ -609,6 +609,16 @@ fn normalized(definition: &Definition) -> Value {
             canonical = Definition::Table(table.canonical());
             &canonical
         }
+        Definition::Function(function) => {
+            canonical = Definition::Function(Function {
+                configuration: function
+                    .configuration
+                    .as_ref()
+                    .map(canonical_settings),
+                ..function.clone()
+            });
+            &canonical
+        }
         Definition::Procedure(procedure) => {
             canonical = Definition::Procedure(procedure.canonical());
             &canonical
@@ -1013,6 +1023,42 @@ mod tests {
         // a repo `returns: int4` must not diff against the server's
         // `integer` on every deploy
         assert_eq!(normalized(&f("int4")), normalized(&f("integer")));
+    }
+
+    /// A list setting compares element by element, so the same names
+    /// in another order are a change. A list of one element is the
+    /// one name that pull writes as a string.
+    #[test]
+    fn function_list_settings_compare_by_element() {
+        let f = |kind: &str, value: serde_json::Value| -> Value {
+            let mut json = serde_json::json!({
+                "name": "f", "schema": "test", "owner": "postgres",
+                "language": "sql", "definition": "SELECT 1",
+                "configuration": {"search_path": value},
+            });
+            if kind == "function" {
+                json["returns"] = serde_json::json!("integer");
+                normalized(&function(json))
+            } else {
+                normalized(&procedure(json))
+            }
+        };
+        for kind in ["function", "procedure"] {
+            let pulled = f(kind, serde_json::json!(["pg_catalog", "pg_temp"]));
+            assert_eq!(
+                f(kind, serde_json::json!(["pg_catalog", "pg_temp"])),
+                pulled
+            );
+            assert_ne!(
+                f(kind, serde_json::json!(["pg_temp", "pg_catalog"])),
+                pulled
+            );
+            assert_ne!(f(kind, serde_json::json!(["pg_catalog"])), pulled);
+            assert_eq!(
+                f(kind, serde_json::json!(["pg_catalog"])),
+                f(kind, serde_json::json!("pg_catalog"))
+            );
+        }
     }
 
     #[test]

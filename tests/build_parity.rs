@@ -359,6 +359,41 @@ fn outside_items() -> Vec<Item> {
                 .unwrap(),
             ),
         ),
+        // deviation 36
+        item(
+            3,
+            ObjectType::Function,
+            Definition::Function(
+                serde_json::from_value(serde_json::json!({
+                    "name": "definer",
+                    "schema": "test",
+                    "owner": "postgres",
+                    "returns": "text",
+                    "language": "sql",
+                    "security": "DEFINER",
+                    "configuration": {
+                        "search_path": ["pg_catalog", "$user", "pg_temp"],
+                    },
+                    "definition": "SELECT current_user::text;",
+                }))
+                .unwrap(),
+            ),
+        ),
+        item(
+            4,
+            ObjectType::Procedure,
+            Definition::Procedure(
+                serde_json::from_value(serde_json::json!({
+                    "name": "definer_proc",
+                    "schema": "test",
+                    "owner": "postgres",
+                    "language": "sql",
+                    "configuration": {"search_path": ["pg_catalog", "pg_temp"]},
+                    "definition": "SELECT 1;",
+                }))
+                .unwrap(),
+            ),
+        ),
     ]
 }
 
@@ -403,6 +438,26 @@ const OUTSIDE_CORRECTED: &[(&str, &str, &str, &str, &str)] = &[
         "COMMENT ON OPERATOR \"Gate Ops\".<~> (integer, integer) IS \
          $$Quoted schema$$;\n;\n",
         "",
+    ),
+    // deviation 36: each element of a list setting is its own string
+    // constant. The Python rendered a list as ARRAY[...], which SET
+    // does not parse, and a string with commas as one name
+    (
+        "FUNCTION",
+        "test",
+        "definer",
+        "CREATE FUNCTION test.definer() RETURNS text LANGUAGE sql SECURITY \
+         DEFINER SET search_path = 'pg_catalog', '$user', 'pg_temp' AS \
+         $$\nSELECT current_user::text;\n$$;\n",
+        "DROP FUNCTION test.definer();\n",
+    ),
+    (
+        "PROCEDURE",
+        "test",
+        "definer_proc",
+        "CREATE PROCEDURE test.definer_proc() LANGUAGE sql SET search_path \
+         = 'pg_catalog', 'pg_temp' AS $$\nSELECT 1;\n$$;\n",
+        "DROP PROCEDURE test.definer_proc();\n",
     ),
 ];
 

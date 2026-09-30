@@ -51,20 +51,47 @@ psql --single-transaction -v ON_ERROR_STOP=1 -f deploy.sql
 via `psql` (it rolls back on the first error and refuses while gated
 destructive statements are pending).
 
-Before its first statement, the script sets an empty `search_path`, as
-pg_restore does, and its header says so:
+Before its first statement, the script sets the session settings of
+pg_restore that can change the result of DDL, and its header names
+them:
 
 ```sql
+SET client_encoding = 'UTF8';
+SET standard_conforming_strings = on;
 SELECT pg_catalog.set_config('search_path', '', false);
+SET check_function_bodies = false;
+SET xmloption = content;
 ```
 
-Thus a name in the script resolves as it does in a restore of the
-`build` archive, and not by the `search_path` of the session. A name
-with no schema resolves only in `pg_catalog`, so qualify each other
-name in the project. The setting is not local to the transaction, so
-it also applies when the script runs outside a transaction block. It
-stays until the session ends, or until a rollback of the transaction
-that set it.
+Thus the script runs as a restore of the `build` archive does, and not
+by the settings of the session:
+
+- `client_encoding`: the script is UTF-8, so a character that is not
+  ASCII does not change when the database or the client uses another
+  encoding.
+- `standard_conforming_strings`: a backslash in a string literal is
+  not an escape.
+- `search_path`: a name resolves as it does in a restore. A name with
+  no schema resolves only in `pg_catalog`, so qualify each other name
+  in the project.
+- `check_function_bodies`: PostgreSQL does not check the body of a
+  `LANGUAGE sql` function when it makes the function, so the body can
+  refer to a table that the script makes after it.
+- `xmloption`: an `xml` constant that is not a document, such as a
+  default of `'text'::xml`, is valid.
+
+The script does not set the other settings that pg_restore sets.
+`statement_timeout`, `lock_timeout`, `idle_in_transaction_session_timeout`
+and `transaction_timeout` can stop the script, but they do not change
+what it makes, and on a live database they are limits that the operator
+sets on purpose. `client_min_messages` changes only the messages that
+the client gets. `row_security` changes only the rows that a query
+reads. DDL does not use it, except the query that fills a materialized
+view.
+
+The settings are not local to the transaction, so they also apply when
+the script runs outside a transaction block. They stay until the
+session ends, or until a rollback of the transaction that set them.
 
 | Option | Description |
 | --- | --- |
