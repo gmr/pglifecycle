@@ -683,21 +683,28 @@ fn view_dependencies(
 /// it. An object that the inventory does not have is left out, as
 /// `view_dependencies` leaves it out. A function or aggregate is named
 /// with its argument types, which the load resolves to one overload.
+/// It is left out when the inventory has no overload with those
+/// argument types, because the load fails for such an entry.
 fn routine_dependencies(
     parents: Option<&Vec<super::RoutineParent>>,
     assembly: &Assembly,
     relations: &BTreeMap<(String, String), &'static str>,
 ) -> Option<Value> {
+    use crate::project::{
+        aggregate_signature, parameter_signature, tag_signature,
+    };
     let known = |key: &str, schema: &str, tag: &str| {
-        let name = tag.split('(').next().unwrap_or_default();
+        let (name, arguments) =
+            tag_signature(tag).unwrap_or((tag, Vec::new()));
         let same = |s: &str, n: &str| s == schema && n == name;
         match key {
-            "aggregates" => {
-                assembly.aggregates.iter().any(|a| same(&a.schema, &a.name))
-            }
-            "functions" => {
-                assembly.functions.iter().any(|f| same(&f.schema, &f.name))
-            }
+            "aggregates" => assembly.aggregates.iter().any(|a| {
+                same(&a.schema, &a.name) && aggregate_signature(a) == arguments
+            }),
+            "functions" => assembly.functions.iter().any(|f| {
+                same(&f.schema, &f.name)
+                    && parameter_signature(&f.parameters) == arguments
+            }),
             "sequences" => {
                 assembly.sequences.iter().any(|s| same(&s.schema, &s.name))
             }
@@ -1351,11 +1358,20 @@ mod tests {
     /// A routine names each object that its archive entry depends on
     /// and that the pulled inventory has, a function with the argument
     /// types of its tag. An object that the inventory does not have is
-    /// left out
+    /// left out. An overload that the inventory does not have is also
+    /// left out, although the inventory has an overload with the same
+    /// name: the load fails for an entry that names no overload
     #[test]
     fn routine_dependencies_name_the_pulled_objects() {
+        let mut z = function("test", "z");
+        z.parameters = Some(vec![models::FunctionParameter {
+            mode: String::from("IN"),
+            data_type: String::from("int4"),
+            name: Some(String::from("a")),
+            default: None,
+        }]);
         let assembly = Assembly {
-            functions: vec![function("test", "z")],
+            functions: vec![z],
             ..Assembly::default()
         };
         let relations = inventory(&[("test", "users", "tables")]);
@@ -1368,6 +1384,7 @@ mod tests {
         let parents = vec![
             parent("tables", "test", "users"),
             parent("functions", "test", "z(integer)"),
+            parent("functions", "test", "z(bigint)"),
             parent("functions", "ext", "other()"),
             parent("views", "test", "users"),
             parent("sequences", "test", "gone"),

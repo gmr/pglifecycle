@@ -7,7 +7,7 @@ use serde_json::Value;
 
 use crate::constants::{DEPENDENCIES, ObjectType, READ_ORDER};
 use crate::deploy::identity_type;
-use crate::models::{Definition, FunctionParameter, Item};
+use crate::models::{Aggregate, Definition, FunctionParameter, Item};
 use crate::project::{Project, validate};
 use crate::yamlio;
 
@@ -800,10 +800,8 @@ fn resolve_dependency(
             return Ok(exact);
         }
     }
-    let (name, arguments) = match dep.parent_tag.split_once('(') {
-        Some((name, arguments)) => {
-            (name.trim_end(), Some(split_arguments(arguments)))
-        }
+    let (name, arguments) = match tag_signature(&dep.parent_tag) {
+        Some((name, arguments)) => (name, Some(arguments)),
         None => (dep.parent_tag.as_str(), None),
     };
     let overloads = lookup_items(index, desc, namespace, name);
@@ -822,8 +820,6 @@ fn resolve_dependency(
     };
     match arguments {
         Some(arguments) => {
-            let arguments: Vec<String> =
-                arguments.iter().map(|a| identity_type(a)).collect();
             let found: Vec<usize> = overloads
                 .iter()
                 .copied()
@@ -878,6 +874,19 @@ fn split_arguments(arguments: &str) -> Vec<String> {
         .collect()
 }
 
+/// The name and the argument types of a routine tag with an argument
+/// list, such as `f(integer, text)`. The types are as
+/// [`routine_signature`] writes them. A tag with no argument list
+/// gives `None`.
+pub(crate) fn tag_signature(tag: &str) -> Option<(&str, Vec<String>)> {
+    let (name, arguments) = tag.split_once('(')?;
+    let arguments = split_arguments(arguments)
+        .iter()
+        .map(|a| identity_type(a))
+        .collect();
+    Some((name.trim_end(), arguments))
+}
+
 /// The argument types that PostgreSQL resolves a routine by, as
 /// [`identity_type`] writes them: an alias is its canonical name, a
 /// built-in type has no `pg_catalog` schema, a name that is not quoted
@@ -886,25 +895,34 @@ fn split_arguments(arguments: &str) -> Vec<String> {
 /// its direct arguments, then its ORDER BY arguments, as pg_dump lists
 /// them.
 fn routine_signature(definition: &Definition) -> Vec<String> {
-    let parameters = |parameters: &Option<Vec<FunctionParameter>>| {
-        parameters
-            .iter()
-            .flatten()
-            .filter(|p| !matches!(p.mode.as_str(), "OUT" | "TABLE"))
-            .map(|p| identity_type(&p.data_type))
-            .collect()
-    };
     match definition {
-        Definition::Function(f) => parameters(&f.parameters),
-        Definition::Procedure(p) => parameters(&p.parameters),
-        Definition::Aggregate(a) => a
-            .arguments
-            .iter()
-            .chain(a.order_by.iter().flatten())
-            .map(|a| identity_type(&a.data_type))
-            .collect(),
+        Definition::Function(f) => parameter_signature(&f.parameters),
+        Definition::Procedure(p) => parameter_signature(&p.parameters),
+        Definition::Aggregate(a) => aggregate_signature(a),
         _ => Vec::new(),
     }
+}
+
+/// The [`routine_signature`] of a function or procedure
+pub(crate) fn parameter_signature(
+    parameters: &Option<Vec<FunctionParameter>>,
+) -> Vec<String> {
+    parameters
+        .iter()
+        .flatten()
+        .filter(|p| !matches!(p.mode.as_str(), "OUT" | "TABLE"))
+        .map(|p| identity_type(&p.data_type))
+        .collect()
+}
+
+/// The [`routine_signature`] of an aggregate
+pub(crate) fn aggregate_signature(aggregate: &Aggregate) -> Vec<String> {
+    aggregate
+        .arguments
+        .iter()
+        .chain(aggregate.order_by.iter().flatten())
+        .map(|a| identity_type(&a.data_type))
+        .collect()
 }
 
 /// What makes two definitions the same object. A function is
