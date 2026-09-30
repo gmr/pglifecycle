@@ -297,9 +297,11 @@ revocations:
   so a type with no schema is not found and the script fails.
 
 - A type name (a column `data_type`, a parameter type, a `returns`
-  type, or the type of a cast) can be in any form that PostgreSQL
-  accepts. `deploy` compares it in the form that PostgreSQL writes, so
-  these forms are not a change: an alias (`int4`, `varchar`,
+  type, the source or target type of a cast or the type of a
+  transform, or the type of a cast in an index or an exclusion
+  constraint expression) can be in these forms. `deploy` compares it
+  in the form that PostgreSQL writes, so these forms are not a change:
+  an alias (`int4`, `varchar`,
   `timestamptz`, `decimal`, `bool`), a name in uppercase, `float` and
   `float(p)` (`double precision`, or `real` for a precision of 1 to
   24), `char` and `bit` with no length (`character(1)`, `bit(1)`),
@@ -311,6 +313,12 @@ revocations:
   there `varchar(10)` is `character varying` and `bpchar` is
   `character`. A quoted name, such as `"char"`, and a type that is not
   a built-in type keep their names.
+
+  `deploy` compares these as they are written, so write them as `pull`
+  writes them: a cast in a `CHECK`, a `WHERE` or a `DEFAULT`
+  expression, a quoted built-in name such as `"int4"`, `serial`, an
+  array type name of a type that is not in the list above (such as
+  `_text`), and a column type in a `TABLE(...)` return type.
 
 - A storage parameter (`storage_parameters` of a table, a
   materialized view or an index) can be a YAML number or boolean:

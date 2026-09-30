@@ -1299,14 +1299,22 @@ pub(crate) fn identity_type(data_type: &str) -> String {
         }
     }
     let result = result.trim_end();
-    let (base, array) = match result.strip_suffix("[]") {
+    // `SETOF` before a return type stays, and the type after it is
+    // made the same as an argument type
+    let (setof, rest) = match result.strip_prefix("setof ") {
+        Some(rest) => ("setof ", rest),
+        None => ("", result),
+    };
+    let (base, array) = match rest.strip_suffix("[]") {
         Some(base) => (base, "[]"),
-        None => (result, ""),
+        None => (rest, ""),
     };
     match base {
-        "bpchar" => format!("character{array}"),
-        "\"bit\"" => format!("bit{array}"),
-        _ if base.starts_with("interval ") => format!("interval{array}"),
+        "bpchar" => format!("{setof}character{array}"),
+        "\"bit\"" => format!("{setof}bit{array}"),
+        _ if base.starts_with("interval ") => {
+            format!("{setof}interval{array}")
+        }
         _ => result.to_string(),
     }
 }
@@ -1748,6 +1756,20 @@ mod tests {
             "timestamp with time zone"
         );
         assert_eq!(identity_type("public.\"a(b)\""), "public.\"a(b)\"");
+    }
+
+    #[test]
+    fn return_type_keeps_setof_in_the_postgresql_form() {
+        // PostgreSQL 18 writes each of these as `SETOF` and the type
+        // with no typmod
+        assert_eq!(return_type("SETOF bpchar"), "setof character");
+        assert_eq!(return_type("SETOF bpchar[]"), "setof character[]");
+        assert_eq!(return_type("SETOF \"bit\""), "setof bit");
+        assert_eq!(return_type("SETOF interval day"), "setof interval");
+        assert_eq!(
+            return_type("SETOF bpchar"),
+            return_type("SETOF character")
+        );
     }
 
     #[test]
