@@ -286,7 +286,8 @@ revocations:
   function call. Parentheses around all of it are also accepted, and
   `deploy` compares the expression without them.
 
-  The type of a cast can be a type alias, and it can be in uppercase:
+  The type of a cast can be in any form of a type name (see the next
+  item), and this is also true in an exclusion constraint expression:
   `(label)::VARCHAR(20)` compares equal to
   `(label)::character varying(20)`, which PostgreSQL writes. `deploy`
   compares the remaining text of the expression as it is, so write it
@@ -294,6 +295,22 @@ revocations:
   schema, as `pull` writes it: `(embedding)::public.halfvec(1536)`.
   The deploy script runs with the empty `search_path` of `pg_restore`,
   so a type with no schema is not found and the script fails.
+
+- A type name (a column `data_type`, a parameter type, a `returns`
+  type, or the type of a cast) can be in any form that PostgreSQL
+  accepts. `deploy` compares it in the form that PostgreSQL writes, so
+  these forms are not a change: an alias (`int4`, `varchar`,
+  `timestamptz`, `decimal`, `bool`), a name in uppercase, `float` and
+  `float(p)` (`double precision`, or `real` for a precision of 1 to
+  24), `char` and `bit` with no length (`character(1)`, `bit(1)`),
+  `timestamp(3)` (`timestamp(3) without time zone`), spaces in a
+  modifier (`decimal(10, 2)`), `numeric(10)` (`numeric(10,0)`), and an
+  array bound, `ARRAY` or an array type name (`int[3]`,
+  `integer ARRAY` and `_int4` are `integer[]`). PostgreSQL keeps no
+  typmod in a parameter, a return, a cast or a transform type, so
+  there `varchar(10)` is `character varying` and `bpchar` is
+  `character`. A quoted name, such as `"char"`, and a type that is not
+  a built-in type keep their names.
 
 - A storage parameter (`storage_parameters` of a table, a
   materialized view or an index) can be a YAML number or boolean:

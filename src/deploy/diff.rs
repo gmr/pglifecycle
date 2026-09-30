@@ -38,7 +38,8 @@ impl ObjectKey {
 /// identity. A cast or a transform has no schema: the project files it
 /// under one, and pull picks one from its types, so the two need not
 /// agree. A cast's name, `(source AS target)`, keeps its canonical
-/// types, so `int4` matches the `integer` pg_dump writes. An aggregate
+/// types, so `int4` matches the `integer` pg_dump writes. A cast or a
+/// transform type has no typmod (see [`identity_type`]). An aggregate
 /// is identified by its name and its input types, so one overload does
 /// not stand for another. The aggregate and operator names remove
 /// typmods, as PostgreSQL does not keep them in an argument type (see
@@ -95,7 +96,7 @@ fn object_identity(definition: &Definition) -> (String, String) {
             String::new(),
             format!(
                 "FOR {} LANGUAGE {}",
-                canonical_type(&transform.data_type),
+                identity_type(&transform.data_type),
                 transform.language
             ),
         ),
@@ -103,12 +104,8 @@ fn object_identity(definition: &Definition) -> (String, String) {
             String::new(),
             format!(
                 "({} AS {})",
-                canonical_type(
-                    cast.source_type.as_deref().unwrap_or_default()
-                ),
-                canonical_type(
-                    cast.target_type.as_deref().unwrap_or_default()
-                )
+                identity_type(cast.source_type.as_deref().unwrap_or_default()),
+                identity_type(cast.target_type.as_deref().unwrap_or_default())
             ),
         ),
         // deploy splits a container into one for each object, which is
@@ -126,7 +123,8 @@ fn object_identity(definition: &Definition) -> (String, String) {
 
 /// The function identity signature with canonicalized parameter
 /// types, so a repo `fn(int4)` keys identically to the server's
-/// `fn(integer)` (mirrors [`crate::models::Function::identity`])
+/// `fn(integer)` (mirrors [`crate::models::Function::identity`]). A
+/// parameter type has no typmod (see [`identity_type`]).
 fn function_key_name(function: &crate::models::Function) -> String {
     let args: Vec<String> = function
         .parameters
@@ -141,7 +139,7 @@ fn function_key_name(function: &crate::models::Function) -> String {
             if let Some(name) = &p.name {
                 parts.push(name.clone());
             }
-            parts.push(canonical_type(&p.data_type));
+            parts.push(identity_type(&p.data_type));
             parts.join(" ")
         })
         .collect();
@@ -619,6 +617,16 @@ fn normalized(definition: &Definition) -> Value {
                     .configuration
                     .as_ref()
                     .map(canonical_settings),
+                parameters: function.parameters.as_ref().map(|parameters| {
+                    parameters
+                        .iter()
+                        .map(|p| crate::models::FunctionParameter {
+                            data_type: identity_type(&p.data_type),
+                            ..p.clone()
+                        })
+                        .collect()
+                }),
+                returns: function.returns.as_deref().map(return_type),
                 ..function.clone()
             });
             &canonical
@@ -762,58 +770,297 @@ fn normalize(value: &mut Value) {
     }
 }
 
-/// Canonicalize common type-name aliases the way PostgreSQL does on
-/// ingest, so a hand-edited `int4` does not falsely diff against the
-/// server's `integer` (PLAN.md risk #5). A length/precision modifier
-/// (`varchar(255)`, `numeric(10,2)`) and an array suffix are split
-/// off the base name so the alias can be matched and reattached.
+/// A type name in the form that PostgreSQL's `format_type` writes for
+/// a column of that type, so a hand-written `int4` does not falsely
+/// diff against the server's `integer` (PLAN.md risk #5). The forms
+/// that change are the ones that PostgreSQL 18 changes:
+///
+/// - an alias (`int4`, `varchar`, `timestamptz`, `decimal`) is the
+///   standard name;
+/// - `float` is `double precision`, and `float(p)` is `real` for a
+///   precision of 1 to 24 and `double precision` for 25 to 53;
+/// - `char` and `bit` with no length have the length 1;
+/// - `timestamp` and `time` are `without time zone`, with the
+///   precision after the first word (`timestamp(3) with time zone`);
+/// - `numeric(p)` is `numeric(p,0)`;
+/// - an array bound (`int[3]`), `ARRAY` and the array type name of a
+///   built-in type (`_int4`) are `[]`;
+/// - a modifier has no spaces next to its parentheses and commas, and
+///   a name that is not quoted is in lowercase.
+///
+/// A user-defined type or a quoted name keeps its name. A built-in type
+/// has no `pg_catalog` schema, as pg_dump writes it with none. `SETOF`
+/// before a return type stays.
 pub(crate) fn canonical_type(data_type: &str) -> String {
-    // PostgreSQL folds a name that is not quoted to lowercase, so `TEXT`
-    // is `text`; a quoted name keeps its case
-    let mut quoted = false;
-    let data_type: String = data_type
-        .chars()
-        .map(|c| {
-            if c == '"' {
-                quoted = !quoted;
-            }
-            if quoted { c } else { c.to_ascii_lowercase() }
-        })
-        .collect();
-    let (body, array) = match data_type.trim_end().strip_suffix("[]") {
-        Some(body) => (body.trim_end(), "[]"),
-        None => (data_type.trim_end(), ""),
+    let parts = type_parts(data_type);
+    match parts.split_first() {
+        Some((TypePart::Word(first), rest))
+            if first == "setof" && !rest.is_empty() =>
+        {
+            format!("setof {}", canonical_parts(rest))
+        }
+        _ => canonical_parts(&parts),
+    }
+}
+
+/// One part of a type name
+#[derive(Debug, PartialEq)]
+enum TypePart {
+    /// A name, with its schema and its quoted parts
+    Word(String),
+    /// A modifier with its parentheses
+    Modifier(String),
+    /// An array bound in brackets
+    Bound,
+}
+
+/// The parts of a type name. PostgreSQL folds a name that is not quoted
+/// to lowercase, so `TEXT` is `text`; a quoted name keeps its case.
+fn type_parts(data_type: &str) -> Vec<TypePart> {
+    let mut parts = Vec::new();
+    let mut word = String::new();
+    let mut chars = data_type.chars();
+    let flush = |word: &mut String, parts: &mut Vec<TypePart>| {
+        if !word.is_empty() {
+            parts.push(TypePart::Word(std::mem::take(word)));
+        }
     };
-    let (name, modifier) = match body.find('(') {
-        Some(index) => (body[..index].trim_end(), &body[index..]),
-        None => (body, ""),
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => {
+                word.push(c);
+                for c in chars.by_ref() {
+                    word.push(c);
+                    if c == '"' {
+                        break;
+                    }
+                }
+            }
+            '(' => {
+                flush(&mut word, &mut parts);
+                parts.push(TypePart::Modifier(modifier(&mut chars)));
+            }
+            '[' => {
+                flush(&mut word, &mut parts);
+                chars.by_ref().find(|c| *c == ']');
+                parts.push(TypePart::Bound);
+            }
+            c if c.is_whitespace() => flush(&mut word, &mut parts),
+            c => word.push(c.to_ascii_lowercase()),
+        }
+    }
+    flush(&mut word, &mut parts);
+    parts
+}
+
+/// A modifier, from after its `(` to its `)`, in lowercase and with no
+/// spaces next to its parentheses and commas, other than in quotes
+fn modifier(chars: &mut std::str::Chars) -> String {
+    let mut text = String::from("(");
+    let mut depth = 1;
+    let mut quote = None;
+    let mut space = false;
+    for c in chars.by_ref() {
+        if let Some(open) = quote {
+            text.push(c);
+            if c == open {
+                quote = None;
+            }
+            continue;
+        }
+        if c.is_whitespace() {
+            space = true;
+            continue;
+        }
+        if space && !matches!(c, ')' | ',') && !text.ends_with(['(', ',']) {
+            text.push(' ');
+        }
+        space = false;
+        match c {
+            '"' | '\'' => quote = Some(c),
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            _ => {}
+        }
+        text.push(c.to_ascii_lowercase());
+        if depth == 0 {
+            break;
+        }
+    }
+    text
+}
+
+/// The built-in types whose array type name (`_int4`) is a hand-written
+/// form of an array of the type
+const ARRAY_ELEMENTS: &[&str] = &[
+    "bit",
+    "bool",
+    "bpchar",
+    "char",
+    "float4",
+    "float8",
+    "int2",
+    "int4",
+    "int8",
+    "interval",
+    "numeric",
+    "time",
+    "timestamp",
+    "timestamptz",
+    "timetz",
+    "varbit",
+    "varchar",
+];
+
+/// The type that the parts name, with `[]` for an array
+fn canonical_parts(parts: &[TypePart]) -> String {
+    let mut parts = parts;
+    let mut array = false;
+    while let [rest @ .., TypePart::Bound] = parts {
+        parts = rest;
+        array = true;
+    }
+    if let [rest @ .., TypePart::Word(word)] = parts
+        && !rest.is_empty()
+        && word == "array"
+    {
+        parts = rest;
+        array = true;
+    }
+    let mut base = base_type(parts);
+    if array && !base.ends_with("[]") {
+        base.push_str("[]");
+    }
+    base
+}
+
+/// The type that the parts name, other than an array bound
+fn base_type(parts: &[TypePart]) -> String {
+    let mut words = Vec::new();
+    let mut modifier = None;
+    // the number of words before the modifier
+    let mut position = 0;
+    for part in parts {
+        match part {
+            TypePart::Word(word) => words.push(word.as_str()),
+            TypePart::Modifier(text) if modifier.is_none() => {
+                modifier = Some(text.as_str());
+                position = words.len();
+            }
+            _ => return written(&words, modifier, position),
+        }
+    }
+    let Some(first) = words.first_mut() else {
+        return written(&words, modifier, position);
     };
     // a built-in type is in pg_catalog, and pg_dump writes it with no
-    // schema. The keyword `char` is `character` only when it has no
-    // schema: `pg_catalog.char` is the one-byte type `"char"`
-    let (name, qualified) = match name
+    // schema. The keywords `char` and `bit` are `character` and
+    // `bit(1)` only when they have no schema: `pg_catalog.char` is the
+    // one-byte type `"char"`, and `pg_catalog.bit` has no length.
+    let qualified = match first
         .strip_prefix("pg_catalog.")
-        .or_else(|| name.strip_prefix("\"pg_catalog\"."))
+        .or_else(|| first.strip_prefix("\"pg_catalog\"."))
     {
-        Some(name) => (name, true),
-        None => (name, false),
+        Some(name) => {
+            *first = name;
+            true
+        }
+        None => false,
     };
-    let canonical = match name {
-        "char" if qualified => "\"char\"",
-        "bool" => "boolean",
-        "char" => "character",
-        "decimal" => "numeric",
-        "float4" => "real",
-        "float8" => "double precision",
-        "int2" => "smallint",
-        "int4" | "int" => "integer",
-        "int8" => "bigint",
-        "timestamptz" => "timestamp with time zone",
-        "timetz" => "time with time zone",
-        "varchar" => "character varying",
-        other => other,
+    if let [name] = words[..]
+        && modifier.is_none()
+        && let Some(element) = name.strip_prefix('_')
+        && ARRAY_ELEMENTS.contains(&element)
+    {
+        return format!(
+            "{}[]",
+            canonical_type(&format!("pg_catalog.{element}"))
+        );
+    }
+    let name = words.join(" ");
+    // the modifier is after the last word, or after the first word of
+    // a date and time type
+    let at_end = modifier.is_none() || position == words.len();
+    let after_first = modifier.is_none() || position == 1;
+    let with = |base: &str| format!("{base}{}", modifier.unwrap_or_default());
+    let zone = |base: &str, zone: &str| {
+        format!("{base}{} {zone} time zone", modifier.unwrap_or_default())
     };
-    format!("{canonical}{modifier}{array}")
+    match name.as_str() {
+        "char" if qualified && modifier.is_none() => String::from("\"char\""),
+        "bit" if qualified && modifier.is_none() => String::from("\"bit\""),
+        "timestamp" | "timestamp without time zone" if after_first => {
+            zone("timestamp", "without")
+        }
+        "timestamptz" | "timestamp with time zone" if after_first => {
+            zone("timestamp", "with")
+        }
+        "time" | "time without time zone" if after_first => {
+            zone("time", "without")
+        }
+        "timetz" | "time with time zone" if after_first => {
+            zone("time", "with")
+        }
+        _ if !at_end => written(&words, modifier, position),
+        "int" | "integer" | "int4" => with("integer"),
+        "smallint" | "int2" => with("smallint"),
+        "bigint" | "int8" => with("bigint"),
+        "real" | "float4" => with("real"),
+        "double precision" | "float8" => with("double precision"),
+        "boolean" | "bool" => with("boolean"),
+        "float" => match modifier.map(precision) {
+            None => String::from("double precision"),
+            Some(Some(1..=24)) => String::from("real"),
+            Some(Some(25..=53)) => String::from("double precision"),
+            Some(_) => written(&words, modifier, position),
+        },
+        "decimal" | "dec" | "numeric" => match modifier.map(precision) {
+            Some(Some(precision)) => format!("numeric({precision},0)"),
+            _ => with("numeric"),
+        },
+        "char" | "character" | "nchar" | "national char"
+        | "national character" => {
+            format!("character{}", modifier.unwrap_or("(1)"))
+        }
+        "bpchar" if modifier.is_some() => with("character"),
+        "varchar"
+        | "char varying"
+        | "character varying"
+        | "nchar varying"
+        | "national char varying"
+        | "national character varying" => with("character varying"),
+        "bit" => format!("bit{}", modifier.unwrap_or("(1)")),
+        "varbit" | "bit varying" => with("bit varying"),
+        _ => written(&words, modifier, position),
+    }
+}
+
+/// The number in a modifier of one number, `(10)`
+fn precision(modifier: &str) -> Option<u32> {
+    modifier.strip_prefix('(')?.strip_suffix(')')?.parse().ok()
+}
+
+/// The words with one space between them, and the modifier after the
+/// word that it follows
+fn written(words: &[&str], modifier: Option<&str>, position: usize) -> String {
+    let mut text = String::new();
+    for (index, word) in words.iter().enumerate() {
+        if index == position
+            && let Some(modifier) = modifier
+        {
+            text.push_str(modifier);
+        }
+        if !text.is_empty() {
+            text.push(' ');
+        }
+        text.push_str(word);
+    }
+    if position == words.len()
+        && let Some(modifier) = modifier
+    {
+        text.push_str(modifier);
+    }
+    text
 }
 
 /// A collation name as PostgreSQL finds it. PostgreSQL always searches
@@ -825,63 +1072,216 @@ pub(crate) fn canonical_collation(collation: &str) -> String {
     super::alter::names::name(collation)
 }
 
-/// An index expression with the type of each cast (`::type`) in the
-/// form that [`canonical_type`] gives, which is the form PostgreSQL
-/// writes: `(a)::varchar(20)` is `(a)::character varying(20)`. Text in
-/// a string literal or in a quoted name stays as it is. This changes
-/// only the type names: deploy compares the remaining text as it is.
+/// An expression with the type of each cast (`::type`) in the form
+/// that [`canonical_type`] gives, which is the form PostgreSQL writes:
+/// `(a)::varchar(20)` is `(a)::character varying(20)`, and
+/// `(a)::TIMESTAMP WITH TIME ZONE` is `(a)::timestamp with time
+/// zone`. Text in a string literal (also an `E'...'` string and a
+/// dollar-quoted string) or in a quoted name stays as it is. This
+/// changes only the type names: deploy compares the remaining text as
+/// it is.
 pub(crate) fn canonical_casts(expression: &str) -> String {
     let mut result = String::with_capacity(expression.len());
-    let mut chars = expression.chars().peekable();
+    let mut rest = expression;
+    // the character before `rest`, which tells if `E` or `$` starts a
+    // string or is a part of a name
+    let mut previous = None;
+    while let Some(c) = rest.chars().next() {
+        let after_name = previous.is_some_and(is_name_char);
+        let length = match c {
+            '\'' => quoted_length(rest, false),
+            'e' | 'E' if !after_name && rest[1..].starts_with('\'') => {
+                1 + quoted_length(&rest[1..], true)
+            }
+            '"' => rest[1..].find('"').map_or(rest.len(), |end| end + 2),
+            '$' if !after_name => dollar_quoted_length(rest).unwrap_or(1),
+            ':' if rest.starts_with("::") => {
+                result.push_str("::");
+                rest = &rest[2..];
+                let length = cast_type_length(rest);
+                result.push_str(&canonical_type(&rest[..length]));
+                rest = &rest[length..];
+                previous = result.chars().last();
+                continue;
+            }
+            c => c.len_utf8(),
+        };
+        result.push_str(&rest[..length]);
+        previous = rest[..length].chars().last();
+        rest = &rest[length..];
+    }
+    result
+}
+
+/// Whether the character can be in a name that is not quoted
+fn is_name_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_' || c == '$'
+}
+
+/// The length of the string literal at the start of the text, with its
+/// quotes. A doubled quote is in the string; with `escapes`, a
+/// backslash escapes the next character too.
+fn quoted_length(text: &str, escapes: bool) -> usize {
+    let mut chars = text.char_indices().skip(1);
+    while let Some((index, c)) = chars.next() {
+        match c {
+            '\\' if escapes => {
+                chars.next();
+            }
+            '\'' if text[index + 1..].starts_with('\'') => {
+                chars.next();
+            }
+            '\'' => return index + 1,
+            _ => {}
+        }
+    }
+    text.len()
+}
+
+/// The length of the dollar-quoted string at the start of the text
+/// (`$$...$$` or `$tag$...$tag$`), or none when the `$` does not start
+/// one (as in the parameter `$1`)
+fn dollar_quoted_length(text: &str) -> Option<usize> {
+    let tag_end = text[1..].find('$')? + 2;
+    let tag = &text[..tag_end];
+    let name = &tag[1..tag_end - 1];
+    if name.starts_with(|c: char| c.is_ascii_digit())
+        || !name.chars().all(|c| c.is_alphanumeric() || c == '_')
+    {
+        return None;
+    }
+    Some(
+        text[tag_end..]
+            .find(tag)
+            .map_or(text.len(), |end| tag_end + end + tag.len()),
+    )
+}
+
+/// The length of the type name at the start of the text, after a `::`:
+/// a name (quoted parts, or not, with a `.` between them), the words
+/// that continue a type name of more than one word (`double
+/// precision`, `character varying`, `timestamp with time zone`,
+/// `interval day to second`), a modifier, and array bounds or `ARRAY`
+fn cast_type_length(text: &str) -> usize {
+    let mut length = name_length(text);
+    if length == 0 {
+        return 0;
+    }
+    let first = text[..length].to_ascii_lowercase();
+    let first = first.strip_prefix("pg_catalog.").unwrap_or(&first);
+    let mut previous = first.to_string();
+    let mut words = 1;
+    let mut modifier = false;
+    loop {
+        let rest = &text[length..];
+        let spaces = rest.len() - rest.trim_start().len();
+        let next = &rest[spaces..];
+        if next.starts_with('(') && !modifier {
+            let Some(end) = modifier_length(next) else {
+                break;
+            };
+            length += spaces + end;
+            modifier = true;
+            continue;
+        }
+        if next.starts_with('[') {
+            let Some(end) = next.find(']') else {
+                break;
+            };
+            length += spaces + end + 1;
+            previous = String::from("]");
+            continue;
+        }
+        let word_length = name_length(next);
+        if spaces == 0 || word_length == 0 {
+            break;
+        }
+        let word = next[..word_length].to_ascii_lowercase();
+        let continues = match (previous.as_str(), word.as_str()) {
+            ("]", _) => false,
+            (_, "array") => true,
+            ("double", "precision") => true,
+            ("national", "character" | "char") => true,
+            ("character" | "char" | "nchar" | "bit", "varying") => true,
+            ("timestamp" | "time", "with" | "without") if words == 1 => true,
+            ("with" | "without", "time") => true,
+            ("time", "zone") => words > 1,
+            (
+                "interval" | "year" | "month" | "day" | "hour" | "minute"
+                | "to",
+                "year" | "month" | "day" | "hour" | "minute" | "second" | "to",
+            ) => first == "interval",
+            _ => false,
+        };
+        if !continues {
+            break;
+        }
+        length += spaces + word_length;
+        previous = word;
+        words += 1;
+    }
+    length
+}
+
+/// The length of a name at the start of the text: quoted parts, or
+/// not, with a `.` between them
+fn name_length(text: &str) -> usize {
+    let mut length = 0;
+    while let Some(c) = text[length..].chars().next() {
+        if c == '"' {
+            length += text[length + 1..]
+                .find('"')
+                .map_or(text.len() - length, |end| end + 2);
+        } else if is_name_char(c) || c == '.' {
+            length += c.len_utf8();
+        } else {
+            break;
+        }
+    }
+    length
+}
+
+/// The length of the modifier at the start of the text, to its `)`
+fn modifier_length(text: &str) -> Option<usize> {
+    let mut depth = 0;
     let mut quote = None;
-    while let Some(c) = chars.next() {
-        result.push(c);
+    for (index, c) in text.char_indices() {
         match (quote, c) {
             (Some(open), c) if c == open => quote = None,
             (Some(_), _) => {}
-            (None, '\'' | '"') => quote = Some(c),
-            (None, ':') if chars.peek() == Some(&':') => {
-                result.push(chars.next().unwrap());
-                // the type name: parts that are quoted or not, with a
-                // `.` between them. A modifier or `[]` after the name
-                // stays as it is.
-                let mut name = String::new();
-                loop {
-                    match chars.peek() {
-                        Some('"') => {
-                            name.push(chars.next().unwrap());
-                            for c in chars.by_ref() {
-                                name.push(c);
-                                if c == '"' {
-                                    break;
-                                }
-                            }
-                        }
-                        Some(&c)
-                            if c.is_alphanumeric()
-                                || c == '_'
-                                || c == '$'
-                                || c == '.' =>
-                        {
-                            name.push(chars.next().unwrap());
-                        }
-                        _ => break,
-                    }
-                }
-                if !name.is_empty() {
-                    result.push_str(&canonical_type(&name));
+            (None, '"' | '\'') => quote = Some(c),
+            (None, '(') => depth += 1,
+            (None, ')') => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index + 1);
                 }
             }
             _ => {}
         }
     }
-    result
+    None
+}
+
+/// A return type as PostgreSQL keeps it: [`identity_type`], as a
+/// return type has no typmod either. A `TABLE(...)` return type keeps
+/// the form that [`canonical_type`] gives.
+pub(crate) fn return_type(returns: &str) -> String {
+    let canonical = canonical_type(returns);
+    if canonical.starts_with("table(") {
+        canonical
+    } else {
+        identity_type(&canonical)
+    }
 }
 
 /// A type as it identifies an argument: [`canonical_type`] without
 /// its modifiers. PostgreSQL does not keep a typmod in an argument
 /// type, so `varchar(10)` and `varchar` give the same aggregate or
-/// operator. A modifier in a quoted name is kept.
+/// operator. A modifier in a quoted name is kept. With no typmod,
+/// `bpchar` is `character`, `"bit"` is `bit`, and an interval has no
+/// fields (`interval day` is `interval`): PostgreSQL writes an
+/// argument type in that form.
 pub(crate) fn identity_type(data_type: &str) -> String {
     let mut quoted = false;
     let mut depth = 0usize;
@@ -898,7 +1298,17 @@ pub(crate) fn identity_type(data_type: &str) -> String {
             result.push(c);
         }
     }
-    result.trim_end().to_string()
+    let result = result.trim_end();
+    let (base, array) = match result.strip_suffix("[]") {
+        Some(base) => (base, "[]"),
+        None => (result, ""),
+    };
+    match base {
+        "bpchar" => format!("character{array}"),
+        "\"bit\"" => format!("bit{array}"),
+        _ if base.starts_with("interval ") => format!("interval{array}"),
+        _ => result.to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -956,6 +1366,179 @@ mod tests {
         assert_eq!(identity_type("pg_catalog.INT4"), "integer");
     }
 
+    /// Each hand-written form against the form that `format_type`
+    /// gives on PostgreSQL 18 for a column of that type
+    fn same_type(written: &str, stored: &str) {
+        assert_eq!(canonical_type(written), stored, "{written}");
+        assert_eq!(canonical_type(stored), stored, "{stored}");
+    }
+
+    #[test]
+    fn canonicalizes_float_by_precision() {
+        same_type("float", "double precision");
+        same_type("FLOAT", "double precision");
+        same_type("float(1)", "real");
+        same_type("float(24)", "real");
+        same_type("float (10)", "real");
+        same_type("float(25)", "double precision");
+        same_type("float(53)", "double precision");
+        same_type("float(10)[]", "real[]");
+        same_type("double  precision", "double precision");
+        // not types: PostgreSQL refuses them, so they stay as written
+        assert_eq!(canonical_type("float(0)"), "float(0)");
+        assert_eq!(canonical_type("float(54)"), "float(54)");
+        assert_eq!(canonical_type("double"), "double");
+    }
+
+    #[test]
+    fn canonicalizes_character_and_bit_lengths() {
+        same_type("char", "character(1)");
+        same_type("CHAR", "character(1)");
+        same_type("character", "character(1)");
+        same_type("nchar", "character(1)");
+        same_type("national character", "character(1)");
+        same_type("national char(4)", "character(4)");
+        same_type("char[]", "character(1)[]");
+        same_type("bpchar(5)", "character(5)");
+        same_type("bpchar", "bpchar");
+        same_type("pg_catalog.bpchar", "bpchar");
+        same_type("varchar", "character varying");
+        same_type("char varying(5)", "character varying(5)");
+        same_type("nchar varying", "character varying");
+        same_type("national character varying(7)", "character varying(7)");
+        same_type("character  varying(7)", "character varying(7)");
+        same_type("bit", "bit(1)");
+        same_type("bit(3)", "bit(3)");
+        same_type("pg_catalog.bit(3)", "bit(3)");
+        same_type("pg_catalog.bit", "\"bit\"");
+        same_type("\"bit\"", "\"bit\"");
+        same_type("bit varying", "bit varying");
+        same_type("varbit", "bit varying");
+        same_type("varbit(4)", "bit varying(4)");
+        same_type("\"char\"", "\"char\"");
+    }
+
+    #[test]
+    fn canonicalizes_date_and_time_types() {
+        same_type("timestamp", "timestamp without time zone");
+        same_type("timestamp(3)", "timestamp(3) without time zone");
+        same_type(
+            "TIMESTAMP(3) WITHOUT TIME ZONE",
+            "timestamp(3) without time zone",
+        );
+        same_type("TIMESTAMP WITH TIME ZONE", "timestamp with time zone");
+        same_type(
+            "timestamp (3) with time zone",
+            "timestamp(3) with time zone",
+        );
+        same_type("timestamp(3)with time zone", "timestamp(3) with time zone");
+        same_type("timestamptz(3)", "timestamp(3) with time zone");
+        same_type("timestamptz(3)[]", "timestamp(3) with time zone[]");
+        same_type("pg_catalog.timestamp(3)", "timestamp(3) without time zone");
+        same_type("time", "time without time zone");
+        same_type("time(2)", "time(2) without time zone");
+        same_type("time   with time zone", "time with time zone");
+        same_type("timetz", "time with time zone");
+        same_type("timetz(0)", "time(0) with time zone");
+        same_type("pg_catalog.timetz(0)", "time(0) with time zone");
+        same_type("interval", "interval");
+        same_type("interval(3)", "interval(3)");
+        same_type("interval day", "interval day");
+        same_type("interval day to second (3)", "interval day to second(3)");
+        same_type("INTERVAL HOUR TO MINUTE", "interval hour to minute");
+    }
+
+    #[test]
+    fn canonicalizes_numeric_modifiers() {
+        same_type("decimal", "numeric");
+        same_type("dec", "numeric");
+        same_type("decimal(10, 2)", "numeric(10,2)");
+        same_type("numeric( 10 , 2 )", "numeric(10,2)");
+        same_type("dec(5,1)", "numeric(5,1)");
+        same_type("decimal(10)", "numeric(10,0)");
+        same_type("numeric(10, -2)", "numeric(10,-2)");
+        same_type("int2", "smallint");
+        same_type("int8", "bigint");
+        same_type("bool", "boolean");
+    }
+
+    #[test]
+    fn canonicalizes_array_forms() {
+        same_type("int4[]", "integer[]");
+        same_type("int4 []", "integer[]");
+        same_type("int[3]", "integer[]");
+        same_type("int[3][4]", "integer[]");
+        same_type("int[][]", "integer[]");
+        same_type("integer ARRAY", "integer[]");
+        same_type("int4 ARRAY[ 3 ]", "integer[]");
+        same_type("_int4", "integer[]");
+        same_type("pg_catalog._int4", "integer[]");
+        same_type("_varchar", "character varying[]");
+        same_type("_bpchar", "bpchar[]");
+        same_type("varchar(20)[]", "character varying(20)[]");
+    }
+
+    #[test]
+    fn keeps_user_defined_and_quoted_types() {
+        assert_eq!(canonical_type("public.int4"), "public.int4");
+        assert_eq!(canonical_type("public._int4"), "public._int4");
+        assert_eq!(canonical_type("_mood"), "_mood");
+        assert_eq!(canonical_type("\"int4\""), "\"int4\"");
+        assert_eq!(canonical_type("\"Mood\"[]"), "\"Mood\"[]");
+        assert_eq!(
+            canonical_type("public.\"My  Type\"(a, b)"),
+            "public.\"My  Type\"(a,b)"
+        );
+    }
+
+    #[test]
+    fn canonicalizes_setof_return_types() {
+        same_type("SETOF int4", "setof integer");
+        same_type("setof varchar(3)[]", "setof character varying(3)[]");
+    }
+
+    /// A real change of type is still a change
+    #[test]
+    fn different_types_stay_different() {
+        let different = |a: &str, b: &str| {
+            assert_ne!(canonical_type(a), canonical_type(b), "{a} = {b}")
+        };
+        different("varchar(10)", "varchar(20)");
+        different("float(24)", "float(25)");
+        different("char", "char(2)");
+        different("char", "bpchar");
+        different("char", "\"char\"");
+        different("bit", "bit varying");
+        different("bit", "pg_catalog.bit");
+        different("timestamp", "timestamptz");
+        different("time(2)", "time(3)");
+        different("interval", "interval day");
+        different("numeric(10)", "numeric(10,2)");
+        different("int4", "int4[]");
+        different("SETOF int4", "int4");
+    }
+
+    #[test]
+    fn identity_type_is_the_argument_type() {
+        // PostgreSQL 18 writes an argument type with no typmod, so
+        // `character` there is any length, as `bpchar` is
+        assert_eq!(identity_type("char(3)"), "character");
+        assert_eq!(identity_type("char"), "character");
+        assert_eq!(identity_type("bpchar"), "character");
+        assert_eq!(identity_type("_bpchar"), "character[]");
+        assert_eq!(identity_type("\"bit\""), "bit");
+        assert_eq!(identity_type("bit(3)"), "bit");
+        assert_eq!(identity_type("float(10)"), "real");
+        assert_eq!(
+            identity_type("timestamptz(3)"),
+            "timestamp with time zone"
+        );
+        assert_eq!(identity_type("int[3]"), "integer[]");
+        // the fields of an interval are its typmod
+        assert_eq!(identity_type("interval day to second(3)"), "interval");
+        assert_eq!(identity_type("INTERVAL HOUR[]"), "interval[]");
+    }
+
     #[test]
     fn owner_differences_are_ignored() {
         let mut a = table("users", None);
@@ -1000,6 +1583,70 @@ mod tests {
         );
         // the other text keeps its case
         assert_eq!(canonical_casts("LOWER((a)::TEXT)"), "LOWER((a)::text)");
+    }
+
+    /// Each hand-written cast against the form that `pg_get_expr`
+    /// gives on PostgreSQL 18
+    #[test]
+    fn canonicalizes_cast_type_names_of_more_than_one_word() {
+        let same = |written: &str, stored: &str| {
+            assert_eq!(canonical_casts(written), stored, "{written}");
+            assert_eq!(canonical_casts(stored), stored, "{stored}");
+        };
+        same(
+            "((a)::TIMESTAMP WITH TIME ZONE IS NOT NULL)",
+            "((a)::timestamp with time zone IS NOT NULL)",
+        );
+        same(
+            "((a)::timestamptz(3) IS NOT NULL)",
+            "((a)::timestamp(3) with time zone IS NOT NULL)",
+        );
+        same(
+            "(a)::timestamp AT TIME ZONE 'UTC'",
+            "(a)::timestamp without time zone AT TIME ZONE 'UTC'",
+        );
+        same("((a)::DOUBLE PRECISION + 1)", "((a)::double precision + 1)");
+        same("(a)::float(10)", "(a)::real");
+        same("(a)::float", "(a)::double precision");
+        same("(a)::character varying(20)", "(a)::character varying(20)");
+        same("(a)::national char varying(4)", "(a)::character varying(4)");
+        same("(a)::char", "(a)::character(1)");
+        same("(a)::bit", "(a)::bit(1)");
+        same("(a)::\"bit\"", "(a)::\"bit\"");
+        same("(a)::decimal(10, 2)", "(a)::numeric(10,2)");
+        same(
+            "(a)::interval day to second(3)",
+            "(a)::interval day to second(3)",
+        );
+        same(
+            "(a)::INTERVAL HOUR TO MINUTE",
+            "(a)::interval hour to minute",
+        );
+        same("(a)::int[3]", "(a)::integer[]");
+        same("(a)::integer ARRAY", "(a)::integer[]");
+        same("(a)::_int4", "(a)::integer[]");
+        same(
+            "((a)::varchar(3)[] IS NULL)",
+            "((a)::character varying(3)[] IS NULL)",
+        );
+    }
+
+    #[test]
+    fn cast_types_in_escape_and_dollar_strings_stay() {
+        assert_eq!(
+            canonical_casts("(E'it\\'s::int4' || (a)::INT4)"),
+            "(E'it\\'s::int4' || (a)::integer)"
+        );
+        assert_eq!(
+            canonical_casts("(e'\\\\'::text || 'x::int4')"),
+            "(e'\\\\'::text || 'x::int4')"
+        );
+        assert_eq!(
+            canonical_casts("($$x::int4$$ || $t$y::int4$t$ || (a)::INT4)"),
+            "($$x::int4$$ || $t$y::int4$t$ || (a)::integer)"
+        );
+        // `$` in a name does not start a string
+        assert_eq!(canonical_casts("(a$b)::INT4"), "(a$b)::integer");
     }
 
     #[test]
@@ -1238,6 +1885,48 @@ mod tests {
         Definition::Function(
             serde_json::from_value(json).expect("function deserializes"),
         )
+    }
+
+    /// PostgreSQL keeps no typmod in a parameter or a return type, and
+    /// writes `bpchar` there as `character`: pg_dump writes
+    /// `f(a character varying) RETURNS numeric` for `f(a varchar(10))
+    /// RETURNS numeric(10,2)`
+    #[test]
+    fn function_types_compare_without_typmods() {
+        let f = |parameter: &str, returns: &str| {
+            function(serde_json::json!({
+                "name": "f", "schema": "test", "owner": "postgres",
+                "language": "sql", "definition": "SELECT 1",
+                "parameters": [
+                    {"mode": "IN", "name": "a", "data_type": parameter},
+                    {"mode": "OUT", "name": "b", "data_type": parameter},
+                ],
+                "returns": returns,
+            }))
+        };
+        let key = |d: &Definition| ObjectKey::new(ObjectType::Function, d);
+        let pulled = f("character varying", "numeric");
+        for written in
+            [f("varchar(10)", "numeric(10,2)"), f("VARCHAR", "NUMERIC")]
+        {
+            assert_eq!(key(&written), key(&pulled));
+            assert_eq!(normalized(&written), normalized(&pulled));
+        }
+        let pulled = f("character", "SETOF character");
+        let written = f("bpchar", "SETOF bpchar(3)");
+        assert_eq!(key(&written), key(&pulled));
+        assert_eq!(normalized(&written), normalized(&pulled));
+        // a real change of type is still a change
+        let other = f("text", "numeric");
+        assert_ne!(key(&other), key(&f("character varying", "numeric")));
+        assert_ne!(
+            normalized(&f("character varying", "integer")),
+            normalized(&f("character varying", "numeric"))
+        );
+        assert_ne!(
+            normalized(&f("text", "TABLE(a integer)")),
+            normalized(&f("text", "TABLE(a text)"))
+        );
     }
 
     #[test]
