@@ -76,11 +76,13 @@ pub(super) fn operator_family(
     let family = target(&repo.schema, &repo.name, &repo.method);
     let mut alters = Vec::new();
     // drop first, so that a member can be given again in another form
-    let dropped: Vec<String> = difference(&d.operators, &r.operators)
+    let dropped_operators = difference(&d.operators, &r.operators);
+    let dropped_functions = difference(&d.functions, &r.functions);
+    let dropped: Vec<String> = dropped_operators
         .iter()
         .map(|o| format!("OPERATOR {} ({})", o.strategy, types(&o.arguments)))
         .chain(
-            difference(&d.functions, &r.functions).iter().map(|f| {
+            dropped_functions.iter().map(|f| {
                 format!("FUNCTION {} ({})", f.support, types(&f.types))
             }),
         )
@@ -91,11 +93,38 @@ pub(super) fn operator_family(
             dropped.join(",\n    ")
         )));
     }
-    if let Some(items) = members(
-        &difference(&r.operators, &d.operators),
-        &difference(&r.functions, &d.functions),
-    ) {
+    // PostgreSQL refuses a member in the slot of a member that is still
+    // there, and an operator that is still there for the same purpose.
+    // Such an ADD needs the DROP, so it is gated with it: a script
+    // without --allow-drop does not keep it and fail.
+    let (after_drop_operators, new_operators): (Vec<_>, Vec<_>) =
+        difference(&r.operators, &d.operators)
+            .into_iter()
+            .partition(|o| {
+                dropped_operators.iter().any(|d| {
+                    d.arguments == o.arguments
+                        && (d.strategy == o.strategy
+                            || (d.name == o.name
+                                && d.order_by.is_some()
+                                    == o.order_by.is_some()))
+                })
+            });
+    let (after_drop_functions, new_functions): (Vec<_>, Vec<_>) =
+        difference(&r.functions, &d.functions)
+            .into_iter()
+            .partition(|f| {
+                dropped_functions
+                    .iter()
+                    .any(|d| d.support == f.support && d.types == f.types)
+            });
+    if let Some(items) = members(&new_operators, &new_functions) {
         alters.push(Alter::new(format!(
+            "ALTER OPERATOR FAMILY {family} ADD\n    {items};\n"
+        )));
+    }
+    if let Some(items) = members(&after_drop_operators, &after_drop_functions)
+    {
+        alters.push(Alter::destructive(format!(
             "ALTER OPERATOR FAMILY {family} ADD\n    {items};\n"
         )));
     }
@@ -601,6 +630,74 @@ mod tests {
                     "ALTER OPERATOR FAMILY test.int_family USING btree ADD\n    \
                      OPERATOR 1 <(integer, bigint);\n",
                     false
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_add_that_needs_a_drop_is_gated_with_it() {
+        let with = |operators: serde_json::Value,
+                    functions: serde_json::Value| {
+            family(json!({
+                "name": "int_family", "schema": "test", "owner": "postgres",
+                "method": "btree", "operators": operators,
+                "functions": functions,
+            }))
+        };
+        let db = with(
+            json!([
+                {"strategy": 1, "name": "<", "arguments": ["int4", "int8"]},
+                {"strategy": 2, "name": "<=", "arguments": ["int4", "int8"]},
+            ]),
+            json!([{"support": 1, "types": ["int4", "int8"],
+                    "function": "btint48cmp(int4, int8)"}]),
+        );
+        // strategy 1 has another operator, the operator of strategy 2
+        // moves to strategy 4, support 1 has another function, and
+        // strategy 5 is new
+        let repo = with(
+            json!([
+                {"strategy": 1, "name": "test.<",
+                 "arguments": ["int4", "int8"]},
+                {"strategy": 4, "name": "<=", "arguments": ["int4", "int8"]},
+                {"strategy": 5, "name": ">", "arguments": ["int4", "int8"]},
+            ]),
+            json!([{"support": 1, "types": ["int4", "int8"],
+                    "function": "test.cmp(int4, int8)"}]),
+        );
+        let Resolution::Statements(alters) = operator_family(&repo, &db)
+        else {
+            panic!("expected statements");
+        };
+        let sql: Vec<(&str, bool)> = alters
+            .iter()
+            .map(|a| (a.sql.as_str(), a.destructive))
+            .collect();
+        // PostgreSQL refuses each gated ADD while the member that the
+        // DROP removes is there, so a script without --allow-drop must
+        // not have it
+        assert_eq!(
+            sql,
+            [
+                (
+                    "ALTER OPERATOR FAMILY test.int_family USING btree DROP\n    \
+                     OPERATOR 1 (integer, bigint),\n    \
+                     OPERATOR 2 (integer, bigint),\n    \
+                     FUNCTION 1 (integer, bigint);\n",
+                    true
+                ),
+                (
+                    "ALTER OPERATOR FAMILY test.int_family USING btree ADD\n    \
+                     OPERATOR 5 >(integer, bigint);\n",
+                    false
+                ),
+                (
+                    "ALTER OPERATOR FAMILY test.int_family USING btree ADD\n    \
+                     OPERATOR 1 test.<(integer, bigint),\n    \
+                     OPERATOR 4 <=(integer, bigint),\n    \
+                     FUNCTION 1 (integer, bigint) test.cmp(integer, bigint);\n",
+                    true
                 ),
             ]
         );

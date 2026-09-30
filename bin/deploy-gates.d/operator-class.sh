@@ -201,6 +201,32 @@ expect_opclass "SELECT NOT EXISTS (SELECT FROM pg_amop a
     "the database-only family member was not dropped"
 expect_empty_plan "a database-only family member is dropped"
 
+# another operator in the slot of a family member: the ADD needs the
+# DROP, so it is withheld with it, and the script without --allow-drop
+# runs
+psql -d "${TARGET_DB}" -q -v ON_ERROR_STOP=1 <<'SQL'
+ALTER OPERATOR FAMILY test.int_family USING btree
+    DROP OPERATOR 1 (integer, bigint);
+ALTER OPERATOR FAMILY test.int_family USING btree
+    ADD OPERATOR 1 <= (integer, bigint);
+SQL
+expect_opclass_withheld 2 "the family member change was not withheld"
+if ! psql -d "${TARGET_DB}" -q -v ON_ERROR_STOP=1 \
+        -f "${WORKDIR}/withheld.sql"; then
+    echo "Convergence gate FAILED: the script without --allow-drop" \
+        "does not run" >&2
+    exit 1
+fi
+./target/debug/pglifecycle deploy --apply --allow-drop -d "${TARGET_DB}" \
+    "${WORKDIR}/project"
+expect_opclass "SELECT EXISTS (SELECT FROM pg_amop a
+    JOIN pg_opfamily f ON f.oid = a.amopfamily
+    WHERE f.opfname = 'int_family' AND a.amopstrategy = 1
+      AND a.amoprighttype = 'bigint'::regtype
+      AND a.amopopr = '<(integer, bigint)'::regoperator)" \
+    "the changed family member was not set back"
+expect_empty_plan "a changed family member converges"
+
 # a class and a family that only the database has
 psql -d "${TARGET_DB}" -q -v ON_ERROR_STOP=1 <<'SQL'
 CREATE OPERATOR FAMILY test.stray_family USING hash;
