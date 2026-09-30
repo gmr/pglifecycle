@@ -459,3 +459,33 @@ fn fully_modeled_archive_writes_no_remaining_file() {
         "remaining.yaml must not be written when nothing was left over"
     );
 }
+
+#[test]
+fn pull_refuses_a_dump_in_another_encoding() {
+    let dir = tempfile::tempdir().unwrap();
+    let archive = dir.path().join("latin1.dump");
+    common::session_archive(&archive, "LATIN1", "on", true);
+    let dest = dir.path().join("project");
+    let error = pull::pull(&pull_args(&archive, &dest)).unwrap_err();
+    assert!(
+        error.contains("in the LATIN1 encoding")
+            && error.contains("pg_dump -E UTF8"),
+        "the error must name the encoding and the remedy: {error}"
+    );
+    assert!(!dest.exists(), "pull must not write a project");
+}
+
+#[test]
+fn pull_refuses_a_dump_with_standard_strings_off() {
+    let dir = tempfile::tempdir().unwrap();
+    let archive = dir.path().join("scs-off.dump");
+    common::session_archive(&archive, "UTF8", "off", false);
+    let dest = dir.path().join("project");
+    let error = pull::pull(&pull_args(&archive, &dest)).unwrap_err();
+    assert!(
+        error.contains("standard_conforming_strings off")
+            && error.contains("PGOPTIONS='-c standard_conforming_strings=on'"),
+        "the error must name the setting and the remedy: {error}"
+    );
+    assert!(!dest.exists(), "pull must not write a project");
+}

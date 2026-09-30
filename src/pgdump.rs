@@ -31,6 +31,18 @@ pub fn dump(
     ddl: &DumpDdl,
     path: &Path,
 ) -> Result<(), String> {
+    execute("pg_dump", dump_args(conn, ddl, path), conn)
+}
+
+/// The pg_dump arguments for [`dump`]. `-E UTF8` makes the archive
+/// UTF8 whatever the encoding of the database, the role or the
+/// environment is: pg_dump writes the archive in the client encoding,
+/// and libpgdump reads each string as UTF-8.
+fn dump_args(
+    conn: &cli::Connection,
+    ddl: &DumpDdl,
+    path: &Path,
+) -> Vec<OsString> {
     let mut args = connection_args(conn);
     if let Some(dbname) = &conn.dbname {
         args.push("-d".into());
@@ -40,8 +52,9 @@ pub fn dump(
     args.push(path.into());
     args.push("-Fc".into());
     args.push("--schema-only".into());
+    args.extend(["-E".into(), "UTF8".into()]);
     args.extend(ddl_args(ddl).into_iter().map(OsString::from));
-    execute("pg_dump", args, conn)
+    args
 }
 
 /// Dump cluster roles to `path` as SQL via `pg_dumpall --roles-only`.
@@ -76,14 +89,26 @@ fn run_dump_roles(
     path: &Path,
     include_passwords: bool,
 ) -> Result<(), String> {
+    let args = dump_roles_args(conn, path, include_passwords);
+    execute("pg_dumpall", args, conn)
+}
+
+/// The pg_dumpall arguments for [`run_dump_roles`]. `-E UTF8` makes the
+/// SQL UTF8, the encoding that pull reads it in.
+fn dump_roles_args(
+    conn: &cli::Connection,
+    path: &Path,
+    include_passwords: bool,
+) -> Vec<OsString> {
     let mut args = connection_args(conn);
     args.push("-f".into());
     args.push(path.into());
     args.push("-r".into());
+    args.extend(["-E".into(), "UTF8".into()]);
     if !include_passwords {
         args.push("--no-role-passwords".into());
     }
-    execute("pg_dumpall", args, conn)
+    args
 }
 
 /// Whether a failed password-included roles dump should be retried
@@ -111,7 +136,7 @@ pub fn apply(conn: &cli::Connection, script: &Path) -> Result<(), String> {
     args.push("ON_ERROR_STOP=1".into());
     args.push("-f".into());
     args.push(script.into());
-    let output = run("psql", &args, conn)?;
+    let output = run("psql", &args, conn, None)?;
     if !output.status.success() {
         return Err(stderr_of(&output));
     }
@@ -175,11 +200,12 @@ fn connection_args(conn: &cli::Connection) -> Vec<OsString> {
 /// supplied" failure triggers a prompt and one retry. Prompting is
 /// pglifecycle's own (bars suspended, echo off), so it cannot be
 /// erased by a redrawing spinner the way the tools' own /dev/tty
-/// prompt is.
+/// prompt is. `options`, when given, is the PGOPTIONS of the tool.
 fn run(
     program: &str,
     args: &[OsString],
     conn: &cli::Connection,
+    options: Option<&OsString>,
 ) -> Result<Output, String> {
     let mut password = match conn.password {
         true => Some(prompt_password(program, conn)?),
@@ -193,6 +219,9 @@ fn run(
         command.stdin(Stdio::null());
         if let Some(password) = &password {
             command.env("PGPASSWORD", password);
+        }
+        if let Some(options) = options {
+            command.env("PGOPTIONS", options);
         }
         log::debug!("Executing {command:?}");
         let output = command.output().map_err(|e| {
@@ -237,6 +266,22 @@ fn stderr_of(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).trim().to_string()
 }
 
+/// The PGOPTIONS of a dump: the options of the caller, and then
+/// `standard_conforming_strings` on. pg_dump and pg_dumpall write a
+/// string literal in the form that this setting selects, and pull reads
+/// each literal with the setting on, as the build and the deploy script
+/// write it. When a setting occurs two times, the server uses the last
+/// value, thus this value replaces the value of the database, the role
+/// and the caller.
+fn dump_options(caller: Option<OsString>) -> OsString {
+    let mut options = caller.unwrap_or_default();
+    if !options.is_empty() {
+        options.push(" ");
+    }
+    options.push("-c standard_conforming_strings=on");
+    options
+}
+
 /// Run a dump command, reporting a non-zero exit as an error and
 /// naming the ways to supply a password when that was the cause and
 /// no prompt was possible
@@ -245,7 +290,8 @@ fn execute(
     args: Vec<OsString>,
     conn: &cli::Connection,
 ) -> Result<(), String> {
-    let output = run(program, &args, conn)?;
+    let options = dump_options(std::env::var_os("PGOPTIONS"));
+    let output = run(program, &args, conn, Some(&options))?;
     if !output.status.success() {
         let stderr = stderr_of(&output);
         let hint = if needs_password(&stderr) {
@@ -349,6 +395,38 @@ mod tests {
             password,
             role: None,
         }
+    }
+
+    /// Whether `flag` and then `value` are in `args`
+    fn has_pair(args: &[OsString], flag: &str, value: &str) -> bool {
+        args.windows(2)
+            .any(|pair| pair[0] == flag && pair[1] == value)
+    }
+
+    #[test]
+    fn dumps_in_utf8() {
+        let path = Path::new("schema.dump");
+        let args = dump_args(&connection(false), &DumpDdl::default(), path);
+        assert!(has_pair(&args, "-E", "UTF8"), "{args:?}");
+        for include_passwords in [false, true] {
+            let args =
+                dump_roles_args(&connection(false), path, include_passwords);
+            assert!(has_pair(&args, "-E", "UTF8"), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn dump_options_set_standard_strings_after_the_caller() {
+        assert_eq!(dump_options(None), "-c standard_conforming_strings=on");
+        assert_eq!(
+            dump_options(Some(OsString::new())),
+            "-c standard_conforming_strings=on"
+        );
+        assert_eq!(
+            dump_options(Some("-c standard_conforming_strings=off".into())),
+            "-c standard_conforming_strings=off \
+             -c standard_conforming_strings=on"
+        );
     }
 
     #[test]
