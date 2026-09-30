@@ -2,7 +2,9 @@
 # Deploy gates:
 #
 #   1. Equivalence — deploy --apply against an empty database yields the
-#      same schema as build + pg_restore (schema-only dumps match).
+#      same schema as build + pg_restore (schema-only dumps match), for
+#      fixtures/schema.sql and for the pagila schema, whose re-deploy is
+#      also an empty plan.
 #   2. Convergence — mutate the database; without --allow-drop every
 #      destructive change is withheld and reported, and with it
 #      deploy --apply converges, so a re-deploy produces an empty plan.
@@ -21,6 +23,8 @@ export PGHOST PGPORT PGUSER
 
 SOURCE_DB=deploy_source
 TARGET_DB=deploy_target
+PAGILA_SOURCE_DB=deploy_pagila_source
+PAGILA_TARGET_DB=deploy_pagila_target
 WORKDIR="$(mktemp -d)"
 
 cleanup() {
@@ -28,6 +32,10 @@ cleanup() {
     bin/drop-database "${TARGET_DB}" \
         >/dev/null 2>&1 || true
     bin/drop-database "${SOURCE_DB}" \
+        >/dev/null 2>&1 || true
+    bin/drop-database "${PAGILA_TARGET_DB}" \
+        >/dev/null 2>&1 || true
+    bin/drop-database "${PAGILA_SOURCE_DB}" \
         >/dev/null 2>&1 || true
 }
 trap cleanup EXIT INT TERM
@@ -81,6 +89,46 @@ if diff -u "${WORKDIR}/source.sql" "${WORKDIR}/target.sql"; then
     echo "Equivalence gate passed: schema diff is empty"
 else
     echo "Equivalence gate FAILED: deployed schema differs from source" >&2
+    exit 1
+fi
+
+echo "==> Gate 1: equivalence of pagila (deploy --apply into an empty database)"
+# a schema that someone else wrote (fixtures/pagila/README.md). Some of
+# its LANGUAGE sql functions refer, by a name with no schema, to a
+# table that the script makes after them, so the script must not check
+# function bodies, as pg_restore does not. The routine bodies of
+# pagila are not in the style that pull writes, so the diff compares
+# them without whitespace and semicolons (bin/normalize-routine-bodies).
+bin/drop-database "${PAGILA_SOURCE_DB}"
+psql -d postgres -q -c "CREATE DATABASE ${PAGILA_SOURCE_DB}"
+psql -d "${PAGILA_SOURCE_DB}" -q -v ON_ERROR_STOP=1 \
+    -f fixtures/pagila/pagila-schema.sql
+pg_dump -d "${PAGILA_SOURCE_DB}" -Fc --schema-only \
+    -f "${WORKDIR}/pagila.dump"
+./target/debug/pglifecycle pull --dump "${WORKDIR}/pagila.dump" \
+    "${WORKDIR}/pagila"
+bin/drop-database "${PAGILA_TARGET_DB}"
+psql -d postgres -q -c "CREATE DATABASE ${PAGILA_TARGET_DB}"
+./target/debug/pglifecycle deploy --apply -d "${PAGILA_TARGET_DB}" \
+    "${WORKDIR}/pagila"
+./target/debug/pglifecycle deploy -o "${WORKDIR}/pagila-replan.sql" \
+    -d "${PAGILA_TARGET_DB}" "${WORKDIR}/pagila"
+if ! grep -q '^-- no changes' "${WORKDIR}/pagila-replan.sql"; then
+    echo "Equivalence gate FAILED: the pagila re-deploy is not empty" >&2
+    cat "${WORKDIR}/pagila-replan.sql" >&2
+    exit 1
+fi
+dump_schema "${PAGILA_SOURCE_DB}" | bin/normalize-routine-bodies \
+    > "${WORKDIR}/pagila-source.sql"
+dump_schema "${PAGILA_TARGET_DB}" | bin/normalize-routine-bodies \
+    > "${WORKDIR}/pagila-target.sql"
+if diff -u "${WORKDIR}/pagila-source.sql" "${WORKDIR}/pagila-target.sql"
+then
+    echo "Equivalence gate passed: pagila schema diff and re-deploy are" \
+        "empty"
+else
+    echo "Equivalence gate FAILED: deployed pagila schema differs from" \
+        "source" >&2
     exit 1
 fi
 
