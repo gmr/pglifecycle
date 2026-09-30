@@ -225,24 +225,23 @@ the script sets the owner with `ALTER … OWNER TO` directly after each
 CREATE. An object that the database has with another owner gets the
 same statement in place; it is not destructive. The owner is not part
 of the definition comparison, so a changed owner never causes a
-rebuild. deploy does not compare the owner of a type that it only
-checks for existence (the list below). Each owner role must exist, and
-each owner must have CREATE on the schema of its objects. A connecting
-role that is not a superuser must be a member of each owner role with
-the SET and INHERIT options (`GRANT` gives both by default to a role
-that has the INHERIT attribute). The statements after an owner change
-need the privileges of the owner: for example, CREATE TABLE in a new
-schema, and the indexes, comments and grants of a new table. To change
-the owner of an object that the database has, the connecting role must
-also have the privileges of its current owner. To change the owner of
-a schema, the connecting role must have CREATE on the database. A type
-whose model has no owner (for example publications,
-subscriptions and event triggers) keeps the connecting role as owner.
-So does most of what the project writes as raw `sql`: as pg_restore
-does, deploy sets no owner for an archive entry with no DROP statement.
-A new object gets the default privileges of the connecting role, not
-those of its owner; its grants come from the project. With `-O`, deploy
-does not set or compare owners (as `pg_restore --no-owner`).
+rebuild. Each owner role must exist, and each owner must have CREATE on
+the schema of its objects. A connecting role that is not a superuser
+must be a member of each owner role with the SET and INHERIT options
+(`GRANT` gives both by default to a role that has the INHERIT
+attribute). The statements after an owner change need the privileges of
+the owner: for example, CREATE TABLE in a new schema, and the indexes,
+comments and grants of a new table. To change the owner of an object
+that the database has, the connecting role must also have the
+privileges of its current owner. To change the owner of a schema, the
+connecting role must have CREATE on the database. A type whose model
+has no owner (for example publications, subscriptions and event
+triggers) keeps the connecting role as owner. So does most of what the
+project writes as raw `sql`: as pg_restore does, deploy sets no owner
+for an archive entry with no DROP statement. A new object gets the
+default privileges of the connecting role, not those of its owner; its
+grants come from the project. With `-O`, deploy does not set or compare
+owners (as `pg_restore --no-owner`).
 
 Roles, users, groups, and tablespaces are skipped entirely — they are
 cluster-level objects a single-database dump cannot capture.
@@ -336,22 +335,55 @@ project gives for a copy, not its parser or its other mappings. Text
 search dictionaries and configurations have an owner in PostgreSQL,
 but the project model has none, so deploy does not compare or set it.
 
-`deploy` creates these object types when they are missing, but only
-checks that they exist. `pull` models them, but `deploy` does not
-compare their definitions yet, so a changed one is left as the
-database has it, and one that only the database has is kept:
+Aggregates, operators, casts, transforms, operator classes and
+operator families compare by definition. An aggregate is matched by
+its name and its input types, an operator by its name and its argument
+types, a class or a family by its name and its index method, a cast by
+its two types, and a transform by its type and its language. A name, a
+type or a function
+compares in the form that PostgreSQL keeps: a type alias or an
+uppercase name is not a difference, nor is `pg_catalog.` or
+`OPERATOR(...)`, an option at its default, or the order of the members
+of a class or a family. A cast or a transform has no schema of its
+own, so the schema that the project files it under is not compared.
+PostgreSQL has almost no ALTER for these types:
 
-- aggregates, matched by name and input types
-- casts
-- operators, matched by name and argument types
-- operator classes, matched by name and index method
-- operator families, matched by name and index method
-- transforms
+- An aggregate changes with `CREATE OR REPLACE AGGREGATE`. A change to
+  the state type, the final function, `FINALFUNC_EXTRA`,
+  `HYPOTHETICAL` or an argument drops the aggregate and makes it again,
+  as `CREATE OR REPLACE` cannot change them.
+- An operator changes `RESTRICT` and `JOIN` in place with `ALTER
+  OPERATOR ... SET`, and sets `COMMUTATOR`, `NEGATOR`, `HASHES` and
+  `MERGES` in place when the database has none. To clear or change
+  one of those four, or to change the function, deploy drops the
+  operator and makes it again. PostgreSQL can link the commutator or
+  the negator back to the operator that names it, so a project can
+  give the link on one side only.
+- A transform changes with `CREATE OR REPLACE TRANSFORM`.
+- A family adds and drops its members with `ALTER OPERATOR FAMILY`. A
+  member that only the database has is dropped only with
+  `--allow-drop`. A member that a class does not have yet is added to
+  the family of the class in place. PostgreSQL keeps some members of a
+  class, for example a btree sort support function and each operator
+  of a GiST class, in the family only, and pg_dump writes them there;
+  written in the class, they compare equal. A class with no family
+  gets a family of its own name, which deploy does not drop.
+- Any other change to a cast or a class drops it and makes it again.
 
-Object types `pull` does not yet model (security labels, …) are
-handled the same way. An object that the project writes as a raw `sql`
-statement is also only checked for existence, whatever its type:
-`pull` writes the structured fields, so the two never compare equal.
+A drop and a create is destructive, so it needs `--allow-drop`. The
+drop does not cascade: when an object depends on the object, for
+example an index on an operator class or a view that uses a cast, the
+drop fails and the transaction rolls back. A class whose members are
+kept in its family cannot be made again while they are there, so a
+rebuild of such a class also fails and rolls back. The comment of each
+of these types changes in place. An aggregate, an operator, a class
+and a family have an owner; a cast and a transform do not.
+
+An object of a type that `pull` does not yet model (security labels,
+…) is left as the database has it. An object that the project writes
+as a raw `sql` statement is only checked for existence, whatever its
+type: `pull` writes the structured fields, so the two never compare
+equal.
 A raw statement has no structured input types, so it is matched by
 its type, schema and name, and any overload of that name counts. A
 raw cast is the exception: it must have its source and target types,
