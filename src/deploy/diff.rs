@@ -81,14 +81,15 @@ fn object_identity(definition: &Definition) -> (String, String) {
                 identity_type(operator.right_arg.as_deref().unwrap_or("NONE"))
             ),
         ),
-        // one name can be used once for each index method
+        // one name can be used once for each index method, whose name
+        // PostgreSQL folds to lowercase
         Definition::OperatorClass(class) => (
             class.schema.clone(),
-            format!("{} USING {}", class.name, class.method),
+            format!("{} USING {}", class.name, class.method.to_lowercase()),
         ),
         Definition::OperatorFamily(family) => (
             family.schema.clone(),
-            format!("{} USING {}", family.name, family.method),
+            format!("{} USING {}", family.name, family.method.to_lowercase()),
         ),
         Definition::Transform(transform) => (
             String::new(),
@@ -235,8 +236,8 @@ enum Compare {
 fn compare(desc: ObjectType) -> Compare {
     match desc {
         ObjectType::AccessMethod => Compare::Existence,
-        ObjectType::Aggregate => Compare::Existence,
-        ObjectType::Cast => Compare::Existence,
+        ObjectType::Aggregate => Compare::Definition,
+        ObjectType::Cast => Compare::Definition,
         ObjectType::Collation => Compare::Existence,
         ObjectType::Conversion => Compare::Existence,
         ObjectType::DefaultPrivileges => Compare::Definition,
@@ -247,9 +248,9 @@ fn compare(desc: ObjectType) -> Compare {
         ObjectType::Function => Compare::Definition,
         ObjectType::Group => Compare::Skip,
         ObjectType::MaterializedView => Compare::Definition,
-        ObjectType::Operator => Compare::Existence,
-        ObjectType::OperatorClass => Compare::Existence,
-        ObjectType::OperatorFamily => Compare::Existence,
+        ObjectType::Operator => Compare::Definition,
+        ObjectType::OperatorClass => Compare::Definition,
+        ObjectType::OperatorFamily => Compare::Definition,
         ObjectType::ProceduralLanguage => Compare::Definition,
         ObjectType::Procedure => Compare::Definition,
         ObjectType::Publication => Compare::Definition,
@@ -262,7 +263,7 @@ fn compare(desc: ObjectType) -> Compare {
         ObjectType::Table => Compare::Definition,
         ObjectType::Tablespace => Compare::Skip,
         ObjectType::TextSearch => Compare::Existence,
-        ObjectType::Transform => Compare::Existence,
+        ObjectType::Transform => Compare::Definition,
         ObjectType::Type => Compare::Definition,
         ObjectType::User => Compare::Skip,
         ObjectType::UserMapping => Compare::Definition,
@@ -272,6 +273,8 @@ fn compare(desc: ObjectType) -> Compare {
 
 pub fn diff(project: &Project, assembly: &Assembly) -> Diff {
     let mut database = database_index(assembly);
+    super::alter::operator::align(project, &mut database);
+    super::alter::operator_class::align(project, &mut database);
     let existing = existence_index(assembly);
     let mut items = BTreeMap::new();
     let mut changed = BTreeMap::new();
@@ -381,6 +384,10 @@ fn take_raw(
     let key = ObjectKey::new(desc, definition);
     if let Some(db) = database.remove(&key) {
         return Some(db);
+    }
+    // a cast key, `(source AS target)`, has no bare name
+    if desc == ObjectType::Cast {
+        return None;
     }
     let bare = |name: &str| {
         name.split('(')
@@ -586,6 +593,40 @@ fn normalized(definition: &Definition) -> Value {
         }
         Definition::Subscription(subscription) => {
             canonical = Definition::Subscription(subscription.canonical());
+            &canonical
+        }
+        Definition::Aggregate(aggregate) => {
+            canonical = Definition::Aggregate(
+                super::alter::aggregate::canonical(aggregate),
+            );
+            &canonical
+        }
+        Definition::Cast(cast) => {
+            canonical = Definition::Cast(super::alter::cast::canonical(cast));
+            &canonical
+        }
+        Definition::Operator(operator) => {
+            canonical = Definition::Operator(
+                super::alter::operator::canonical(operator),
+            );
+            &canonical
+        }
+        Definition::OperatorClass(class) => {
+            canonical = Definition::OperatorClass(
+                super::alter::operator_class::canonical_class(class),
+            );
+            &canonical
+        }
+        Definition::OperatorFamily(family) => {
+            canonical = Definition::OperatorFamily(
+                super::alter::operator_class::canonical_family(family),
+            );
+            &canonical
+        }
+        Definition::Transform(transform) => {
+            canonical = Definition::Transform(
+                super::alter::transform::canonical(transform),
+            );
             &canonical
         }
         // default privileges compare by the privileges they give, so

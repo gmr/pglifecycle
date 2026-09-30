@@ -743,6 +743,20 @@ fn drop_sql(key: &ObjectKey, definition: Option<&Definition>) -> String {
              DROP SUBSCRIPTION IF EXISTS {name};\n"
         );
     }
+    // these types are named by more than their key
+    match definition {
+        Some(Definition::Aggregate(a)) => return alter::aggregate::drop(a),
+        Some(Definition::Cast(c)) => return alter::cast::drop(c),
+        Some(Definition::Operator(o)) => return alter::operator::drop(o),
+        Some(Definition::OperatorClass(c)) => {
+            return alter::operator_class::drop_class(c);
+        }
+        Some(Definition::OperatorFamily(f)) => {
+            return alter::operator_class::drop_family(f);
+        }
+        Some(Definition::Transform(t)) => return alter::transform::drop(t),
+        _ => {}
+    }
     if let Some(Definition::UserMapping(mapping)) = definition {
         return mapping
             .servers
@@ -817,6 +831,12 @@ fn drop_match_key(key: &ObjectKey, definition: &Definition) -> ObjectKey {
             schema: key.schema.clone(),
             name: diff::function_tag_name(f),
         },
+        // the tag of an ordered-set aggregate has no ORDER BY
+        Definition::Aggregate(a) => ObjectKey {
+            desc: key.desc,
+            schema: key.schema.clone(),
+            name: alter::aggregate::tag_name(a),
+        },
         _ => key.clone(),
     }
 }
@@ -827,6 +847,8 @@ fn drop_match_key(key: &ObjectKey, definition: &Definition) -> ObjectKey {
 fn entry_key(entry: &libpgdump::Entry) -> Option<ObjectKey> {
     use libpgdump::ObjectType as OT;
     let desc = match entry.desc {
+        OT::Aggregate => constants::ObjectType::Aggregate,
+        OT::Cast => constants::ObjectType::Cast,
         OT::Domain => constants::ObjectType::Domain,
         OT::Extension => constants::ObjectType::Extension,
         OT::ForeignDataWrapper => constants::ObjectType::ForeignDataWrapper,
@@ -836,6 +858,9 @@ fn entry_key(entry: &libpgdump::Entry) -> Option<ObjectKey> {
         OT::ForeignTable => constants::ObjectType::Table,
         OT::Function => constants::ObjectType::Function,
         OT::MaterializedView => constants::ObjectType::MaterializedView,
+        OT::Operator => constants::ObjectType::Operator,
+        OT::OperatorClass => constants::ObjectType::OperatorClass,
+        OT::OperatorFamily => constants::ObjectType::OperatorFamily,
         OT::ProceduralLanguage => constants::ObjectType::ProceduralLanguage,
         OT::Procedure => constants::ObjectType::Procedure,
         OT::Publication => constants::ObjectType::Publication,
@@ -844,6 +869,7 @@ fn entry_key(entry: &libpgdump::Entry) -> Option<ObjectKey> {
         OT::ForeignServer | OT::Server => constants::ObjectType::Server,
         OT::Subscription => constants::ObjectType::Subscription,
         OT::Table => constants::ObjectType::Table,
+        OT::Transform => constants::ObjectType::Transform,
         OT::Type => constants::ObjectType::Type,
         OT::UserMapping => constants::ObjectType::UserMapping,
         OT::View => constants::ObjectType::View,
@@ -859,21 +885,32 @@ fn entry_key(entry: &libpgdump::Entry) -> Option<ObjectKey> {
         _ => return None,
     };
     let schema = match desc {
-        constants::ObjectType::Extension
+        constants::ObjectType::Cast
+        | constants::ObjectType::Extension
         | constants::ObjectType::ForeignDataWrapper
         | constants::ObjectType::ProceduralLanguage
         | constants::ObjectType::Publication
         | constants::ObjectType::Schema
         | constants::ObjectType::Server
         | constants::ObjectType::Subscription
+        | constants::ObjectType::Transform
         | constants::ObjectType::UserMapping => String::new(),
         _ => entry.namespace.clone().unwrap_or_default(),
     };
-    Some(ObjectKey {
-        desc,
-        schema,
-        name: entry.tag.clone()?,
-    })
+    // the tags of these types do not have the whole identity
+    let name = match desc {
+        constants::ObjectType::Cast => alter::cast::entry_name(entry)?,
+        constants::ObjectType::Operator => alter::operator::entry_name(entry)?,
+        constants::ObjectType::OperatorClass
+        | constants::ObjectType::OperatorFamily => {
+            alter::operator_class::entry_name(entry)?
+        }
+        constants::ObjectType::Transform => {
+            alter::transform::entry_name(entry)?
+        }
+        _ => entry.tag.clone()?,
+    };
+    Some(ObjectKey { desc, schema, name })
 }
 
 /// `DESC namespace.tag` for plan labels

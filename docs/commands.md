@@ -276,25 +276,63 @@ disables it and removes its slot name, as `DROP SUBSCRIPTION` cannot
 drop a slot in a transaction: the publisher keeps the slot, and the
 report gives the statement that drops it there.
 
+Aggregates, operators, casts, transforms, operator classes and
+operator families compare by definition. An aggregate is matched by
+its name and its input types, an operator by its name and its argument
+types, a class or a family by its name and its index method, a cast by
+its two types, and a transform by its type and its language. A name, a
+type or a function
+compares in the form that PostgreSQL keeps: a type alias or an
+uppercase name is not a difference, nor is `pg_catalog.` or
+`OPERATOR(...)`, an option at its default, or the order of the members
+of a class or a family. A cast or a transform has no schema of its
+own, so the schema that the project files it under is not compared.
+PostgreSQL has almost no ALTER for these types:
+
+- An aggregate changes with `CREATE OR REPLACE AGGREGATE`. A change to
+  the state type, the final function, `FINALFUNC_EXTRA`,
+  `HYPOTHETICAL` or an argument drops the aggregate and makes it again,
+  as `CREATE OR REPLACE` cannot change them.
+- An operator changes `RESTRICT` and `JOIN` in place with `ALTER
+  OPERATOR ... SET`, and sets `COMMUTATOR`, `NEGATOR`, `HASHES` and
+  `MERGES` in place when the database has none. To clear or change
+  one of those four, or to change the function, deploy drops the
+  operator and makes it again. PostgreSQL can link the commutator or
+  the negator back to the operator that names it, so a project can
+  give the link on one side only.
+- A transform changes with `CREATE OR REPLACE TRANSFORM`.
+- A family adds and drops its members with `ALTER OPERATOR FAMILY`. A
+  member that only the database has is dropped only with
+  `--allow-drop`. A member that a class does not have yet is added to
+  the family of the class in place. PostgreSQL keeps some members of a
+  class, for example a btree sort support function and each operator
+  of a GiST class, in the family only, and pg_dump writes them there;
+  written in the class, they compare equal. A class with no family
+  gets a family of its own name, which deploy does not drop.
+- Any other change to a cast or a class drops it and makes it again.
+
+A drop and a create is destructive, so it needs `--allow-drop`. The
+drop does not cascade: when an object depends on the object, for
+example an index on an operator class or a view that uses a cast, the
+drop fails and the transaction rolls back. A class whose members are
+kept in its family cannot be made again while they are there, so a
+rebuild of such a class also fails and rolls back. The comment of each
+of these types changes in place. An aggregate, an operator, a class
+and a family have an owner; a cast and a transform do not.
+
 `deploy` creates these object types when they are missing, but only
 checks that they exist. `pull` models them, but `deploy` does not
 compare their definitions yet, so a changed one is left as the
 database has it, and one that only the database has is kept:
 
 - access methods
-- aggregates, matched by name and input types
-- casts
 - collations
 - conversions
 - event triggers
-- operators, matched by name and argument types
-- operator classes, matched by name and index method
-- operator families, matched by name and index method
 - statistics (extended statistics)
 - text search objects, checked per schema: when a schema has any text
   search object in the database, `deploy` creates none of the
   project's text search objects in that schema
-- transforms
 
 Object types `pull` does not yet model (security labels, …) are
 handled the same way. An object that the project writes as a raw `sql`

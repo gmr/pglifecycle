@@ -39,6 +39,13 @@ use crate::utils::{
 
 mod procedure;
 
+pub(crate) mod aggregate;
+pub(crate) mod cast;
+mod names;
+pub(crate) mod operator;
+pub(crate) mod operator_class;
+pub(crate) mod transform;
+
 /// One reconciliation statement
 pub(crate) struct Alter {
     pub sql: String,
@@ -243,6 +250,22 @@ pub(crate) fn resolve_with(
             Definition::DefaultPrivileges(repo),
             Definition::DefaultPrivileges(db),
         ) => default_privileges::default_privileges(repo, db),
+        (Definition::Aggregate(repo), Definition::Aggregate(db)) => {
+            aggregate::aggregate(repo, db)
+        }
+        (Definition::Cast(repo), Definition::Cast(db)) => cast::cast(repo, db),
+        (Definition::Operator(repo), Definition::Operator(db)) => {
+            operator::operator(repo, db)
+        }
+        (Definition::OperatorClass(repo), Definition::OperatorClass(db)) => {
+            operator_class::operator_class(repo, db)
+        }
+        (Definition::OperatorFamily(repo), Definition::OperatorFamily(db)) => {
+            operator_class::operator_family(repo, db)
+        }
+        (Definition::Transform(repo), Definition::Transform(db)) => {
+            transform::transform(repo, db)
+        }
         _ => Resolution::Replace,
     }
 }
