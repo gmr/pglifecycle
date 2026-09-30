@@ -5,12 +5,17 @@ title: Dependencies
 description: >
   Objects this object depends on, for the cases the dependency graph
   cannot infer: an ordering the topological sort would otherwise get
-  wrong, such as a foreign key between tables or an inheritance parent.
+  wrong, such as a table that a view reads, or a function that a
+  SQL-standard function body calls. A foreign key needs no entry: the
+  build adds each foreign key after all tables.
 
   Each entry names an object as `schema.name`, or unqualified for a
-  schemaless type. A function or aggregate carries its argument
-  signature (`test.f(integer)`) and a cast its types
-  (`(int4 AS timestamp)`), since the name alone is ambiguous.
+  schemaless type. A function or aggregate carries the argument types
+  of one overload (`test.f(integer)`, or `test.agg(*)` for an
+  aggregate with no arguments), since overloads share a name, and a
+  cast its types (`(int4 AS timestamp)`). The argument types compare
+  as PostgreSQL resolves them. A bare function or aggregate name is
+  correct only when one overload has it.
 type: object
 properties:
   aggregates:
