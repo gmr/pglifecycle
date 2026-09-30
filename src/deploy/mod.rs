@@ -649,12 +649,23 @@ fn report(diff: &Diff, plan: &Plan, assembly: &pull::Assembly) {
     );
 }
 
-/// Render the script with a self-describing header
+/// Render the script with a self-describing header.
+///
+/// The statements run with the empty `search_path` of pg_restore, so
+/// that a name in the build's SQL resolves as it does in a restore of
+/// the build, and not by the `search_path` of the session. The setting
+/// is not local to the transaction (`false`), as pg_restore sets it:
+/// a local setting has no effect on the statements that follow it
+/// when the script runs outside a transaction block. In a transaction
+/// block, a rollback also undoes the setting.
 fn render_script(plan: &Plan, project: &str, source: &str) -> String {
     let mut script = format!(
         "-- pglifecycle deploy\n-- project: {project}\n-- source: \
          {source}\n"
     );
+    if !plan.included.is_empty() {
+        script.push_str("-- search_path: empty, as pg_restore sets it\n");
+    }
     if !plan.excluded.is_empty() {
         script.push_str(&format!(
             "-- destructive statements: {} excluded (re-run with \
@@ -705,6 +716,11 @@ fn render_script(plan: &Plan, project: &str, source: &str) -> String {
                  the project\n",
             );
         }
+    }
+    if !plan.included.is_empty() {
+        script.push_str(
+            "\nSELECT pg_catalog.set_config('search_path', '', false);\n",
+        );
     }
     for statement in &plan.included {
         script
@@ -1702,6 +1718,32 @@ mod tests {
             assert!(line.starts_with("--"), "line runs as SQL: {line}");
         }
         assert!(script.contains("--   DROP TABLE t; --\";\n"));
+    }
+
+    /// The statements run with the empty search_path of pg_restore, so
+    /// that a name in them resolves as it does in a restore of the
+    /// build. The header says so.
+    #[test]
+    fn script_runs_with_an_empty_search_path() {
+        let plan = Plan {
+            included: vec![Statement {
+                label: "SCHEMA app".to_string(),
+                sql: "CREATE SCHEMA app;\n".to_string(),
+                fails_open: false,
+            }],
+            excluded: Vec::new(),
+            kept: Vec::new(),
+            included_destructive: 0,
+        };
+        let script = render_script(&plan, "test", "db");
+        assert_eq!(
+            script,
+            "-- pglifecycle deploy\n-- project: test\n-- source: db\n\
+             -- search_path: empty, as pg_restore sets it\n\
+             -- destructive statements: none\n\
+             \nSELECT pg_catalog.set_config('search_path', '', false);\n\
+             \n-- SCHEMA app\nCREATE SCHEMA app;\n"
+        );
     }
 
     fn owner_entry(

@@ -140,6 +140,25 @@
 //!     (...)`. The Python rendered the connection and the parameters
 //!     bare, which does not parse. A `slot_name` of `NONE` renders as
 //!     the keyword, because as a string it names a slot.
+//! 33. A text search mapping renders its token type in lowercase, as
+//!     PostgreSQL reads a name that is not in quotes, and as deploy
+//!     compares it. Each token type of a parser is in lowercase, so
+//!     the quoted `"URL"` of a project token `URL` failed with `token
+//!     type "URL" does not exist`. The Python rendered no mappings.
+//!     No test-project mapping has an uppercase token type.
+//! 34. An operator argument of `NONE`, in any case, renders as no
+//!     argument, as deploy compares it. The Python rendered `LEFTARG =
+//!     NONE`, and PostgreSQL rejected it with `type "none" does not
+//!     exist`. The drop and comment signatures keep `NONE`. PostgreSQL
+//!     14 and later have no postfix operators, so a `right_arg` of
+//!     `NONE` now fails with "Postfix operators are not supported". The
+//!     test-project operator has two arguments.
+//! 35. An operator renders its schema quoted where the name needs
+//!     quotes. The Python wrote the schema bare, so the create, the
+//!     drop and the comment of an operator in a schema such as `Gate
+//!     Ops` did not parse, and nor did the owner statement that
+//!     pg_restore makes from the drop (see 17). The test-project
+//!     operator is in `test`, which quotes the same either way.
 
 mod acls;
 
@@ -1524,14 +1543,21 @@ impl Builder {
         if let Some(sql) = &d.sql {
             return self.add_item(item, vec![sql.clone()], vec![], false);
         }
-        let name = format!("{}.{}", d.schema, d.name);
+        // the schema is an identifier; the operator name is a symbol,
+        // which is never quoted (deviation 35)
+        let name = format!("{}.{}", quote_ident(&d.schema), d.name);
         let mut create =
             vec!["CREATE".into(), "OPERATOR".into(), name.clone()];
+        // NONE, in any case, is no argument: `LEFTARG = NONE` names a
+        // type that does not exist (deviation 34)
+        let argument = |v: &&str| !v.trim().eq_ignore_ascii_case("none");
+        let left_arg = d.left_arg.as_deref().filter(argument);
+        let right_arg = d.right_arg.as_deref().filter(argument);
         let mut options = vec![format!("PROCEDURE = {}", d.function)];
-        if let Some(v) = &d.left_arg {
+        if let Some(v) = left_arg {
             options.push(format!("LEFTARG = {v}"));
         }
-        if let Some(v) = &d.right_arg {
+        if let Some(v) = right_arg {
             options.push(format!("RIGHTARG = {v}"));
         }
         if let Some(v) = &d.commutator {
@@ -1555,8 +1581,8 @@ impl Builder {
         create.push(format!("({})", options.join(", ")));
         let signature = format!(
             "({}, {})",
-            d.left_arg.as_deref().unwrap_or("NONE"),
-            d.right_arg.as_deref().unwrap_or("NONE")
+            left_arg.unwrap_or("NONE"),
+            right_arg.unwrap_or("NONE")
         );
         // no IF EXISTS: pg_restore builds this type's owner
         // statement by stripping the leading DROP off this one
@@ -2671,6 +2697,9 @@ impl Builder {
                 } else {
                     "ALTER"
                 };
+                // a token type as PostgreSQL reads one: folded to
+                // lowercase, as every token type of a parser is. In
+                // quotes, `URL` names no token type (deviation 33)
                 for (token, dictionaries) in config.mappings.iter().flatten() {
                     let last = create.len() - 1;
                     create[last].push(';');
@@ -2678,7 +2707,7 @@ impl Builder {
                         "ALTER TEXT SEARCH CONFIGURATION {} {verb} MAPPING \
                          FOR {} WITH {}",
                         qualified(&config.name),
-                        quote_ident(token),
+                        quote_ident(&token.to_ascii_lowercase()),
                         dictionaries.join(", ")
                     ));
                 }
@@ -5623,6 +5652,94 @@ mod tests {
         assert_eq!(drop, "DROP FUNCTION test.bare_zero();\n");
     }
 
+    /// Render the operator that `fields` give; return its create and
+    /// drop SQL
+    fn operator_entry(fields: Value) -> (String, String) {
+        let mut operator = json!({
+            "name": "~~~",
+            "schema": "test",
+            "owner": "app",
+            "function": "int4um",
+        });
+        operator
+            .as_object_mut()
+            .unwrap()
+            .extend(fields.as_object().unwrap().clone());
+        let item = Item {
+            id: 1,
+            desc: ObjectType::Operator,
+            definition: Definition::Operator(
+                serde_json::from_value(operator).unwrap(),
+            ),
+            dependencies: BTreeSet::new(),
+        };
+        let dump = libpgdump::new("t", "UTF-8", "18.0").unwrap();
+        let mut builder = Builder {
+            dump,
+            dump_id_map: HashMap::new(),
+            text_search_last: HashMap::new(),
+            pending_attaches: Vec::new(),
+            index_attaches: IndexAttaches::default(),
+            text_search_ids: HashMap::new(),
+            text_search_refs: Vec::new(),
+            partition_ids: HashMap::new(),
+            superuser: "postgres".into(),
+        };
+        builder.dump_item(&item).unwrap();
+        let entry = builder
+            .dump
+            .entries()
+            .iter()
+            .find(|e| e.desc == libpgdump::ObjectType::Operator)
+            .expect("an OPERATOR entry")
+            .clone();
+        (
+            entry.defn.unwrap_or_default(),
+            entry.drop_stmt.unwrap_or_default(),
+        )
+    }
+
+    /// `NONE` is no argument, in any case: `LEFTARG = NONE` names a
+    /// type that does not exist (deviation 34). The signature keeps it.
+    #[test]
+    fn renders_a_none_argument_as_no_argument() {
+        let (create, drop) = operator_entry(
+            json!({"left_arg": "NONE", "right_arg": "integer"}),
+        );
+        assert_eq!(
+            create,
+            "CREATE OPERATOR test.~~~ (PROCEDURE = int4um, RIGHTARG = \
+             integer);\n"
+        );
+        assert_eq!(drop, "DROP OPERATOR test.~~~ (NONE, integer);\n");
+        let (create, drop) = operator_entry(
+            json!({"left_arg": "integer", "right_arg": "none"}),
+        );
+        assert_eq!(
+            create,
+            "CREATE OPERATOR test.~~~ (PROCEDURE = int4um, LEFTARG = \
+             integer);\n"
+        );
+        assert_eq!(drop, "DROP OPERATOR test.~~~ (integer, NONE);\n");
+    }
+
+    /// The schema of an operator is an identifier, so a name that
+    /// needs quotes gets them in the create, the drop that pg_restore
+    /// builds the owner statement from, and the comment (deviation 35)
+    #[test]
+    fn quotes_the_schema_of_an_operator() {
+        let (create, drop) = operator_entry(json!({
+            "schema": "Gate Ops",
+            "right_arg": "integer",
+        }));
+        assert_eq!(
+            create,
+            "CREATE OPERATOR \"Gate Ops\".~~~ (PROCEDURE = int4um, \
+             RIGHTARG = integer);\n"
+        );
+        assert_eq!(drop, "DROP OPERATOR \"Gate Ops\".~~~ (NONE, integer);\n");
+    }
+
     #[test]
     fn renders_transform_with_a_quoted_language() {
         let item = Item {
@@ -5891,6 +6008,31 @@ mod tests {
             "{}",
             defn("parsed")
         );
+    }
+
+    /// PostgreSQL folds a token type that is not in quotes to
+    /// lowercase, and every token type of a parser is lowercase. A
+    /// quoted `"URL"` names no token type (deviation 33).
+    #[test]
+    fn renders_token_types_in_lowercase() {
+        let item = text_search(
+            0,
+            "s",
+            json!([
+                {"name": "parsed", "parser": "pg_catalog.default",
+                 "mappings": {"URL": ["simple"], "Int": ["simple"]}},
+            ]),
+        );
+        let output = assemble(&text_search_project(vec![item])).unwrap();
+        let defn = output
+            .dump
+            .entries()
+            .iter()
+            .find(|e| e.tag.as_deref() == Some("parsed"))
+            .and_then(|e| e.defn.clone())
+            .expect("a TEXT SEARCH CONFIGURATION entry");
+        assert!(defn.contains("ADD MAPPING FOR url WITH simple"), "{defn}");
+        assert!(defn.contains("ADD MAPPING FOR int WITH simple"), "{defn}");
     }
 
     /// Two schemas whose configurations use a dictionary of the other

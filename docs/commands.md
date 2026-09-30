@@ -51,6 +51,21 @@ psql --single-transaction -v ON_ERROR_STOP=1 -f deploy.sql
 via `psql` (it rolls back on the first error and refuses while gated
 destructive statements are pending).
 
+Before its first statement, the script sets an empty `search_path`, as
+pg_restore does, and its header says so:
+
+```sql
+SELECT pg_catalog.set_config('search_path', '', false);
+```
+
+Thus a name in the script resolves as it does in a restore of the
+`build` archive, and not by the `search_path` of the session. A name
+with no schema resolves only in `pg_catalog`, so qualify each other
+name in the project. The setting is not local to the transaction, so
+it also applies when the script runs outside a transaction block. It
+stays until the session ends, or until a rollback of the transaction
+that set it.
+
 | Option | Description |
 | --- | --- |
 | `-D, --dump FILE` | Compare against a `pg_dump -Fc` file instead of connecting |
