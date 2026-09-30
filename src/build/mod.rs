@@ -159,6 +159,16 @@
 //!     Ops` did not parse, and nor did the owner statement that
 //!     pg_restore makes from the drop (see 17). The test-project
 //!     operator is in `test`, which quotes the same either way.
+//! 36. A function's or procedure's setting that is a list renders
+//!     each element as its own string constant, `SET search_path =
+//!     'pg_catalog', 'pg_temp'`, as pg_dump writes it. The Python
+//!     rendered a list as `ARRAY['pg_catalog', 'pg_temp']`, which SET
+//!     does not parse. A string renders as one string constant, as
+//!     before, and for a setting that PostgreSQL keeps as a list, one
+//!     string is one name: `'pg_catalog, pg_temp'` names one schema,
+//!     so a SECURITY DEFINER function searched pg_temp first. The
+//!     project refuses a list setting written as one string with a
+//!     comma. No test-project routine has a setting.
 
 mod acls;
 
@@ -175,7 +185,8 @@ use crate::models::{
 use crate::progress;
 use crate::project::{Project, split_sql_name};
 use crate::utils::{
-    dollar_quote, postgres_value, quote_ident, raw_value, user_mapping_subject,
+    dollar_quote, postgres_value, quote_ident, raw_value, setting_value,
+    user_mapping_subject,
 };
 
 pub fn build(project: &Project, destination: &Path) -> Result<(), String> {
@@ -1293,7 +1304,7 @@ impl Builder {
         }
         if let Some(configuration) = &d.configuration {
             for (k, v) in configuration {
-                create.push(format!("SET {k} = {}", postgres_value(v)));
+                create.push(format!("SET {k} = {}", setting_value(v)));
             }
         }
         // a SQL-standard body (BEGIN ATOMIC ... END) takes the place of

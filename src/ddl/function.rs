@@ -1,10 +1,11 @@
 //! Functions and procedures (CreateFunctionStmt)
 
+use serde_json::Value;
 use tree_sitter::Node;
 
 use crate::ddl::object::{string_value, unstring};
 use crate::ddl::{NodeExt, Statement, any_name, unquote};
-use crate::models::{Function, FunctionParameter};
+use crate::models::{Function, FunctionParameter, is_list_setting};
 
 /// CREATE [OR REPLACE] FUNCTION/PROCEDURE → Function
 pub(crate) fn create_function(
@@ -164,25 +165,37 @@ fn apply_common_option(function: &mut Function, node: &Node, src: &str) {
         // `FunctionSetResetClause` child, not directly under this
         // node, so this one genuinely needs the recursive search
         && let Some(config) = node.find("set_rest_more")
+        && let Some((name, value)) = setting(&config, src)
     {
-        let text = config.text(src);
-        if let Some((name, value)) = split_set(text) {
-            function
-                .configuration
-                .get_or_insert_default()
-                .insert(name, serde_json::Value::String(value));
-        }
+        function
+            .configuration
+            .get_or_insert_default()
+            .insert(name, value);
     }
 }
 
-/// `name TO value` / `name = value` from a SET clause body
-fn split_set(text: &str) -> Option<(String, String)> {
-    let (name, value) = text
-        .split_once(" TO ")
-        .or_else(|| text.split_once(" to "))
-        .or_else(|| text.split_once('='))?;
+/// The name and the value of a SET clause, `name TO value [, ...]`.
+/// pg_dump writes each element of a list setting as its own string
+/// constant, so a value with more than one element is a list of them.
+/// A list setting whose one element has a comma is also a list, because
+/// the project refuses that setting as one string with a comma.
+fn setting(node: &Node, src: &str) -> Option<(String, Value)> {
+    let set = node.find("generic_set")?;
     // mixed-case GUC names (e.g. "IntervalStyle") are quoted by pg_dump
-    Some((unquote(name.trim()), unstring(value.trim())))
+    let name = unquote(set.find("var_name")?.text(src));
+    let mut values: Vec<String> = set
+        .find_all("var_value")
+        .iter()
+        .map(|v| unstring(v.text(src)))
+        .collect();
+    let value = match values.as_slice() {
+        [] => return None,
+        [one] if !(is_list_setting(&name) && one.contains(',')) => {
+            Value::String(values.remove(0))
+        }
+        _ => Value::Array(values.into_iter().map(Value::String).collect()),
+    };
+    Some((name, value))
 }
 
 fn parameter(node: &Node, src: &str) -> FunctionParameter {
@@ -230,6 +243,58 @@ mod tests {
             config.get("IntervalStyle"),
             Some(&serde_json::Value::String("postgres".into()))
         );
+    }
+
+    /// The settings of a routine as pg_dump writes them
+    fn settings(clauses: &str) -> serde_json::Map<String, serde_json::Value> {
+        let sql = format!(
+            "CREATE FUNCTION test.f() RETURNS integer LANGUAGE sql \
+             {clauses} AS $$ SELECT 1 $$;"
+        );
+        let Statement::CreateFunction(function) = parse_one(&sql) else {
+            panic!("expected CreateFunction")
+        };
+        function.configuration.unwrap()
+    }
+
+    /// pg_dump writes each element of a list setting as its own string
+    /// constant, with no identifier quotes
+    #[test]
+    fn config_list_is_one_item_for_each_element() {
+        let config = settings(
+            "SET search_path TO 'pg_catalog', 'pg_temp' \
+             SET temp_tablespaces TO 'fast', 'Slow Disk'",
+        );
+        assert_eq!(config["search_path"], json!(["pg_catalog", "pg_temp"]));
+        assert_eq!(config["temp_tablespaces"], json!(["fast", "Slow Disk"]));
+    }
+
+    #[test]
+    fn config_list_elements_keep_their_text() {
+        let config = settings(
+            "SET search_path TO 'my schema', '$user', 'it''s', 'Quo\"te', ''",
+        );
+        assert_eq!(
+            config["search_path"],
+            json!(["my schema", "$user", "it's", "Quo\"te", ""])
+        );
+    }
+
+    /// One element is a string. A list setting whose one element has a
+    /// comma stays a list, because the string form of it is refused
+    #[test]
+    fn config_one_element() {
+        let config = settings(
+            "SET search_path TO 'pg_catalog' SET work_mem TO '64MB' \
+             SET \"DateStyle\" TO 'iso, mdy'",
+        );
+        assert_eq!(config["search_path"], json!("pg_catalog"));
+        assert_eq!(config["work_mem"], json!("64MB"));
+        assert_eq!(config["DateStyle"], json!("iso, mdy"));
+        let config = settings("SET search_path TO ''");
+        assert_eq!(config["search_path"], json!(""));
+        let config = settings("SET search_path TO 'a,b'");
+        assert_eq!(config["search_path"], json!(["a,b"]));
     }
 
     #[test]

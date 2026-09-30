@@ -727,6 +727,26 @@ BEGIN ATOMIC
   SELECT 42;
 END;
 
+-- Routines that set a list setting. PostgreSQL searches pg_temp first
+-- when search_path does not name it, so a SECURITY DEFINER function
+-- names pg_temp last. pg_dump writes each element as a string
+-- constant. The last function has elements that need quotes.
+CREATE FUNCTION test.definer_now() RETURNS TIMESTAMPTZ
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path = pg_catalog, pg_temp AS $$
+ SELECT now();
+$$;
+
+CREATE PROCEDURE test.definer_touch() LANGUAGE sql
+    SET search_path = pg_catalog, pg_temp AS $$
+ SELECT 1;
+$$;
+
+CREATE FUNCTION test.quoted_path() RETURNS INTEGER LANGUAGE sql
+    SET search_path = "Quoted Schema", "$user", '' AS $$
+ SELECT 1;
+$$;
+
 -- Operators: binary with the planner's options and a comment, and
 -- prefix
 CREATE FUNCTION test.same_parity(a INTEGER, b INTEGER) RETURNS BOOLEAN
