@@ -15,6 +15,8 @@
 #    --allow-drop.
 # 5. A prefix operator written with `left_arg: NONE` is made with no
 #    left argument. The plan is empty.
+# 6. An operator in a schema whose name needs quotes is made, with its
+#    owner and its comment. The plan is empty.
 
 # $1 is a query that must return t, $2 says what the step checks
 expect_operator() {
@@ -173,3 +175,30 @@ expect_operator "SELECT oprkind = 'l' AND oprleft = 0
     FROM pg_operator WHERE oid = 'test.~#~(NONE, integer)'::regoperator" \
     "the prefix operator was not made"
 expect_empty_plan "a prefix operator with a NONE left argument is unchanged"
+
+# an operator in a schema whose name needs quotes: the create, and the
+# owner statement that deploy makes from the drop, quote the schema
+cat > "${WORKDIR}/project/schemata/gate_ops.yaml" <<'YAML'
+---
+name: Gate Ops
+owner: postgres
+YAML
+cat > "${WORKDIR}/project/operators/gate_ops.yaml" <<'YAML'
+---
+operators:
+- name: '<~>'
+  schema: Gate Ops
+  owner: Gate Owner
+  function: int4eq
+  left_arg: integer
+  right_arg: integer
+  comment: Quoted schema
+YAML
+./target/debug/pglifecycle deploy --apply -d "${TARGET_DB}" \
+    "${WORKDIR}/project"
+expect_operator "SELECT pg_get_userbyid(oprowner) = 'Gate Owner'
+        AND obj_description(oid, 'pg_operator') = 'Quoted schema'
+    FROM pg_operator
+    WHERE oid = '\"Gate Ops\".<~>(integer, integer)'::regoperator" \
+    "the operator in a quoted schema was not made"
+expect_empty_plan "an operator in a quoted schema is unchanged"

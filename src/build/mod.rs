@@ -153,6 +153,12 @@
 //!     14 and later have no postfix operators, so a `right_arg` of
 //!     `NONE` now fails with "Postfix operators are not supported". The
 //!     test-project operator has two arguments.
+//! 35. An operator renders its schema quoted where the name needs
+//!     quotes. The Python wrote the schema bare, so the create, the
+//!     drop and the comment of an operator in a schema such as `Gate
+//!     Ops` did not parse, and nor did the owner statement that
+//!     pg_restore makes from the drop (see 17). The test-project
+//!     operator is in `test`, which quotes the same either way.
 
 mod acls;
 
@@ -1537,7 +1543,9 @@ impl Builder {
         if let Some(sql) = &d.sql {
             return self.add_item(item, vec![sql.clone()], vec![], false);
         }
-        let name = format!("{}.{}", d.schema, d.name);
+        // the schema is an identifier; the operator name is a symbol,
+        // which is never quoted (deviation 35)
+        let name = format!("{}.{}", quote_ident(&d.schema), d.name);
         let mut create =
             vec!["CREATE".into(), "OPERATOR".into(), name.clone()];
         // NONE, in any case, is no argument: `LEFTARG = NONE` names a
@@ -5713,6 +5721,23 @@ mod tests {
              integer);\n"
         );
         assert_eq!(drop, "DROP OPERATOR test.~~~ (integer, NONE);\n");
+    }
+
+    /// The schema of an operator is an identifier, so a name that
+    /// needs quotes gets them in the create, the drop that pg_restore
+    /// builds the owner statement from, and the comment (deviation 35)
+    #[test]
+    fn quotes_the_schema_of_an_operator() {
+        let (create, drop) = operator_entry(json!({
+            "schema": "Gate Ops",
+            "right_arg": "integer",
+        }));
+        assert_eq!(
+            create,
+            "CREATE OPERATOR \"Gate Ops\".~~~ (PROCEDURE = int4um, \
+             RIGHTARG = integer);\n"
+        );
+        assert_eq!(drop, "DROP OPERATOR \"Gate Ops\".~~~ (NONE, integer);\n");
     }
 
     #[test]

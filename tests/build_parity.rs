@@ -342,6 +342,23 @@ fn outside_items() -> Vec<Item> {
                 .unwrap(),
             ),
         ),
+        // deviation 35
+        item(
+            2,
+            ObjectType::Operator,
+            Definition::Operator(
+                serde_json::from_value(serde_json::json!({
+                    "name": "<~>",
+                    "schema": "Gate Ops",
+                    "owner": "postgres",
+                    "function": "int4eq",
+                    "left_arg": "integer",
+                    "right_arg": "integer",
+                    "comment": "Quoted schema",
+                }))
+                .unwrap(),
+            ),
+        ),
     ]
 }
 
@@ -368,6 +385,24 @@ const OUTSIDE_CORRECTED: &[(&str, &str, &str, &str, &str)] = &[
         "CREATE OPERATOR test.~~~ (PROCEDURE = int4um, RIGHTARG = \
          integer);\n",
         "DROP OPERATOR test.~~~ (NONE, integer);\n",
+    ),
+    // deviation 35: the schema of an operator is quoted. The Python
+    // wrote it bare, which does not parse for a name that needs quotes
+    (
+        "OPERATOR",
+        "Gate Ops",
+        "<~>",
+        "CREATE OPERATOR \"Gate Ops\".<~> (PROCEDURE = int4eq, LEFTARG = \
+         integer, RIGHTARG = integer);\n",
+        "DROP OPERATOR \"Gate Ops\".<~> (integer, integer);\n",
+    ),
+    (
+        "COMMENT",
+        "Gate Ops",
+        "<~>",
+        "COMMENT ON OPERATOR \"Gate Ops\".<~> (integer, integer) IS \
+         $$Quoted schema$$;\n;\n",
+        "",
     ),
 ];
 
@@ -596,7 +631,11 @@ fn corrects_objects_outside_the_test_project() {
             })
             .unwrap_or_else(|| panic!("missing entry {desc} {tag}"));
         assert_eq!(entry.defn.as_deref(), Some(*defn), "{desc} {tag} defn");
-        assert_eq!(entry.drop_stmt.as_deref(), Some(*drop), "{desc} {tag}");
+        assert_eq!(
+            entry.drop_stmt.as_deref().unwrap_or_default(),
+            *drop,
+            "{desc} {tag} drop"
+        );
     }
 }
 
