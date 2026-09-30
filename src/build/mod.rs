@@ -146,6 +146,13 @@
 //!     the quoted `"URL"` of a project token `URL` failed with `token
 //!     type "URL" does not exist`. The Python rendered no mappings.
 //!     No test-project mapping has an uppercase token type.
+//! 34. An operator argument of `NONE`, in any case, renders as no
+//!     argument, as deploy compares it. The Python rendered `LEFTARG =
+//!     NONE`, and PostgreSQL rejected it with `type "none" does not
+//!     exist`. The drop and comment signatures keep `NONE`. PostgreSQL
+//!     14 and later have no postfix operators, so a `right_arg` of
+//!     `NONE` now fails with "Postfix operators are not supported". The
+//!     test-project operator has two arguments.
 
 mod acls;
 
@@ -1533,11 +1540,16 @@ impl Builder {
         let name = format!("{}.{}", d.schema, d.name);
         let mut create =
             vec!["CREATE".into(), "OPERATOR".into(), name.clone()];
+        // NONE, in any case, is no argument: `LEFTARG = NONE` names a
+        // type that does not exist (deviation 34)
+        let argument = |v: &&str| !v.trim().eq_ignore_ascii_case("none");
+        let left_arg = d.left_arg.as_deref().filter(argument);
+        let right_arg = d.right_arg.as_deref().filter(argument);
         let mut options = vec![format!("PROCEDURE = {}", d.function)];
-        if let Some(v) = &d.left_arg {
+        if let Some(v) = left_arg {
             options.push(format!("LEFTARG = {v}"));
         }
-        if let Some(v) = &d.right_arg {
+        if let Some(v) = right_arg {
             options.push(format!("RIGHTARG = {v}"));
         }
         if let Some(v) = &d.commutator {
@@ -1561,8 +1573,8 @@ impl Builder {
         create.push(format!("({})", options.join(", ")));
         let signature = format!(
             "({}, {})",
-            d.left_arg.as_deref().unwrap_or("NONE"),
-            d.right_arg.as_deref().unwrap_or("NONE")
+            left_arg.unwrap_or("NONE"),
+            right_arg.unwrap_or("NONE")
         );
         // no IF EXISTS: pg_restore builds this type's owner
         // statement by stripping the leading DROP off this one
@@ -5630,6 +5642,77 @@ mod tests {
         // FUNCTION by stripping the leading DROP off this one
         // (deviation 17)
         assert_eq!(drop, "DROP FUNCTION test.bare_zero();\n");
+    }
+
+    /// Render the operator that `fields` give; return its create and
+    /// drop SQL
+    fn operator_entry(fields: Value) -> (String, String) {
+        let mut operator = json!({
+            "name": "~~~",
+            "schema": "test",
+            "owner": "app",
+            "function": "int4um",
+        });
+        operator
+            .as_object_mut()
+            .unwrap()
+            .extend(fields.as_object().unwrap().clone().into_iter());
+        let item = Item {
+            id: 1,
+            desc: ObjectType::Operator,
+            definition: Definition::Operator(
+                serde_json::from_value(operator).unwrap(),
+            ),
+            dependencies: BTreeSet::new(),
+        };
+        let dump = libpgdump::new("t", "UTF-8", "18.0").unwrap();
+        let mut builder = Builder {
+            dump,
+            dump_id_map: HashMap::new(),
+            text_search_last: HashMap::new(),
+            pending_attaches: Vec::new(),
+            index_attaches: IndexAttaches::default(),
+            text_search_ids: HashMap::new(),
+            text_search_refs: Vec::new(),
+            partition_ids: HashMap::new(),
+            superuser: "postgres".into(),
+        };
+        builder.dump_item(&item).unwrap();
+        let entry = builder
+            .dump
+            .entries()
+            .iter()
+            .find(|e| e.desc == libpgdump::ObjectType::Operator)
+            .expect("an OPERATOR entry")
+            .clone();
+        (
+            entry.defn.unwrap_or_default(),
+            entry.drop_stmt.unwrap_or_default(),
+        )
+    }
+
+    /// `NONE` is no argument, in any case: `LEFTARG = NONE` names a
+    /// type that does not exist (deviation 34). The signature keeps it.
+    #[test]
+    fn renders_a_none_argument_as_no_argument() {
+        let (create, drop) = operator_entry(
+            json!({"left_arg": "NONE", "right_arg": "integer"}),
+        );
+        assert_eq!(
+            create,
+            "CREATE OPERATOR test.~~~ (PROCEDURE = int4um, RIGHTARG = \
+             integer);\n"
+        );
+        assert_eq!(drop, "DROP OPERATOR test.~~~ (NONE, integer);\n");
+        let (create, drop) = operator_entry(
+            json!({"left_arg": "integer", "right_arg": "none"}),
+        );
+        assert_eq!(
+            create,
+            "CREATE OPERATOR test.~~~ (PROCEDURE = int4um, LEFTARG = \
+             integer);\n"
+        );
+        assert_eq!(drop, "DROP OPERATOR test.~~~ (integer, NONE);\n");
     }
 
     #[test]

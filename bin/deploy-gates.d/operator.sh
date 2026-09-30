@@ -13,6 +13,8 @@
 # 4. Operators that only the database has, one of them an overload of
 #    an operator that the project has, are dropped only with
 #    --allow-drop.
+# 5. A prefix operator written with `left_arg: NONE` is made with no
+#    left argument. The plan is empty.
 
 # $1 is a query that must return t, $2 says what the step checks
 expect_operator() {
@@ -154,3 +156,20 @@ expect_operator "SELECT to_regoperator('test.@@@(integer, integer)') IS NULL
     AND to_regoperator('test.!!!(NONE, bigint)') IS NOT NULL" \
     "the database-only operators were not dropped"
 expect_empty_plan "database-only operators are dropped"
+
+# a prefix operator whose left argument is NONE: the build writes no
+# LEFTARG, as `LEFTARG = NONE` names a type that does not exist
+cat >> "${WORKDIR}/project/operators/test.yaml" <<'YAML'
+- name: '~#~'
+  schema: test
+  owner: postgres
+  function: int4um
+  left_arg: NONE
+  right_arg: integer
+YAML
+./target/debug/pglifecycle deploy --apply -d "${TARGET_DB}" \
+    "${WORKDIR}/project"
+expect_operator "SELECT oprkind = 'l' AND oprleft = 0
+    FROM pg_operator WHERE oid = 'test.~#~(NONE, integer)'::regoperator" \
+    "the prefix operator was not made"
+expect_empty_plan "a prefix operator with a NONE left argument is unchanged"

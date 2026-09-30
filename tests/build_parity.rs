@@ -326,6 +326,22 @@ fn outside_items() -> Vec<Item> {
                 .unwrap(),
             ),
         ),
+        // deviation 34
+        item(
+            1,
+            ObjectType::Operator,
+            Definition::Operator(
+                serde_json::from_value(serde_json::json!({
+                    "name": "~~~",
+                    "schema": "test",
+                    "owner": "postgres",
+                    "function": "int4um",
+                    "left_arg": "NONE",
+                    "right_arg": "integer",
+                }))
+                .unwrap(),
+            ),
+        ),
     ]
 }
 
@@ -342,6 +358,16 @@ const OUTSIDE_CORRECTED: &[(&str, &str, &str, &str, &str)] = &[
          pg_catalog.default); ALTER TEXT SEARCH CONFIGURATION test.urls \
          ADD MAPPING FOR url WITH simple;\n",
         "DROP TEXT SEARCH CONFIGURATION IF EXISTS test.urls;\n",
+    ),
+    // deviation 34: NONE is no argument. The Python rendered `LEFTARG
+    // = NONE`, which names no type
+    (
+        "OPERATOR",
+        "test",
+        "~~~",
+        "CREATE OPERATOR test.~~~ (PROCEDURE = int4um, RIGHTARG = \
+         integer);\n",
+        "DROP OPERATOR test.~~~ (NONE, integer);\n",
     ),
 ];
 
