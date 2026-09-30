@@ -7,8 +7,8 @@ use serde_json::{Map, Value};
 /// writes as one string constant for each element. This is
 /// `variable_is_guc_list_quote` in PostgreSQL 18's
 /// src/bin/pg_dump/dumputils.c: the settings marked `GUC_LIST_QUOTE`.
-/// A routine keeps such a setting as a list. As one string, the value
-/// is one name.
+/// A routine, a role or a user keeps such a setting as a list. As one
+/// string, the value is one name.
 pub const LIST_SETTINGS: &[&str] = &[
     "local_preload_libraries",
     "oauth_validator_libraries",
@@ -280,5 +280,31 @@ impl Procedure {
             configuration: self.configuration.as_ref().map(canonical_settings),
             ..self.clone()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    /// PostgreSQL 18 keeps the text of a setting value as SET gives it,
+    /// for a boolean setting too: `off` stays `off` and `false` stays
+    /// `false`. The build writes a YAML boolean as the keyword `True` or
+    /// `False`, which PostgreSQL keeps as `true` or `false`, and pull
+    /// reads that text. So a boolean compares as its text, and another
+    /// spelling of the same value is a change.
+    #[test]
+    fn boolean_settings_compare_as_the_text_postgres_keeps() {
+        let settings = |value: Value| {
+            let Value::Object(map) = json!({"enable_seqscan": value}) else {
+                unreachable!()
+            };
+            canonical_settings(&map)
+        };
+        assert_eq!(settings(json!(false)), settings(json!("false")));
+        assert_eq!(settings(json!(true)), settings(json!("true")));
+        assert_ne!(settings(json!(false)), settings(json!("off")));
     }
 }
