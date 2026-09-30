@@ -1,7 +1,10 @@
 //! Project loading and validation (ports project.py)
 
 mod load;
-pub(crate) use load::{generated_name, split_sql_name};
+pub(crate) use load::{
+    aggregate_signature, generated_name, parameter_signature, split_sql_name,
+    tag_signature,
+};
 pub mod validate;
 
 use std::path::PathBuf;

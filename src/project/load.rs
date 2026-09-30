@@ -7,7 +7,7 @@ use serde_json::Value;
 
 use crate::constants::{DEPENDENCIES, ObjectType, READ_ORDER};
 use crate::deploy::identity_type;
-use crate::models::{Definition, Item};
+use crate::models::{Aggregate, Definition, FunctionParameter, Item};
 use crate::project::{Project, validate};
 use crate::yamlio;
 
@@ -537,33 +537,43 @@ impl Loader {
             if self.is_stale_foreign_key_edge(dep) {
                 continue;
             }
+            let item = &self.project.inventory[dep.item];
+            let dependent = format!(
+                "{} {}.{}",
+                item.desc.as_str(),
+                item.definition.schema().unwrap_or_default(),
+                identity(&item.definition),
+            );
+            let parents = match resolve_dependency(
+                &self.index,
+                &self.project.inventory,
+                dep,
+            ) {
+                Ok(parents) => parents,
+                Err(error) => {
+                    log::error!(
+                        "The dependency of {dependent} on {} {}.{} {error}",
+                        dep.parent_desc.as_str(),
+                        dep.parent_namespace,
+                        dep.parent_tag,
+                    );
+                    self.errors += 1;
+                    continue;
+                }
+            };
             // a dependency may point at an object the project does not
             // manage (e.g. an inheritance parent owned by an
             // extension); skip the edge rather than failing the load
-            let parents = lookup_items(
-                &self.index,
-                dep.parent_desc,
-                Some(&dep.parent_namespace),
-                &dep.parent_tag,
-            );
             if parents.is_empty() {
-                let item = &self.project.inventory[dep.item];
                 log::warn!(
-                    "Skipping dependency from {} {}.{} on unmanaged {} {}.{}",
-                    item.desc.as_str(),
-                    item.definition.schema().unwrap_or_default(),
-                    item.definition.name(),
+                    "Skipping dependency from {dependent} on unmanaged \
+                     {} {}.{}",
                     dep.parent_desc.as_str(),
                     dep.parent_namespace,
                     dep.parent_tag,
                 );
                 continue;
             }
-            // a `dependencies` entry names an object, and a name is
-            // ambiguous across overloads, so every overload of that
-            // name is ordered ahead of the dependent object. A missing
-            // edge fails a restore outright, where a redundant one at
-            // worst costs ordering, so the ambiguity resolves wide
             for parent in parents {
                 if parent != dep.item {
                     self.project.inventory[dep.item]
@@ -590,8 +600,9 @@ impl Loader {
     /// its members ahead of everything else in the archive, including
     /// the CREATE SCHEMA they need (gmr/libpgdump#14). Such a project
     /// builds an archive that no longer restores, so drop the edge
-    /// instead of keeping faith with it, and name it so the operator
-    /// knows to pull again.
+    /// instead of keeping faith with it, and tell the operator to
+    /// remove it. A person can also write the edge by hand, so a new
+    /// pull does not always remove it.
     fn is_stale_foreign_key_edge(&self, dep: &CachedDependency) -> bool {
         if dep.parent_desc != ObjectType::Table {
             return false;
@@ -618,12 +629,16 @@ impl Loader {
             return false;
         }
         log::warn!(
-            "Ignoring the foreign-key dependency of table {}.{} on \
-             table {}.{}. Pull the project again to remove it.",
+            "Ignoring the dependency of table {}.{} on table {}.{}: a \
+             table dependency orders only INHERITS and LIKE, and the \
+             build adds each foreign key after all tables. Remove the \
+             entry from the dependencies of {}.{}.",
             table.schema,
             table.name,
             dep.parent_namespace,
             dep.parent_tag,
+            table.schema,
+            table.name,
         );
         true
     }
@@ -751,6 +766,163 @@ fn lookup_items(
         .get(&index_key(desc, namespace, tag))
         .cloned()
         .unwrap_or_default()
+}
+
+/// Find the items that a `dependencies` entry names. An empty list
+/// means that the project does not manage the object.
+///
+/// Overloads of a function, procedure or aggregate share a name, so
+/// an entry for one of these gives its argument types, as pg_dump tags
+/// it: `test.f(integer, text)`, or `test.agg(*)` for an aggregate with
+/// no arguments. The types compare as PostgreSQL resolves them (see
+/// [`routine_signature`]). An entry with no argument list names the
+/// one overload that has the name. An entry that names no single
+/// overload is an error, because the load cannot know which overload
+/// the author meant.
+fn resolve_dependency(
+    index: &HashMap<(ObjectType, Option<String>, String), Vec<usize>>,
+    inventory: &[Item],
+    dep: &CachedDependency,
+) -> Result<Vec<usize>, String> {
+    let desc = dep.parent_desc;
+    let namespace = Some(dep.parent_namespace.as_str());
+    if !matches!(
+        desc,
+        ObjectType::Function | ObjectType::Procedure | ObjectType::Aggregate
+    ) {
+        return Ok(lookup_items(index, desc, namespace, &dep.parent_tag));
+    }
+    // a routine can also give its argument types in its name, with no
+    // parameters, as test-project/functions does
+    if dep.parent_tag.contains('(') {
+        let exact = lookup_items(index, desc, namespace, &dep.parent_tag);
+        if !exact.is_empty() {
+            return Ok(exact);
+        }
+    }
+    let (name, arguments) = match tag_signature(&dep.parent_tag) {
+        Some((name, arguments)) => (name, Some(arguments)),
+        None => (dep.parent_tag.as_str(), None),
+    };
+    let overloads = lookup_items(index, desc, namespace, name);
+    let signatures = || {
+        overloads
+            .iter()
+            .map(|&i| {
+                format!(
+                    "{}.{name}({})",
+                    dep.parent_namespace,
+                    routine_signature(&inventory[i].definition).join(", ")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    match arguments {
+        Some(arguments) => {
+            let found: Vec<usize> = overloads
+                .iter()
+                .copied()
+                .filter(|&i| {
+                    routine_signature(&inventory[i].definition) == arguments
+                })
+                .collect();
+            if found.is_empty() && !overloads.is_empty() {
+                return Err(format!(
+                    "matches no overload. The overloads are: {}",
+                    signatures()
+                ));
+            }
+            Ok(found)
+        }
+        None if overloads.len() > 1 => Err(format!(
+            "is ambiguous: {} overloads have that name. Give the \
+             argument types of one: {}",
+            overloads.len(),
+            signatures()
+        )),
+        None => Ok(overloads),
+    }
+}
+
+/// The argument types of an argument list without its closing
+/// parenthesis, split at each comma that is not in parentheses or
+/// quotes, so `numeric(10,2)` stays one type. `*`, the argument list of
+/// an aggregate with no arguments, is no argument.
+fn split_arguments(arguments: &str) -> Vec<String> {
+    let arguments = arguments.trim_end();
+    let arguments = arguments.strip_suffix(')').unwrap_or(arguments);
+    let mut result = vec![String::new()];
+    let (mut quoted, mut depth) = (false, 0usize);
+    for c in arguments.chars() {
+        match c {
+            '"' => quoted = !quoted,
+            '(' if !quoted => depth += 1,
+            ')' if !quoted => depth = depth.saturating_sub(1),
+            ',' if !quoted && depth == 0 => {
+                result.push(String::new());
+                continue;
+            }
+            _ => {}
+        }
+        result.last_mut().unwrap().push(c);
+    }
+    result
+        .into_iter()
+        .map(|argument| argument.trim().to_string())
+        .filter(|argument| !argument.is_empty() && argument != "*")
+        .collect()
+}
+
+/// The name and the argument types of a routine tag with an argument
+/// list, such as `f(integer, text)`. The types are as
+/// [`routine_signature`] writes them. A tag with no argument list
+/// gives `None`.
+pub(crate) fn tag_signature(tag: &str) -> Option<(&str, Vec<String>)> {
+    let (name, arguments) = tag.split_once('(')?;
+    let arguments = split_arguments(arguments)
+        .iter()
+        .map(|a| identity_type(a))
+        .collect();
+    Some((name.trim_end(), arguments))
+}
+
+/// The argument types that PostgreSQL resolves a routine by, as
+/// [`identity_type`] writes them: an alias is its canonical name, a
+/// built-in type has no `pg_catalog` schema, a name that is not quoted
+/// is in lowercase, and a typmod is removed. An OUT or TABLE parameter
+/// is not an argument. The arguments of an ordered-set aggregate are
+/// its direct arguments, then its ORDER BY arguments, as pg_dump lists
+/// them.
+fn routine_signature(definition: &Definition) -> Vec<String> {
+    match definition {
+        Definition::Function(f) => parameter_signature(&f.parameters),
+        Definition::Procedure(p) => parameter_signature(&p.parameters),
+        Definition::Aggregate(a) => aggregate_signature(a),
+        _ => Vec::new(),
+    }
+}
+
+/// The [`routine_signature`] of a function or procedure
+pub(crate) fn parameter_signature(
+    parameters: &Option<Vec<FunctionParameter>>,
+) -> Vec<String> {
+    parameters
+        .iter()
+        .flatten()
+        .filter(|p| !matches!(p.mode.as_str(), "OUT" | "TABLE"))
+        .map(|p| identity_type(&p.data_type))
+        .collect()
+}
+
+/// The [`routine_signature`] of an aggregate
+pub(crate) fn aggregate_signature(aggregate: &Aggregate) -> Vec<String> {
+    aggregate
+        .arguments
+        .iter()
+        .chain(aggregate.order_by.iter().flatten())
+        .map(|a| identity_type(&a.data_type))
+        .collect()
 }
 
 /// What makes two definitions the same object. A function is
@@ -1462,6 +1634,144 @@ mod tests {
         // item 0 is the schema, 1 is f(integer), 2 is f(text)
         assert!(loader.project.inventory[1].dependencies.is_empty());
         assert_eq!(loader.project.inventory[2].dependencies, [0].into());
+    }
+
+    /// Load `routines` as (type, name, argument types), then one
+    /// function `test.dependent()` whose `dependencies` block names
+    /// `references` under `key`, and resolve the edges. The dependent
+    /// function is the last item
+    fn load_routine_dependency(
+        routines: &[(ObjectType, &str, &[&str])],
+        key: &str,
+        references: &[&str],
+    ) -> Loader {
+        let mut loader = Loader::new(Path::new("."));
+        for (desc, name, types) in routines {
+            let entry = if *desc == ObjectType::Aggregate {
+                let arguments: Vec<Value> = types
+                    .iter()
+                    .map(|data_type| json!({"data_type": data_type}))
+                    .collect();
+                json!({"name": name, "schema": "test", "owner": "postgres",
+                       "sfunc": "f", "state_data_type": "integer",
+                       "arguments": arguments})
+            } else {
+                let parameters: Vec<Value> = types
+                    .iter()
+                    .map(|data_type| match data_type.strip_prefix("OUT ") {
+                        Some(data_type) => {
+                            json!({"mode": "OUT", "data_type": data_type})
+                        }
+                        None => json!({"mode": "IN", "data_type": data_type}),
+                    })
+                    .collect();
+                json!({"name": name, "schema": "test", "owner": "postgres",
+                       "parameters": parameters})
+            };
+            loader.add_definition(*desc, entry, None);
+        }
+        let mut defn = json!({
+            "name": "dependent",
+            "schema": "test",
+            "owner": "postgres",
+            "dependencies": {key: references},
+        });
+        loader.cache_and_remove_dependencies(&mut defn);
+        loader.add_definition(ObjectType::Function, defn, None);
+        loader.apply_cached_dependencies().unwrap();
+        loader
+    }
+
+    /// A function reference with an argument list names one overload.
+    /// The argument types compare as PostgreSQL resolves them: an
+    /// alias is its canonical name, case and a `pg_catalog` schema do
+    /// not change a built-in type, and an OUT parameter is not an
+    /// argument. pg_dump writes the argument types in the same form in
+    /// its archive tag, which pull writes to `dependencies`
+    #[test]
+    fn routine_dependency_resolves_by_signature() {
+        let loader = load_routine_dependency(
+            &[
+                (ObjectType::Function, "f", &["integer"]),
+                (ObjectType::Function, "f", &["text", "OUT integer"]),
+                (ObjectType::Function, "g", &["character varying"]),
+            ],
+            "functions",
+            &["test.f(int4)", "test.f(pg_catalog.TEXT)", "test.g(varchar)"],
+        );
+        assert_eq!(loader.errors, 0);
+        assert_eq!(loader.project.inventory[3].dependencies, [0, 1, 2].into());
+
+        let loader = load_routine_dependency(
+            &[
+                (ObjectType::Function, "f", &["integer"]),
+                (ObjectType::Function, "f", &["text"]),
+            ],
+            "functions",
+            &["test.f(int)"],
+        );
+        assert_eq!(loader.errors, 0);
+        assert_eq!(loader.project.inventory[2].dependencies, [0].into());
+    }
+
+    /// An aggregate reference resolves by signature too, and `(*)` is
+    /// the argument list of an aggregate with no arguments, as pg_dump
+    /// writes it
+    #[test]
+    fn aggregate_dependency_resolves_by_signature() {
+        let loader = load_routine_dependency(
+            &[
+                (ObjectType::Aggregate, "agg", &["integer"]),
+                (ObjectType::Aggregate, "agg", &["bigint"]),
+                (ObjectType::Aggregate, "agg", &[]),
+            ],
+            "aggregates",
+            &["test.agg(int8)", "test.agg(*)"],
+        );
+        assert_eq!(loader.errors, 0);
+        assert_eq!(loader.project.inventory[3].dependencies, [1, 2].into());
+    }
+
+    /// A reference with no argument list names the one overload that
+    /// has the name
+    #[test]
+    fn bare_routine_dependency_resolves_one_overload() {
+        let loader = load_routine_dependency(
+            &[
+                (ObjectType::Function, "z_principal_id", &[]),
+                (ObjectType::Function, "other", &["integer"]),
+            ],
+            "functions",
+            &["test.z_principal_id"],
+        );
+        assert_eq!(loader.errors, 0);
+        assert_eq!(loader.project.inventory[2].dependencies, [0].into());
+    }
+
+    /// A reference with no argument list is an error when more than one
+    /// overload has the name, as is an argument list that no overload
+    /// has: either one names no single object, and the load cannot
+    /// know which overload the author meant
+    #[test]
+    fn unresolved_routine_dependency_is_an_error() {
+        let overloads: &[(ObjectType, &str, &[&str])] = &[
+            (ObjectType::Function, "f", &["integer"]),
+            (ObjectType::Function, "f", &["text"]),
+        ];
+        for reference in ["test.f", "test.f(bigint)"] {
+            let loader =
+                load_routine_dependency(overloads, "functions", &[reference]);
+            assert_eq!(loader.errors, 1, "{reference}");
+            assert!(loader.project.inventory[2].dependencies.is_empty());
+        }
+        // a name that the project does not have is not managed, and
+        // orders nothing, with or without an argument list
+        for reference in ["test.missing", "test.missing(integer)"] {
+            let loader =
+                load_routine_dependency(overloads, "functions", &[reference]);
+            assert_eq!(loader.errors, 0, "{reference}");
+            assert!(loader.project.inventory[2].dependencies.is_empty());
+        }
     }
 
     /// L10: a container entry missing `name` is skipped as an error

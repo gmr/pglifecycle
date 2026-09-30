@@ -83,9 +83,9 @@ pub fn render(
             &value,
         )?;
     }
-    writer.write_functions(assembly)?;
+    writer.write_functions(assembly, &relation_inventory)?;
     writer.write_types(assembly)?;
-    writer.write_catalog_objects(assembly)?;
+    writer.write_catalog_objects(assembly, &relation_inventory)?;
     for server in &assembly.servers {
         writer.save(top_level("servers", &server.name)?, server)?;
     }
@@ -219,18 +219,32 @@ impl Writer {
     /// counter-suffixed candidate is skipped when it collides with
     /// another function's real name (e.g. `fn`, `fn`, `fn_1`), so the
     /// real `fn_1` is never displaced into `fn_1_1.yaml`
-    fn write_functions(&mut self, assembly: &Assembly) -> Result<(), String> {
+    fn write_functions(
+        &mut self,
+        assembly: &Assembly,
+        relations: &BTreeMap<(String, String), &'static str>,
+    ) -> Result<(), String> {
         let names: Vec<(&str, &str)> = assembly
             .functions
             .iter()
             .map(|f| (f.schema.as_str(), f.name.as_str()))
             .collect();
-        for (function, filename) in
-            assembly.functions.iter().zip(overload_file_names(&names))
-        {
-            self.save(
+        let files = assembly.functions.iter().zip(overload_file_names(&names));
+        for (i, (function, filename)) in files.enumerate() {
+            let mut value = serialize(function)?;
+            if let (Some(map), Some(dependencies)) = (
+                value.as_object_mut(),
+                routine_dependencies(
+                    assembly.function_dependencies.get(i),
+                    assembly,
+                    relations,
+                ),
+            ) {
+                map.insert(String::from("dependencies"), dependencies);
+            }
+            self.save_value(
                 nested("functions", &function.schema, &filename)?,
-                function,
+                &value,
             )?;
         }
         Ok(())
@@ -242,6 +256,7 @@ impl Writer {
     fn write_catalog_objects(
         &mut self,
         assembly: &Assembly,
+        relations: &BTreeMap<(String, String), &'static str>,
     ) -> Result<(), String> {
         let names: Vec<(&str, &str)> = assembly
             .aggregates
@@ -321,12 +336,23 @@ impl Writer {
             .iter()
             .map(|p| (p.schema.as_str(), p.name.as_str()))
             .collect();
-        for (procedure, filename) in
-            assembly.procedures.iter().zip(overload_file_names(&names))
-        {
-            self.save(
+        let files =
+            assembly.procedures.iter().zip(overload_file_names(&names));
+        for (i, (procedure, filename)) in files.enumerate() {
+            let mut value = serialize(procedure)?;
+            if let (Some(map), Some(dependencies)) = (
+                value.as_object_mut(),
+                routine_dependencies(
+                    assembly.procedure_dependencies.get(i),
+                    assembly,
+                    relations,
+                ),
+            ) {
+                map.insert(String::from("dependencies"), dependencies);
+            }
+            self.save_value(
                 nested("procedures", &procedure.schema, &filename)?,
-                procedure,
+                &value,
             )?;
         }
         let operators: Vec<Value> = assembly
@@ -649,6 +675,54 @@ fn view_dependencies(
         );
     }
     Some(Value::Object(object))
+}
+
+/// The `dependencies` of a function or procedure: each object that
+/// its archive entry depends on (see `pull::routine_parents`) and that
+/// the pulled inventory has, so that the build orders the routine after
+/// it. An object that the inventory does not have is left out, as
+/// `view_dependencies` leaves it out. A function or aggregate is named
+/// with its argument types, which the load resolves to one overload.
+/// It is left out when the inventory has no overload with those
+/// argument types, because the load fails for such an entry.
+fn routine_dependencies(
+    parents: Option<&Vec<super::RoutineParent>>,
+    assembly: &Assembly,
+    relations: &BTreeMap<(String, String), &'static str>,
+) -> Option<Value> {
+    use crate::project::{
+        aggregate_signature, parameter_signature, tag_signature,
+    };
+    let known = |key: &str, schema: &str, tag: &str| {
+        let (name, arguments) =
+            tag_signature(tag).unwrap_or((tag, Vec::new()));
+        let same = |s: &str, n: &str| s == schema && n == name;
+        match key {
+            "aggregates" => assembly.aggregates.iter().any(|a| {
+                same(&a.schema, &a.name) && aggregate_signature(a) == arguments
+            }),
+            "functions" => assembly.functions.iter().any(|f| {
+                same(&f.schema, &f.name)
+                    && parameter_signature(&f.parameters) == arguments
+            }),
+            "sequences" => {
+                assembly.sequences.iter().any(|s| same(&s.schema, &s.name))
+            }
+            key => relations
+                .get(&(schema.to_string(), tag.to_string()))
+                .is_some_and(|relation| *relation == key),
+        }
+    };
+    let mut dependencies: BTreeMap<&str, BTreeSet<String>> = BTreeMap::new();
+    for parent in parents.into_iter().flatten() {
+        if known(parent.key, &parent.schema, &parent.tag) {
+            dependencies
+                .entry(parent.key)
+                .or_default()
+                .insert(format!("{}.{}", parent.schema, parent.tag));
+        }
+    }
+    (!dependencies.is_empty()).then(|| json!(dependencies))
 }
 
 /// Parse a view/materialized view's query text and return every
@@ -1056,7 +1130,9 @@ mod tests {
             mode_headers: false,
             include_password_hashes: false,
         };
-        writer.write_catalog_objects(&assembly).unwrap();
+        writer
+            .write_catalog_objects(&assembly, &BTreeMap::new())
+            .unwrap();
         let body = &writer.files[&Path::new("subscriptions").join("s.yaml")];
         assert!(!body.contains("secret"), "unexpected contents: {body}");
         assert!(body.contains("host=h"), "unexpected contents: {body}");
@@ -1148,7 +1224,7 @@ mod tests {
             mode_headers: false,
             include_password_hashes: false,
         };
-        writer.write_functions(&assembly).unwrap();
+        writer.write_functions(&assembly, &BTreeMap::new()).unwrap();
         let paths: Vec<&PathBuf> = writer.files.keys().collect();
         let fn_1_path =
             Path::new("functions").join("public").join("fn_1.yaml");
@@ -1277,5 +1353,49 @@ mod tests {
     fn view_dependencies_none_without_query() {
         let inv = inventory(&[("test", "users", "tables")]);
         assert_eq!(view_dependencies("test", "v", None, &inv), None);
+    }
+
+    /// A routine names each object that its archive entry depends on
+    /// and that the pulled inventory has, a function with the argument
+    /// types of its tag. An object that the inventory does not have is
+    /// left out. An overload that the inventory does not have is also
+    /// left out, although the inventory has an overload with the same
+    /// name: the load fails for an entry that names no overload
+    #[test]
+    fn routine_dependencies_name_the_pulled_objects() {
+        let mut z = function("test", "z");
+        z.parameters = Some(vec![models::FunctionParameter {
+            mode: String::from("IN"),
+            data_type: String::from("int4"),
+            name: Some(String::from("a")),
+            default: None,
+        }]);
+        let assembly = Assembly {
+            functions: vec![z],
+            ..Assembly::default()
+        };
+        let relations = inventory(&[("test", "users", "tables")]);
+        let parent =
+            |key, schema: &str, tag: &str| crate::pull::RoutineParent {
+                key,
+                schema: schema.to_string(),
+                tag: tag.to_string(),
+            };
+        let parents = vec![
+            parent("tables", "test", "users"),
+            parent("functions", "test", "z(integer)"),
+            parent("functions", "test", "z(bigint)"),
+            parent("functions", "ext", "other()"),
+            parent("views", "test", "users"),
+            parent("sequences", "test", "gone"),
+        ];
+        assert_eq!(
+            routine_dependencies(Some(&parents), &assembly, &relations),
+            Some(json!({
+                "functions": ["test.z(integer)"],
+                "tables": ["test.users"],
+            }))
+        );
+        assert_eq!(routine_dependencies(None, &assembly, &relations), None);
     }
 }

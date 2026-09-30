@@ -508,6 +508,13 @@ pub struct Assembly {
     pub access_methods: Vec<models::AccessMethod>,
     pub roles: BTreeMap<String, RoleState>,
     pub remaining: Vec<Remaining>,
+    /// The objects that each function and procedure depends on in the
+    /// archive, parallel to `functions` and `procedures`
+    function_dependencies: Vec<Vec<RoutineParent>>,
+    procedure_dependencies: Vec<Vec<RoutineParent>>,
+    /// [`routine_parents`] of the archive, by dump id, taken by `apply`
+    /// as it adds each function and procedure
+    routine_parents: HashMap<i32, Vec<RoutineParent>>,
     /// Indexes whose target relation had not yet been ingested when the
     /// index entry was seen (pg_dump sorts INDEX before MATERIALIZED
     /// VIEW), replayed after the entry loop completes
@@ -535,6 +542,65 @@ pub struct Assembly {
     /// in sync as indexes are attached so `COMMENT ON INDEX` does not
     /// need to scan every index in every table
     index_location: HashMap<(String, String), IndexLocation>,
+}
+
+/// An object that a function or procedure depends on in the archive,
+/// named as a `dependencies` entry names it: `key` is the plural key,
+/// and `tag` is the name, with the argument types for a routine, as
+/// pg_dump tags the entry
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct RoutineParent {
+    key: &'static str,
+    schema: String,
+    tag: String,
+}
+
+/// The objects that each function and procedure entry depends on, by
+/// dump id.
+///
+/// PostgreSQL examines a SQL-standard body (`BEGIN ATOMIC` or
+/// `RETURN`) when it makes the routine, so the routine has to come
+/// after the functions, aggregates and relations that the body uses.
+/// pg_depend records these for such a body, and pg_dump writes them
+/// into the archive entry. It records none for a string body (`AS $$
+/// ... $$`). A relation that is the argument or return type, as in
+/// `RETURNS SETOF t`, is recorded for both. The schema and the other
+/// types are not kept: type order already makes them before every
+/// routine.
+fn routine_parents(
+    entries: &[libpgdump::Entry],
+) -> HashMap<i32, Vec<RoutineParent>> {
+    use libpgdump::ObjectType as OT;
+    let by_id: HashMap<i32, &libpgdump::Entry> =
+        entries.iter().map(|e| (e.dump_id, e)).collect();
+    entries
+        .iter()
+        .filter(|e| matches!(e.desc, OT::Function | OT::Procedure))
+        .map(|entry| {
+            let parents = entry
+                .dependencies
+                .iter()
+                .filter_map(|id| by_id.get(id))
+                .filter_map(|parent| {
+                    let key = match parent.desc {
+                        OT::Aggregate => "aggregates",
+                        OT::Function => "functions",
+                        OT::MaterializedView => "materialized_views",
+                        OT::Sequence => "sequences",
+                        OT::Table | OT::ForeignTable => "tables",
+                        OT::View => "views",
+                        _ => return None,
+                    };
+                    Some(RoutineParent {
+                        key,
+                        schema: parent.namespace.clone().unwrap_or_default(),
+                        tag: parent.tag.clone().unwrap_or_default(),
+                    })
+                })
+                .collect();
+            (entry.dump_id, parents)
+        })
+        .collect()
 }
 
 /// Where an ingested index currently lives, for `index_location`
@@ -621,6 +687,7 @@ impl Assembly {
         let mut parser = ddl::Parser::new()?;
         self.dbname = dump.dbname().to_string();
         let entries = dump.entries();
+        self.routine_parents = routine_parents(entries);
         let task = progress::spinner("Ingesting entries");
         for entry in entries {
             task.set_message(format!(
@@ -907,6 +974,11 @@ impl Assembly {
             Statement::CreateProcedure(mut procedure) => {
                 procedure.owner = owner;
                 self.procedures.push(*procedure);
+                self.procedure_dependencies.push(
+                    self.routine_parents
+                        .remove(&entry.dump_id)
+                        .unwrap_or_default(),
+                );
             }
             Statement::CreateOperator(mut operator) => {
                 operator.owner = owner;
@@ -963,6 +1035,11 @@ impl Assembly {
             Statement::CreateFunction(mut function) => {
                 function.owner = owner;
                 self.functions.push(*function);
+                self.function_dependencies.push(
+                    self.routine_parents
+                        .remove(&entry.dump_id)
+                        .unwrap_or_default(),
+                );
             }
             Statement::CreateForeignDataWrapper(mut fdw) => {
                 fdw.owner = owner;
@@ -3203,6 +3280,77 @@ mod tests {
         assert_eq!(assembly.views.len(), 1);
         assert_eq!(assembly.functions.len(), 1);
         assert!(assembly.remaining.is_empty());
+    }
+
+    /// A function or procedure keeps the functions and relations that
+    /// its archive entry depends on, named as the entries are tagged,
+    /// but not its schema
+    #[test]
+    fn routines_keep_their_archive_dependencies() {
+        let mut dump = libpgdump::new("fixtures", "UTF8", "18.0").unwrap();
+        let mut entry = |desc, namespace, tag, defn, deps: &[i32]| {
+            dump.add_entry(
+                desc,
+                Some(namespace),
+                Some(tag),
+                Some("postgres"),
+                Some(defn),
+                None,
+                None,
+                deps,
+            )
+            .expect("add_entry failed")
+        };
+        let schema = entry(OT::Schema, "", "test", "CREATE SCHEMA test;", &[]);
+        let table = entry(
+            OT::Table,
+            "test",
+            "t",
+            "CREATE TABLE test.t (id integer);",
+            &[schema],
+        );
+        let callee = entry(
+            OT::Function,
+            "test",
+            "z(integer)",
+            "CREATE FUNCTION test.z(n integer) RETURNS integer \
+             LANGUAGE sql RETURN n;",
+            &[schema],
+        );
+        entry(
+            OT::Function,
+            "test",
+            "a()",
+            "CREATE FUNCTION test.a() RETURNS bigint LANGUAGE sql \
+             RETURN (SELECT count(*) + test.z(1) FROM test.t);",
+            &[schema, callee, table],
+        );
+        entry(
+            OT::Procedure,
+            "test",
+            "p()",
+            "CREATE PROCEDURE test.p() LANGUAGE sql \
+             BEGIN ATOMIC SELECT test.z(1); END;",
+            &[callee, schema],
+        );
+        let mut assembly = Assembly::default();
+        assembly.ingest(&dump).unwrap();
+        let parent = |key, tag: &str| RoutineParent {
+            key,
+            schema: String::from("test"),
+            tag: tag.to_string(),
+        };
+        assert_eq!(
+            assembly.function_dependencies,
+            vec![
+                vec![],
+                vec![parent("functions", "z(integer)"), parent("tables", "t")],
+            ]
+        );
+        assert_eq!(
+            assembly.procedure_dependencies,
+            vec![vec![parent("functions", "z(integer)")]]
+        );
     }
 
     #[test]

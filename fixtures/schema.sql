@@ -727,6 +727,36 @@ BEGIN ATOMIC
   SELECT 42;
 END;
 
+-- SQL-standard bodies that use other objects. PostgreSQL examines
+-- such a body when it makes the routine, also with
+-- check_function_bodies off, so the routine has to come after each
+-- object that its body uses. Name order puts `a_calls_later` and
+-- `a_proc_calls_later` before the function that they call, and type
+-- order puts a function before an aggregate, a table and a view.
+-- pg_dump records these dependencies, and pull writes them to
+-- `dependencies`. The calls to `overloaded` and `sum_ints` each use one
+-- of two overloads.
+CREATE FUNCTION test.z_called_later(n INTEGER) RETURNS INTEGER
+    LANGUAGE sql IMMUTABLE RETURN n + 1;
+
+CREATE FUNCTION test.a_calls_later() RETURNS TEXT LANGUAGE sql
+BEGIN ATOMIC
+  SELECT test.overloaded(test.z_called_later(1));
+END;
+
+CREATE PROCEDURE test.a_proc_calls_later() LANGUAGE sql
+BEGIN ATOMIC
+  SELECT test.z_called_later(2);
+END;
+
+CREATE FUNCTION test.a_reads_users() RETURNS BIGINT LANGUAGE sql
+BEGIN ATOMIC
+  SELECT count(*) AS count FROM test.users;
+END;
+
+CREATE FUNCTION test.a_reads_view() RETURNS INTEGER LANGUAGE sql
+    RETURN (SELECT test.sum_ints(1) AS sum_ints FROM test.active_users);
+
 -- Routines that set a list setting. PostgreSQL searches pg_temp first
 -- when search_path does not name it, so a SECURITY DEFINER function
 -- names pg_temp last. pg_dump writes each element as a string
