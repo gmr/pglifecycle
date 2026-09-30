@@ -110,6 +110,12 @@ fn object_identity(definition: &Definition) -> (String, String) {
                 )
             ),
         ),
+        // deploy splits a container into one for each object, which is
+        // keyed by its kind and name (`alter::text_search::split`)
+        Definition::TextSearch(container) => (
+            container.schema.clone(),
+            super::alter::text_search::key_name(container),
+        ),
         _ => (
             definition.schema().unwrap_or_default().to_string(),
             definition.name(),
@@ -165,7 +171,12 @@ pub(crate) fn function_tag_name(function: &crate::models::Function) -> String {
 
 impl std::fmt::Display for ObjectKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.schema.is_empty() {
+        if self.desc == ObjectType::TextSearch
+            && let Some((kind, name)) =
+                super::alter::text_search::split_key_name(&self.name)
+        {
+            write!(f, "TEXT SEARCH {kind} {}.{name}", self.schema)
+        } else if self.schema.is_empty() {
             write!(f, "{} {}", self.desc.as_str(), self.name)
         } else {
             write!(f, "{} {}.{}", self.desc.as_str(), self.schema, self.name)
@@ -261,7 +272,7 @@ fn compare(desc: ObjectType) -> Compare {
         ObjectType::Subscription => Compare::Definition,
         ObjectType::Table => Compare::Definition,
         ObjectType::Tablespace => Compare::Skip,
-        ObjectType::TextSearch => Compare::Existence,
+        ObjectType::TextSearch => Compare::Definition,
         ObjectType::Transform => Compare::Existence,
         ObjectType::Type => Compare::Definition,
         ObjectType::User => Compare::Skip,
@@ -321,13 +332,23 @@ pub fn diff(project: &Project, assembly: &Assembly) -> Diff {
                         {
                             owner_changed.insert(item.id);
                         }
-                        // pull removes a password from a connection
+                        // pull removes a password from a connection, and
+                        // a copied text search configuration compares by
+                        // the mappings that the project gives
                         let compared = match (&item.definition, &db) {
                             (
                                 Definition::Subscription(repo),
                                 Definition::Subscription(db),
                             ) => Some(Definition::Subscription(
                                 without_redacted_password(repo, db),
+                            )),
+                            (
+                                Definition::TextSearch(repo),
+                                Definition::TextSearch(db),
+                            ) => Some(Definition::TextSearch(
+                                super::alter::text_search::copied_view(
+                                    repo, db,
+                                ),
                             )),
                             _ => None,
                         };
@@ -485,7 +506,12 @@ fn snapshot_definitions(assembly: &Assembly) -> Vec<(ObjectType, Definition)> {
             &a.subscriptions,
             Definition::Subscription,
         ))
-        .chain(all(O::TextSearch, &a.text_search, Definition::TextSearch))
+        .chain(
+            a.text_search
+                .iter()
+                .flat_map(super::alter::text_search::split)
+                .map(|t| (O::TextSearch, Definition::TextSearch(t))),
+        )
         .chain(all(O::Procedure, &a.procedures, Definition::Procedure))
         .chain(all(O::Operator, &a.operators, Definition::Operator))
         .chain(all(O::Statistics, &a.statistics, Definition::Statistics))
@@ -615,6 +641,12 @@ fn normalized(definition: &Definition) -> Value {
         Definition::AccessMethod(method) => {
             canonical = Definition::AccessMethod(
                 super::alter::access_method::canonical(method),
+            );
+            &canonical
+        }
+        Definition::TextSearch(container) => {
+            canonical = Definition::TextSearch(
+                super::alter::text_search::canonical(container),
             );
             &canonical
         }

@@ -25,6 +25,7 @@ pub(crate) mod event_trigger;
 mod publication;
 pub(crate) mod statistics;
 mod subscription;
+pub(crate) mod text_search;
 
 use serde_json::{Map, Value};
 
@@ -262,6 +263,9 @@ pub(crate) fn resolve_with(
         }
         (Definition::AccessMethod(repo), Definition::AccessMethod(db)) => {
             access_method::access_method(repo, db)
+        }
+        (Definition::TextSearch(repo), Definition::TextSearch(db)) => {
+            text_search::text_search(repo, db)
         }
         _ => Resolution::Replace,
     }

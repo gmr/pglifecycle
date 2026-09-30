@@ -310,6 +310,32 @@ superuser. Values that can be written two ways compare as the same:
 - access methods: the type in any case; the handler as for a
   conversion function.
 
+Text search parsers, templates, dictionaries and configurations
+compare one by one, by kind, schema and name. The project keeps the
+text search objects of a schema in one file, but deploy adds, changes
+and drops each object apart from the others in that file. A mapping of
+a configuration changes in place with `ALTER TEXT SEARCH CONFIGURATION
+… ADD MAPPING`, `… ALTER MAPPING` or `… DROP MAPPING`, the options of a
+dictionary with `ALTER TEXT SEARCH DICTIONARY … (…)`, and a comment
+with `COMMENT ON`. An option that only the database has is given with
+no value, which removes it. A changed parser of a configuration,
+template of a dictionary, or function of a parser or a template has no
+ALTER form, so deploy drops the object and makes it again (with
+`--allow-drop`). The drop fails when another object uses the object,
+for example a configuration that maps the dictionary: deploy does not
+use `CASCADE`, so the deploy stops and rolls back. Names compare as
+PostgreSQL reads them: a part that is not in quotes is folded to
+lowercase, and a name with no schema is in `pg_catalog`, as the build
+runs with an empty `search_path`. Thus qualify a name in the object's
+own schema. Token types compare in lowercase and in any order; the
+dictionaries of a token type compare in their order. Option names
+compare in lowercase, and a boolean or a number is the same as its
+text. pg_dump writes a copied configuration (`source`) as its parser
+and all its mappings, so deploy compares only the mappings that the
+project gives for a copy, not its parser or its other mappings. Text
+search dictionaries and configurations have an owner in PostgreSQL,
+but the project model has none, so deploy does not compare or set it.
+
 `deploy` creates these object types when they are missing, but only
 checks that they exist. `pull` models them, but `deploy` does not
 compare their definitions yet, so a changed one is left as the
@@ -320,9 +346,6 @@ database has it, and one that only the database has is kept:
 - operators, matched by name and argument types
 - operator classes, matched by name and index method
 - operator families, matched by name and index method
-- text search objects, checked per schema: when a schema has any text
-  search object in the database, `deploy` creates none of the
-  project's text search objects in that schema
 - transforms
 
 Object types `pull` does not yet model (security labels, …) are

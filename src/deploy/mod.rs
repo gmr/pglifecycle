@@ -33,7 +33,9 @@ pub fn deploy(args: &cli::Deploy) -> Result<(), String> {
         ));
     }
     diagnostics::init(args.error_file.clone());
-    let project = project::load(&args.project)?;
+    let mut project = project::load(&args.project)?;
+    // one item for each text search object, not for each schema
+    alter::text_search::split_inventory(&mut project.inventory);
     let source = source_label(args);
     log::info!("Comparing {} against {source}", project.name);
     let ddl = pgdump::DumpDdl {
@@ -743,6 +745,11 @@ fn drop_sql(key: &ObjectKey, definition: Option<&Definition>) -> String {
              DROP SUBSCRIPTION IF EXISTS {name};\n"
         );
     }
+    if key.desc == constants::ObjectType::TextSearch
+        && let Some(sql) = alter::text_search::drop_sql(&key.schema, &key.name)
+    {
+        return sql;
+    }
     if let Some(Definition::UserMapping(mapping)) = definition {
         return mapping
             .servers
@@ -852,6 +859,21 @@ fn entry_key(entry: &libpgdump::Entry) -> Option<ObjectKey> {
         OT::Type => constants::ObjectType::Type,
         OT::UserMapping => constants::ObjectType::UserMapping,
         OT::View => constants::ObjectType::View,
+        // a text search entry is tagged by its object name; the item is
+        // one object, keyed by its kind and name
+        OT::TextSearchParser
+        | OT::TextSearchTemplate
+        | OT::TextSearchDictionary
+        | OT::TextSearchConfiguration => {
+            return Some(ObjectKey {
+                desc: constants::ObjectType::TextSearch,
+                schema: entry.namespace.clone().unwrap_or_default(),
+                name: alter::text_search::entry_key_name(
+                    entry.desc.as_str(),
+                    entry.tag.as_deref()?,
+                )?,
+            });
+        }
         // a DEFAULT ACL entry is tagged by its object type; the item is
         // the role, which is the entry's owner
         OT::DefaultAcl => {
