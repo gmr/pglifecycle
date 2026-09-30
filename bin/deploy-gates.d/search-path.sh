@@ -2,8 +2,8 @@
 # empty search_path of pg_restore, so a name in it resolves as it does
 # in a restore of the build, and not by the search_path of the session.
 #
-# 1. The script sets the search_path before its first statement, and
-#    its header says so.
+# 1. The script sets the search_path with the other session settings
+#    before its first statement, and its header says so.
 # 2. A bare commutator that does not exist fails, as it does in a
 #    restore. With the search_path of the session, CREATE OPERATOR
 #    made a shell operator in public. The transaction rolls back.
@@ -21,12 +21,13 @@ operators:
 YAML
 ./target/debug/pglifecycle deploy -o "${WORKDIR}/search-path.sql" \
     -d "${TARGET_DB}" "${WORKDIR}/project"
-first_statement="$(grep -v '^--' "${WORKDIR}/search-path.sql" \
-    | grep -v '^$' | head -n 1)"
-if ! grep -q '^-- search_path: empty, as pg_restore sets it$' \
+# the session settings are the block after the header, before the
+# first statement
+settings="$(awk 'BEGIN { RS = "" } NR == 2' "${WORKDIR}/search-path.sql")"
+if ! grep -q '^-- session settings, as pg_restore sets them: .*search_path' \
         "${WORKDIR}/search-path.sql" \
-    || [ "${first_statement}" \
-        != "SELECT pg_catalog.set_config('search_path', '', false);" ]
+    || ! grep -qxF "SELECT pg_catalog.set_config('search_path', '', false);" \
+        <<< "${settings}"
 then
     echo "Convergence gate FAILED: the script does not set the" \
         "search_path first" >&2
