@@ -112,8 +112,9 @@ The exclude patterns are the same as `pull`'s and are passed through to
 out of the snapshot, which both shortens the dump and silences the
 "unmanaged" dependency warnings.
 
-The connection options match `pull` (see below). Like `pull`, `deploy`
-snapshots and formats the database with libpgfmt, so DDL that fails to
+The connection options match `pull` (see below), and so do the session
+settings of the dump and the rules for a `--dump` file. Like `pull`,
+`deploy` snapshots and formats the database with libpgfmt, so DDL that fails to
 parse or format — and the statement in flight if it is interrupted — is
 recorded to the error report (`--error-file`); see
 [Diagnosing parse and format failures](#diagnosing-parse-and-format-failures).
@@ -501,6 +502,20 @@ The exclude patterns are passed through to `pg_dump` (`--exclude-table`,
 `--exclude-schema`, `--exclude-extension`) and use the same pattern
 syntax. They apply only when connecting to a database; with `--dump` the
 archive is already built, so they are rejected as conflicting.
+
+`pull` runs `pg_dump` and `pg_dumpall` with `-E UTF8`, and with
+`standard_conforming_strings` on (added to the end of `PGOPTIONS`). These
+settings replace the settings of the database, the role and the
+environment, thus a database with the LATIN1 encoding, or with
+`standard_conforming_strings` off, gives the same project as a UTF8
+database with the default settings. A `--dump` file must have the same
+settings. `pull` refuses a file in another encoding, or a file made with
+`standard_conforming_strings` off, and names the setting. Make the file
+again with the settings:
+
+```bash
+PGOPTIONS='-c standard_conforming_strings=on' pg_dump -E UTF8 -Fc --schema-only -d mydb -f mydb.dump
+```
 
 The `--style` value is one of libpgfmt's styles — `river`, `mozilla`,
 `aweber`, `dbt`, `gitlab`, `kickstarter`, `mattmc3`, or `pg_dump` — and

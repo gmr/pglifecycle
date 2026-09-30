@@ -294,3 +294,36 @@ fn deploy_requires_a_project() {
     };
     assert!(deploy::deploy(&args).is_err());
 }
+
+/// deploy refuses a dump that pull cannot read as pg_dump wrote it: an
+/// archive in LATIN1 (its text is ASCII, thus libpgdump can load it),
+/// and an archive with standard_conforming_strings off
+#[test]
+fn deploy_refuses_a_dump_with_other_session_settings() {
+    let dir = tempfile::tempdir().unwrap();
+    let archive = dir.path().join("fixtures.dump");
+    fixture_archive(&archive);
+    let project = dir.path().join("project");
+    pull_project(&archive, &project);
+    for (encoding, stdstrings, expected) in [
+        ("LATIN1", "on", "in the LATIN1 encoding"),
+        ("UTF8", "off", "standard_conforming_strings off"),
+    ] {
+        let other = dir.path().join("other.dump");
+        common::session_archive(&other, encoding, stdstrings, false);
+        let argv = vec![
+            "pglifecycle",
+            "deploy",
+            "--dump",
+            other.to_str().unwrap(),
+            project.to_str().unwrap(),
+        ];
+        let parsed =
+            cli::Cli::try_parse_from(argv).expect("failed to parse args");
+        let cli::Action::Deploy(args) = parsed.action else {
+            unreachable!()
+        };
+        let error = deploy::deploy(&args).unwrap_err();
+        assert!(error.contains(expected), "unexpected error: {error}");
+    }
+}
