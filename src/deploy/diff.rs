@@ -111,6 +111,12 @@ fn object_identity(definition: &Definition) -> (String, String) {
                 )
             ),
         ),
+        // deploy splits a container into one for each object, which is
+        // keyed by its kind and name (`alter::text_search::split`)
+        Definition::TextSearch(container) => (
+            container.schema.clone(),
+            super::alter::text_search::key_name(container),
+        ),
         _ => (
             definition.schema().unwrap_or_default().to_string(),
             definition.name(),
@@ -166,7 +172,12 @@ pub(crate) fn function_tag_name(function: &crate::models::Function) -> String {
 
 impl std::fmt::Display for ObjectKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.schema.is_empty() {
+        if self.desc == ObjectType::TextSearch
+            && let Some((kind, name)) =
+                super::alter::text_search::split_key_name(&self.name)
+        {
+            write!(f, "TEXT SEARCH {kind} {}.{name}", self.schema)
+        } else if self.schema.is_empty() {
             write!(f, "{} {}", self.desc.as_str(), self.name)
         } else {
             write!(f, "{} {}.{}", self.desc.as_str(), self.schema, self.name)
@@ -235,14 +246,14 @@ enum Compare {
 /// (`entry_key` and `drop_sql` in `mod.rs`).
 fn compare(desc: ObjectType) -> Compare {
     match desc {
-        ObjectType::AccessMethod => Compare::Existence,
+        ObjectType::AccessMethod => Compare::Definition,
         ObjectType::Aggregate => Compare::Definition,
         ObjectType::Cast => Compare::Definition,
-        ObjectType::Collation => Compare::Existence,
-        ObjectType::Conversion => Compare::Existence,
+        ObjectType::Collation => Compare::Definition,
+        ObjectType::Conversion => Compare::Definition,
         ObjectType::DefaultPrivileges => Compare::Definition,
         ObjectType::Domain => Compare::Definition,
-        ObjectType::EventTrigger => Compare::Existence,
+        ObjectType::EventTrigger => Compare::Definition,
         ObjectType::Extension => Compare::Definition,
         ObjectType::ForeignDataWrapper => Compare::Definition,
         ObjectType::Function => Compare::Definition,
@@ -258,11 +269,11 @@ fn compare(desc: ObjectType) -> Compare {
         ObjectType::Schema => Compare::Definition,
         ObjectType::Sequence => Compare::Definition,
         ObjectType::Server => Compare::Definition,
-        ObjectType::Statistics => Compare::Existence,
+        ObjectType::Statistics => Compare::Definition,
         ObjectType::Subscription => Compare::Definition,
         ObjectType::Table => Compare::Definition,
         ObjectType::Tablespace => Compare::Skip,
-        ObjectType::TextSearch => Compare::Existence,
+        ObjectType::TextSearch => Compare::Definition,
         ObjectType::Transform => Compare::Definition,
         ObjectType::Type => Compare::Definition,
         ObjectType::User => Compare::Skip,
@@ -324,13 +335,23 @@ pub fn diff(project: &Project, assembly: &Assembly) -> Diff {
                         {
                             owner_changed.insert(item.id);
                         }
-                        // pull removes a password from a connection
+                        // pull removes a password from a connection, and
+                        // a copied text search configuration compares by
+                        // the mappings that the project gives
                         let compared = match (&item.definition, &db) {
                             (
                                 Definition::Subscription(repo),
                                 Definition::Subscription(db),
                             ) => Some(Definition::Subscription(
                                 without_redacted_password(repo, db),
+                            )),
+                            (
+                                Definition::TextSearch(repo),
+                                Definition::TextSearch(db),
+                            ) => Some(Definition::TextSearch(
+                                super::alter::text_search::copied_view(
+                                    repo, db,
+                                ),
                             )),
                             _ => None,
                         };
@@ -492,7 +513,12 @@ fn snapshot_definitions(assembly: &Assembly) -> Vec<(ObjectType, Definition)> {
             &a.subscriptions,
             Definition::Subscription,
         ))
-        .chain(all(O::TextSearch, &a.text_search, Definition::TextSearch))
+        .chain(
+            a.text_search
+                .iter()
+                .flat_map(super::alter::text_search::split)
+                .map(|t| (O::TextSearch, Definition::TextSearch(t))),
+        )
         .chain(all(O::Procedure, &a.procedures, Definition::Procedure))
         .chain(all(O::Operator, &a.operators, Definition::Operator))
         .chain(all(O::Statistics, &a.statistics, Definition::Statistics))
@@ -626,6 +652,42 @@ fn normalized(definition: &Definition) -> Value {
         Definition::Transform(transform) => {
             canonical = Definition::Transform(
                 super::alter::transform::canonical(transform),
+            );
+            &canonical
+        }
+        Definition::Statistics(statistics) => {
+            canonical = Definition::Statistics(
+                super::alter::statistics::canonical(statistics),
+            );
+            &canonical
+        }
+        Definition::EventTrigger(trigger) => {
+            canonical = Definition::EventTrigger(
+                super::alter::event_trigger::canonical(trigger),
+            );
+            &canonical
+        }
+        Definition::Collation(collation) => {
+            canonical = Definition::Collation(
+                super::alter::collation::canonical(collation),
+            );
+            &canonical
+        }
+        Definition::Conversion(conversion) => {
+            canonical = Definition::Conversion(
+                super::alter::conversion::canonical(conversion),
+            );
+            &canonical
+        }
+        Definition::AccessMethod(method) => {
+            canonical = Definition::AccessMethod(
+                super::alter::access_method::canonical(method),
+            );
+            &canonical
+        }
+        Definition::TextSearch(container) => {
+            canonical = Definition::TextSearch(
+                super::alter::text_search::canonical(container),
             );
             &canonical
         }
@@ -1140,6 +1202,58 @@ mod tests {
             ObjectKey::new(ObjectType::Procedure, &named("q")).name,
             "q()"
         );
+    }
+
+    #[test]
+    fn objects_with_no_data_compare_in_canonical_form() {
+        let statistics = |owner: &str, kinds: serde_json::Value| {
+            Definition::Statistics(
+                serde_json::from_value(serde_json::json!({
+                    "name": "s", "schema": "test", "owner": owner,
+                    "table": "test.t", "kinds": kinds,
+                    "elements": ["a", "b"],
+                }))
+                .expect("statistics deserialize"),
+            )
+        };
+        assert_eq!(
+            normalized(&statistics(
+                "app",
+                serde_json::json!(["mcv", "dependencies", "ndistinct"])
+            )),
+            normalized(&statistics(
+                "postgres",
+                serde_json::json!(["ndistinct", "dependencies", "mcv"])
+            ))
+        );
+        let trigger = |tags: serde_json::Value| {
+            Definition::EventTrigger(
+                serde_json::from_value(serde_json::json!({
+                    "name": "e", "event": "ddl_command_start",
+                    "filter": {"tags": tags}, "function": "test.f()",
+                }))
+                .expect("event trigger deserializes"),
+            )
+        };
+        assert_eq!(
+            normalized(&trigger(serde_json::json!([
+                "drop table",
+                "ALTER TABLE"
+            ]))),
+            normalized(&trigger(serde_json::json!([
+                "ALTER TABLE",
+                "DROP TABLE"
+            ])))
+        );
+        for desc in [
+            ObjectType::AccessMethod,
+            ObjectType::Collation,
+            ObjectType::Conversion,
+            ObjectType::EventTrigger,
+            ObjectType::Statistics,
+        ] {
+            assert_eq!(compare(desc), Compare::Definition);
+        }
     }
 
     #[test]

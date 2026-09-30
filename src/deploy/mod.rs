@@ -33,7 +33,9 @@ pub fn deploy(args: &cli::Deploy) -> Result<(), String> {
         ));
     }
     diagnostics::init(args.error_file.clone());
-    let project = project::load(&args.project)?;
+    let mut project = project::load(&args.project)?;
+    // one item for each text search object, not for each schema
+    alter::text_search::split_inventory(&mut project.inventory);
     let source = source_label(args);
     log::info!("Comparing {} against {source}", project.name);
     let ddl = pgdump::DumpDdl {
@@ -757,6 +759,11 @@ fn drop_sql(key: &ObjectKey, definition: Option<&Definition>) -> String {
         Some(Definition::Transform(t)) => return alter::transform::drop(t),
         _ => {}
     }
+    if key.desc == constants::ObjectType::TextSearch
+        && let Some(sql) = alter::text_search::drop_sql(&key.schema, &key.name)
+    {
+        return sql;
+    }
     if let Some(Definition::UserMapping(mapping)) = definition {
         return mapping
             .servers
@@ -847,9 +854,13 @@ fn drop_match_key(key: &ObjectKey, definition: &Definition) -> ObjectKey {
 fn entry_key(entry: &libpgdump::Entry) -> Option<ObjectKey> {
     use libpgdump::ObjectType as OT;
     let desc = match entry.desc {
+        OT::AccessMethod => constants::ObjectType::AccessMethod,
         OT::Aggregate => constants::ObjectType::Aggregate,
         OT::Cast => constants::ObjectType::Cast,
+        OT::Collation => constants::ObjectType::Collation,
+        OT::Conversion => constants::ObjectType::Conversion,
         OT::Domain => constants::ObjectType::Domain,
+        OT::EventTrigger => constants::ObjectType::EventTrigger,
         OT::Extension => constants::ObjectType::Extension,
         OT::ForeignDataWrapper => constants::ObjectType::ForeignDataWrapper,
         // foreign tables key as tables (the project models them as
@@ -866,6 +877,7 @@ fn entry_key(entry: &libpgdump::Entry) -> Option<ObjectKey> {
         OT::Publication => constants::ObjectType::Publication,
         OT::Schema => constants::ObjectType::Schema,
         OT::Sequence => constants::ObjectType::Sequence,
+        OT::Statistics => constants::ObjectType::Statistics,
         OT::ForeignServer | OT::Server => constants::ObjectType::Server,
         OT::Subscription => constants::ObjectType::Subscription,
         OT::Table => constants::ObjectType::Table,
@@ -873,6 +885,21 @@ fn entry_key(entry: &libpgdump::Entry) -> Option<ObjectKey> {
         OT::Type => constants::ObjectType::Type,
         OT::UserMapping => constants::ObjectType::UserMapping,
         OT::View => constants::ObjectType::View,
+        // a text search entry is tagged by its object name; the item is
+        // one object, keyed by its kind and name
+        OT::TextSearchParser
+        | OT::TextSearchTemplate
+        | OT::TextSearchDictionary
+        | OT::TextSearchConfiguration => {
+            return Some(ObjectKey {
+                desc: constants::ObjectType::TextSearch,
+                schema: entry.namespace.clone().unwrap_or_default(),
+                name: alter::text_search::entry_key_name(
+                    entry.desc.as_str(),
+                    entry.tag.as_deref()?,
+                )?,
+            });
+        }
         // a DEFAULT ACL entry is tagged by its object type; the item is
         // the role, which is the entry's owner
         OT::DefaultAcl => {
@@ -885,7 +912,9 @@ fn entry_key(entry: &libpgdump::Entry) -> Option<ObjectKey> {
         _ => return None,
     };
     let schema = match desc {
-        constants::ObjectType::Cast
+        constants::ObjectType::AccessMethod
+        | constants::ObjectType::Cast
+        | constants::ObjectType::EventTrigger
         | constants::ObjectType::Extension
         | constants::ObjectType::ForeignDataWrapper
         | constants::ObjectType::ProceduralLanguage
@@ -1167,6 +1196,110 @@ mod tests {
             .map(|key| key.to_string())
             .collect();
         assert_eq!(keys, vec!["PUBLICATION pub", "SUBSCRIPTION sub"]);
+    }
+
+    /// Statistics, event trigger, collation, conversion and access
+    /// method entries key as their models do: pg_dump tags each with
+    /// its bare name, and an event trigger or an access method has no
+    /// schema. So a removed one drops in dependency order, with its
+    /// name quoted
+    #[test]
+    fn objects_with_no_data_have_keys_and_drops() {
+        use constants::ObjectType as O;
+        use libpgdump::ObjectType as OT;
+        use serde_json::{from_value, json};
+        let name = "Stray One";
+        let schema = "Quoted Schema";
+        let owned = |fields: serde_json::Value| {
+            let mut value = json!({
+                "name": name, "schema": schema, "owner": "postgres",
+            });
+            value
+                .as_object_mut()
+                .expect("an object")
+                .extend(fields.as_object().expect("an object").clone());
+            value
+        };
+        let objects = [
+            (
+                OT::AccessMethod,
+                O::AccessMethod,
+                Definition::AccessMethod(
+                    from_value(json!({"name": name, "type": "TABLE",
+                        "handler": "heap_tableam_handler"}))
+                    .expect("access method"),
+                ),
+                "DROP ACCESS METHOD IF EXISTS \"Stray One\";\n",
+            ),
+            (
+                OT::Collation,
+                O::Collation,
+                Definition::Collation(
+                    from_value(owned(json!({"locale": "C"})))
+                        .expect("collation"),
+                ),
+                "DROP COLLATION IF EXISTS \"Quoted Schema\".\"Stray \
+                 One\";\n",
+            ),
+            (
+                OT::Conversion,
+                O::Conversion,
+                Definition::Conversion(
+                    from_value(owned(json!({"encoding_from": "LATIN3",
+                        "encoding_to": "UTF8",
+                        "function": "iso8859_to_utf8"})))
+                    .expect("conversion"),
+                ),
+                "DROP CONVERSION IF EXISTS \"Quoted Schema\".\"Stray \
+                 One\";\n",
+            ),
+            (
+                OT::EventTrigger,
+                O::EventTrigger,
+                Definition::EventTrigger(
+                    from_value(json!({"name": name, "event": "sql_drop",
+                        "function": "test.note_ddl()"}))
+                    .expect("event trigger"),
+                ),
+                "DROP EVENT TRIGGER IF EXISTS \"Stray One\";\n",
+            ),
+            (
+                OT::Statistics,
+                O::Statistics,
+                Definition::Statistics(
+                    from_value(owned(json!({"table": "test.t",
+                        "elements": ["a", "b"]})))
+                    .expect("statistics"),
+                ),
+                "DROP STATISTICS IF EXISTS \"Quoted Schema\".\"Stray \
+                 One\";\n",
+            ),
+        ];
+        for (entry_desc, desc, definition, drop) in objects {
+            let key = ObjectKey::new(desc, &definition);
+            let namespace = (!key.schema.is_empty()).then_some(schema);
+            let mut snapshot =
+                libpgdump::new("test", "UTF8", "18.0").expect("new dump");
+            snapshot
+                .add_entry(
+                    entry_desc,
+                    namespace,
+                    Some(name),
+                    None,
+                    None,
+                    None,
+                    None,
+                    &[],
+                )
+                .expect("add entry");
+            assert_eq!(
+                snapshot.entries().iter().find_map(entry_key),
+                Some(drop_match_key(&key, &definition)),
+                "{}",
+                desc.as_str()
+            );
+            assert_eq!(drop_sql(&key, Some(&definition)), drop);
+        }
     }
 
     /// The default privileges of a role that only the database has are

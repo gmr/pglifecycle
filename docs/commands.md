@@ -225,24 +225,23 @@ the script sets the owner with `ALTER … OWNER TO` directly after each
 CREATE. An object that the database has with another owner gets the
 same statement in place; it is not destructive. The owner is not part
 of the definition comparison, so a changed owner never causes a
-rebuild. deploy does not compare the owner of a type that it only
-checks for existence (the list below). Each owner role must exist, and
-each owner must have CREATE on the schema of its objects. A connecting
-role that is not a superuser must be a member of each owner role with
-the SET and INHERIT options (`GRANT` gives both by default to a role
-that has the INHERIT attribute). The statements after an owner change
-need the privileges of the owner: for example, CREATE TABLE in a new
-schema, and the indexes, comments and grants of a new table. To change
-the owner of an object that the database has, the connecting role must
-also have the privileges of its current owner. To change the owner of
-a schema, the connecting role must have CREATE on the database. A type
-whose model has no owner (for example publications,
-subscriptions and event triggers) keeps the connecting role as owner.
-So does most of what the project writes as raw `sql`: as pg_restore
-does, deploy sets no owner for an archive entry with no DROP statement.
-A new object gets the default privileges of the connecting role, not
-those of its owner; its grants come from the project. With `-O`, deploy
-does not set or compare owners (as `pg_restore --no-owner`).
+rebuild. Each owner role must exist, and each owner must have CREATE on
+the schema of its objects. A connecting role that is not a superuser
+must be a member of each owner role with the SET and INHERIT options
+(`GRANT` gives both by default to a role that has the INHERIT
+attribute). The statements after an owner change need the privileges of
+the owner: for example, CREATE TABLE in a new schema, and the indexes,
+comments and grants of a new table. To change the owner of an object
+that the database has, the connecting role must also have the
+privileges of its current owner. To change the owner of a schema, the
+connecting role must have CREATE on the database. A type whose model
+has no owner (for example publications, subscriptions and event
+triggers) keeps the connecting role as owner. So does most of what the
+project writes as raw `sql`: as pg_restore does, deploy sets no owner
+for an archive entry with no DROP statement. A new object gets the
+default privileges of the connecting role, not those of its owner; its
+grants come from the project. With `-O`, deploy does not set or compare
+owners (as `pg_restore --no-owner`).
 
 Roles, users, groups, and tablespaces are skipped entirely — they are
 cluster-level objects a single-database dump cannot capture.
@@ -275,6 +274,66 @@ subscription that only the database has (with `--allow-drop`) first
 disables it and removes its slot name, as `DROP SUBSCRIPTION` cannot
 drop a slot in a transaction: the publisher keeps the slot, and the
 report gives the statement that drops it there.
+
+Statistics, event triggers, collations, conversions and access methods
+compare by definition. These changes are made in place, without
+`--allow-drop`: the statistics target (`ALTER STATISTICS ... SET
+STATISTICS`), the state of an event trigger (`ALTER EVENT TRIGGER ...
+ENABLE [REPLICA | ALWAYS]` or `DISABLE`), the comment, and the owner of
+statistics, a collation or a conversion. PostgreSQL has no ALTER for the
+other settings, so a change to one of them drops and makes the object
+again, only with `--allow-drop`. These objects hold no data, but an
+object can depend on one: for example, a column that uses a collation.
+Then the drop fails, and deploy rolls back all of its changes; deploy
+does not use `CASCADE`. One that only the database has is dropped, also
+only with `--allow-drop`. An event trigger or an access method needs a
+superuser. Values that can be written two ways compare as the same:
+
+- statistics: the table as PostgreSQL resolves the name, the kinds as a
+  set (all three are the same as none), the columns as a set (a name in
+  parentheses is a column), and a target of -1 as none. An expression
+  loses the parentheses that enclose all of it, and compares with no
+  spaces and in lowercase, other than in quotes; PostgreSQL writes an
+  expression back in its own form (for example with casts), so write it
+  as `pull` does.
+- event triggers: the tags as a set, in any case; ORIGIN, the default
+  state, as none; the function name as PostgreSQL resolves it.
+- collations: `libc` and `deterministic: true`, the defaults, as none;
+  the same `lc_collate` and `lc_ctype` as one `locale`; a simple ICU
+  locale such as `en_US` in its standard form, `en-US`. The version is
+  not compared. A collation made `FROM` another is only checked for
+  existence, as `pull` writes the settings that it copied.
+- conversions: `default: false` as none; an encoding by the name that
+  PostgreSQL resolves it to (`utf-8` and `Unicode` are `UTF8`); the
+  function name as PostgreSQL resolves it, with no `pg_catalog.`.
+- access methods: the type in any case; the handler as for a
+  conversion function.
+
+Text search parsers, templates, dictionaries and configurations
+compare one by one, by kind, schema and name. The project keeps the
+text search objects of a schema in one file, but deploy adds, changes
+and drops each object apart from the others in that file. A mapping of
+a configuration changes in place with `ALTER TEXT SEARCH CONFIGURATION
+… ADD MAPPING`, `… ALTER MAPPING` or `… DROP MAPPING`, the options of a
+dictionary with `ALTER TEXT SEARCH DICTIONARY … (…)`, and a comment
+with `COMMENT ON`. An option that only the database has is given with
+no value, which removes it. A changed parser of a configuration,
+template of a dictionary, or function of a parser or a template has no
+ALTER form, so deploy drops the object and makes it again (with
+`--allow-drop`). The drop fails when another object uses the object,
+for example a configuration that maps the dictionary: deploy does not
+use `CASCADE`, so the deploy stops and rolls back. Names compare as
+PostgreSQL reads them: a part that is not in quotes is folded to
+lowercase, and a name with no schema is in `pg_catalog`, as the build
+runs with an empty `search_path`. Thus qualify a name in the object's
+own schema. Token types compare in lowercase and in any order; the
+dictionaries of a token type compare in their order. Option names
+compare in lowercase, and a boolean or a number is the same as its
+text. pg_dump writes a copied configuration (`source`) as its parser
+and all its mappings, so deploy compares only the mappings that the
+project gives for a copy, not its parser or its other mappings. Text
+search dictionaries and configurations have an owner in PostgreSQL,
+but the project model has none, so deploy does not compare or set it.
 
 Aggregates, operators, casts, transforms, operator classes and
 operator families compare by definition. An aggregate is matched by
@@ -320,24 +379,11 @@ rebuild of such a class also fails and rolls back. The comment of each
 of these types changes in place. An aggregate, an operator, a class
 and a family have an owner; a cast and a transform do not.
 
-`deploy` creates these object types when they are missing, but only
-checks that they exist. `pull` models them, but `deploy` does not
-compare their definitions yet, so a changed one is left as the
-database has it, and one that only the database has is kept:
-
-- access methods
-- collations
-- conversions
-- event triggers
-- statistics (extended statistics)
-- text search objects, checked per schema: when a schema has any text
-  search object in the database, `deploy` creates none of the
-  project's text search objects in that schema
-
-Object types `pull` does not yet model (security labels, …) are
-handled the same way. An object that the project writes as a raw `sql`
-statement is also only checked for existence, whatever its type:
-`pull` writes the structured fields, so the two never compare equal.
+An object of a type that `pull` does not yet model (security labels,
+…) is left as the database has it. An object that the project writes
+as a raw `sql` statement is only checked for existence, whatever its
+type: `pull` writes the structured fields, so the two never compare
+equal.
 A raw statement has no structured input types, so it is matched by
 its type, schema and name, and any overload of that name counts. A
 raw cast is the exception: it must have its source and target types,
