@@ -292,6 +292,38 @@ revocations:
   it. To get the form for a body, create the function in a scratch
   database and `pull` it.
 
+- A function's or procedure's `configuration` sets each setting when
+  the routine starts. A value is a string, a number or a boolean. A
+  setting that PostgreSQL keeps as a list of names is a list, with one
+  name for each item. These settings are `search_path`,
+  `temp_tablespaces`, `local_preload_libraries`,
+  `session_preload_libraries`, `shared_preload_libraries`,
+  `oauth_validator_libraries`, `output_plugin_libraries` and
+  `unix_socket_directories`. Write each name as it is, with no quotes
+  in it (`$user`, `My Schema`). `build` writes each item as its own
+  string constant, `SET search_path = 'pg_catalog', 'pg_temp'`, as
+  `pg_dump` does, and `pull` writes a value with more than one name as
+  a list:
+
+```yaml
+---
+name: whoami
+returns: text
+language: sql
+security: DEFINER
+configuration:
+  search_path: [pg_catalog, pg_temp]
+definition: SELECT current_user::text;
+```
+
+  For one of these settings, one string with a comma is an error. As
+  one string, `pg_catalog, pg_temp` names one schema, so PostgreSQL
+  searches `pg_temp` first, which is not safe for a `SECURITY DEFINER`
+  function. One name can be a string (`search_path: pg_catalog`). A
+  list for any other setting is also an error: `pg_dump` writes the
+  value of such a setting as one string, so write it as one string
+  (`DateStyle: iso, mdy`).
+
 - A foreign key can leave out its `name`. The project then uses the
   name PostgreSQL generates, `<table>_<columns>_fkey`, cut to 63
   bytes. When that name is already in use, PostgreSQL adds a number,
