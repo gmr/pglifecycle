@@ -20,6 +20,7 @@
 pub(crate) mod default_privileges;
 mod publication;
 mod subscription;
+pub(crate) mod text_search;
 
 use serde_json::{Map, Value};
 
@@ -243,6 +244,9 @@ pub(crate) fn resolve_with(
             Definition::DefaultPrivileges(repo),
             Definition::DefaultPrivileges(db),
         ) => default_privileges::default_privileges(repo, db),
+        (Definition::TextSearch(repo), Definition::TextSearch(db)) => {
+            text_search::text_search(repo, db)
+        }
         _ => Resolution::Replace,
     }
 }
