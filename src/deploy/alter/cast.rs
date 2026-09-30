@@ -2,9 +2,9 @@
 //! COMMENT ON CAST; any other change drops the cast and makes it
 //! again. A cast has no schema and no owner of its own.
 
-use super::names::{signature, type_name};
+use super::names::{argument_type, signature};
 use super::{Resolution, push_comment};
-use crate::deploy::diff::canonical_type;
+use crate::deploy::diff::identity_type;
 use crate::models::Cast;
 
 pub(super) fn cast(repo: &Cast, db: &Cast) -> Resolution {
@@ -26,18 +26,18 @@ pub(super) fn cast(repo: &Cast, db: &Cast) -> Resolution {
     Resolution::Statements(alters)
 }
 
-/// The cast as PostgreSQL keeps it: canonical types and function, and
-/// no flag at its default. The schema only says where the project
-/// files the cast, and the owner is not compared. A cast with a
-/// function is not an I/O conversion cast.
+/// The cast as PostgreSQL keeps it: canonical types with no typmod, a
+/// canonical function, and no flag at its default. The schema only
+/// says where the project files the cast, and the owner is not
+/// compared. A cast with a function is not an I/O conversion cast.
 pub(crate) fn canonical(cast: &Cast) -> Cast {
     let set = |value: Option<bool>| value.filter(|v| *v);
     let function = cast.function.as_deref().map(signature);
     Cast {
         schema: String::new(),
         owner: String::new(),
-        source_type: cast.source_type.as_deref().map(type_name),
-        target_type: cast.target_type.as_deref().map(type_name),
+        source_type: cast.source_type.as_deref().map(argument_type),
+        target_type: cast.target_type.as_deref().map(argument_type),
         inout: set(cast.inout).filter(|_| function.is_none()),
         function,
         assignment: set(cast.assignment),
@@ -74,8 +74,8 @@ pub(crate) fn entry_name(entry: &libpgdump::Entry) -> Option<String> {
     })?;
     Some(format!(
         "({} AS {})",
-        canonical_type(&inner[..split]),
-        canonical_type(&inner[split + 4..])
+        identity_type(&inner[..split]),
+        identity_type(&inner[split + 4..])
     ))
 }
 
@@ -177,5 +177,51 @@ mod tests {
             drop(&cast),
             "DROP CAST IF EXISTS (\"gate.dotted\".\"pair AS t\" AS TEXT);\n"
         );
+    }
+
+    /// PostgreSQL 18 keeps no typmod in a cast type, and pg_dump
+    /// writes `bpchar` there as `character`
+    #[test]
+    fn cast_types_have_no_typmod() {
+        let mut dump =
+            libpgdump::new("test", "UTF8", "18.0").expect("new dump");
+        let id = dump
+            .add_entry(
+                libpgdump::ObjectType::Cast,
+                None,
+                Some("CAST (character AS character varying)"),
+                None,
+                None,
+                None,
+                None,
+                &[],
+            )
+            .expect("add entry");
+        let entry = dump
+            .entries()
+            .iter()
+            .find(|entry| entry.dump_id == id)
+            .expect("the entry");
+        let cast = |source: &str, target: &str| {
+            parse(json!({
+                "schema": "test", "owner": "",
+                "source_type": source, "target_type": target,
+                "inout": true,
+            }))
+        };
+        let written = cast("bpchar", "varchar(10)");
+        assert_eq!(
+            entry_name(entry),
+            Some(
+                ObjectKey::new(
+                    ObjectType::Cast,
+                    &Definition::Cast(written.clone())
+                )
+                .name
+            )
+        );
+        let pulled = cast("character", "character varying");
+        assert_eq!(canonical(&written), canonical(&pulled));
+        assert_ne!(canonical(&cast("text", "text")), canonical(&pulled));
     }
 }

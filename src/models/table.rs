@@ -206,7 +206,8 @@ impl Table {
     /// writes, and the two have to compare equal. A value that
     /// PostgreSQL keeps in another form than the project can write it
     /// (a storage parameter, a collation, the type of a cast in an index
-    /// expression) is in the form that PostgreSQL reads.
+    /// or an exclusion constraint expression) is in the form that
+    /// PostgreSQL reads.
     pub fn canonical(&self) -> Table {
         let mut table = self.with_canonical_not_nulls();
         for column in table.columns.iter_mut().flatten() {
@@ -253,6 +254,9 @@ impl Table {
             exclude.method.get_or_insert_with(|| String::from("btree"));
             for element in &mut exclude.elements {
                 canonical_collation(&mut element.collation);
+                if let Some(expression) = &mut element.expression {
+                    *expression = crate::deploy::canonical_casts(expression);
+                }
             }
         }
         table.storage_parameters =
@@ -1127,6 +1131,32 @@ mod tests {
         // a string literal and a quoted name keep their text
         different("('a::int4'::text)", "('a::integer'::text)");
         different("(\"a::int4\")::text", "(\"a::integer\")::text");
+    }
+
+    /// The type of a cast in an exclusion constraint expression
+    /// compares in the form that PostgreSQL writes, as in an index
+    #[test]
+    fn exclusion_cast_types_compare_in_standard_form() {
+        let table = |expression: &str| {
+            with_fields(serde_json::json!({
+                "exclude_constraints": [{
+                    "name": "x",
+                    "elements": [
+                        {"expression": expression, "operator": "="},
+                    ],
+                }],
+            }))
+            .canonical()
+        };
+        assert_eq!(
+            table("(label)::VARCHAR(20)"),
+            table("(label)::character varying(20)")
+        );
+        assert_eq!(table("(n)::float(10)"), table("(n)::real"));
+        assert_ne!(
+            table("(label)::varchar(30)"),
+            table("(label)::character varying(20)")
+        );
     }
 
     /// A project written before row security was modeled leaves the
