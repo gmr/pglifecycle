@@ -3,6 +3,50 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+/// The settings that PostgreSQL keeps as a list of names, which pg_dump
+/// writes as one string constant for each element. This is
+/// `variable_is_guc_list_quote` in PostgreSQL 18's
+/// src/bin/pg_dump/dumputils.c: the settings marked `GUC_LIST_QUOTE`.
+/// A routine keeps such a setting as a list. As one string, the value
+/// is one name.
+pub const LIST_SETTINGS: &[&str] = &[
+    "local_preload_libraries",
+    "oauth_validator_libraries",
+    "output_plugin_libraries",
+    "search_path",
+    "session_preload_libraries",
+    "shared_preload_libraries",
+    "temp_tablespaces",
+    "unix_socket_directories",
+];
+
+/// Whether PostgreSQL keeps the setting `name` as a list of names. A
+/// setting name has no case.
+pub fn is_list_setting(name: &str) -> bool {
+    LIST_SETTINGS.iter().any(|s| s.eq_ignore_ascii_case(name))
+}
+
+/// The settings of a routine in the form that deploy compares, which
+/// is the form that pull writes. A setting name has no case, pull reads
+/// a value as text, and a list of one element is that element.
+pub fn canonical_settings(
+    settings: &Map<String, Value>,
+) -> Map<String, Value> {
+    settings
+        .iter()
+        .map(|(name, value)| {
+            let value = match value {
+                Value::Number(_) | Value::Bool(_) => {
+                    Value::String(value.to_string())
+                }
+                Value::Array(items) if items.len() == 1 => items[0].clone(),
+                other => other.clone(),
+            };
+            (name.to_lowercase(), value)
+        })
+        .collect()
+}
+
 /// Represents a Function
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -197,9 +241,10 @@ impl Procedure {
     /// The same procedure in the form deploy compares, where each field
     /// that a file can write in more than one way has the form that
     /// pull writes. PostgreSQL keeps no typmod in a parameter type,
-    /// folds the language name and a setting name to lower case, and
-    /// `INVOKER` is the default security. pull reads a default and a
-    /// setting value as text, and an empty parameter list as absent.
+    /// folds the language name to lower case, and `INVOKER` is the
+    /// default security. pull reads a default as text, and an empty
+    /// parameter list as absent. The settings compare as
+    /// [`canonical_settings`] gives them.
     pub fn canonical(&self) -> Procedure {
         let text = |value: &Value| match value {
             Value::Number(_) | Value::Bool(_) => {
@@ -232,12 +277,7 @@ impl Procedure {
                 .security
                 .clone()
                 .filter(|s| !s.eq_ignore_ascii_case("INVOKER")),
-            configuration: self.configuration.as_ref().map(|settings| {
-                settings
-                    .iter()
-                    .map(|(name, value)| (name.to_lowercase(), text(value)))
-                    .collect()
-            }),
+            configuration: self.configuration.as_ref().map(canonical_settings),
             ..self.clone()
         }
     }

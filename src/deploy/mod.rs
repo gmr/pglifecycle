@@ -651,20 +651,42 @@ fn report(diff: &Diff, plan: &Plan, assembly: &pull::Assembly) {
 
 /// Render the script with a self-describing header.
 ///
-/// The statements run with the empty `search_path` of pg_restore, so
-/// that a name in the build's SQL resolves as it does in a restore of
-/// the build, and not by the `search_path` of the session. The setting
-/// is not local to the transaction (`false`), as pg_restore sets it:
-/// a local setting has no effect on the statements that follow it
-/// when the script runs outside a transaction block. In a transaction
-/// block, a rollback also undoes the setting.
+/// The statements run with the session settings of pg_restore that
+/// can change the result of DDL, so that the build's SQL runs as it
+/// does in a restore of the build, and not by the settings of the
+/// session:
+///
+/// - `client_encoding` is UTF8, the encoding of the script.
+/// - `standard_conforming_strings` is on, so a backslash in a string
+///   literal is not an escape.
+/// - `search_path` is empty, so a name resolves as it does in a
+///   restore.
+/// - `check_function_bodies` is off, so a function can refer to an
+///   object that the script makes after it.
+/// - `xmloption` is content, so an xml constant that is not a
+///   document is valid.
+///
+/// The script does not set the other settings of pg_restore (the
+/// timeouts, `client_min_messages` and `row_security`): they do not
+/// change the objects that the DDL makes. A timeout can stop the
+/// script, but on a live database it is a limit that the operator
+/// sets on purpose.
+///
+/// The settings are not local to the transaction, as pg_restore sets
+/// them: a local setting has no effect on the statements that follow
+/// it when the script runs outside a transaction block. In a
+/// transaction block, a rollback also undoes the settings.
 fn render_script(plan: &Plan, project: &str, source: &str) -> String {
     let mut script = format!(
         "-- pglifecycle deploy\n-- project: {project}\n-- source: \
          {source}\n"
     );
     if !plan.included.is_empty() {
-        script.push_str("-- search_path: empty, as pg_restore sets it\n");
+        script.push_str(
+            "-- session settings, as pg_restore sets them: \
+             client_encoding, standard_conforming_strings, search_path, \
+             check_function_bodies, xmloption\n",
+        );
     }
     if !plan.excluded.is_empty() {
         script.push_str(&format!(
@@ -719,7 +741,11 @@ fn render_script(plan: &Plan, project: &str, source: &str) -> String {
     }
     if !plan.included.is_empty() {
         script.push_str(
-            "\nSELECT pg_catalog.set_config('search_path', '', false);\n",
+            "\nSET client_encoding = 'UTF8';\n\
+             SET standard_conforming_strings = on;\n\
+             SELECT pg_catalog.set_config('search_path', '', false);\n\
+             SET check_function_bodies = false;\n\
+             SET xmloption = content;\n",
         );
     }
     for statement in &plan.included {
@@ -1720,11 +1746,11 @@ mod tests {
         assert!(script.contains("--   DROP TABLE t; --\";\n"));
     }
 
-    /// The statements run with the empty search_path of pg_restore, so
-    /// that a name in them resolves as it does in a restore of the
-    /// build. The header says so.
+    /// The statements run with the session settings of pg_restore that
+    /// can change the result of DDL, so that they run as they do in a
+    /// restore of the build. The header says which settings.
     #[test]
-    fn script_runs_with_an_empty_search_path() {
+    fn script_runs_with_the_session_settings_of_pg_restore() {
         let plan = Plan {
             included: vec![Statement {
                 label: "SCHEMA app".to_string(),
@@ -1739,9 +1765,15 @@ mod tests {
         assert_eq!(
             script,
             "-- pglifecycle deploy\n-- project: test\n-- source: db\n\
-             -- search_path: empty, as pg_restore sets it\n\
+             -- session settings, as pg_restore sets them: \
+             client_encoding, standard_conforming_strings, search_path, \
+             check_function_bodies, xmloption\n\
              -- destructive statements: none\n\
-             \nSELECT pg_catalog.set_config('search_path', '', false);\n\
+             \nSET client_encoding = 'UTF8';\n\
+             SET standard_conforming_strings = on;\n\
+             SELECT pg_catalog.set_config('search_path', '', false);\n\
+             SET check_function_bodies = false;\n\
+             SET xmloption = content;\n\
              \n-- SCHEMA app\nCREATE SCHEMA app;\n"
         );
     }

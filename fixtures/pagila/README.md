@@ -12,6 +12,10 @@ we thought to test. Pagila's function bodies are not written in the style
 `pull` formats them in, so the gate compares routine bodies with whitespace
 and semicolons removed (`bin/normalize-routine-bodies`).
 
+The deploy gates (`just deploy-gates`) also use it: they deploy the pulled
+project into an empty database, compare schema-only dumps as the pagila gate
+does, and require that a second deploy has no changes.
+
 To update it, replace `pagila-schema.sql` with the file from a newer commit and
 change the commit above.
 
