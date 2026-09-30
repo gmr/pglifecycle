@@ -770,7 +770,18 @@ pub(crate) fn canonical_type(data_type: &str) -> String {
         Some(index) => (body[..index].trim_end(), &body[index..]),
         None => (body, ""),
     };
+    // a built-in type is in pg_catalog, and pg_dump writes it with no
+    // schema. The keyword `char` is `character` only when it has no
+    // schema: `pg_catalog.char` is the one-byte type `"char"`
+    let (name, qualified) = match name
+        .strip_prefix("pg_catalog.")
+        .or_else(|| name.strip_prefix("\"pg_catalog\"."))
+    {
+        Some(name) => (name, true),
+        None => (name, false),
+    };
     let canonical = match name {
+        "char" if qualified => "\"char\"",
         "bool" => "boolean",
         "char" => "character",
         "decimal" => "numeric",
@@ -849,6 +860,20 @@ mod tests {
             "timestamp with time zone"
         );
         assert_eq!(canonical_type("Public.\"Mood\""), "public.\"Mood\"");
+    }
+
+    #[test]
+    fn canonicalizes_types_qualified_with_pg_catalog() {
+        assert_eq!(canonical_type("pg_catalog.int4"), "integer");
+        assert_eq!(canonical_type("PG_CATALOG.TEXT[]"), "text[]");
+        assert_eq!(
+            canonical_type("\"pg_catalog\".varchar(10)"),
+            "character varying(10)"
+        );
+        assert_eq!(canonical_type("pg_catalog.char"), "\"char\"");
+        assert_eq!(canonical_type("pg_catalog.\"char\""), "\"char\"");
+        assert_eq!(canonical_type("public.int4"), "public.int4");
+        assert_eq!(identity_type("pg_catalog.INT4"), "integer");
     }
 
     #[test]

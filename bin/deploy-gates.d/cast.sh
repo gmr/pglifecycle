@@ -44,7 +44,7 @@ casts:
   inout: false
   assignment: false
   implicit: false
-- source_type: int
+- source_type: PG_CATALOG.INT4
   target_type: test.base_int
   assignment: true
 YAML

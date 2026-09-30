@@ -2,7 +2,7 @@
 # definition.
 #
 # 1. Aggregates written by hand in a short form: type aliases and
-#    uppercase types, a qualified pg_catalog function, a sort operator
+#    uppercase types, a type and a function qualified with pg_catalog, a sort operator
 #    without OPERATOR(), and options at their defaults. The plan is
 #    empty.
 # 2. Drift in the options and the comment converges with CREATE OR
@@ -83,7 +83,7 @@ owner: postgres
 arguments:
 - data_type: integer
 order_by:
-- data_type: INTEGER
+- data_type: PG_CATALOG.INT4
 sfunc: TEST.ADD_INTS
 state_data_type: integer
 ffunc: test.add_ints

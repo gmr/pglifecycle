@@ -52,7 +52,7 @@ cat >> "${WORKDIR}/project/operators/test.yaml" <<'YAML'
   owner: postgres
   function: PG_CATALOG.INT4LT
   left_arg: INT4
-  right_arg: int
+  right_arg: pg_catalog.int4
   commutator: OPERATOR(test.>>>)
   restrict: pg_catalog.scalarltsel
   join: SCALARLTJOINSEL
