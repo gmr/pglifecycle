@@ -8,8 +8,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
 
+use super::routine_body::canonical_sql_body;
 use crate::constants::ObjectType;
-use crate::models::{Definition, Function, Subscription, canonical_settings};
+use crate::models::{
+    Definition, Domain, Function, Subscription, canonical_settings,
+};
 use crate::project::Project;
 use crate::pull::{Assembly, without_password};
 
@@ -193,7 +196,8 @@ pub enum Change {
     /// In both but different → ALTER, or the gated drop+recreate
     /// fallback
     Changed,
-    /// Exists on both sides but the type is not yet model-diffable
+    /// Exists on both sides, but the project writes it as a raw `sql`
+    /// statement, which deploy does not compare
     Undiffable,
     /// Out of deploy's scope (roles, users, groups, tablespaces)
     Skipped,
@@ -228,9 +232,6 @@ enum Compare {
     /// Compare the definitions; a difference is a change, and an
     /// object that only the database has is removed
     Definition,
-    /// Check only that the object exists: a changed definition is left
-    /// as the database has it, and a database-only object is kept
-    Existence,
     /// Out of deploy's scope: roles, users, and groups require
     /// cluster-level access pg_dump does not capture, and tablespaces
     /// are likewise absent from a single-database dump — diffing them
@@ -238,9 +239,9 @@ enum Compare {
     Skip,
 }
 
-/// How deploy compares each object type. A type moves from
-/// `Existence` to `Definition` when deploy can reconcile its changes
-/// (`alter::resolve_with`) and drop it in dependency order
+/// How deploy compares each object type. Every type that deploy
+/// manages is compared by definition: deploy reconciles its changes
+/// (`alter::resolve_with`) and drops it in dependency order
 /// (`entry_key` and `drop_sql` in `mod.rs`).
 fn compare(desc: ObjectType) -> Compare {
     match desc {
@@ -284,7 +285,6 @@ pub fn diff(project: &Project, assembly: &Assembly) -> Diff {
     let mut database = database_index(assembly);
     super::alter::operator::align(project, &mut database);
     super::alter::operator_class::align(project, &mut database);
-    let existing = existence_index(assembly);
     let mut items = BTreeMap::new();
     let mut changed = BTreeMap::new();
     let mut owned = BTreeSet::new();
@@ -305,7 +305,8 @@ pub fn diff(project: &Project, assembly: &Assembly) -> Diff {
                 Change::Skipped
             }
             // pull writes the structured fields, so a raw statement
-            // never compares equal: it is only checked for existence
+            // never compares equal: deploy only finds the object that
+            // it stands for, so that the object is not dropped
             Compare::Definition if item.definition.raw_sql() => {
                 match take_raw(&mut database, item.desc, &item.definition) {
                     Some(_) => Change::Undiffable,
@@ -364,20 +365,6 @@ pub fn diff(project: &Project, assembly: &Assembly) -> Diff {
                     }
                 }
             }
-            Compare::Existence => {
-                let key =
-                    definition_existence_key(item.desc, &item.definition);
-                let found = if item.definition.raw_sql() {
-                    raw_exists(&existing, item.desc, &key)
-                } else {
-                    existing.contains(&key)
-                };
-                if found {
-                    Change::Undiffable
-                } else {
-                    Change::Added
-                }
-            }
         };
         items.insert(item.id, change);
     }
@@ -393,8 +380,9 @@ pub fn diff(project: &Project, assembly: &Assembly) -> Diff {
 /// Remove the database object that a raw `sql` item stands for, and
 /// return it. The item's key is tried first. A raw function has no
 /// parameter list, so its key can differ from the database key: then
-/// the first object of the same type, schema and bare name matches, as
-/// in [`existence_key`].
+/// the first object of the same type, schema and bare name (the name
+/// with no argument list) matches. A raw cast must have its source and
+/// target types, and it matches only by them.
 fn take_raw(
     database: &mut BTreeMap<ObjectKey, Definition>,
     desc: ObjectType,
@@ -425,29 +413,6 @@ fn take_raw(
         })
         .cloned()?;
     database.remove(&found)
-}
-
-/// Whether the database has the object that a raw `sql` item of an
-/// existence-checked type stands for. A raw statement can have no
-/// structured input types, so any object of its type, schema and bare
-/// name matches. A cast key, `(source AS target)`, has no bare name,
-/// and the cast schema requires both types, so a cast matches only by
-/// its full key.
-fn raw_exists(
-    existing: &BTreeSet<(String, String, String)>,
-    desc: ObjectType,
-    key: &(String, String, String),
-) -> bool {
-    if existing.contains(key) {
-        return true;
-    }
-    if desc == ObjectType::Cast {
-        return false;
-    }
-    let bare = existence_key(&key.0, &key.1, &key.2);
-    existing
-        .iter()
-        .any(|k| existence_key(&k.0, &k.1, &k.2) == bare)
 }
 
 /// Every object the snapshot parsed into a model, with its type
@@ -555,46 +520,6 @@ fn database_index(assembly: &Assembly) -> BTreeMap<ObjectKey, Definition> {
         .collect()
 }
 
-/// Existence-only index over the snapshot objects whose type is
-/// compared by existence, and the entries that were not parsed into
-/// models (`Assembly::remaining`)
-fn existence_index(assembly: &Assembly) -> BTreeSet<(String, String, String)> {
-    let remaining = assembly.remaining.iter().filter_map(|r| {
-        let tag = r.tag.as_deref()?;
-        Some(existence_key(
-            &r.desc,
-            r.namespace.as_deref().unwrap_or_default(),
-            tag,
-        ))
-    });
-    let modeled = snapshot_definitions(assembly)
-        .into_iter()
-        .filter(|(desc, _)| compare(*desc) == Compare::Existence)
-        .map(|(desc, definition)| definition_existence_key(desc, &definition));
-    remaining.chain(modeled).collect()
-}
-
-/// [`existence_key`] for a model: its [`ObjectKey`] as a tuple
-fn definition_existence_key(
-    desc: ObjectType,
-    definition: &Definition,
-) -> (String, String, String) {
-    let key = ObjectKey::new(desc, definition);
-    (desc.as_str().to_string(), key.schema, key.name)
-}
-
-/// Match key for existence-only comparison; argument lists are
-/// stripped because pg_dump's signature formatting and the build's
-/// may differ (overloads of unmodeled types therefore conflate)
-fn existence_key(
-    desc: &str,
-    namespace: &str,
-    tag: &str,
-) -> (String, String, String) {
-    let name = tag.split('(').next().unwrap_or(tag).trim_end();
-    (desc.to_string(), namespace.to_string(), name.to_string())
-}
-
 /// A definition as a JSON value with the fields deploy does not
 /// manage removed and type aliases canonicalized
 fn normalized(definition: &Definition) -> Value {
@@ -627,12 +552,24 @@ fn normalized(definition: &Definition) -> Value {
                         .collect()
                 }),
                 returns: function.returns.as_deref().map(return_type),
+                sql_body: function.sql_body.as_deref().map(canonical_sql_body),
                 ..function.clone()
             });
             &canonical
         }
         Definition::Procedure(procedure) => {
-            canonical = Definition::Procedure(procedure.canonical());
+            let procedure = procedure.canonical();
+            canonical = Definition::Procedure(crate::models::Procedure {
+                sql_body: procedure
+                    .sql_body
+                    .as_deref()
+                    .map(canonical_sql_body),
+                ..procedure
+            });
+            &canonical
+        }
+        Definition::Domain(domain) => {
+            canonical = Definition::Domain(canonical_domain(domain));
             &canonical
         }
         Definition::Publication(publication) => {
@@ -729,6 +666,22 @@ fn normalized(definition: &Definition) -> Value {
     value
 }
 
+/// The domain with the type of each cast in its default and its CHECK
+/// constraints in the form that PostgreSQL writes (see
+/// [`canonical_casts`])
+pub(crate) fn canonical_domain(domain: &Domain) -> Domain {
+    let mut domain = domain.clone();
+    if let Some(default) = &mut domain.default {
+        *default = canonical_casts(default);
+    }
+    for check in domain.check_constraints.iter_mut().flatten() {
+        if let Some(expression) = &mut check.expression {
+            *expression = canonical_casts(expression);
+        }
+    }
+    domain
+}
+
 /// The database subscription without the password in its connection
 /// when the project connection has none. Pull removes the password, so
 /// a project that does not carry one does not remove or change it (as
@@ -784,13 +737,18 @@ fn normalize(value: &mut Value) {
 ///   precision after the first word (`timestamp(3) with time zone`);
 /// - `numeric(p)` is `numeric(p,0)`;
 /// - an array bound (`int[3]`), `ARRAY` and the array type name of a
-///   built-in type (`_int4`) are `[]`;
+///   built-in type (`_int4`, `_text`) are `[]`, and a modifier of an
+///   array type name is the modifier of its element type
+///   (`_varchar(4)` is `character varying(4)[]`);
+/// - a quoted name of a built-in type (`"int4"`, `"_text"`) is the name
+///   with no quotes, as PostgreSQL finds the type in pg_catalog;
 /// - a modifier has no spaces next to its parentheses and commas, and
 ///   a name that is not quoted is in lowercase.
 ///
-/// A user-defined type or a quoted name keeps its name. A built-in type
-/// has no `pg_catalog` schema, as pg_dump writes it with none. `SETOF`
-/// before a return type stays.
+/// A user-defined type keeps its name, and so does a quoted name that
+/// is not the name of a built-in type (`"integer"` is not a type). A
+/// built-in type has no `pg_catalog` schema, as pg_dump writes it with
+/// none. `SETOF` before a return type stays.
 pub(crate) fn canonical_type(data_type: &str) -> String {
     let parts = type_parts(data_type);
     match parts.split_first() {
@@ -890,26 +848,153 @@ fn modifier(chars: &mut std::str::Chars) -> String {
     text
 }
 
-/// The built-in types whose array type name (`_int4`) is a hand-written
-/// form of an array of the type
-const ARRAY_ELEMENTS: &[&str] = &[
+/// The names of the types in pg_catalog on PostgreSQL 18, other than
+/// array types and the row types of the system catalogs. A quoted name
+/// in this list is the built-in type. The list does not change in a
+/// major version of PostgreSQL.
+const BUILT_IN_TYPES: &[&str] = &[
+    "aclitem",
+    "any",
+    "anyarray",
+    "anycompatible",
+    "anycompatiblearray",
+    "anycompatiblemultirange",
+    "anycompatiblenonarray",
+    "anycompatiblerange",
+    "anyelement",
+    "anyenum",
+    "anymultirange",
+    "anynonarray",
+    "anyrange",
     "bit",
     "bool",
+    "box",
     "bpchar",
+    "bytea",
     "char",
+    "cid",
+    "cidr",
+    "circle",
+    "cstring",
+    "date",
+    "datemultirange",
+    "daterange",
+    "event_trigger",
+    "fdw_handler",
     "float4",
     "float8",
+    "gtsvector",
+    "index_am_handler",
+    "inet",
     "int2",
+    "int2vector",
     "int4",
+    "int4multirange",
+    "int4range",
     "int8",
+    "int8multirange",
+    "int8range",
+    "internal",
     "interval",
+    "json",
+    "jsonb",
+    "jsonpath",
+    "language_handler",
+    "line",
+    "lseg",
+    "macaddr",
+    "macaddr8",
+    "money",
+    "name",
     "numeric",
+    "nummultirange",
+    "numrange",
+    "oid",
+    "oidvector",
+    "path",
+    "pg_brin_bloom_summary",
+    "pg_brin_minmax_multi_summary",
+    "pg_ddl_command",
+    "pg_dependencies",
+    "pg_lsn",
+    "pg_mcv_list",
+    "pg_ndistinct",
+    "pg_node_tree",
+    "pg_snapshot",
+    "point",
+    "polygon",
+    "record",
+    "refcursor",
+    "regclass",
+    "regcollation",
+    "regconfig",
+    "regdictionary",
+    "regnamespace",
+    "regoper",
+    "regoperator",
+    "regproc",
+    "regprocedure",
+    "regrole",
+    "regtype",
+    "table_am_handler",
+    "text",
+    "tid",
     "time",
     "timestamp",
     "timestamptz",
     "timetz",
+    "trigger",
+    "tsm_handler",
+    "tsmultirange",
+    "tsquery",
+    "tsrange",
+    "tstzmultirange",
+    "tstzrange",
+    "tsvector",
+    "txid_snapshot",
+    "unknown",
+    "uuid",
     "varbit",
     "varchar",
+    "void",
+    "xid",
+    "xid8",
+    "xml",
+];
+
+/// The types of [`BUILT_IN_TYPES`] that have no array type: the
+/// pseudo-types other than `record` and `cstring`, and the types of
+/// planner statistics and summaries
+const WITHOUT_ARRAY: &[&str] = &[
+    "any",
+    "anyarray",
+    "anycompatible",
+    "anycompatiblearray",
+    "anycompatiblemultirange",
+    "anycompatiblenonarray",
+    "anycompatiblerange",
+    "anyelement",
+    "anyenum",
+    "anymultirange",
+    "anynonarray",
+    "anyrange",
+    "event_trigger",
+    "fdw_handler",
+    "index_am_handler",
+    "internal",
+    "language_handler",
+    "pg_brin_bloom_summary",
+    "pg_brin_minmax_multi_summary",
+    "pg_ddl_command",
+    "pg_dependencies",
+    "pg_mcv_list",
+    "pg_ndistinct",
+    "pg_node_tree",
+    "table_am_handler",
+    "trigger",
+    "tsm_handler",
+    "unknown",
+    "void",
 ];
 
 /// The type that the parts name, with `[]` for an array
@@ -957,7 +1042,7 @@ fn base_type(parts: &[TypePart]) -> String {
     // schema. The keywords `char` and `bit` are `character` and
     // `bit(1)` only when they have no schema: `pg_catalog.char` is the
     // one-byte type `"char"`, and `pg_catalog.bit` has no length.
-    let qualified = match first
+    let mut qualified = match first
         .strip_prefix("pg_catalog.")
         .or_else(|| first.strip_prefix("\"pg_catalog\"."))
     {
@@ -967,14 +1052,28 @@ fn base_type(parts: &[TypePart]) -> String {
         }
         None => false,
     };
+    // PostgreSQL finds a quoted name in pg_catalog first, so `"int4"`
+    // is the type int4, as `pg_catalog.int4` is
     if let [name] = words[..]
-        && modifier.is_none()
+        && let Some(name) = name
+            .strip_prefix('"')
+            .and_then(|name| name.strip_suffix('"'))
+        && (BUILT_IN_TYPES.contains(&name)
+            || name.strip_prefix('_').is_some_and(has_array))
+    {
+        words[0] = name;
+        qualified = true;
+    }
+    if let [name] = words[..]
         && let Some(element) = name.strip_prefix('_')
-        && ARRAY_ELEMENTS.contains(&element)
+        && has_array(element)
     {
         return format!(
             "{}[]",
-            canonical_type(&format!("pg_catalog.{element}"))
+            canonical_type(&format!(
+                "pg_catalog.{element}{}",
+                modifier.unwrap_or_default()
+            ))
         );
     }
     let name = words.join(" ");
@@ -987,6 +1086,7 @@ fn base_type(parts: &[TypePart]) -> String {
         format!("{base}{} {zone} time zone", modifier.unwrap_or_default())
     };
     match name.as_str() {
+        "any" if qualified => String::from("\"any\""),
         "char" if qualified && modifier.is_none() => String::from("\"char\""),
         "bit" if qualified && modifier.is_none() => String::from("\"bit\""),
         "timestamp" | "timestamp without time zone" if after_first => {
@@ -1033,6 +1133,12 @@ fn base_type(parts: &[TypePart]) -> String {
         "varbit" | "bit varying" => with("bit varying"),
         _ => written(&words, modifier, position),
     }
+}
+
+/// Whether the built-in type has an array type, whose name is `_` and
+/// the name of the type
+fn has_array(name: &str) -> bool {
+    BUILT_IN_TYPES.contains(&name) && !WITHOUT_ARRAY.contains(&name)
 }
 
 /// The number in a modifier of one number, `(10)`
@@ -1264,15 +1370,54 @@ fn modifier_length(text: &str) -> Option<usize> {
 }
 
 /// A return type as PostgreSQL keeps it: [`identity_type`], as a
-/// return type has no typmod either. A `TABLE(...)` return type keeps
-/// the form that [`canonical_type`] gives.
+/// return type has no typmod either. The type of each column of a
+/// `TABLE(...)` return type is an [`identity_type`] too: PostgreSQL
+/// keeps the columns as OUT parameters.
 pub(crate) fn return_type(returns: &str) -> String {
     let canonical = canonical_type(returns);
-    if canonical.starts_with("table(") {
-        canonical
-    } else {
-        identity_type(&canonical)
+    match canonical
+        .strip_prefix("table(")
+        .and_then(|columns| columns.strip_suffix(')'))
+    {
+        Some(columns) => {
+            let columns: Vec<String> = split_columns(columns)
+                .into_iter()
+                .map(|column| {
+                    let length = name_length(column);
+                    format!(
+                        "{} {}",
+                        &column[..length],
+                        identity_type(&column[length..])
+                    )
+                })
+                .collect();
+            format!("table({})", columns.join(", "))
+        }
+        None => identity_type(&canonical),
     }
+}
+
+/// The columns of a `TABLE(...)` return type, split at each comma that
+/// is not in parentheses or quotes
+fn split_columns(columns: &str) -> Vec<&str> {
+    let mut result = Vec::new();
+    let mut depth = 0usize;
+    let mut quoted = false;
+    let mut start = 0;
+    for (index, c) in columns.char_indices() {
+        match c {
+            '"' => quoted = !quoted,
+            '(' if !quoted => depth += 1,
+            ')' if !quoted => depth = depth.saturating_sub(1),
+            ',' if !quoted && depth == 0 => {
+                result.push(columns[start..index].trim());
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    result.push(columns[start..].trim());
+    result
 }
 
 /// A type as it identifies an argument: [`canonical_type`] without
@@ -1486,12 +1631,78 @@ mod tests {
         same_type("varchar(20)[]", "character varying(20)[]");
     }
 
+    /// Each form against the form that `format_type` gives on
+    /// PostgreSQL 18 for a column of that type. A quoted name is a
+    /// built-in type when pg_catalog has a type of that name.
+    #[test]
+    fn canonicalizes_quoted_built_in_names() {
+        same_type("\"int4\"", "integer");
+        same_type("\"varchar\"", "character varying");
+        same_type("\"varchar\"(10)", "character varying(10)");
+        same_type("\"_int4\"", "integer[]");
+        same_type("\"bpchar\"", "bpchar");
+        same_type("\"bpchar\"(3)", "character(3)");
+        same_type("\"bit\"(3)", "bit(3)");
+        same_type("\"numeric\"(10)", "numeric(10,0)");
+        same_type("\"timestamptz\"(3)", "timestamp(3) with time zone");
+        same_type("\"timestamp\"", "timestamp without time zone");
+        same_type("\"time\"(2)", "time(2) without time zone");
+        same_type("\"timetz\"", "time with time zone");
+        same_type("\"float8\"", "double precision");
+        same_type("\"bool\"[]", "boolean[]");
+        same_type("\"text\"", "text");
+        same_type("\"_char\"", "\"char\"[]");
+        same_type("\"_varchar\"(5)", "character varying(5)[]");
+        same_type("pg_catalog.\"int4\"", "integer");
+        same_type("\"pg_catalog\".\"_int4\"", "integer[]");
+        same_type("\"int2vector\"", "int2vector");
+        same_type("\"any\"", "\"any\"");
+        same_type("pg_catalog.any", "\"any\"");
+        // not built-in type names: PostgreSQL 18 refuses them, or finds
+        // a type of the project, so they stay as written
+        assert_eq!(canonical_type("\"integer\""), "\"integer\"");
+        assert_eq!(canonical_type("\"INT4\""), "\"INT4\"");
+        assert_eq!(
+            canonical_type("\"double precision\""),
+            "\"double precision\""
+        );
+        assert_eq!(canonical_type("public.\"int4\""), "public.\"int4\"");
+        assert_eq!(identity_type("\"int4\""), "integer");
+        assert_eq!(identity_type("\"varchar\"(10)"), "character varying");
+    }
+
+    /// The array type name of a built-in type is `_` and the name of
+    /// the element type, and a typmod applies to the element
+    #[test]
+    fn canonicalizes_built_in_array_names() {
+        same_type("_text", "text[]");
+        same_type("_uuid", "uuid[]");
+        same_type("_TEXT", "text[]");
+        same_type("_jsonb", "jsonb[]");
+        same_type("_int4range", "int4range[]");
+        same_type("_int4multirange", "int4multirange[]");
+        same_type("_timestamptz", "timestamp with time zone[]");
+        same_type("_timestamp(3)", "timestamp(3) without time zone[]");
+        same_type("_varchar(4)", "character varying(4)[]");
+        same_type("_numeric(10)", "numeric(10,0)[]");
+        same_type("_bit", "\"bit\"[]");
+        same_type("_oidvector", "oidvector[]");
+        same_type("_record", "record[]");
+        same_type("pg_catalog._text", "text[]");
+        // a type with no array type, and a type of the project
+        assert_eq!(canonical_type("_void"), "_void");
+        assert_eq!(canonical_type("_trigger"), "_trigger");
+        assert_eq!(canonical_type("_x"), "_x");
+        assert_eq!(canonical_type("public._text"), "public._text");
+        assert_eq!(canonical_type("test._uuid"), "test._uuid");
+        assert_eq!(identity_type("_varchar(4)"), "character varying[]");
+    }
+
     #[test]
     fn keeps_user_defined_and_quoted_types() {
         assert_eq!(canonical_type("public.int4"), "public.int4");
         assert_eq!(canonical_type("public._int4"), "public._int4");
         assert_eq!(canonical_type("_mood"), "_mood");
-        assert_eq!(canonical_type("\"int4\""), "\"int4\"");
         assert_eq!(canonical_type("\"Mood\"[]"), "\"Mood\"[]");
         assert_eq!(
             canonical_type("public.\"My  Type\"(a, b)"),
@@ -1722,7 +1933,7 @@ mod tests {
     }
 
     #[test]
-    fn aggregate_existence_key_keeps_input_types() {
+    fn aggregate_key_keeps_input_types() {
         let aggregate = |data_type: &str| {
             Definition::Aggregate(
                 serde_json::from_value(serde_json::json!({
@@ -1736,9 +1947,8 @@ mod tests {
                 .unwrap(),
             )
         };
-        let key = |d: &str| {
-            definition_existence_key(ObjectType::Aggregate, &aggregate(d))
-        };
+        let key =
+            |d: &str| ObjectKey::new(ObjectType::Aggregate, &aggregate(d));
         // one overload does not stand for another
         assert_ne!(key("integer"), key("text"));
         // a type alias is the same input type
@@ -1758,6 +1968,112 @@ mod tests {
         assert_eq!(identity_type("public.\"a(b)\""), "public.\"a(b)\"");
     }
 
+    /// PostgreSQL 18 keeps no typmod in a RETURNS TABLE column type,
+    /// and pg_dump writes `TABLE(a integer, b character varying)` for
+    /// `TABLE(a int4, b varchar(3))`
+    /// PostgreSQL 18 writes `SELECT 'x'::text` for `SELECT 'x'`, and
+    /// `SELECT 'x'::text AS text` for the routine that deploy makes
+    /// from that body
+    #[test]
+    fn routine_body_literal_names_are_not_a_change() {
+        let body = |select: &str| format!("BEGIN ATOMIC\n {select};\nEND");
+        let f = |select: &str| {
+            function(serde_json::json!({
+                "name": "f", "schema": "test", "owner": "postgres",
+                "language": "sql", "returns": "text",
+                "sql_body": body(select),
+            }))
+        };
+        assert_eq!(
+            normalized(&f("SELECT 'e\\f'::text AS text")),
+            normalized(&f("SELECT 'e\\f'::text"))
+        );
+        assert_ne!(
+            normalized(&f("SELECT 'g'::text AS text")),
+            normalized(&f("SELECT 'e\\f'::text"))
+        );
+        let p = |select: &str| {
+            Definition::Procedure(
+                serde_json::from_value(serde_json::json!({
+                    "name": "p", "schema": "test", "owner": "postgres",
+                    "language": "sql", "sql_body": body(select),
+                }))
+                .unwrap(),
+            )
+        };
+        assert_eq!(
+            normalized(&p("SELECT 'x'::text AS text")),
+            normalized(&p("SELECT 'x'::text"))
+        );
+        assert_ne!(
+            normalized(&p("SELECT 'y'::text AS text")),
+            normalized(&p("SELECT 'x'::text"))
+        );
+    }
+
+    #[test]
+    fn domain_cast_types_are_not_a_change() {
+        let domain = |default: &str, check: &str| {
+            Definition::Domain(
+                serde_json::from_value(serde_json::json!({
+                    "name": "d", "schema": "test", "owner": "postgres",
+                    "data_type": "integer", "default": default,
+                    "check_constraints": [
+                        {"name": "d_check", "expression": check},
+                    ],
+                }))
+                .unwrap(),
+            )
+        };
+        let pulled = domain("(1)::smallint", "((VALUE)::bigint > 0)");
+        assert_eq!(
+            normalized(&domain("(1)::INT2", "((VALUE)::INT8 > 0)")),
+            normalized(&pulled)
+        );
+        assert_ne!(
+            normalized(&domain("(1)::INT2", "((VALUE)::INT4 > 0)")),
+            normalized(&pulled)
+        );
+        assert_ne!(
+            normalized(&domain("(1)::INT4", "((VALUE)::INT8 > 0)")),
+            normalized(&pulled)
+        );
+    }
+
+    #[test]
+    fn return_table_columns_are_argument_types() {
+        let pulled = "TABLE(a integer, b character varying, \"C\" text[])";
+        assert_eq!(
+            return_type("TABLE(a int4, B VARCHAR(3), \"C\" _text)"),
+            return_type(pulled)
+        );
+        assert_eq!(
+            return_type("table( a int4 ,b varchar(3) , \"C\" text ARRAY )"),
+            return_type(pulled)
+        );
+        assert_eq!(
+            return_type("TABLE(d numeric(10, 2), e timestamptz(3))"),
+            return_type("TABLE(d numeric, e timestamp with time zone)")
+        );
+        assert_eq!(
+            return_type("TABLE(\"a,b\" int4)"),
+            return_type("TABLE(\"a,b\" integer)")
+        );
+        // a real change is still a change
+        assert_ne!(
+            return_type("TABLE(a int4, b text)"),
+            return_type("TABLE(a integer, b character varying)")
+        );
+        assert_ne!(
+            return_type("TABLE(a integer)"),
+            return_type("TABLE(b integer)")
+        );
+        assert_ne!(
+            return_type("TABLE(\"A\" integer)"),
+            return_type("TABLE(a integer)")
+        );
+    }
+
     #[test]
     fn return_type_keeps_setof_in_the_postgresql_form() {
         // PostgreSQL 18 writes each of these as `SETOF` and the type
@@ -1773,47 +2089,33 @@ mod tests {
     }
 
     #[test]
-    fn existence_key_strips_signature() {
-        // unmodeled-type overloads conflate to one existence key: an
-        // aggregate present in both sides under any overload reads as
-        // "exists" regardless of argument types (documented limit —
-        // these types are existence-checked, not diffed)
-        assert_eq!(
-            existence_key("AGGREGATE", "test", "sum(integer)"),
-            existence_key("AGGREGATE", "test", "sum(numeric)")
-        );
-        assert_ne!(
-            existence_key("AGGREGATE", "test", "sum(integer)"),
-            existence_key("AGGREGATE", "test", "max(integer)")
-        );
-    }
-
-    #[test]
-    fn raw_cast_matches_only_its_own_types() {
-        let key = |desc: &str, schema: &str, name: &str| {
-            (desc.to_string(), schema.to_string(), name.to_string())
+    fn raw_cast_takes_only_its_own_types() {
+        let cast = |target: &str, sql: Option<&str>| {
+            let mut value = serde_json::json!({
+                "schema": "test", "owner": "postgres",
+                "source_type": "test.point_pair", "target_type": target,
+                "inout": true,
+            });
+            if let Some(sql) = sql {
+                value["sql"] = sql.into();
+            }
+            Definition::Cast(serde_json::from_value(value).unwrap())
         };
-        let existing = BTreeSet::from([
-            key("CAST", "", "(test.point_pair AS text)"),
-            key("PROCEDURE", "test", "p(integer)"),
-        ]);
+        let db = cast("text", None);
+        let mut database = BTreeMap::new();
+        database.insert(ObjectKey::new(ObjectType::Cast, &db), db);
         // a different cast does not stand for the raw cast
-        assert!(!raw_exists(
-            &existing,
-            ObjectType::Cast,
-            &key("CAST", "", "(test.point_pair AS character varying)")
-        ));
-        assert!(raw_exists(
-            &existing,
-            ObjectType::Cast,
-            &key("CAST", "", "(test.point_pair AS text)")
-        ));
-        // a raw procedure with no parameters matches by its bare name
-        assert!(raw_exists(
-            &existing,
-            ObjectType::Procedure,
-            &key("PROCEDURE", "test", "p()")
-        ));
+        let other = cast(
+            "character varying",
+            Some("CREATE CAST (test.point_pair AS varchar) WITH INOUT"),
+        );
+        assert!(take_raw(&mut database, ObjectType::Cast, &other).is_none());
+        let raw = cast(
+            "text",
+            Some("CREATE CAST (test.point_pair AS text) WITH INOUT"),
+        );
+        assert!(take_raw(&mut database, ObjectType::Cast, &raw).is_some());
+        assert!(database.is_empty());
     }
 
     #[test]

@@ -168,12 +168,14 @@ reconciled in place where PostgreSQL can express it:
 - **Functions and views** — `CREATE OR REPLACE` (a function whose
   return type changed must be dropped first, so it falls back). A
   function is matched by its name and its input parameters. A type
-  alias or a type modifier in a parameter or the return type is not a
-  change, as PostgreSQL keeps no typmod there (see
-  [Project format](project-format.md)). A
+  alias or a type modifier in a parameter, the return type or a
+  `TABLE(...)` column is not a change, as PostgreSQL keeps no typmod
+  there (see [Project format](project-format.md)). A
   view's rules are reconciled after it. A `sql_body` is compared as
   text with the form PostgreSQL keeps, so write it as `pull` writes
-  it (see [Project format](project-format.md)).
+  it. An `AS` name that PostgreSQL adds to a constant column when
+  deploy makes the routine (`SELECT 'a'::text AS text`) is not a
+  change (see [Project format](project-format.md)).
 - **Procedures** — `CREATE OR REPLACE PROCEDURE`, as for functions,
   with the comment set after it. A procedure is matched by its name
   and input types, so a changed input type makes the new procedure
