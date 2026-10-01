@@ -62,8 +62,6 @@ impl Loader {
         Self {
             project: Project {
                 name: String::from("postgres"),
-                encoding: String::from("UTF8"),
-                stdstrings: true,
                 superuser: String::from("postgres"),
                 default_schema: String::from("public"),
                 path: path.to_path_buf(),
@@ -117,8 +115,28 @@ impl Loader {
         if let Some(name) = project["name"].as_str() {
             self.project.name = name.to_string();
         }
-        if let Some(encoding) = project["encoding"].as_str() {
-            self.project.encoding = encoding.to_string();
+        // the text of a project is UTF-8, with standard conforming
+        // strings, and build always writes the archive so. The fields
+        // are obsolete, and load only with these values.
+        if let Some(encoding) = project["encoding"].as_str()
+            && !crate::pull::is_utf8(encoding)
+        {
+            return Err(format!(
+                "{}: encoding {encoding} is not supported. The text of a \
+                 project is UTF-8, and build always writes the archive in \
+                 UTF8; pg_restore converts it to the encoding of the \
+                 database. Remove the obsolete encoding field",
+                path.display()
+            ));
+        }
+        if project["stdstrings"].as_bool() == Some(false) {
+            return Err(format!(
+                "{}: stdstrings false is not supported. The SQL of a \
+                 project is written with standard_conforming_strings on, \
+                 and build always writes the archive so. Remove the \
+                 obsolete stdstrings field",
+                path.display()
+            ));
         }
         for entry in array_field(&project, "extensions") {
             self.add_definition(ObjectType::Extension, entry, Some(&path));

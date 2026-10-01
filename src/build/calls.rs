@@ -1,6 +1,6 @@
 //! The functions that the column defaults and the CHECK constraints of
 //! a table call, and which of these expressions the build has to emit
-//! as their own entries (deviation 38).
+//! as their own entries (deviation 40).
 //!
 //! PostgreSQL finds the functions of a default or a CHECK constraint
 //! when it makes the table, so each function has to exist before the
@@ -272,8 +272,6 @@ mod tests {
     fn project(inventory: Vec<Item>) -> Project {
         Project {
             name: "calls".into(),
-            encoding: "UTF8".into(),
-            stdstrings: true,
             superuser: "postgres".into(),
             default_schema: "public".into(),
             path: std::path::PathBuf::new(),

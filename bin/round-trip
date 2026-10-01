@@ -8,14 +8,17 @@
 #   of both databases -> diff is empty
 #
 # Plus a second restore with ownership applied, which the comparing
-# restore cannot check because it runs --no-owner, and a round trip of
-# the settings of a role and a user, which pull reads from pg_dumpall.
+# restore cannot check because it runs --no-owner, a round trip of the
+# settings and the comments of a role and a user, which pull reads from
+# pg_dumpall, and a restore of a built project with text that is not
+# ASCII into a LATIN1 and a UTF8 database.
 #
 # Requires a PostgreSQL superuser connection (defaults target the
 # compose.yaml container; override with PGHOST/PGPORT/PGUSER) and the
 # postgres client tools on PATH. All commands run via psql/pg_dump
-# against scratch databases, named NAME_source, NAME_restored and
-# NAME_owned, that are dropped and recreated. FIXTURE defaults to
+# against scratch databases, named NAME_source, NAME_restored,
+# NAME_owned, NAME_enc_latin1 and NAME_enc_utf8, that are dropped and
+# recreated. FIXTURE defaults to
 # fixtures/schema.sql and NAME to roundtrip.
 #
 # pull formats routine bodies, so a fixture that is not written in the
@@ -39,6 +42,7 @@ RESTORED_DB="${NAME}_restored"
 OWNED_DB="${NAME}_owned"
 SETTINGS_ROLE="${NAME}_settings"
 SETTINGS_USER="${NAME} Settings User"
+ENC_DB_PREFIX="${NAME}_enc"
 WORKDIR="$(mktemp -d)"
 
 drop_settings_roles() {
@@ -56,6 +60,9 @@ cleanup() {
         >/dev/null 2>&1 || true
     bin/drop-database "${SOURCE_DB}" \
         >/dev/null 2>&1 || true
+    for db in "${ENC_DB_PREFIX}_latin1" "${ENC_DB_PREFIX}_utf8"; do
+        bin/drop-database "${db}" >/dev/null 2>&1 || true
+    done
 }
 
 trap cleanup EXIT INT TERM
@@ -133,17 +140,24 @@ fi
 # when it connects to a database, and the steps above do not see them.
 # A role and a user get settings that need quotes, a list setting with
 # one name that has a comma, and a string with a comma for a setting
-# that is not a list. The settings that the build restores must be the
-# settings that pull read. Each name of a list is quoted in
-# pg_db_role_setting, so the comparison is exact.
+# that is not a list. The role also gets a comment and a setting with a
+# backslash and characters that are not ASCII, which pg_dumpall writes
+# as escape strings (E'...'). The settings and the comments that the
+# build restores must be the settings and the comments that pull read.
+# Each name of a list is quoted in pg_db_role_setting, so the
+# comparison is exact. The restore applies the owners, as a plain
+# pg_restore does.
 echo "==> Role settings: pull with pg_dumpall, build, restore"
+export PGCLIENTENCODING=UTF8
 drop_settings_roles
 psql -d postgres -q -v ON_ERROR_STOP=1 <<SQL
 CREATE ROLE "${SETTINGS_ROLE}";
+COMMENT ON ROLE "${SETTINGS_ROLE}" IS 'rôle C:\x ''q'' ü';
 ALTER ROLE "${SETTINGS_ROLE}" SET search_path TO "\$user", "my schema", public;
 ALTER ROLE "${SETTINGS_ROLE}" SET application_name TO 'x, y';
 ALTER ROLE "${SETTINGS_ROLE}" SET enable_seqscan TO off;
 ALTER ROLE "${SETTINGS_ROLE}" SET "DateStyle" TO 'iso, mdy';
+ALTER ROLE "${SETTINGS_ROLE}" SET roundtrip.path TO 'C:\dossier\é';
 CREATE USER "${SETTINGS_USER}";
 ALTER ROLE "${SETTINGS_USER}" SET temp_tablespaces TO 'pg_default', 'a,b';
 ALTER ROLE "${SETTINGS_USER}" SET search_path TO '';
@@ -156,19 +170,23 @@ role_settings() {
            AND setrole::regrole::text IN (
                quote_ident('${SETTINGS_ROLE}'),
                quote_ident('${SETTINGS_USER}'))
-         ORDER BY role, s"
+         UNION ALL
+        SELECT oid::regrole::text,
+               'comment: ' || shobj_description(oid, 'pg_authid')
+          FROM pg_roles
+         WHERE rolname IN ('${SETTINGS_ROLE}', '${SETTINGS_USER}')
+           AND shobj_description(oid, 'pg_authid') IS NOT NULL
+         ORDER BY 1, 2"
 }
 role_settings > "${WORKDIR}/role-settings-source.txt"
 ./target/debug/pglifecycle pull -d "${SOURCE_DB}" "${WORKDIR}/roles"
 ./target/debug/pglifecycle build "${WORKDIR}/roles" \
     "${WORKDIR}/roles.dump"
 pg_restore -l "${WORKDIR}/roles.dump" \
-    | grep -E " (ROLE|USER)  (${SETTINGS_ROLE}|${SETTINGS_USER}) " \
+    | grep -E " (ROLE|USER|COMMENT)  (${SETTINGS_ROLE}|${SETTINGS_USER}) " \
     > "${WORKDIR}/roles.list"
 drop_settings_roles
-# pg_restore cannot set the owner of a ROLE or a USER entry, so the
-# restore runs --no-owner
-pg_restore -d postgres --no-owner --exit-on-error \
+pg_restore -d postgres --exit-on-error \
     -L "${WORKDIR}/roles.list" "${WORKDIR}/roles.dump"
 role_settings > "${WORKDIR}/role-settings-restored.txt"
 if [ ! -s "${WORKDIR}/role-settings-source.txt" ]; then
@@ -182,3 +200,52 @@ else
     echo "Role settings gate FAILED: role settings differ" >&2
     exit 1
 fi
+
+# The text of a project is UTF-8, so the build writes the archive in
+# UTF8 and pg_restore converts the text to the encoding of the
+# database. A project that sets another encoding, or that sets
+# stdstrings to false, is refused: the build cannot write that archive.
+# The text must be the same in a LATIN1 and in a UTF8 database. All the
+# characters are in LATIN1.
+echo "==> Build encoding: restore into a LATIN1 and a UTF8 database"
+ENC_TEXT='rôle ü é C:\x'
+mkdir -p "${WORKDIR}/enc/schemata"
+cat > "${WORKDIR}/enc/schemata/enc.yaml" <<YAML
+---
+name: enc
+owner: postgres
+comment: '${ENC_TEXT}'
+YAML
+for setting in 'encoding: LATIN1' 'stdstrings: false'; do
+    printf -- '---\nname: enc\nsuperuser: postgres\n%s\n' "${setting}" \
+        > "${WORKDIR}/enc/project.yaml"
+    if ./target/debug/pglifecycle build "${WORKDIR}/enc" \
+            "${WORKDIR}/enc.dump" 2> "${WORKDIR}/enc.log"; then
+        echo "Build encoding gate FAILED: build accepted ${setting}" >&2
+        exit 1
+    fi
+    if ! grep -q "${setting%%:*}" "${WORKDIR}/enc.log"; then
+        cat "${WORKDIR}/enc.log" >&2
+        echo "Build encoding gate FAILED: the error for ${setting}" \
+            "does not name the field" >&2
+        exit 1
+    fi
+done
+printf -- '---\nname: enc\nsuperuser: postgres\n' \
+    > "${WORKDIR}/enc/project.yaml"
+./target/debug/pglifecycle build "${WORKDIR}/enc" "${WORKDIR}/enc.dump"
+for encoding in LATIN1 UTF8; do
+    db="${ENC_DB_PREFIX}_$(echo "${encoding}" | tr '[:upper:]' '[:lower:]')"
+    bin/drop-database "${db}"
+    psql -d postgres -q -v ON_ERROR_STOP=1 -c "CREATE DATABASE ${db} \
+        ENCODING '${encoding}' LOCALE 'C' TEMPLATE template0"
+    pg_restore -d "${db}" --exit-on-error "${WORKDIR}/enc.dump"
+    text="$(psql -d "${db}" -tA -v ON_ERROR_STOP=1 \
+        -c "SELECT obj_description('enc'::regnamespace, 'pg_namespace')")"
+    if [ "${text}" != "${ENC_TEXT}" ]; then
+        echo "Build encoding gate FAILED: the ${encoding} database has" \
+            "the comment '${text}', not '${ENC_TEXT}'" >&2
+        exit 1
+    fi
+    echo "Build encoding gate passed: the ${encoding} database has the text"
+done

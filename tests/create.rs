@@ -25,8 +25,7 @@ fn creates_skeleton_project() {
     assert_eq!(
         yaml,
         "---\n\
-         name: pglc-test-create\nencoding: UTF-8\n\
-         stdstrings: true\nsuperuser: postgres\n"
+         name: pglc-test-create\nsuperuser: postgres\n"
     );
 }
 
@@ -40,8 +39,7 @@ fn create_includes_mode_headers_when_requested() {
     assert_eq!(
         yaml,
         "# -*- mode: pglifecycle -*-\n# pglifecycle: project\n---\n\
-         name: pglc-test-create-headers\nencoding: UTF-8\n\
-         stdstrings: true\nsuperuser: postgres\n"
+         name: pglc-test-create-headers\nsuperuser: postgres\n"
     );
 }
 
@@ -62,16 +60,7 @@ fn create_honors_options() {
     let tmp = parent.path().join("pglc-test-create-opts");
     let output = run_create(
         &tmp,
-        &[
-            "--name",
-            "example",
-            "--encoding",
-            "LATIN1",
-            "--no-stdstrings",
-            "--superuser",
-            "admin",
-            "--no-gitkeep",
-        ],
+        &["--name", "example", "--superuser", "admin", "--no-gitkeep"],
     );
     assert!(output.status.success());
     assert!(!tmp.join("tables").join(".gitkeep").exists());
@@ -79,7 +68,19 @@ fn create_honors_options() {
     assert_eq!(
         yaml,
         "---\n\
-         name: example\nencoding: LATIN1\n\
-         stdstrings: false\nsuperuser: admin\n"
+         name: example\nsuperuser: admin\n"
     );
+}
+
+/// The build always writes the archive in UTF8 with standard conforming
+/// strings, so create has no options to change them
+#[test]
+fn create_has_no_session_options() {
+    let parent = tempfile::tempdir().unwrap();
+    for option in [&["--encoding", "LATIN1"][..], &["--no-stdstrings"]] {
+        let tmp = parent.path().join("pglc-test-create-session");
+        let output = run_create(&tmp, option);
+        assert!(!output.status.success(), "create accepted {option:?}");
+        assert!(!tmp.exists(), "create made a project for {option:?}");
+    }
 }

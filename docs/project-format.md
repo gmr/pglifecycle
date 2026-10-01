@@ -6,7 +6,7 @@ database object, validated against the JSON-Schema definitions in
 
 ```text
 my-project/
-├── project.yaml          # name, encoding, extensions, languages,
+├── project.yaml          # name, superuser, extensions, languages,
 │                         # access methods
 ├── schemata/             # one file per schema
 │   └── test.yaml

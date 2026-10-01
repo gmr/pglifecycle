@@ -764,6 +764,41 @@ mod tests {
         );
     }
 
+    /// pg_dumpall writes a value with a backslash as an escape string
+    #[test]
+    fn role_setting_decodes_escape_strings() {
+        assert_eq!(
+            role_setting_value(
+                r#"ALTER ROLE app SET "app.path" TO E'C:\\dossier\\é';"#
+            ),
+            serde_json::json!(r"C:\dossier\é")
+        );
+        assert_eq!(
+            role_setting_value(
+                r"ALTER ROLE app SET search_path TO E'a\\b', 'ü';"
+            ),
+            serde_json::json!([r"a\b", "ü"])
+        );
+    }
+
+    /// pg_dumpall writes a comment or a password with a backslash as an
+    /// escape string
+    #[test]
+    fn role_comment_and_password_decode_escape_strings() {
+        let Statement::Comment { comment, .. } =
+            parse_one(r"COMMENT ON ROLE app IS E'rôle C:\\x ''q'' ü';")
+        else {
+            panic!("expected Comment")
+        };
+        assert_eq!(comment, r"rôle C:\x 'q' ü");
+        let Statement::AlterRole(def) =
+            parse_one(r"ALTER ROLE app WITH LOGIN PASSWORD E'p\\ss''é';")
+        else {
+            panic!("expected AlterRole")
+        };
+        assert_eq!(def.password.as_deref(), Some(r"p\ss'é"));
+    }
+
     #[test]
     fn role_setting_unquotes_mixed_case_name() {
         // pg_dump quotes mixed-case GUC names; the project stores the

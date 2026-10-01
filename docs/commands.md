@@ -13,11 +13,9 @@ pglifecycle create [OPTIONS] DEST
 
 | Option | Description |
 | --- | --- |
-| `--encoding ENCODING` | Database encoding (default `UTF-8`) |
 | `--force` | Write to `DEST` even if it already exists |
 | `--name NAME` | Override the default project name |
 | `--no-gitkeep` | Do not create `.gitkeep` files in empty directories |
-| `--no-stdstrings` | Turn off standard conforming strings |
 | `--superuser NAME` | Superuser name (default `postgres`) |
 | `--include-mode-headers` | Prefix generated files with editor mode headers |
 
@@ -31,6 +29,12 @@ topological sort.
 ```bash
 pglifecycle build PROJECT DEST
 ```
+
+The archive is in UTF8 with `standard_conforming_strings` on, because
+the text of a project is UTF-8 and its SQL is written with that
+setting. pg_restore converts the text to the encoding of the database,
+thus the same archive restores into a UTF8 and into a LATIN1 database.
+Create the database with the encoding before the restore.
 
 ## deploy
 
@@ -414,16 +418,23 @@ PostgreSQL has almost no ALTER for these types:
   class, for example a btree sort support function and each operator
   of a GiST class, in the family only, and pg_dump writes them there;
   written in the class, they compare equal. A class with no family
-  gets a family of its own name, which deploy does not drop.
+  gets a family of its own name, which deploy does not drop, as that
+  drops the class too. Deploy compares the members of that family
+  with the members that the project classes give, and drops each
+  other member from the family, only with `--allow-drop`.
 - Any other change to a cast or a class drops it and makes it again.
+  The drop of a class does not drop the members that PostgreSQL keeps
+  in its family, and the create gives them again, so deploy drops them
+  from the family first. When a class moves to another family and the
+  old family is only in the database, deploy drops the old family
+  first, and PostgreSQL drops the class with it. Then deploy makes the
+  class again in its new family.
 
 A drop and a create is destructive, so it needs `--allow-drop`. The
 drop does not cascade: when an object depends on the object, for
 example an index on an operator class or a view that uses a cast, the
-drop fails and the transaction rolls back. A class whose members are
-kept in its family cannot be made again while they are there, so a
-rebuild of such a class also fails and rolls back. The comment of each
-of these types changes in place. An aggregate, an operator, a class
+drop fails and the transaction rolls back. The comment of each of
+these types changes in place. An aggregate, an operator, a class
 and a family have an owner; a cast and a transform do not.
 
 An object of a type that `pull` does not yet model (security labels,
@@ -520,6 +531,18 @@ again with the settings:
 ```bash
 PGOPTIONS='-c standard_conforming_strings=on' pg_dump -E UTF8 -Fc --schema-only -d mydb -f mydb.dump
 ```
+
+libpq uses `PGOPTIONS` only when the connection does not set `options`.
+An `options` value in the `--dbname` connection string (such as
+`dbname=mydb options='-c statement_timeout=0'` or
+`postgresql:///mydb?options=...`), or in the service of the connection
+in `pg_service.conf`, replaces `PGOPTIONS`. Then the dump uses the
+`standard_conforming_strings` value of that `options` value, or of the
+database. `pull` and `deploy` refuse the dump when the setting is off,
+and tell which setting is off. To use the connection, add
+`-c standard_conforming_strings=on` to the end of its `options` value.
+The same is true for a `--dump` file that you make through such a
+connection.
 
 The `--style` value is one of libpgfmt's styles — `river`, `mozilla`,
 `aweber`, `dbt`, `gitlab`, `kickstarter`, `mattmc3`, or `pg_dump` — and

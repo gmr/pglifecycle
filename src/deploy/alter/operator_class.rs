@@ -15,6 +15,19 @@
 //! of a GiST class), and pg_dump writes them in the family. [`align`]
 //! moves such a member back to the class when the project gives it
 //! there, so the two forms compare equal.
+//!
+//! A class with no family in the project gets a family of its own name
+//! (an implied family). Deploy does not drop that family, as that drops
+//! the class too. [`align`] moves the members of the family that no
+//! project class gives to the database class, and the class drops them
+//! from the family in place, gated by `--allow-drop`.
+//!
+//! The drop of a class does not drop the members that PostgreSQL keeps
+//! in the family, and the create of the class gives them again. Thus
+//! the rebuild of a class drops them from the family first. The drop of
+//! a family drops its classes too, so the rebuild drops the class only
+//! if it exists: a class that moves to another family is gone when the
+//! plan drops the old family first.
 
 use std::collections::BTreeMap;
 
@@ -27,13 +40,44 @@ use crate::models::{
     OperatorFamily,
 };
 use crate::project::{Project, split_sql_name};
+use crate::pull::Assembly;
 use crate::utils::quote_ident;
+
+/// The members that the database keeps for a project class in the
+/// family of the database class, and not in the class (see [`align`])
+#[derive(Debug, Default)]
+pub(crate) struct Loose {
+    /// The family, `schema.name USING method`
+    family: String,
+    /// The family stays when the plan makes the class again: the
+    /// project gives it, or a project class is in it. The plan drops
+    /// each other family first, and its members with it.
+    kept: bool,
+    /// The members that the project class gives
+    operators: Vec<OperatorClassOperator>,
+    functions: Vec<OperatorClassFunction>,
+    /// The members of an implied family that no project class gives
+    extra_operators: Vec<OperatorClassOperator>,
+    extra_functions: Vec<OperatorClassFunction>,
+}
+
+/// The [`Loose`] members of the project classes, by the key of the
+/// class
+pub(crate) type Families = BTreeMap<ObjectKey, Loose>;
+
+/// The operators and the functions of a class or a family
+type Members<'a> = (
+    &'a Option<Vec<OperatorClassOperator>>,
+    &'a Option<Vec<OperatorClassFunction>>,
+);
 
 pub(super) fn operator_class(
     repo: &OperatorClass,
     db: &OperatorClass,
+    families: &Families,
 ) -> Resolution {
     let (r, d) = (canonical_class(repo), canonical_class(db));
+    let loose = families.get(&class_key(&r));
     // the owner is compared on its own
     let definition = |class: &OperatorClass| OperatorClass {
         owner: String::new(),
@@ -42,22 +86,29 @@ pub(super) fn operator_class(
         comment: None,
         ..class.clone()
     };
-    let operators = difference(&r.operators, &d.operators);
-    let functions = difference(&r.functions, &d.functions);
+    // the members of the implied family that no project class gives
+    // are not members of the class: the class drops them from the
+    // family in place
+    let extra_operators = loose.map(|l| l.extra_operators.as_slice());
+    let extra_functions = loose.map(|l| l.extra_functions.as_slice());
+    let class_operators = without(&d.operators, extra_operators);
+    let class_functions = without(&d.functions, extra_functions);
     if definition(&r) != definition(&d)
-        || !difference(&d.operators, &r.operators).is_empty()
-        || !difference(&d.functions, &r.functions).is_empty()
+        || !difference(&class_operators, &r.operators).is_empty()
+        || !difference(&class_functions, &r.functions).is_empty()
     {
-        return Resolution::Replace;
+        return rebuild(db, loose);
     }
-    let mut alters = Vec::new();
-    if let Some(items) = members(&operators, &functions) {
-        alters.push(Alter::new(format!(
-            "ALTER OPERATOR FAMILY {} USING {} ADD\n    {items};\n",
-            r.family.as_deref().unwrap_or_default(),
-            quote_ident(&r.method)
-        )));
-    }
+    let family = format!(
+        "{} USING {}",
+        r.family.as_deref().unwrap_or_default(),
+        quote_ident(&r.method)
+    );
+    let mut alters = family_members(
+        &family,
+        (&r.operators, &r.functions),
+        (&d.operators, &d.functions),
+    );
     push_comment(
         &mut alters,
         "OPERATOR CLASS",
@@ -68,55 +119,83 @@ pub(super) fn operator_class(
     Resolution::Statements(alters)
 }
 
+/// The drop and the create of a class. The create gives again the
+/// members that PostgreSQL keeps in the family, so the rebuild drops
+/// them from the family first, with the members of an implied family
+/// that no project class gives. A family that does not stay drops
+/// before the rebuild, and its classes and members with it, so the
+/// class is dropped only if it exists.
+fn rebuild(db: &OperatorClass, loose: Option<&Loose>) -> Resolution {
+    let before = loose
+        .filter(|l| l.kept)
+        .and_then(|l| {
+            dropped_members(
+                &l.family,
+                &[l.operators.as_slice(), &l.extra_operators].concat(),
+                &[l.functions.as_slice(), &l.extra_functions].concat(),
+            )
+        })
+        .map(Alter::destructive)
+        .into_iter()
+        .collect();
+    Resolution::Rebuild {
+        before,
+        drop: drop_class(db),
+    }
+}
+
 pub(super) fn operator_family(
     repo: &OperatorFamily,
     db: &OperatorFamily,
 ) -> Resolution {
     let (r, d) = (canonical_family(repo), canonical_family(db));
     let family = target(&repo.schema, &repo.name, &repo.method);
+    let mut alters = family_members(
+        &family,
+        (&r.operators, &r.functions),
+        (&d.operators, &d.functions),
+    );
+    push_comment(
+        &mut alters,
+        "OPERATOR FAMILY",
+        &family,
+        &repo.comment,
+        &db.comment,
+    );
+    Resolution::Statements(alters)
+}
+
+/// The ALTER OPERATOR FAMILY statements that change the members of
+/// `family` from `db` to `repo`
+fn family_members(family: &str, repo: Members, db: Members) -> Vec<Alter> {
     let mut alters = Vec::new();
     // drop first, so that a member can be given again in another form
-    let dropped_operators = difference(&d.operators, &r.operators);
-    let dropped_functions = difference(&d.functions, &r.functions);
-    let dropped: Vec<String> = dropped_operators
-        .iter()
-        .map(|o| format!("OPERATOR {} ({})", o.strategy, types(&o.arguments)))
-        .chain(
-            dropped_functions.iter().map(|f| {
-                format!("FUNCTION {} ({})", f.support, types(&f.types))
-            }),
-        )
-        .collect();
-    if !dropped.is_empty() {
-        alters.push(Alter::destructive(format!(
-            "ALTER OPERATOR FAMILY {family} DROP\n    {};\n",
-            dropped.join(",\n    ")
-        )));
+    let dropped_operators = difference(db.0, repo.0);
+    let dropped_functions = difference(db.1, repo.1);
+    if let Some(sql) =
+        dropped_members(family, &dropped_operators, &dropped_functions)
+    {
+        alters.push(Alter::destructive(sql));
     }
     // PostgreSQL refuses a member in the slot of a member that is still
     // there, and an operator that is still there for the same purpose.
     // Such an ADD needs the DROP, so it is gated with it: a script
     // without --allow-drop does not keep it and fail.
     let (after_drop_operators, new_operators): (Vec<_>, Vec<_>) =
-        difference(&r.operators, &d.operators)
-            .into_iter()
-            .partition(|o| {
-                dropped_operators.iter().any(|d| {
-                    d.arguments == o.arguments
-                        && (d.strategy == o.strategy
-                            || (d.name == o.name
-                                && d.order_by.is_some()
-                                    == o.order_by.is_some()))
-                })
-            });
+        difference(repo.0, db.0).into_iter().partition(|o| {
+            dropped_operators.iter().any(|d| {
+                d.arguments == o.arguments
+                    && (d.strategy == o.strategy
+                        || (d.name == o.name
+                            && d.order_by.is_some() == o.order_by.is_some()))
+            })
+        });
     let (after_drop_functions, new_functions): (Vec<_>, Vec<_>) =
-        difference(&r.functions, &d.functions)
-            .into_iter()
-            .partition(|f| {
-                dropped_functions
-                    .iter()
-                    .any(|d| d.support == f.support && d.types == f.types)
-            });
+        difference(repo.1, db.1).into_iter().partition(|f| {
+            dropped_functions
+                .iter()
+                .any(|d| d.support == f.support && d.types == f.types)
+        });
     if let Some(items) = members(&new_operators, &new_functions) {
         alters.push(Alter::new(format!(
             "ALTER OPERATOR FAMILY {family} ADD\n    {items};\n"
@@ -128,14 +207,31 @@ pub(super) fn operator_family(
             "ALTER OPERATOR FAMILY {family} ADD\n    {items};\n"
         )));
     }
-    push_comment(
-        &mut alters,
-        "OPERATOR FAMILY",
-        &family,
-        &repo.comment,
-        &db.comment,
-    );
-    Resolution::Statements(alters)
+    alters
+}
+
+/// The ALTER OPERATOR FAMILY ... DROP statement of these members, or
+/// None when there are none
+fn dropped_members(
+    family: &str,
+    operators: &[OperatorClassOperator],
+    functions: &[OperatorClassFunction],
+) -> Option<String> {
+    let items: Vec<String> = operators
+        .iter()
+        .map(|o| format!("OPERATOR {} ({})", o.strategy, types(&o.arguments)))
+        .chain(
+            functions.iter().map(|f| {
+                format!("FUNCTION {} ({})", f.support, types(&f.types))
+            }),
+        )
+        .collect();
+    (!items.is_empty()).then(|| {
+        format!(
+            "ALTER OPERATOR FAMILY {family} DROP\n    {};\n",
+            items.join(",\n    ")
+        )
+    })
 }
 
 fn types(types: &Option<Vec<String>>) -> String {
@@ -153,6 +249,21 @@ fn difference<T: Clone + PartialEq>(
         .filter(|item| !b.contains(item))
         .cloned()
         .collect()
+}
+
+/// The items of `a` that are not in `remove`
+fn without<T: Clone + PartialEq>(
+    a: &Option<Vec<T>>,
+    remove: Option<&[T]>,
+) -> Option<Vec<T>> {
+    let remove = remove.unwrap_or_default();
+    a.as_ref().map(|items| {
+        items
+            .iter()
+            .filter(|item| !remove.contains(item))
+            .cloned()
+            .collect()
+    })
 }
 
 /// The OPERATOR and FUNCTION items of ALTER OPERATOR FAMILY ... ADD,
@@ -335,20 +446,32 @@ fn family_key(class: &OperatorClass) -> ObjectKey {
     }
 }
 
+/// The key of a class, from the class
+fn class_key(class: &OperatorClass) -> ObjectKey {
+    ObjectKey::new(
+        ObjectType::OperatorClass,
+        &Definition::OperatorClass(class.clone()),
+    )
+}
+
 /// Align the database classes and families with the project before
-/// they compare:
+/// they compare, and return the [`Loose`] members of each project
+/// class:
 ///
 /// 1. A member that a project class gives, and that the database has
 ///    as a member of the family of the class only, moves from the
 ///    database family to the database class.
 /// 2. The family that PostgreSQL made for a project class with no
 ///    family (or that the class names) is not an object that only the
-///    database has when the project does not give it. Dropping it would
-///    drop the class too.
+///    database has when the project does not give it (an implied
+///    family). Dropping it would drop the class too. The members that
+///    stay in it after step 1, which no project class gives, move to
+///    the first project class that the database has in the family, so
+///    that the class drops them from the family.
 pub(crate) fn align(
     project: &Project,
     database: &mut BTreeMap<ObjectKey, Definition>,
-) {
+) -> Families {
     let classes: Vec<OperatorClass> = project
         .inventory
         .iter()
@@ -357,59 +480,138 @@ pub(crate) fn align(
             _ => None,
         })
         .collect();
-    for repo in &classes {
-        let key = ObjectKey::new(
-            ObjectType::OperatorClass,
-            &Definition::OperatorClass(repo.clone()),
-        );
-        let Some(Definition::OperatorClass(db)) = database.get(&key) else {
-            continue;
-        };
-        let mut db_class = canonical_class(db);
-        let Some(Definition::OperatorFamily(db_family)) =
-            database.get_mut(&family_key(&db_class))
-        else {
-            continue;
-        };
-        let mut family = canonical_family(db_family);
-        let moved_operators = shared(
-            &repo.operators,
-            &mut db_class.operators,
-            &mut family.operators,
-        );
-        let moved_functions = shared(
-            &repo.functions,
-            &mut db_class.functions,
-            &mut family.functions,
-        );
-        if !moved_operators && !moved_functions {
-            continue;
-        }
-        *db_family = family;
-        database.insert(key, Definition::OperatorClass(db_class));
-    }
-    let families: Vec<ObjectKey> = project
+    let given: Vec<ObjectKey> = project
         .inventory
         .iter()
         .filter(|item| item.desc == ObjectType::OperatorFamily)
         .map(|item| ObjectKey::new(item.desc, &item.definition))
         .collect();
+    let implied: Vec<ObjectKey> = classes
+        .iter()
+        .map(family_key)
+        .filter(|key| !given.contains(key))
+        .collect();
+    let mut families = Families::new();
     for repo in &classes {
-        let key = family_key(repo);
-        if !families.contains(&key) {
-            database.remove(&key);
+        let key = class_key(repo);
+        let Some(Definition::OperatorClass(db)) = database.get(&key) else {
+            continue;
+        };
+        let mut db_class = canonical_class(db);
+        let db_family_key = family_key(&db_class);
+        let Some(Definition::OperatorFamily(db_family)) =
+            database.get_mut(&db_family_key)
+        else {
+            continue;
+        };
+        let mut family = canonical_family(db_family);
+        let operators = shared(
+            &repo.operators,
+            &mut db_class.operators,
+            &mut family.operators,
+        );
+        let functions = shared(
+            &repo.functions,
+            &mut db_class.functions,
+            &mut family.functions,
+        );
+        if operators.is_empty() && functions.is_empty() {
+            continue;
         }
+        families.insert(
+            key.clone(),
+            Loose {
+                family: target(&family.schema, &family.name, &family.method),
+                kept: given.contains(&db_family_key)
+                    || implied.contains(&db_family_key),
+                operators,
+                functions,
+                ..Loose::default()
+            },
+        );
+        *db_family = family;
+        database.insert(key, Definition::OperatorClass(db_class));
     }
+    for implied_key in &implied {
+        let Some(Definition::OperatorFamily(family)) =
+            database.remove(implied_key)
+        else {
+            continue;
+        };
+        let Some(key) = classes.iter().map(class_key).find(|key| {
+            matches!(
+                database.get(key),
+                Some(Definition::OperatorClass(db))
+                    if family_key(&canonical_class(db)) == *implied_key
+            )
+        }) else {
+            continue;
+        };
+        let Some(Definition::OperatorClass(db)) = database.get_mut(&key)
+        else {
+            continue;
+        };
+        let mut class = canonical_class(db);
+        let extra_operators =
+            canonical_operators(&family.operators, Some(&class.data_type))
+                .unwrap_or_default();
+        let extra_functions = canonical_functions(
+            &family.functions,
+            &class.method,
+            Some(&class.data_type),
+        )
+        .unwrap_or_default();
+        if extra_operators.is_empty() && extra_functions.is_empty() {
+            continue;
+        }
+        class
+            .operators
+            .get_or_insert_with(Vec::new)
+            .extend(extra_operators.iter().cloned());
+        class
+            .functions
+            .get_or_insert_with(Vec::new)
+            .extend(extra_functions.iter().cloned());
+        *db = canonical_class(&class);
+        let loose = families.entry(key).or_insert_with(|| Loose {
+            family: target(&family.schema, &family.name, &family.method),
+            kept: true,
+            ..Loose::default()
+        });
+        loose.extra_operators = extra_operators;
+        loose.extra_functions = extra_functions;
+    }
+    families
+}
+
+/// The [`Loose`] members of the project classes: [`align`] on the
+/// classes and the families of the database, as the diff aligns them
+pub(crate) fn families(project: &Project, assembly: &Assembly) -> Families {
+    let classes = assembly
+        .operator_classes
+        .iter()
+        .map(|class| Definition::OperatorClass(class.clone()))
+        .map(|class| {
+            (ObjectKey::new(ObjectType::OperatorClass, &class), class)
+        });
+    let families = assembly
+        .operator_families
+        .iter()
+        .map(|family| Definition::OperatorFamily(family.clone()))
+        .map(|family| {
+            (ObjectKey::new(ObjectType::OperatorFamily, &family), family)
+        });
+    align(project, &mut classes.chain(families).collect())
 }
 
 /// Move each member of `wanted` that `class` does not have and `family`
-/// has from `family` to `class`; true when one moved
+/// has from `family` to `class`, and return the members that moved
 fn shared<T: Clone + PartialEq>(
     wanted: &Option<Vec<T>>,
     class: &mut Option<Vec<T>>,
     family: &mut Option<Vec<T>>,
-) -> bool {
-    let mut moved = false;
+) -> Vec<T> {
+    let mut moved = Vec::new();
     for member in wanted.iter().flatten() {
         let in_class = class.iter().flatten().any(|m| m == member);
         let Some(members) = family.as_mut() else {
@@ -423,7 +625,7 @@ fn shared<T: Clone + PartialEq>(
         }
         members.remove(index);
         class.get_or_insert_with(Vec::new).push(member.clone());
-        moved = true;
+        moved.push(member.clone());
     }
     if family.as_ref().is_some_and(Vec::is_empty) {
         *family = None;
@@ -567,7 +769,9 @@ mod tests {
             {"support": 1, "function": "btint4cmp(integer, integer)"},
             {"support": 2, "function": "btint4sortsupport(internal)"},
         ]));
-        let Resolution::Statements(alters) = operator_class(&repo, &db) else {
+        let Resolution::Statements(alters) =
+            operator_class(&repo, &db, &Families::new())
+        else {
             panic!("expected statements");
         };
         assert_eq!(
@@ -576,16 +780,26 @@ mod tests {
              (integer, integer) btint4sortsupport(internal);\n"
         );
         assert!(!alters[0].destructive);
-        // a member that only the database class has needs a rebuild
-        assert!(matches!(operator_class(&db, &repo), Resolution::Replace));
+        // a member that only the database class has needs a rebuild,
+        // which drops the class only if it exists
+        let Resolution::Rebuild { before, drop } =
+            operator_class(&db, &repo, &Families::new())
+        else {
+            panic!("expected a rebuild");
+        };
+        assert!(before.is_empty());
+        assert_eq!(
+            drop,
+            "DROP OPERATOR CLASS IF EXISTS test.c USING btree;\n"
+        );
         // as does another class definition
         let default = OperatorClass {
             default: Some(true),
             ..repo.clone()
         };
         assert!(matches!(
-            operator_class(&default, &repo),
-            Resolution::Replace
+            operator_class(&default, &repo, &Families::new()),
+            Resolution::Rebuild { .. }
         ));
         // the owner is compared on its own
         let owned = OperatorClass {
@@ -593,7 +807,7 @@ mod tests {
             ..repo.clone()
         };
         assert!(matches!(
-            operator_class(&owned, &repo),
+            operator_class(&owned, &repo, &Families::new()),
             Resolution::Statements(alters) if alters.is_empty()
         ));
     }
@@ -706,8 +920,6 @@ mod tests {
     fn project(items: Vec<(ObjectType, Definition)>) -> Project {
         Project {
             name: String::from("test"),
-            encoding: String::from("UTF8"),
-            stdstrings: true,
             superuser: String::from("postgres"),
             default_schema: String::from("public"),
             path: std::path::PathBuf::new(),
@@ -776,6 +988,265 @@ mod tests {
         // the family of the class is not in the project, so it is not
         // an object that only the database has
         assert!(!database.contains_key(&family_key));
+    }
+
+    /// A btree class for integer, with its sort support function in the
+    /// class, as a person writes it
+    fn int_class(name: &str, family: Option<&str>) -> OperatorClass {
+        class(json!({
+            "name": name, "schema": "test", "owner": "postgres",
+            "method": "btree", "data_type": "integer", "family": family,
+            "operators": [{"strategy": 1, "name": "<"}],
+            "functions": [
+                {"support": 1, "function": "btint4cmp(integer, integer)"},
+                {"support": 2, "function": "btint4sortsupport(internal)"},
+            ],
+        }))
+    }
+
+    /// The database as pg_dump gives an [`int_class`] in the family
+    /// `family_name`: the sort support function `sort_support` is in the
+    /// family, with the family operators `operators`
+    fn dumped(
+        repo: &OperatorClass,
+        family_name: &str,
+        sort_support: &str,
+        operators: serde_json::Value,
+    ) -> BTreeMap<ObjectKey, Definition> {
+        let db = Definition::OperatorClass(OperatorClass {
+            family: Some(format!("test.{family_name}")),
+            functions: Some(vec![OperatorClassFunction {
+                support: 1,
+                types: None,
+                function: String::from("btint4cmp(integer, integer)"),
+            }]),
+            ..repo.clone()
+        });
+        let db_family = Definition::OperatorFamily(family(json!({
+            "name": family_name, "schema": "test", "owner": "postgres",
+            "method": "btree", "operators": operators,
+            "functions": [{"support": 2, "types": ["integer", "integer"],
+                           "function": sort_support}],
+        })));
+        BTreeMap::from([
+            (ObjectKey::new(ObjectType::OperatorClass, &db), db),
+            (
+                ObjectKey::new(ObjectType::OperatorFamily, &db_family),
+                db_family,
+            ),
+        ])
+    }
+
+    fn statements(resolution: Resolution) -> Vec<(String, bool)> {
+        let Resolution::Statements(alters) = resolution else {
+            panic!("expected statements");
+        };
+        alters.into_iter().map(|a| (a.sql, a.destructive)).collect()
+    }
+
+    fn database_class<'a>(
+        database: &'a BTreeMap<ObjectKey, Definition>,
+        repo: &OperatorClass,
+    ) -> &'a OperatorClass {
+        match database.get(&class_key(repo)) {
+            Some(Definition::OperatorClass(db)) => db,
+            _ => panic!("the class is in the database"),
+        }
+    }
+
+    #[test]
+    fn an_implied_family_drops_the_members_that_no_class_gives() {
+        let repo = int_class("c", None);
+        let project = project(vec![(
+            ObjectType::OperatorClass,
+            Definition::OperatorClass(repo.clone()),
+        )]);
+        let mut database = dumped(
+            &repo,
+            "c",
+            "btint4sortsupport(internal)",
+            json!([{"strategy": 3, "name": "=",
+                    "arguments": ["integer", "bigint"]}]),
+        );
+        let families = align(&project, &mut database);
+        // the implied family is not an object that only the database has
+        assert_eq!(database.len(), 1);
+        let db = database_class(&database, &repo);
+        // the member that no class gives is not in the project class, so
+        // the class changes, and it drops the member from the family
+        assert_ne!(canonical_class(db), canonical_class(&repo));
+        assert_eq!(
+            statements(operator_class(&repo, db, &families)),
+            [(
+                String::from(
+                    "ALTER OPERATOR FAMILY test.c USING btree DROP\n    \
+                     OPERATOR 3 (integer, bigint);\n"
+                ),
+                true
+            )]
+        );
+        // a class change drops the members that the family keeps before
+        // the class is made again, as the create gives them again
+        let changed = OperatorClass {
+            default: Some(true),
+            ..repo.clone()
+        };
+        let Resolution::Rebuild { before, drop } =
+            operator_class(&changed, db, &families)
+        else {
+            panic!("expected a rebuild");
+        };
+        let before: Vec<(&str, bool)> = before
+            .iter()
+            .map(|a| (a.sql.as_str(), a.destructive))
+            .collect();
+        assert_eq!(
+            before,
+            [(
+                "ALTER OPERATOR FAMILY test.c USING btree DROP\n    \
+                 OPERATOR 3 (integer, bigint),\n    \
+                 FUNCTION 2 (integer, integer);\n",
+                true
+            )]
+        );
+        assert_eq!(
+            drop,
+            "DROP OPERATOR CLASS IF EXISTS test.c USING btree;\n"
+        );
+    }
+
+    #[test]
+    fn an_add_in_the_slot_of_an_implied_family_member_is_gated() {
+        let repo = int_class("c", None);
+        let project = project(vec![(
+            ObjectType::OperatorClass,
+            Definition::OperatorClass(repo.clone()),
+        )]);
+        // the database has another sort support function in the family
+        let mut database = dumped(
+            &repo,
+            "c",
+            "btint8sortsupport(internal)",
+            serde_json::Value::Null,
+        );
+        let families = align(&project, &mut database);
+        let db = database_class(&database, &repo);
+        // PostgreSQL refuses the ADD while the other function is there
+        assert_eq!(
+            statements(operator_class(&repo, db, &families)),
+            [
+                (
+                    String::from(
+                        "ALTER OPERATOR FAMILY test.c USING btree DROP\n    \
+                         FUNCTION 2 (integer, integer);\n"
+                    ),
+                    true
+                ),
+                (
+                    String::from(
+                        "ALTER OPERATOR FAMILY test.c USING btree ADD\n    \
+                         FUNCTION 2 (integer, integer) \
+                         btint4sortsupport(internal);\n"
+                    ),
+                    true
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_shared_implied_family_drops_each_member_once() {
+        let first = int_class("c", None);
+        let second = class(json!({
+            "name": "c8", "schema": "test", "owner": "postgres",
+            "method": "btree", "data_type": "bigint", "family": "test.c",
+            "operators": [{"strategy": 1, "name": "<"}],
+            "functions": [{"support": 1,
+                           "function": "btint8cmp(bigint, bigint)"}],
+        }));
+        let project = project(vec![
+            (
+                ObjectType::OperatorClass,
+                Definition::OperatorClass(first.clone()),
+            ),
+            (
+                ObjectType::OperatorClass,
+                Definition::OperatorClass(second.clone()),
+            ),
+        ]);
+        let mut database = dumped(
+            &first,
+            "c",
+            "btint4sortsupport(internal)",
+            json!([{"strategy": 3, "name": "=",
+                    "arguments": ["integer", "bigint"]}]),
+        );
+        database.insert(
+            class_key(&second),
+            Definition::OperatorClass(second.clone()),
+        );
+        let families = align(&project, &mut database);
+        // the first class in the family drops the member
+        let extras: Vec<&ObjectKey> = families
+            .iter()
+            .filter(|(_, loose)| !loose.extra_operators.is_empty())
+            .map(|(key, _)| key)
+            .collect();
+        assert_eq!(extras, [&class_key(&first)]);
+        assert!(matches!(
+            operator_class(
+                &second,
+                database_class(&database, &second),
+                &families
+            ),
+            Resolution::Statements(alters) if alters.is_empty()
+        ));
+    }
+
+    #[test]
+    fn a_class_that_leaves_a_dropped_family_drops_no_members() {
+        // the class moves to a family of the project, and its old family
+        // is only in the database: the plan drops that family first, and
+        // the class and its members with it
+        let repo = int_class("c", Some("test.new_family"));
+        let new_family = family(json!({
+            "name": "new_family", "schema": "test", "owner": "postgres",
+            "method": "btree",
+        }));
+        let project = project(vec![
+            (
+                ObjectType::OperatorFamily,
+                Definition::OperatorFamily(new_family),
+            ),
+            (
+                ObjectType::OperatorClass,
+                Definition::OperatorClass(repo.clone()),
+            ),
+        ]);
+        let mut database = dumped(
+            &repo,
+            "old_family",
+            "btint4sortsupport(internal)",
+            serde_json::Value::Null,
+        );
+        let families = align(&project, &mut database);
+        assert!(!families[&class_key(&repo)].kept);
+        let old_family = ObjectKey {
+            desc: ObjectType::OperatorFamily,
+            schema: String::from("test"),
+            name: String::from("old_family USING btree"),
+        };
+        assert!(database.contains_key(&old_family));
+        let Resolution::Rebuild { before, drop } =
+            operator_class(&repo, database_class(&database, &repo), &families)
+        else {
+            panic!("expected a rebuild");
+        };
+        assert!(before.is_empty());
+        assert_eq!(
+            drop,
+            "DROP OPERATOR CLASS IF EXISTS test.c USING btree;\n"
+        );
     }
 
     #[test]

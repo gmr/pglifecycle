@@ -180,7 +180,21 @@
 //!     comma, and an empty list for each setting of a routine, a role
 //!     or a user, which rendered a SET with no value. No test-project
 //!     role or user has a setting.
-//! 38. A column default or a CHECK constraint that calls a function
+//! 38. A role, a user or a group has no owner in its entry. The Python
+//!     gave it the superuser, and pg_restore cannot set the owner of
+//!     these types, so each restore that applies owners, which is the
+//!     default, failed with `don't know how to set owner for object
+//!     type "ROLE"` (or `"USER"`, or `"GROUP"`). pg_dump writes no
+//!     entry of these types, and it writes no owner for an object that
+//!     has no owner.
+//! 39. The ENCODING entry is always `SET client_encoding = 'UTF8'`.
+//!     The Python wrote the `encoding` of the project, but the text of
+//!     the archive is always UTF-8, so pg_restore read the text of a
+//!     project with `encoding: LATIN1` as LATIN1, and each character
+//!     that is not ASCII changed. The project refuses an `encoding`
+//!     that is not UTF8, and a `stdstrings` of `false`, which the build
+//!     cannot honor. The test-project has `encoding: UTF-8`.
+//! 40. A column default or a CHECK constraint that calls a function
 //!     that needs the table renders as its own entry after the
 //!     function, as pg_dump writes it (`repairTableAttrDefMultiLoop`
 //!     and `repairTableConstraintMultiLoop` in pg_dump_sort.c): a
@@ -192,7 +206,7 @@
 //!     table, so the Python's inline form failed in every order. A
 //!     table also comes after each function that its CREATE TABLE
 //!     calls. No test-project default or check calls a function.
-//! 39. An object comes after these objects, which its definition
+//! 41. An object comes after these objects, which its definition
 //!     names and which the Python did not order: the table, view or
 //!     materialized view of a column's row type; the functions of an
 //!     operator; and, for a function field of an aggregate, a cast, a
@@ -252,7 +266,8 @@ pub struct BuildOutput {
 /// Render the project into an in-memory archive (everything `build`
 /// does except saving it)
 pub fn assemble(project: &Project) -> Result<BuildOutput, String> {
-    let dump = libpgdump::new(&project.name, &project.encoding, "18.0")
+    // the text of the project is UTF-8 (deviation 39)
+    let dump = libpgdump::new(&project.name, "UTF8", "18.0")
         .map_err(|e| e.to_string())?;
     let mut builder = Builder {
         dump,
@@ -370,7 +385,7 @@ struct Builder {
     partition_ids: HashMap<(String, String), i32>,
     superuser: String,
     /// The functions that the defaults and checks of each table call,
-    /// by the table's inventory id (deviation 38). Shared, so that a
+    /// by the table's inventory id (deviation 40). Shared, so that a
     /// method can read them while it adds entries
     calls: Rc<HashMap<usize, calls::TableCalls>>,
 }
@@ -590,7 +605,7 @@ impl Builder {
     /// Emit the standalone `DEFAULT` entries: the
     /// `SET DEFAULT nextval(...)` ones held out of their `CREATE TABLE`
     /// by [`sequence_backed_default`], the ones that call a function
-    /// that needs the table (deviation 38), and the inherited-column
+    /// that needs the table (deviation 40), and the inherited-column
     /// defaults in `column_defaults`, which no `CREATE TABLE` form can
     /// carry inline. Each depends on its table, on the referenced
     /// sequence when there is one, and on the functions of the project
@@ -699,7 +714,7 @@ impl Builder {
     /// Order each table after the functions that its CREATE TABLE calls
     /// in a default or a check, as pg_dump orders it, and each CHECK
     /// CONSTRAINT entry after the functions that its check calls
-    /// (deviation 38). The DEFAULT entries get their functions in
+    /// (deviation 40). The DEFAULT entries get their functions in
     /// [`Builder::split_column_defaults`]. The entries of the functions
     /// are all known only after each item has its entries.
     fn apply_calls(&mut self, project: &Project) {
@@ -1490,7 +1505,8 @@ impl Builder {
             push_bool_option(&mut create, "SUPERUSER", options.superuser);
         }
         let drop = vec!["DROP GROUP IF EXISTS".into(), quote_ident(&d.name)];
-        self.add_item(item, create, drop, false)
+        // pg_restore cannot set the owner of a group (deviation 38)
+        self.add_item(item, create, drop, true)
     }
 
     fn dump_language(&mut self, item: &Item) -> Result<(), String> {
@@ -1783,7 +1799,9 @@ impl Builder {
         } else {
             vec!["DROP ROLE IF EXISTS".into(), quote_ident(&d.name)]
         };
-        self.add_item(item, create, drop, false)?;
+        // a role has no owner, and pg_restore fails on an owner that
+        // it cannot set (deviation 38)
+        self.add_item(item, create, drop, true)?;
         self.dump_role_settings(item, "ROLE", &d.name, d.settings.as_deref())
     }
 
@@ -2403,7 +2421,7 @@ impl Builder {
     /// refused on a table that has children.
     ///
     /// A CHECK constraint that calls a function that needs the table is
-    /// its own entry too (deviation 38). `assemble` makes it wait for
+    /// its own entry too (deviation 40). `assemble` makes it wait for
     /// the functions that it calls, once each function has its entry.
     fn dump_separate_constraint(
         &mut self,
@@ -3263,7 +3281,8 @@ impl Builder {
         } else {
             vec!["DROP USER IF EXISTS".into(), quote_ident(&d.name)]
         };
-        self.add_item(item, create, drop, false)?;
+        // pg_restore cannot set the owner of a user (deviation 38)
+        self.add_item(item, create, drop, true)?;
         self.dump_role_settings(item, "USER", &d.name, d.settings.as_deref())
     }
 
@@ -3474,7 +3493,7 @@ fn sequence_backed_default(column: &Column) -> Option<&str> {
 }
 
 /// Whether CREATE TABLE leaves out the default of `column`, because a
-/// function that it calls needs the table (deviation 38)
+/// function that it calls needs the table (deviation 40)
 fn separate_default(
     calls: Option<&calls::TableCalls>,
     column: &Column,
@@ -4131,7 +4150,7 @@ fn push_table_constraints(
             inner.push(render_not_null_constraint(not_null));
         }
     }
-    // and one that calls a function that needs the table (deviation 38)
+    // and one that calls a function that needs the table (deviation 40)
     for check in table.check_constraints.as_deref().unwrap_or_default() {
         if check.not_valid != Some(true)
             && !separate_checks.contains(&check.name)
@@ -5231,8 +5250,6 @@ mod tests {
         }]);
         let project = Project {
             name: String::from("t"),
-            encoding: String::from("UTF8"),
-            stdstrings: true,
             superuser: String::from("postgres"),
             default_schema: String::from("public"),
             path: std::path::PathBuf::new(),
@@ -5990,8 +6007,6 @@ mod tests {
         };
         let project = Project {
             name: "t".into(),
-            encoding: "UTF-8".into(),
-            stdstrings: true,
             superuser: "postgres".into(),
             default_schema: "public".into(),
             path: PathBuf::new(),
@@ -6127,8 +6142,6 @@ mod tests {
     fn text_search_project(inventory: Vec<Item>) -> Project {
         Project {
             name: "t".into(),
-            encoding: "UTF8".into(),
-            stdstrings: true,
             superuser: "postgres".into(),
             default_schema: "public".into(),
             path: std::path::PathBuf::new(),

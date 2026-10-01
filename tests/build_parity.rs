@@ -139,10 +139,17 @@ const CORRECTED_DROPS: &[(&str, &str, &str, &str)] = &[
     ),
 ];
 
+/// Deviation 38: pg_restore cannot set the owner of a role, a user or
+/// a group, so these entries have no owner. Python gave them the
+/// superuser. They are compared exactly, with no owner.
+const OWNERLESS: &[(&str, &str, &str)] =
+    &[("GROUP", "", "developers"), ("USER", "", "fwd_user")];
+
 /// (desc, namespace, tag, required defn fragment) for the corrected
 /// Rust entries replacing the deviations above
 const CORRECTED: &[(&str, &str, &str, &str)] = &[
-    ("ENCODING", "", "", "SET client_encoding = 'UTF-8';\n"),
+    // deviation 39: the text is UTF-8, whatever the project says
+    ("ENCODING", "", "", "SET client_encoding = 'UTF8';\n"),
     (
         "STDSTRINGS",
         "",
@@ -422,7 +429,7 @@ fn outside_items() -> Vec<Item> {
                 .unwrap(),
             ),
         ),
-        // deviation 38: a default and a check that call a function
+        // deviation 40: a default and a check that call a function
         // that reads the table
         item(
             7,
@@ -555,7 +562,7 @@ const OUTSIDE_CORRECTED: &[(&str, &str, &str, &str, &str)] = &[
          = 'pg_catalog', 'pg_temp' AS $$\nSELECT 1;\n$$;\n",
         "DROP PROCEDURE test.definer_proc();\n",
     ),
-    // deviation 38: the default and the check that call a function
+    // deviation 40: the default and the check that call a function
     // that reads the table are their own entries, as pg_dump writes
     // them. The Python wrote them in CREATE TABLE, which failed,
     // because the function comes after the table. The check that calls
@@ -635,13 +642,22 @@ fn matches_python_build_output() {
         .unwrap()
         .iter()
         .map(|py| {
+            let key = entry_key(
+                py["desc"].as_str().unwrap(),
+                py["namespace"].as_str().unwrap(),
+                py["tag"].as_str().unwrap(),
+            );
+            // deviation 38: no owner for a role, a user or a group
+            let owner =
+                if OWNERLESS.iter().any(|(d, n, t)| entry_key(d, n, t) == key)
+                {
+                    String::new()
+                } else {
+                    py["owner"].as_str().unwrap().to_string()
+                };
             (
-                entry_key(
-                    py["desc"].as_str().unwrap(),
-                    py["namespace"].as_str().unwrap(),
-                    py["tag"].as_str().unwrap(),
-                ),
-                py["owner"].as_str().unwrap().to_string(),
+                key,
+                owner,
                 py["defn"].as_str().unwrap().to_string(),
                 // deviation 18: Python stored a bare ";" for an entry
                 // with nothing to drop, which made pg_restore attempt
@@ -700,6 +716,17 @@ fn matches_python_build_output() {
             !drop.contains("IF EXISTS"),
             "{key:?} drop statement still carries IF EXISTS"
         );
+    }
+
+    // deviation 38: pg_restore fails on the owner of a role, a user or
+    // a group, so their entries have none
+    for (desc, namespace, tag) in OWNERLESS {
+        let key = entry_key(desc, namespace, tag);
+        let (_, owner, ..) = rust_tuples
+            .iter()
+            .find(|(k, ..)| k == &key)
+            .unwrap_or_else(|| panic!("missing entry {key:?}"));
+        assert_eq!(owner, "", "{key:?} has an owner");
     }
 
     // deviation 18: an entry with nothing to drop stores nothing
@@ -792,8 +819,6 @@ fn matches_python_build_output() {
 fn corrects_objects_outside_the_test_project() {
     let project = project::Project {
         name: "outside".into(),
-        encoding: "UTF8".into(),
-        stdstrings: true,
         superuser: "postgres".into(),
         default_schema: "public".into(),
         path: std::path::PathBuf::new(),
@@ -818,7 +843,7 @@ fn corrects_objects_outside_the_test_project() {
             "{desc} {tag} drop"
         );
     }
-    // deviation 38: the separate default and check come after the
+    // deviation 40: the separate default and check come after the
     // function, and the function after the table
     let id = |desc: &str, tag: &str| {
         output
@@ -903,7 +928,7 @@ fn records_inventory_dependency_edges() {
     // table it references: FK CONSTRAINT is a post-data desc, so it
     // already sorts after every table.
     //
-    // Deviation 39: the conversion and the event trigger wait for the
+    // Deviation 41: the conversion and the event trigger wait for the
     // function that they call. Each names its function without the
     // argument types, and test-project names the function with them,
     // so the name found no function before.

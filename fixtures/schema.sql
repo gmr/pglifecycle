@@ -526,7 +526,7 @@ $$;
 -- language uses only `plcopy_validator(oid)`, and pg_dump orders it
 -- after that overload only. An edge to each overload of the bare
 -- validator name makes a dependency loop with the other overload
--- (build deviation 39).
+-- (build deviation 41).
 CREATE FUNCTION test.plcopy_validator(n INTEGER) RETURNS INTEGER
     LANGUAGE plcopy AS $$
 BEGIN
@@ -773,7 +773,7 @@ CREATE FUNCTION test.a_reads_view() RETURNS INTEGER LANGUAGE sql
 -- table, so pg_dump makes the table without them, then the function,
 -- then the default (TOC entry "DEFAULT") and the check (TOC entry
 -- "CHECK CONSTRAINT") as their own entries. The build does the same
--- (build deviation 38).
+-- (build deviation 40).
 CREATE TABLE test.tickets (id INTEGER NOT NULL, n INTEGER);
 CREATE FUNCTION test.next_ticket() RETURNS INTEGER LANGUAGE sql
     RETURN (SELECT COALESCE(max(n), 0) + 1 FROM test.tickets);
@@ -788,7 +788,7 @@ COMMENT ON CONSTRAINT quotas_n_check ON test.quotas IS 'Within the quota';
 -- A column whose type is the row type of another table. Name order
 -- puts `a_segments` before `z_points`, and tables share one priority,
 -- so the table of the row type has to be ordered first (build
--- deviation 39).
+-- deviation 41).
 CREATE TABLE test.z_points (x INTEGER, y INTEGER);
 CREATE TABLE test.a_segments (
     id       INTEGER,

@@ -177,16 +177,6 @@ impl Writer {
             String::from("name"),
             Value::String(assembly.dbname.clone()),
         );
-        if let Some(encoding) = &assembly.encoding {
-            project.insert(
-                String::from("encoding"),
-                Value::String(encoding.clone()),
-            );
-        }
-        if let Some(stdstrings) = assembly.stdstrings {
-            project
-                .insert(String::from("stdstrings"), Value::Bool(stdstrings));
-        }
         if !assembly.extensions.is_empty() {
             project.insert(
                 String::from("extensions"),
