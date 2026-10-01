@@ -163,6 +163,10 @@ reconciled in place where PostgreSQL can express it:
   database has it.
 - **Functions and views** — `CREATE OR REPLACE` (a function whose
   return type changed must be dropped first, so it falls back). A
+  function is matched by its name and its input parameters. A type
+  alias or a type modifier in a parameter or the return type is not a
+  change, as PostgreSQL keeps no typmod there (see
+  [Project format](project-format.md)). A
   view's rules are reconciled after it. A `sql_body` is compared as
   text with the form PostgreSQL keeps, so write it as `pull` writes
   it (see [Project format](project-format.md)).
