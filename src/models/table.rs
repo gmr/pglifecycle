@@ -57,6 +57,22 @@ fn canonical_collation(collation: &mut Option<String>) {
     }
 }
 
+/// An expression with the type of each cast in the form that
+/// PostgreSQL writes (see [`crate::deploy::canonical_casts`])
+fn canonical_expression(expression: &mut Option<String>) {
+    if let Some(text) = expression {
+        *text = crate::deploy::canonical_casts(text);
+    }
+}
+
+/// A column default with the type of each cast in the form that
+/// PostgreSQL writes. A default that is not a string has no cast.
+fn canonical_default(default: &mut Option<Value>) {
+    if let Some(Value::String(text)) = default {
+        *text = crate::deploy::canonical_casts(text);
+    }
+}
+
 /// Represents a table
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -206,12 +222,14 @@ impl Table {
     /// writes, and the two have to compare equal. A value that
     /// PostgreSQL keeps in another form than the project can write it
     /// (a storage parameter, a collation, the type of a cast in an index
-    /// or an exclusion constraint expression) is in the form that
-    /// PostgreSQL reads.
+    /// or an exclusion constraint expression, in a WHERE clause, a CHECK
+    /// constraint or a default) is in the form that PostgreSQL reads.
     pub fn canonical(&self) -> Table {
         let mut table = self.with_canonical_not_nulls();
         for column in table.columns.iter_mut().flatten() {
             canonical_collation(&mut column.collation);
+            canonical_default(&mut column.default);
+            canonical_expression(&mut column.check_constraint);
             if let Some(options) = column
                 .generated
                 .as_mut()
@@ -228,6 +246,13 @@ impl Table {
         }
         for check in table.check_constraints.iter_mut().flatten() {
             check.not_valid = true_only(check.not_valid);
+            check.expression =
+                crate::deploy::canonical_casts(&check.expression);
+        }
+        for column_default in table.column_defaults.iter_mut().flatten() {
+            if let Value::String(text) = &mut column_default.default {
+                *text = crate::deploy::canonical_casts(text);
+            }
         }
         for not_null in table.not_null_constraints.iter_mut().flatten() {
             not_null.not_valid = true_only(not_null.not_valid);
@@ -252,6 +277,7 @@ impl Table {
         // pg_dump always writes the method, and btree is the default
         for exclude in table.exclude_constraints.iter_mut().flatten() {
             exclude.method.get_or_insert_with(|| String::from("btree"));
+            canonical_expression(&mut exclude.where_clause);
             for element in &mut exclude.elements {
                 canonical_collation(&mut element.collation);
                 if let Some(expression) = &mut element.expression {
@@ -648,10 +674,11 @@ pub struct Index {
 impl Index {
     /// The same index in the form deploy compares: the storage
     /// parameters and the collations in the form that PostgreSQL
-    /// reads, and the type of each cast in an expression in the form
-    /// that PostgreSQL writes
+    /// reads, and the type of each cast in an expression and in the
+    /// WHERE clause in the form that PostgreSQL writes
     pub fn canonical(&self) -> Index {
         let mut index = self.clone();
+        canonical_expression(&mut index.where_clause);
         index.storage_parameters =
             canonical_storage_parameters(index.storage_parameters.take());
         for column in index.columns.iter_mut().flatten() {
@@ -1156,6 +1183,95 @@ mod tests {
         assert_ne!(
             table("(label)::varchar(30)"),
             table("(label)::character varying(20)")
+        );
+    }
+
+    /// The type of a cast in a WHERE clause, a CHECK constraint or a
+    /// default compares in the form that PostgreSQL writes:
+    /// pg_get_expr writes `CHECK (((price)::numeric(10,2) > 0))` and
+    /// `DEFAULT 'x'::character varying` with the type in the
+    /// format_type form
+    #[test]
+    fn expression_cast_types_compare_in_standard_form() {
+        let canonical =
+            |value: serde_json::Value| with_fields(value).canonical();
+        let check = |expression: &str| {
+            canonical(serde_json::json!({
+                "check_constraints": [
+                    {"name": "c", "expression": expression},
+                ],
+            }))
+        };
+        assert_eq!(
+            check("((label)::DECIMAL(10, 2) > (0)::NUMERIC)"),
+            check("((label)::numeric(10,2) > (0)::numeric)")
+        );
+        assert_ne!(
+            check("((label)::INT8 > 0)"),
+            check("((label)::integer > 0)")
+        );
+        let default = |default: serde_json::Value| {
+            canonical(serde_json::json!({
+                "columns": [
+                    {"name": "label", "data_type": "text", "default": default},
+                ],
+            }))
+        };
+        assert_eq!(
+            default("'x'::VARCHAR".into()),
+            default("'x'::character varying".into())
+        );
+        assert_eq!(default("'x::int4'".into()), default("'x::int4'".into()));
+        assert_ne!(
+            default("'x::int4'".into()),
+            default("'x::integer'".into())
+        );
+        assert_ne!(
+            default("'x'::text".into()),
+            default("'x'::character varying".into())
+        );
+        // a default that is not a string has no cast
+        assert_eq!(default(3.into()), default(3.into()));
+        let inherited = |default: &str| {
+            canonical(serde_json::json!({
+                "column_defaults": [{"column": "label", "default": default}],
+            }))
+        };
+        assert_eq!(inherited("(4)::INT8"), inherited("(4)::bigint"));
+        let index_where = |clause: &str| {
+            canonical(serde_json::json!({
+                "indexes": [{
+                    "name": "i", "columns": [{"name": "label"}],
+                    "where": clause,
+                }],
+            }))
+        };
+        assert_eq!(
+            index_where("((label)::INT4 > 0)"),
+            index_where("((label)::integer > 0)")
+        );
+        assert_ne!(
+            index_where("((label)::INT8 > 0)"),
+            index_where("((label)::integer > 0)")
+        );
+        let exclude_where = |clause: &str| {
+            canonical(serde_json::json!({
+                "exclude_constraints": [{
+                    "name": "x",
+                    "elements": [{"name": "label", "operator": "="}],
+                    "where": clause,
+                }],
+            }))
+        };
+        assert_eq!(
+            exclude_where("((label)::FLOAT8 > (0)::FLOAT8)"),
+            exclude_where(
+                "((label)::double precision > (0)::double precision)"
+            )
+        );
+        assert_ne!(
+            exclude_where("((label)::REAL > 0)"),
+            exclude_where("((label)::double precision > 0)")
         );
     }
 

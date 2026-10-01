@@ -31,7 +31,8 @@ use serde_json::{Map, Value};
 
 use crate::build;
 use crate::deploy::diff::{
-    canonical_collation, canonical_type, identity_type, return_type,
+    canonical_collation, canonical_domain, canonical_type, identity_type,
+    return_type,
 };
 use crate::models::{
     CheckConstraint, Column, ColumnDefault, ColumnGenerated, ColumnNotNull,
@@ -1769,8 +1770,10 @@ fn sequence(repo: &Sequence, db: &Sequence) -> Resolution {
 
 /// Domain reconciliation: SET/DROP DEFAULT and a comment delta in
 /// place. A base-type, collation, or constraint change rebuilds (the
-/// domain's constraints are not all individually named).
+/// domain's constraints are not all individually named). The two sides
+/// compare in the form of [`canonical_domain`].
 fn domain(repo: &Domain, db: &Domain) -> Resolution {
+    let (repo, db) = (&canonical_domain(repo), &canonical_domain(db));
     let data_type_changed = match (&repo.data_type, &db.data_type) {
         (Some(r), Some(d)) => canonical_type(r) != canonical_type(d),
         (r, d) => r != d,
@@ -3234,6 +3237,37 @@ mod tests {
         let mut retyped = db.clone();
         retyped.data_type = Some("citext".into());
         assert!(matches!(domain(&retyped, &db), Resolution::Replace));
+    }
+
+    /// The type of a cast in a domain default or CHECK constraint
+    /// compares in the form that PostgreSQL writes, so only a real
+    /// change of the default is set, in place
+    #[test]
+    fn domain_cast_types_compare_in_standard_form() {
+        let db: Domain = serde_json::from_value(serde_json::json!({
+            "name": "d", "schema": "test", "owner": "postgres",
+            "data_type": "integer", "default": "(1)::smallint",
+            "check_constraints": [
+                {"name": "d_check", "expression": "((VALUE)::bigint > 0)"},
+            ],
+        }))
+        .unwrap();
+        let mut repo = db.clone();
+        repo.default = Some("(1)::INT2".into());
+        repo.check_constraints.as_mut().unwrap()[0].expression =
+            Some("((VALUE)::INT8 > 0)".into());
+        assert!(matches!(
+            domain(&repo, &db),
+            Resolution::Statements(ref alters) if alters.is_empty()
+        ));
+        repo.default = Some("(2)::INT2".into());
+        assert_eq!(
+            sql(&statements(domain(&repo, &db))),
+            vec!["ALTER DOMAIN test.d SET DEFAULT (2)::smallint;\n"]
+        );
+        repo.check_constraints.as_mut().unwrap()[0].expression =
+            Some("((VALUE)::INT4 > 0)".into());
+        assert!(matches!(domain(&repo, &db), Resolution::Replace));
     }
 
     #[test]
