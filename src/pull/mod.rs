@@ -253,15 +253,12 @@ fn count_grid(counts: &[(&'static str, usize)]) -> String {
 }
 
 /// The connection the dump is read from, for the startup banner: the
-/// dump file when replaying one, otherwise `dbname@host` (or just the
-/// host when no database name was given)
+/// dump file when replaying one, otherwise the label of the connection
+/// (see [`pgdump::label`]), which has no password
 fn source_label(args: &cli::Pull) -> String {
-    if let Some(dump) = &args.dump {
-        return dump.display().to_string();
-    }
-    match &args.connection.dbname {
-        Some(dbname) => format!("{dbname}@{}", args.connection.host),
-        None => args.connection.host.clone(),
+    match &args.dump {
+        Some(dump) => dump.display().to_string(),
+        None => pgdump::label(&args.connection),
     }
 }
 

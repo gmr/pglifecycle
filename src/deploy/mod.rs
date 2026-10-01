@@ -1067,16 +1067,12 @@ fn owner_sql(entry: &libpgdump::Entry) -> Option<String> {
     Some(format!("ALTER {object} OWNER TO {};\n", quote_ident(owner)))
 }
 
-/// Human-readable comparison source for the header and logs
+/// Human-readable comparison source for the header and logs. The
+/// label of a connection has no password (see [`pgdump::label`]).
 fn source_label(args: &cli::Deploy) -> String {
     match &args.dump {
         Some(path) => format!("dump {}", path.display()),
-        None => format!(
-            "{}:{}/{}",
-            args.connection.host,
-            args.connection.port,
-            args.connection.dbname.as_deref().unwrap_or_default()
-        ),
+        None => pgdump::label(&args.connection),
     }
 }
 

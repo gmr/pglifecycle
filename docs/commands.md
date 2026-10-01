@@ -596,6 +596,14 @@ variables:
 | `-W, --password` | Prompt for a password up front |
 | `--role NAME` | Role to assume when connecting |
 
+`--dbname` can also be a connection string (`host=db dbname=app`) or a
+URI (`postgresql://user@db:5432/app`). Its values have priority over
+`--host`, `--port`, `--username` and the environment, for `pg_dump`,
+`pg_dumpall` and `psql`. The banner, the logs and the `-- source:`
+header of the deploy script show the connection as `dbname@host:port`,
+without the password. When pglifecycle cannot read the connection
+string, they show `(unreadable connection string)`.
+
 pglifecycle does its own password prompting rather than letting
 `pg_dump`, `pg_dumpall`, and `psql` prompt: they write the prompt to
 `/dev/tty`, where the progress bar overwrites it, and the command then
