@@ -31,7 +31,7 @@ pub fn dump(
     ddl: &DumpDdl,
     path: &Path,
 ) -> Result<(), String> {
-    execute("pg_dump", dump_args(conn, ddl, path), conn)
+    execute("pg_dump", dump_args(conn, ddl, path), Vec::new(), conn)
 }
 
 /// The pg_dump arguments for [`dump`]. `-E UTF8` makes the archive
@@ -93,11 +93,30 @@ fn run_dump_roles(
     tablespaces: bool,
 ) -> Result<(), String> {
     let args = dump_roles_args(conn, path, include_passwords, tablespaces);
-    execute("pg_dumpall", args, conn)
+    execute("pg_dumpall", args, dump_roles_env(conn), conn)
+}
+
+/// Whether pg_dumpall gets the connection string of `--dbname`. Its
+/// `--dbname` is only a connection string, thus a plain database name
+/// is not given: the roles are the same in each database.
+fn roles_connection_string(conn: &cli::Connection) -> Option<&str> {
+    conn.dbname
+        .as_deref()
+        .filter(|dbname| is_connection_string(dbname))
 }
 
 /// The pg_dumpall arguments for [`run_dump_roles`]. `-E UTF8` makes the
 /// SQL UTF8, the encoding that pull reads it in.
+///
+/// pg_dumpall gives `-h`, `-p` and `-U` priority over the values of
+/// its connection string, but pg_dump and psql give the connection
+/// string priority. Thus with a connection string, pg_dumpall does not
+/// get these flags. In `keyword=value` form, their values go in front
+/// of the connection string, because a keyword that occurs again
+/// replaces the value. Thus the connection string has priority over
+/// them, and they have priority over a service, as in pg_dump. A URI
+/// cannot have other keywords in front, thus [`dump_roles_env`] gives
+/// the values in the environment.
 fn dump_roles_args(
     conn: &cli::Connection,
     path: &Path,
@@ -105,6 +124,14 @@ fn dump_roles_args(
     tablespaces: bool,
 ) -> Vec<OsString> {
     let mut args = connection_args(conn);
+    if let Some(connection) = roles_connection_string(conn) {
+        args = without_server_flags(args);
+        args.push("-d".into());
+        args.push(match is_uri(connection) {
+            true => connection.into(),
+            false => format!("{} {connection}", server_keywords(conn)).into(),
+        });
+    }
     args.push("-f".into());
     args.push(path.into());
     args.push("-g".into());
@@ -116,6 +143,51 @@ fn dump_roles_args(
         args.push("--no-role-passwords".into());
     }
     args
+}
+
+/// The environment of pg_dumpall for a URI: the values of `-h`, `-p`
+/// and `-U` that [`dump_roles_args`] does not give
+fn dump_roles_env(conn: &cli::Connection) -> Vec<(&'static str, OsString)> {
+    if !roles_connection_string(conn).is_some_and(is_uri) {
+        return Vec::new();
+    }
+    let mut env = vec![
+        ("PGHOST", OsString::from(&conn.host)),
+        ("PGPORT", OsString::from(conn.port.to_string())),
+    ];
+    if let Some(username) = &conn.username {
+        env.push(("PGUSER", OsString::from(username)));
+    }
+    env
+}
+
+/// The values of `-h`, `-p` and `-U` as `keyword='value'` pairs
+fn server_keywords(conn: &cli::Connection) -> String {
+    let quote = |value: &str| {
+        format!("'{}'", value.replace('\\', "\\\\").replace('\'', "\\'"))
+    };
+    let mut pairs = vec![
+        format!("host={}", quote(&conn.host)),
+        format!("port={}", quote(&conn.port.to_string())),
+    ];
+    if let Some(username) = &conn.username {
+        pairs.push(format!("user={}", quote(username)));
+    }
+    pairs.join(" ")
+}
+
+/// `args` without the `-h`, `-p` and `-U` flags and their values
+fn without_server_flags(args: Vec<OsString>) -> Vec<OsString> {
+    let mut kept = Vec::new();
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        if ["-h", "-p", "-U"].iter().any(|flag| arg == *flag) {
+            args.next();
+        } else {
+            kept.push(arg);
+        }
+    }
+    kept
 }
 
 /// Whether a failed password-included roles dump should be retried
@@ -143,7 +215,7 @@ pub fn apply(conn: &cli::Connection, script: &Path) -> Result<(), String> {
     args.push("ON_ERROR_STOP=1".into());
     args.push("-f".into());
     args.push(script.into());
-    let output = run("psql", &args, conn, None)?;
+    let output = run("psql", &args, &[], conn)?;
     if !output.status.success() {
         return Err(stderr_of(&output));
     }
@@ -207,12 +279,12 @@ fn connection_args(conn: &cli::Connection) -> Vec<OsString> {
 /// supplied" failure triggers a prompt and one retry. Prompting is
 /// pglifecycle's own (bars suspended, echo off), so it cannot be
 /// erased by a redrawing spinner the way the tools' own /dev/tty
-/// prompt is. `options`, when given, is the PGOPTIONS of the tool.
+/// prompt is. `env` is more environment of the tool.
 fn run(
     program: &str,
     args: &[OsString],
+    env: &[(&str, OsString)],
     conn: &cli::Connection,
-    options: Option<&OsString>,
 ) -> Result<Output, String> {
     let mut password = match conn.password {
         true => Some(prompt_password(program, conn)?),
@@ -227,10 +299,8 @@ fn run(
         if let Some(password) = &password {
             command.env("PGPASSWORD", password);
         }
-        if let Some(options) = options {
-            command.env("PGOPTIONS", options);
-        }
-        log::debug!("Executing {command:?}");
+        command.envs(env.iter().map(|(name, value)| (name, value)));
+        log::debug!("Executing {}", command_line(program, args, env, conn));
         let output = command.output().map_err(|e| {
             format!("failed to run {:?}: {e}", command.get_program())
         })?;
@@ -297,10 +367,14 @@ fn dump_options(caller: Option<OsString>) -> OsString {
 fn execute(
     program: &str,
     args: Vec<OsString>,
+    mut env: Vec<(&'static str, OsString)>,
     conn: &cli::Connection,
 ) -> Result<(), String> {
-    let options = dump_options(std::env::var_os("PGOPTIONS"));
-    let output = run(program, &args, conn, Some(&options))?;
+    env.insert(
+        0,
+        ("PGOPTIONS", dump_options(std::env::var_os("PGOPTIONS"))),
+    );
+    let output = run(program, &args, &env, conn)?;
     if !output.status.success() {
         let stderr = stderr_of(&output);
         let hint = if needs_password(&stderr) {
@@ -315,6 +389,232 @@ fn execute(
         ));
     }
     Ok(())
+}
+
+/// The label of a connection for the banners, the logs and the header
+/// of the deploy script, when pglifecycle cannot read the connection
+/// string. The label does not show the text, because the text can have
+/// a password.
+const UNREADABLE: &str = "(unreadable connection string)";
+
+/// The URI schemes of a libpq connection string
+const URI_SCHEMES: [&str; 2] = ["postgresql://", "postgres://"];
+
+/// A label of the connection that has no password:
+/// `dbname@host:port`, or `host:port` when no database name is given.
+/// When `--dbname` is a connection string, its values have priority
+/// over `--host` and `--port`, as in pg_dump and psql. A service in
+/// pg_service.conf is not read, and the label does not show the user.
+pub fn label(conn: &cli::Connection) -> String {
+    let target = match conn.dbname.as_deref() {
+        None => Target::default(),
+        Some(dbname) if !is_connection_string(dbname) => Target {
+            dbname: Some(dbname.to_string()),
+            ..Target::default()
+        },
+        Some(dbname) => match Target::parse(dbname) {
+            Some(target) => target,
+            None => return UNREADABLE.to_string(),
+        },
+    };
+    let host = target
+        .host
+        .or(target.hostaddr)
+        .unwrap_or_else(|| conn.host.clone());
+    let port = target.port.unwrap_or_else(|| conn.port.to_string());
+    match target.dbname {
+        Some(dbname) => format!("{dbname}@{host}:{port}"),
+        None => format!("{host}:{port}"),
+    }
+}
+
+/// Whether libpq reads a `--dbname` value as a connection string: a
+/// URI, or `keyword=value` pairs
+fn is_connection_string(dbname: &str) -> bool {
+    is_uri(dbname) || dbname.contains('=')
+}
+
+/// Whether a connection string is a URI
+fn is_uri(connection: &str) -> bool {
+    URI_SCHEMES
+        .iter()
+        .any(|scheme| connection.starts_with(scheme))
+}
+
+/// The values of a connection string that a label shows. An empty
+/// value is not set.
+#[derive(Default)]
+struct Target {
+    dbname: Option<String>,
+    host: Option<String>,
+    hostaddr: Option<String>,
+    port: Option<String>,
+}
+
+impl Target {
+    /// Read a connection string. Returns `None` when the text is not a
+    /// connection string that this can read.
+    fn parse(connection: &str) -> Option<Self> {
+        let pairs = match URI_SCHEMES
+            .iter()
+            .find_map(|scheme| connection.strip_prefix(scheme))
+        {
+            Some(rest) => uri_pairs(rest)?,
+            None => keyword_pairs(connection)?,
+        };
+        let mut target = Target::default();
+        // a keyword that occurs again replaces the value, as in libpq
+        for (key, value) in pairs {
+            let slot = match key.as_str() {
+                "dbname" => &mut target.dbname,
+                "host" => &mut target.host,
+                "hostaddr" => &mut target.hostaddr,
+                "port" => &mut target.port,
+                _ => continue,
+            };
+            *slot = (!value.is_empty()).then_some(value);
+        }
+        Some(target)
+    }
+}
+
+/// The `keyword = value` pairs of a connection string. A value can
+/// be in single quotes, and a backslash escapes the next character.
+fn keyword_pairs(connection: &str) -> Option<Vec<(String, String)>> {
+    let mut pairs = Vec::new();
+    let mut chars = connection.chars().peekable();
+    loop {
+        while chars.next_if(|c| c.is_whitespace()).is_some() {}
+        if chars.peek().is_none() {
+            return Some(pairs);
+        }
+        let mut key = String::new();
+        while let Some(c) = chars.next_if(|c| *c != '=' && !c.is_whitespace())
+        {
+            key.push(c);
+        }
+        while chars.next_if(|c| c.is_whitespace()).is_some() {}
+        if key.is_empty() || chars.next_if_eq(&'=').is_none() {
+            return None;
+        }
+        while chars.next_if(|c| c.is_whitespace()).is_some() {}
+        let quoted = chars.next_if_eq(&'\'').is_some();
+        let mut value = String::new();
+        loop {
+            match chars.next() {
+                None if quoted => return None,
+                None => break,
+                Some('\'') if quoted => break,
+                Some(c) if c.is_whitespace() && !quoted => break,
+                Some('\\') => value.push(chars.next()?),
+                Some(c) => value.push(c),
+            }
+        }
+        pairs.push((key, value));
+    }
+}
+
+/// The pairs of a connection URI (the text after the scheme):
+/// `[user[:password]@][host][:port][,...][/dbname][?keyword=value&...]`.
+/// The user and the password are not read.
+fn uri_pairs(rest: &str) -> Option<Vec<(String, String)>> {
+    let rest = match rest.find(['@', '/']) {
+        Some(at) if rest[at..].starts_with('@') => &rest[at + 1..],
+        _ => rest,
+    };
+    let (address, query) = match rest.split_once('?') {
+        Some((address, query)) => (address, query),
+        None => (rest, ""),
+    };
+    let (hostspec, dbname) = match address.split_once('/') {
+        Some((hostspec, dbname)) => (hostspec, dbname),
+        None => (address, ""),
+    };
+    let mut pairs = Vec::new();
+    if !hostspec.is_empty() {
+        let mut hosts = Vec::new();
+        let mut ports = Vec::new();
+        for item in hostspec.split(',') {
+            // an IPv6 address is in brackets: [::1]:5432
+            let (host, port) = match item.strip_prefix('[') {
+                Some(item) => {
+                    let (host, after) = item.split_once(']')?;
+                    match after {
+                        "" => (host, ""),
+                        _ => (host, after.strip_prefix(':')?),
+                    }
+                }
+                None => item.split_once(':').unwrap_or((item, "")),
+            };
+            hosts.push(percent_decode(host)?);
+            ports.push(percent_decode(port)?);
+        }
+        pairs.push((String::from("host"), hosts.join(",")));
+        if ports.iter().any(|port| !port.is_empty()) {
+            pairs.push((String::from("port"), ports.join(",")));
+        }
+    }
+    if !dbname.is_empty() {
+        pairs.push((String::from("dbname"), percent_decode(dbname)?));
+    }
+    for parameter in query.split('&').filter(|p| !p.is_empty()) {
+        let (key, value) = parameter.split_once('=')?;
+        pairs.push((percent_decode(key)?, percent_decode(value)?));
+    }
+    Some(pairs)
+}
+
+/// Decode the `%XX` escapes of a URI part. Returns `None` for an
+/// incorrect escape, or for a result that is not UTF-8.
+fn percent_decode(text: &str) -> Option<String> {
+    let mut bytes = Vec::with_capacity(text.len());
+    let mut rest = text.as_bytes();
+    while let Some((&byte, after)) = rest.split_first() {
+        if byte == b'%' {
+            let hex = after
+                .get(..2)
+                .filter(|hex| hex.iter().all(u8::is_ascii_hexdigit))?;
+            let hex = std::str::from_utf8(hex).ok()?;
+            bytes.push(u8::from_str_radix(hex, 16).ok()?);
+            rest = &after[2..];
+        } else {
+            bytes.push(byte);
+            rest = after;
+        }
+    }
+    String::from_utf8(bytes).ok()
+}
+
+/// The command line of a client tool for the debug log: the
+/// environment that pglifecycle sets, the program and the arguments. A
+/// connection string can have a password, thus the label replaces each
+/// argument that contains it. PGPASSWORD is not in `env`, thus the log
+/// does not show it.
+fn command_line(
+    program: &str,
+    args: &[OsString],
+    env: &[(&str, OsString)],
+    conn: &cli::Connection,
+) -> String {
+    let secret = conn
+        .dbname
+        .as_deref()
+        .filter(|dbname| is_connection_string(dbname));
+    let mut words: Vec<String> = env
+        .iter()
+        .map(|(name, value)| format!("{name}={value:?}"))
+        .collect();
+    words.push(program.to_string());
+    for arg in args {
+        let arg = arg.to_string_lossy();
+        words.push(match secret {
+            Some(dbname) if arg.contains(dbname) => {
+                format!("(connection string to {})", label(conn))
+            }
+            _ => arg.into_owned(),
+        });
+    }
+    words.join(" ")
 }
 
 #[cfg(test)]
@@ -459,5 +759,149 @@ mod tests {
     fn does_not_retry_on_unrelated_failure() {
         let error = "Failed to dump (2): connection refused";
         assert!(!should_retry_without_passwords(true, error));
+    }
+
+    /// A connection with `dbname` as its --dbname value
+    fn connection_to(dbname: Option<&str>) -> cli::Connection {
+        cli::Connection {
+            dbname: dbname.map(String::from),
+            ..connection(false)
+        }
+    }
+
+    /// The label of `dbname`. The test fails when the label has the
+    /// password text "s3cret".
+    fn label_of(dbname: Option<&str>) -> String {
+        let label = label(&connection_to(dbname));
+        assert!(!label.contains("s3cret"), "{dbname:?}: {label}");
+        label
+    }
+
+    #[test]
+    fn label_of_a_uri_has_no_password() {
+        for (uri, expected) in [
+            (
+                "postgresql://u:s3cret@db.example.com:6543/app?sslmode=require",
+                "app@db.example.com:6543",
+            ),
+            ("postgres://u@db/my%20app?password=s3cret", "my app@db:5432"),
+            (
+                "postgresql:///app?host=/tmp&port=6543&password=s3cret",
+                "app@/tmp:6543",
+            ),
+            ("postgresql://u:s3cret@h1:1,h2:2/app", "app@h1,h2:1,2"),
+            ("postgresql://[::1]:6543/app", "app@::1:6543"),
+            ("postgresql://u:s3cret@db", "db:5432"),
+        ] {
+            assert_eq!(label_of(Some(uri)), expected, "{uri}");
+        }
+    }
+
+    #[test]
+    fn label_of_a_conninfo_has_no_quoted_password() {
+        for (conninfo, expected) in [
+            (
+                "host=db port = 6543 password='s3cret \\' x' dbname='my app'",
+                "my app@db:6543",
+            ),
+            ("dbname=app password='s3cret'", "app@localhost:5432"),
+            ("password=s3cret hostaddr=10.0.0.1", "10.0.0.1:5432"),
+            ("service=prod password=s3cret", "localhost:5432"),
+        ] {
+            assert_eq!(label_of(Some(conninfo)), expected, "{conninfo}");
+        }
+    }
+
+    #[test]
+    fn label_of_a_plain_name_has_the_host_and_port() {
+        assert_eq!(label_of(Some("app")), "app@localhost:5432");
+        assert_eq!(label_of(None), "localhost:5432");
+    }
+
+    #[test]
+    fn label_of_an_unreadable_connection_string_is_a_placeholder() {
+        for dbname in [
+            "host=db password='s3cret",
+            "host=db password s3cret",
+            "=s3cret",
+            "postgresql://u@db/%zz?password=s3cret",
+            "postgresql://u@db/app?password",
+            "postgresql://[::1/app?password=s3cret",
+        ] {
+            assert_eq!(label_of(Some(dbname)), UNREADABLE, "{dbname}");
+        }
+    }
+
+    #[test]
+    fn dumps_the_roles_of_the_server_of_a_connection_string() {
+        let path = Path::new("roles.sql");
+        let mut conn = connection_to(None);
+        conn.username = Some(String::from("o'k\\"));
+        for dbname in ["host=db port=6543 dbname=app", "service=prod"] {
+            conn.dbname = Some(dbname.to_string());
+            let args = dump_roles_args(&conn, path, false, true);
+            let expected = format!(
+                "host='localhost' port='5432' user='o\\'k\\\\' {dbname}"
+            );
+            assert!(has_pair(&args, "-d", &expected), "{args:?}");
+            assert_no_server_flags(&args);
+            assert!(dump_roles_env(&conn).is_empty());
+        }
+        let uri = "postgresql://db:6543/app";
+        conn.dbname = Some(uri.to_string());
+        let args = dump_roles_args(&conn, path, false, true);
+        assert!(has_pair(&args, "-d", uri), "{args:?}");
+        assert_no_server_flags(&args);
+        assert_eq!(
+            dump_roles_env(&conn),
+            vec![
+                ("PGHOST", OsString::from("localhost")),
+                ("PGPORT", OsString::from("5432")),
+                ("PGUSER", OsString::from("o'k\\")),
+            ]
+        );
+    }
+
+    /// pg_dumpall gives -h, -p and -U priority over the values of the
+    /// connection string; pg_dump and psql do not
+    fn assert_no_server_flags(args: &[OsString]) {
+        for flag in ["-h", "-p", "-U"] {
+            assert!(!args.contains(&OsString::from(flag)), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn dumps_the_roles_of_a_plain_name_with_the_flags() {
+        let conn = connection_to(Some("app"));
+        let args = dump_roles_args(&conn, Path::new("roles.sql"), false, true);
+        // pg_dumpall reads -d only as a connection string
+        assert!(!args.contains(&OsString::from("-d")), "{args:?}");
+        assert!(has_pair(&args, "-h", "localhost"), "{args:?}");
+        assert!(has_pair(&args, "-p", "5432"), "{args:?}");
+        assert!(dump_roles_env(&conn).is_empty());
+    }
+
+    #[test]
+    fn command_line_has_no_password() {
+        let conn = connection_to(Some("host=db password=s3cret dbname=app"));
+        let args = dump_args(&conn, &DumpDdl::default(), Path::new("f"));
+        let env = [("PGOPTIONS", OsString::from("-c a=b"))];
+        let line = command_line("pg_dump", &args, &env, &conn);
+        assert!(!line.contains("s3cret"), "{line}");
+        assert!(
+            line.starts_with("PGOPTIONS=\"-c a=b\" pg_dump -h"),
+            "{line}"
+        );
+        assert!(
+            line.contains(" -d (connection string to app@db:5432) "),
+            "{line}"
+        );
+        let args = dump_roles_args(&conn, Path::new("f"), false, true);
+        let line = command_line("pg_dumpall", &args, &[], &conn);
+        assert!(!line.contains("s3cret"), "{line}");
+        assert!(
+            line.contains(" -d (connection string to app@db:5432) "),
+            "{line}"
+        );
     }
 }
