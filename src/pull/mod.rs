@@ -512,6 +512,26 @@ fn extract_roles(
     assembly.ingest_roles(&text)
 }
 
+/// The names of the roles of the cluster, from the globals dump of
+/// pg_dumpall. The reserved `pg_` roles are not in the dump
+pub fn cluster_roles(
+    conn: &cli::Connection,
+) -> Result<std::collections::BTreeSet<String>, String> {
+    let ddl = pgdump::DumpDdl {
+        no_privileges: true,
+        no_tablespaces: true,
+        ..Default::default()
+    };
+    let mut assembly = Assembly::default();
+    extract_roles(conn, false, &ddl, &mut assembly)?;
+    Ok(assembly
+        .roles
+        .into_iter()
+        .filter(|(_, state)| state.created)
+        .map(|(name, _)| name)
+        .collect())
+}
+
 /// A dump entry that was not assembled into the project models
 #[derive(Debug)]
 pub struct Remaining {

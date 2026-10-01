@@ -15,7 +15,7 @@ mod routine_body;
 
 pub(crate) use diff::{canonical_casts, canonical_collation, identity_type};
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::IsTerminal;
 
 use crate::ddl::{self, NodeExt};
@@ -74,6 +74,10 @@ pub fn deploy(args: &cli::Deploy) -> Result<(), String> {
     let plan = plan(&diff, &resolutions, &output, &snapshot, args)?;
     task.finish();
     report(&diff, &plan, &assembly);
+    // a --dump file has no roles, thus only a live database is checked
+    if args.dump.is_none() {
+        check_roles(&plan, &args.connection)?;
+    }
     let script = render_script(&plan, &project.name, &source);
     if let Some(path) = &args.output {
         std::fs::write(path, &script)
@@ -215,6 +219,10 @@ struct Plan {
     /// How many of `included` are destructive (non-zero only with
     /// `--allow-drop`)
     included_destructive: usize,
+    /// The ACL, comment and security label entries that no project item
+    /// owns: their object is not in the project, so the plan does not
+    /// have them
+    unowned: Vec<String>,
 }
 
 /// Assemble the ordered plan: DROPs for database-only objects first
@@ -234,6 +242,7 @@ fn plan(
     let mut excluded = Vec::new();
     let mut included_destructive = 0usize;
     let mut kept = Vec::new();
+    let mut unowned = Vec::new();
     let mut push = |destructive: bool, statement: Statement| {
         if destructive && !args.allow_drop {
             excluded.push(statement);
@@ -418,6 +427,14 @@ fn plan(
             }
         };
         if owners.is_empty() {
+            if matches!(
+                entry.desc,
+                libpgdump::ObjectType::Acl
+                    | libpgdump::ObjectType::Comment
+                    | libpgdump::ObjectType::SecurityLabel
+            ) {
+                unowned.push(entry_label(entry));
+            }
             continue;
         }
         let changes: Vec<Change> = owners
@@ -655,7 +672,69 @@ fn plan(
         excluded,
         kept,
         included_destructive,
+        unowned,
     })
+}
+
+/// Warn about each role that the script needs and the database does
+/// not have. deploy does not make roles, thus the script fails on the
+/// first statement that names one
+fn check_roles(plan: &Plan, conn: &cli::Connection) -> Result<(), String> {
+    let roles = match pull::cluster_roles(conn) {
+        Ok(roles) => roles,
+        Err(error) => {
+            log::warn!(
+                "Cannot read the roles of the database, thus deploy does \
+                 not check the roles of the script: {error}"
+            );
+            return Ok(());
+        }
+    };
+    for (role, labels) in missing_roles(&plan.included, &roles)? {
+        log::warn!(
+            "Role {} is not in the database, and deploy does not make \
+             roles; the script fails until it exists. It is needed by: {}",
+            quote_ident(&role),
+            labels.join(", ")
+        );
+    }
+    Ok(())
+}
+
+/// Each role that `statements` name and `roles` does not have, with
+/// the labels of the statements that name it. PUBLIC, the
+/// CURRENT_USER forms and the reserved `pg_` roles are not roles that
+/// a project makes, thus they are not checked
+fn missing_roles<'a>(
+    statements: &'a [Statement],
+    roles: &BTreeSet<String>,
+) -> Result<BTreeMap<String, Vec<&'a str>>, String> {
+    let mut parser = tree_sitter::Parser::new();
+    parser
+        .set_language(&tree_sitter_postgres::LANGUAGE.into())
+        .map_err(|e| e.to_string())?;
+    let mut missing: BTreeMap<String, Vec<&str>> = BTreeMap::new();
+    for statement in statements {
+        let Some(tree) = parser.parse(&statement.sql, None) else {
+            continue;
+        };
+        for node in tree.root_node().find_all("RoleSpec") {
+            let role = ddl::unquote_role(node.text(&statement.sql));
+            if role == "PUBLIC"
+                || role.starts_with("pg_")
+                || roles.contains(&role)
+                || ["current_role", "current_user", "session_user"]
+                    .contains(&role.as_str())
+            {
+                continue;
+            }
+            let labels = missing.entry(role).or_default();
+            if labels.last() != Some(&statement.label.as_str()) {
+                labels.push(&statement.label);
+            }
+        }
+    }
+    Ok(missing)
 }
 
 /// The CREATE SEQUENCE of a sequence entry without its OWNED BY
@@ -788,6 +867,12 @@ fn report(diff: &Diff, plan: &Plan, assembly: &pull::Assembly) {
              database but cannot be compared: the project writes them as \
              raw sql, which deploy does not compare; they were left \
              untouched"
+        );
+    }
+    for label in &plan.unowned {
+        log::warn!(
+            "{label}: the project does not have its object, thus the plan \
+             does not include it"
         );
     }
     for statement in &plan.excluded {
@@ -1926,6 +2011,7 @@ mod tests {
                 fails_open: false,
             }],
             included_destructive: 0,
+            unowned: Vec::new(),
         };
         let script = render_script(&plan, "test", "db");
         for line in script.lines() {
@@ -1948,6 +2034,7 @@ mod tests {
             excluded: Vec::new(),
             kept: Vec::new(),
             included_destructive: 0,
+            unowned: Vec::new(),
         };
         let script = render_script(&plan, "test", "db");
         assert_eq!(
@@ -2423,6 +2510,111 @@ mod tests {
                 "ALTER SEQUENCE test.o OWNED BY test.t.\"n OWNED BY x\";\n"
                     .to_string(),
             ))
+        );
+    }
+
+    /// The plan does not have an ACL entry on an object that is not in
+    /// the project, for example a grant on a catalog function. The plan
+    /// gives its label, so that deploy can warn about it
+    #[test]
+    fn acl_on_an_object_not_in_the_project_is_unowned() {
+        let diff = Diff {
+            items: BTreeMap::new(),
+            changed: BTreeMap::new(),
+            removed: BTreeMap::new(),
+            owned: BTreeSet::new(),
+            owner_changed: BTreeSet::new(),
+        };
+        let mut dump =
+            libpgdump::new("test", "UTF8", "18.0").expect("new dump");
+        dump.add_entry(
+            libpgdump::ObjectType::Acl,
+            Some("pg_catalog"),
+            Some("FUNCTION pg_reload_conf()"),
+            None,
+            Some(
+                "GRANT ALL ON FUNCTION pg_catalog.pg_reload_conf() TO \
+                 reader;\n",
+            ),
+            None,
+            None,
+            &[],
+        )
+        .expect("add acl entry");
+        let output = build::BuildOutput {
+            dump,
+            item_ids: std::collections::HashMap::new(),
+        };
+        let snapshot =
+            libpgdump::new("test", "UTF8", "18.0").expect("new snapshot");
+        let cli = cli::Cli::parse_from(["pglifecycle", "deploy", "proj"]);
+        let args = match cli.action {
+            cli::Action::Deploy(deploy) => deploy,
+            _ => unreachable!("parsed the deploy subcommand"),
+        };
+        let plan = plan(&diff, &BTreeMap::new(), &output, &snapshot, &args)
+            .expect("plan succeeds");
+        assert!(plan.included.is_empty());
+        assert_eq!(
+            plan.unowned,
+            vec!["ACL pg_catalog.FUNCTION pg_reload_conf()".to_string()]
+        );
+    }
+
+    /// Each role that a planned statement names and the database does
+    /// not have, with the labels of the statements that name it. PUBLIC,
+    /// the CURRENT_USER forms and the reserved pg_ roles are not checked
+    #[test]
+    fn missing_roles_names_each_role_and_its_statements() {
+        let statement = |label: &str, sql: &str| Statement {
+            label: label.to_string(),
+            sql: sql.to_string(),
+            fails_open: false,
+        };
+        let statements = vec![
+            statement(
+                "TABLE public.t",
+                "CREATE TABLE public.t (id integer);\n\
+                 ALTER TABLE public.t OWNER TO \"Table Owner\";\n",
+            ),
+            statement(
+                "ACL public.TABLE t",
+                "GRANT SELECT ON TABLE public.t TO reader;\n\
+                 GRANT SELECT ON TABLE public.t TO PUBLIC;\n\
+                 GRANT SELECT ON TABLE public.t TO pg_read_all_data;\n\
+                 REVOKE ALL ON TABLE public.t FROM postgres;\n",
+            ),
+            statement(
+                "POLICY public.t p",
+                "CREATE POLICY p ON public.t TO app, reader USING (true);\n",
+            ),
+            statement(
+                "DEFAULT PRIVILEGES",
+                "ALTER DEFAULT PRIVILEGES FOR ROLE creator GRANT SELECT \
+                 ON TABLES TO viewer;\n",
+            ),
+            statement(
+                "USER MAPPING mapped SERVER s",
+                "CREATE USER MAPPING FOR mapped SERVER s;\n\
+                 CREATE USER MAPPING FOR CURRENT_USER SERVER s;\n\
+                 CREATE USER MAPPING FOR PUBLIC SERVER s;\n",
+            ),
+        ];
+        let roles = BTreeSet::from([String::from("postgres")]);
+        let missing = missing_roles(&statements, &roles).expect("parses");
+        assert_eq!(
+            missing,
+            BTreeMap::from([
+                (String::from("Table Owner"), vec!["TABLE public.t"]),
+                (String::from("app"), vec!["POLICY public.t p"]),
+                (String::from("creator"), vec!["DEFAULT PRIVILEGES"]),
+                (String::from("mapped"), vec!["USER MAPPING mapped SERVER s"]),
+                (
+                    String::from("reader"),
+                    vec!["ACL public.TABLE t", "POLICY public.t p"]
+                ),
+                (String::from("viewer"), vec!["DEFAULT PRIVILEGES"]),
+            ])
         );
     }
 }
