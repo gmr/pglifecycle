@@ -223,7 +223,9 @@ impl Table {
     /// PostgreSQL keeps in another form than the project can write it
     /// (a storage parameter, a collation, the type of a cast in an index
     /// or an exclusion constraint expression, in a WHERE clause, a CHECK
-    /// constraint or a default) is in the form that PostgreSQL reads.
+    /// constraint, a default, a generated column expression, a policy
+    /// expression or a trigger WHEN condition) is in the form that
+    /// PostgreSQL reads.
     pub fn canonical(&self) -> Table {
         let mut table = self.with_canonical_not_nulls();
         for column in table.columns.iter_mut().flatten() {
@@ -238,6 +240,7 @@ impl Table {
                 options.cycle = true_only(options.cycle);
             }
             if let Some(generated) = column.generated.as_mut() {
+                canonical_expression(&mut generated.expression);
                 generated.sequence_options = generated
                     .sequence_options
                     .take()
@@ -253,6 +256,9 @@ impl Table {
             if let Value::String(text) = &mut column_default.default {
                 *text = crate::deploy::canonical_casts(text);
             }
+        }
+        for trigger in table.triggers.iter_mut().flatten() {
+            canonical_expression(&mut trigger.condition);
         }
         for not_null in table.not_null_constraints.iter_mut().flatten() {
             not_null.not_valid = true_only(not_null.not_valid);
@@ -867,8 +873,10 @@ pub struct Policy {
 }
 
 impl Policy {
-    /// The same policy with each field at its default as absent, and
-    /// the command and PUBLIC in upper case, as pull reads them
+    /// The same policy with each field at its default as absent, the
+    /// command and PUBLIC in upper case, as pull reads them, and the
+    /// type of each cast in USING and WITH CHECK in the form that
+    /// PostgreSQL writes
     pub fn canonical(&self) -> Policy {
         let roles = self.roles.as_ref().map(|roles| {
             roles
@@ -890,6 +898,11 @@ impl Policy {
                 .map(|command| command.to_uppercase())
                 .filter(|command| command != "ALL"),
             roles: roles.filter(|roles| roles != &["PUBLIC"]),
+            using: self.using.as_deref().map(crate::deploy::canonical_casts),
+            with_check: self
+                .with_check
+                .as_deref()
+                .map(crate::deploy::canonical_casts),
             ..self.clone()
         }
     }
@@ -1272,6 +1285,70 @@ mod tests {
         assert_ne!(
             exclude_where("((label)::REAL > 0)"),
             exclude_where("((label)::double precision > 0)")
+        );
+    }
+
+    /// The type of a cast in a generated column expression, a policy
+    /// USING or WITH CHECK expression and a trigger WHEN condition
+    /// compares in the form that PostgreSQL writes
+    #[test]
+    fn generated_policy_and_trigger_cast_types_compare_in_standard_form() {
+        let canonical =
+            |value: serde_json::Value| with_fields(value).canonical();
+        let generated = |expression: &str| {
+            canonical(serde_json::json!({
+                "columns": [{
+                    "name": "g", "data_type": "bigint",
+                    "generated": {"expression": expression},
+                }],
+            }))
+        };
+        assert_eq!(
+            generated("((label)::INT8 * 2)"),
+            generated("((label)::bigint * 2)")
+        );
+        assert_ne!(
+            generated("((label)::INT4 * 2)"),
+            generated("((label)::bigint * 2)")
+        );
+        let policy = |using: &str, with_check: &str| {
+            canonical(serde_json::json!({
+                "policies": [
+                    {"name": "p", "using": using, "with_check": with_check},
+                ],
+            }))
+        };
+        assert_eq!(
+            policy("((label)::INT4 > 0)", "((label)::VARCHAR <> ''::TEXT)"),
+            policy(
+                "((label)::integer > 0)",
+                "((label)::character varying <> ''::text)"
+            )
+        );
+        assert_ne!(
+            policy("((label)::INT8 > 0)", "true"),
+            policy("((label)::integer > 0)", "true")
+        );
+        assert_ne!(
+            policy("true", "((label)::INT8 > 0)"),
+            policy("true", "((label)::integer > 0)")
+        );
+        let trigger = |condition: &str| {
+            canonical(serde_json::json!({
+                "triggers": [{
+                    "name": "t", "when": "BEFORE", "events": ["UPDATE"],
+                    "for_each": "ROW", "condition": condition,
+                    "function": "f()",
+                }],
+            }))
+        };
+        assert_eq!(
+            trigger("((new.label)::INT4 > 0)"),
+            trigger("((new.label)::integer > 0)")
+        );
+        assert_ne!(
+            trigger("((new.label)::INT8 > 0)"),
+            trigger("((new.label)::integer > 0)")
         );
     }
 
