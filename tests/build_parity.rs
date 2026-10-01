@@ -429,6 +429,50 @@ fn outside_items() -> Vec<Item> {
                 .unwrap(),
             ),
         ),
+        // deviation 40: a default and a check that call a function
+        // that reads the table
+        item(
+            7,
+            ObjectType::Table,
+            Definition::Table(
+                serde_json::from_value(serde_json::json!({
+                    "name": "tickets",
+                    "schema": "test",
+                    "owner": "postgres",
+                    "columns": [
+                        {"name": "id", "data_type": "integer"},
+                        {"name": "n", "data_type": "integer",
+                         "default": "test.next_ticket()"},
+                    ],
+                    "check_constraints": [
+                        {"name": "tickets_n_check",
+                         "expression": "(n <= test.next_ticket())"},
+                        {"name": "tickets_id_check",
+                         "expression": "(id > 0)"},
+                    ],
+                }))
+                .unwrap(),
+            ),
+        ),
+        Item {
+            dependencies: [7].into(),
+            ..item(
+                8,
+                ObjectType::Function,
+                Definition::Function(
+                    serde_json::from_value(serde_json::json!({
+                        "name": "next_ticket",
+                        "schema": "test",
+                        "owner": "postgres",
+                        "returns": "integer",
+                        "language": "sql",
+                        "sql_body": "RETURN (SELECT (COALESCE(max(tickets.n), \
+                                     0) + 1) FROM test.tickets)",
+                    }))
+                    .unwrap(),
+                ),
+            )
+        },
     ]
 }
 
@@ -517,6 +561,36 @@ const OUTSIDE_CORRECTED: &[(&str, &str, &str, &str, &str)] = &[
         "CREATE PROCEDURE test.definer_proc() LANGUAGE sql SET search_path \
          = 'pg_catalog', 'pg_temp' AS $$\nSELECT 1;\n$$;\n",
         "DROP PROCEDURE test.definer_proc();\n",
+    ),
+    // deviation 40: the default and the check that call a function
+    // that reads the table are their own entries, as pg_dump writes
+    // them. The Python wrote them in CREATE TABLE, which failed,
+    // because the function comes after the table. The check that calls
+    // no function stays in CREATE TABLE
+    (
+        "TABLE",
+        "test",
+        "tickets",
+        "CREATE TABLE test.tickets ( id integer, n integer, CONSTRAINT \
+         tickets_id_check CHECK ((id > 0)) );\n",
+        "DROP TABLE IF EXISTS test.tickets;\n",
+    ),
+    (
+        "DEFAULT",
+        "test",
+        "tickets n",
+        "ALTER TABLE ONLY test.tickets ALTER COLUMN n SET DEFAULT \
+         test.next_ticket();\n",
+        "ALTER TABLE ONLY test.tickets ALTER COLUMN n DROP DEFAULT;\n",
+    ),
+    (
+        "CHECK CONSTRAINT",
+        "test",
+        "tickets tickets_n_check",
+        "ALTER TABLE test.tickets ADD CONSTRAINT tickets_n_check CHECK ((n \
+         <= test.next_ticket()));\n",
+        "ALTER TABLE test.tickets DROP CONSTRAINT IF EXISTS \
+         tickets_n_check;\n",
     ),
 ];
 
@@ -769,6 +843,28 @@ fn corrects_objects_outside_the_test_project() {
             "{desc} {tag} drop"
         );
     }
+    // deviation 40: the separate default and check come after the
+    // function, and the function after the table
+    let id = |desc: &str, tag: &str| {
+        output
+            .dump
+            .entries()
+            .iter()
+            .find(|e| e.desc.as_str() == desc && e.tag.as_deref() == Some(tag))
+            .map(|e| (e.dump_id, e.dependencies.clone()))
+            .unwrap_or_else(|| panic!("missing entry {desc} {tag}"))
+    };
+    let (table, _) = id("TABLE", "tickets");
+    let (function, function_deps) = id("FUNCTION", "next_ticket");
+    assert_eq!(function_deps, [table]);
+    for (desc, tag) in [
+        ("DEFAULT", "tickets n"),
+        ("CHECK CONSTRAINT", "tickets tickets_n_check"),
+    ] {
+        let (_, mut deps) = id(desc, tag);
+        deps.sort_unstable();
+        assert_eq!(deps, [table, function], "{desc} {tag} dependencies");
+    }
     for (desc, tag, defns) in OUTSIDE_SETTINGS {
         let settings: Vec<&str> = output
             .dump
@@ -825,12 +921,17 @@ fn records_inventory_dependency_edges() {
         })
         .collect();
     edges.sort();
-    // the same 8 inventory edges the loader resolves, plus the edge
+    // the same 10 inventory edges the loader resolves, plus the edge
     // from the FK CONSTRAINT entry to its own table (Python recorded
     // no dependency edges at all; libpgdump's weighted toposort uses
     // these to order the archive). A foreign key needs no edge to the
     // table it references: FK CONSTRAINT is a post-data desc, so it
     // already sorts after every table.
+    //
+    // Deviation 41: the conversion and the event trigger wait for the
+    // function that they call. Each names its function without the
+    // argument types, and test-project names the function with them,
+    // so the name found no function before.
     //
     // The text search objects of one schema's container are chained,
     // each after the one before, in the order they depend on each
@@ -843,7 +944,11 @@ fn records_inventory_dependency_edges() {
         vec![
             "AGGREGATE:test_agg -> \
              FUNCTION:test_aggregate(integer, integer)",
+            "CONVERSION:myconv -> FUNCTION:utf8_to_latin1(integer, integer, \
+             cstring, internal, integer)",
             "DOMAIN:bcp47_locale -> EXTENSION:citext",
+            "EVENT TRIGGER:disable_alter_domain -> \
+             FUNCTION:disable_alter_domain()",
             "FK CONSTRAINT:addresses addresses_user_id -> TABLE:addresses",
             "FUNCTION:utf8_to_latin1(integer, integer, cstring, internal, \
              integer) -> PROCEDURAL LANGUAGE:plpython3u",
