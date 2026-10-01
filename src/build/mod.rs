@@ -237,6 +237,19 @@
 //!     `default_tablespace` for an object in a tablespace that did not
 //!     exist yet, or make an index in it. The Python recorded no order.
 //!     The test-project materialized view is in the `temp` tablespace.
+//! 45. An object comes after each role, user or group of the project
+//!     that it names: its owner, a role of one of its policies, the
+//!     grantee of a grant or a revocation on it, the grantee of a
+//!     default privilege, and the subject of a user mapping. libpgdump
+//!     sorts roles last, because pg_dump writes none, and pg_restore
+//!     runs the entries in the order of the archive. Thus a restore
+//!     failed with `role "app_owner" does not exist` on the owner of
+//!     the first object that a role of the project owns, and a restore
+//!     without owners failed on a policy for such a role. pg_restore
+//!     runs the grants in a later pass, but deploy writes them in the
+//!     order of the archive. pg_dumpall makes the roles before all
+//!     other objects. No test-project object names a role of the
+//!     project that has an entry.
 
 mod acls;
 mod calls;
@@ -297,6 +310,7 @@ pub fn assemble(project: &Project) -> Result<BuildOutput, String> {
         index_attaches: IndexAttaches::default(),
         text_search_ids: HashMap::new(),
         text_search_refs: Vec::new(),
+        role_refs: Vec::new(),
         partition_ids: HashMap::new(),
         superuser: project.superuser.clone(),
         calls: Rc::new(calls::table_calls(project)),
@@ -348,6 +362,7 @@ pub fn assemble(project: &Project) -> Result<BuildOutput, String> {
     builder.apply_attaches(project)?;
     builder.apply_index_attaches()?;
     builder.split_column_defaults(project)?;
+    builder.apply_role_order(project);
     let item_ids = builder
         .dump_id_map
         .iter()
@@ -401,6 +416,10 @@ struct Builder {
     /// The text search objects each text search entry names, as
     /// (entry, kind, schema, name)
     text_search_refs: Vec<(i32, &'static str, String, String)>,
+    /// The roles that an item or its children name other than as the
+    /// owner, as (entry of the item, role), such as the grantee of a
+    /// grant on a table (deviation 45)
+    role_refs: Vec<(i32, String)>,
     /// The entry of each partition modeled by its bounds, by (schema,
     /// name): it is not an item, so an ACL on it depends on this entry
     partition_ids: HashMap<(String, String), i32>,
@@ -1042,8 +1061,11 @@ impl Builder {
         let Definition::DefaultPrivileges(d) = &item.definition else {
             unreachable!()
         };
-        let mut groups: BTreeMap<(String, String), Vec<String>> =
-            BTreeMap::new();
+        // the statements and the grantees of each entry
+        let mut groups: BTreeMap<
+            (String, String),
+            (Vec<String>, Vec<String>),
+        > = BTreeMap::new();
         let declarations = d
             .revocations
             .iter()
@@ -1073,16 +1095,17 @@ impl Builder {
                     sql.push_str(" WITH GRANT OPTION");
                 }
             }
-            groups
+            let (statements, grantees) = groups
                 .entry((
                     privilege.schema.clone().unwrap_or_default(),
                     object_type,
                 ))
-                .or_default()
-                .push(sql);
+                .or_default();
+            statements.push(sql);
+            grantees.push(privilege.grantee.clone());
         }
         let mut previous: Option<i32> = None;
-        for ((schema, object_type), statements) in groups {
+        for ((schema, object_type), (statements, grantees)) in groups {
             let dump_id = self.add_entry(
                 "DEFAULT ACL",
                 &schema,
@@ -1093,7 +1116,11 @@ impl Builder {
                 &previous.into_iter().collect::<Vec<_>>(),
                 None,
             )?;
-            self.dump_id_map.entry(item.id).or_insert(dump_id);
+            let first = *self.dump_id_map.entry(item.id).or_insert(dump_id);
+            // the first entry stands for the item, and each later
+            // entry comes after it (deviation 45)
+            self.role_refs
+                .extend(grantees.into_iter().map(|role| (first, role)));
             previous = Some(dump_id);
         }
         Ok(())
@@ -2671,6 +2698,11 @@ impl Builder {
             &[parent_dump_id],
             None,
         )?;
+        // the table comes after the roles of the policy, thus the
+        // policy does too (deviation 45)
+        for role in policy.roles.iter().flatten() {
+            self.role_refs.push((parent_dump_id, role.clone()));
+        }
         if let Some(comment) = &policy.comment {
             // like a trigger, a policy is named through its table
             self.add_comment(
@@ -3128,6 +3160,59 @@ impl Builder {
         }
         for (child, parent) in edges {
             if let Some(entry) = self.dump.get_entry_mut(child)
+                && !entry.dependencies.contains(&parent)
+            {
+                entry.dependencies.push(parent);
+            }
+        }
+    }
+
+    /// Order the entry of each item after the roles, users and groups
+    /// of the project that it names (deviation 45): its owner, the
+    /// subject of a user mapping, and the roles in `role_refs`.
+    /// libpgdump sorts these types last, because pg_dump writes none
+    /// of them, and pg_restore runs the entries in the order of the
+    /// archive. pg_dumpall makes the roles before all other objects.
+    /// Only the entry of an item gets the edge, and the entries of its
+    /// children come after it: deploy finds the item of a child entry,
+    /// such as a comment, through its edges, so an edge to a role would
+    /// make the role an item of the comment too.
+    fn apply_role_order(&mut self, project: &Project) {
+        let roles: HashMap<String, i32> = project
+            .inventory
+            .iter()
+            .filter(|item| {
+                matches!(
+                    item.definition,
+                    Definition::Group(_)
+                        | Definition::Role(_)
+                        | Definition::User(_)
+                )
+            })
+            .filter_map(|item| {
+                let dump_id = self.dump_id_map.get(&item.id)?;
+                Some((item.definition.name(), *dump_id))
+            })
+            .collect();
+        let items: HashSet<i32> = self.dump_id_map.values().copied().collect();
+        let mut refs = std::mem::take(&mut self.role_refs);
+        for entry in self.dump.entries() {
+            let subject =
+                matches!(entry.desc, libpgdump::ObjectType::UserMapping)
+                    .then_some(entry.tag.as_deref())
+                    .flatten();
+            for name in [entry.owner.as_deref(), subject].into_iter().flatten()
+            {
+                refs.push((entry.dump_id, name.to_string()));
+            }
+        }
+        for (child, name) in refs {
+            let Some(&parent) = roles.get(&name) else {
+                continue;
+            };
+            if child != parent
+                && items.contains(&child)
+                && let Some(entry) = self.dump.get_entry_mut(child)
                 && !entry.dependencies.contains(&parent)
             {
                 entry.dependencies.push(parent);
@@ -4654,6 +4739,7 @@ mod tests {
             index_attaches: IndexAttaches::default(),
             text_search_ids: HashMap::new(),
             text_search_refs: Vec::new(),
+            role_refs: Vec::new(),
             partition_ids: HashMap::new(),
             superuser: "postgres".into(),
             calls: Rc::default(),
@@ -5146,6 +5232,7 @@ mod tests {
             index_attaches: IndexAttaches::default(),
             text_search_ids: HashMap::new(),
             text_search_refs: Vec::new(),
+            role_refs: Vec::new(),
             partition_ids: HashMap::new(),
             superuser: "postgres".into(),
             calls: Rc::default(),
@@ -5193,6 +5280,7 @@ mod tests {
             index_attaches: IndexAttaches::default(),
             text_search_ids: HashMap::new(),
             text_search_refs: Vec::new(),
+            role_refs: Vec::new(),
             partition_ids: HashMap::new(),
             superuser: "postgres".into(),
             calls: Rc::default(),
@@ -5241,6 +5329,7 @@ mod tests {
             index_attaches: IndexAttaches::default(),
             text_search_ids: HashMap::new(),
             text_search_refs: Vec::new(),
+            role_refs: Vec::new(),
             partition_ids: HashMap::new(),
             superuser: "postgres".into(),
             calls: Rc::default(),
@@ -5477,6 +5566,7 @@ mod tests {
             index_attaches: IndexAttaches::default(),
             text_search_ids: HashMap::new(),
             text_search_refs: Vec::new(),
+            role_refs: Vec::new(),
             partition_ids: HashMap::new(),
             superuser: "postgres".into(),
             calls: Rc::default(),
@@ -5529,6 +5619,7 @@ mod tests {
             index_attaches: IndexAttaches::default(),
             text_search_ids: HashMap::new(),
             text_search_refs: Vec::new(),
+            role_refs: Vec::new(),
             partition_ids: HashMap::new(),
             superuser: "postgres".into(),
             calls: Rc::default(),
@@ -5587,6 +5678,7 @@ mod tests {
             index_attaches: IndexAttaches::default(),
             text_search_ids: HashMap::new(),
             text_search_refs: Vec::new(),
+            role_refs: Vec::new(),
             partition_ids: HashMap::new(),
             superuser: "postgres".into(),
             calls: Rc::default(),
@@ -5653,6 +5745,7 @@ mod tests {
             index_attaches: IndexAttaches::default(),
             text_search_ids: HashMap::new(),
             text_search_refs: Vec::new(),
+            role_refs: Vec::new(),
             partition_ids: HashMap::new(),
             superuser: "postgres".into(),
             calls: Rc::default(),
@@ -5883,6 +5976,7 @@ mod tests {
             index_attaches: IndexAttaches::default(),
             text_search_ids: HashMap::new(),
             text_search_refs: Vec::new(),
+            role_refs: Vec::new(),
             partition_ids: HashMap::new(),
             superuser: "postgres".into(),
             calls: Rc::default(),
@@ -5948,6 +6042,7 @@ mod tests {
             index_attaches: IndexAttaches::default(),
             text_search_ids: HashMap::new(),
             text_search_refs: Vec::new(),
+            role_refs: Vec::new(),
             partition_ids: HashMap::new(),
             superuser: "postgres".into(),
             calls: Rc::default(),

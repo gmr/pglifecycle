@@ -72,6 +72,8 @@ const ROLES: &[ObjectType] =
 struct ObjectAcl {
     revokes: Vec<String>,
     grants: Vec<String>,
+    /// The roles that the statements grant to or revoke from
+    roles: Vec<String>,
 }
 
 #[derive(Default)]
@@ -162,6 +164,13 @@ pub(super) fn dump_acls(
                 &dependencies,
             )
             .map_err(|e| format!("failed to add ACL {tag}: {e}"))?;
+        // the object comes after each role that the grants name, thus
+        // the grants do too (deviation 45)
+        if let Some(&target) = dependencies.first() {
+            builder
+                .role_refs
+                .extend(acl.roles.iter().map(|role| (target, role.clone())));
+        }
     }
     dump_memberships(builder, project, &index)
 }
@@ -385,6 +394,9 @@ fn collect(
                     entry.revokes.push(statement);
                 } else {
                     entry.grants.push(statement);
+                }
+                if !entry.roles.iter().any(|r| r == role) {
+                    entry.roles.push(role.to_string());
                 }
             }
         }
