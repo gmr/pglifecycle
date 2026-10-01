@@ -298,8 +298,10 @@ revocations:
   `deploy` compares the expression without them.
 
   The type of a cast can be in any form of a type name (see the next
-  item), and this is also true in an exclusion constraint expression:
-  `(label)::VARCHAR(20)` compares equal to
+  item), and this is also true in an exclusion constraint expression,
+  in the `where` of an index or an exclusion constraint, in a `CHECK`
+  constraint of a table or a domain, and in a default of a column or a
+  domain: `(label)::VARCHAR(20)` compares equal to
   `(label)::character varying(20)`, which PostgreSQL writes. `deploy`
   compares the remaining text of the expression as it is, so write it
   as `pull` writes it. Give a type that is not a built-in type its
@@ -308,28 +310,34 @@ revocations:
   so a type with no schema is not found and the script fails.
 
 - A type name (a column `data_type`, a parameter type, a `returns`
-  type, the source or target type of a cast or the type of a
-  transform, or the type of a cast in an index or an exclusion
-  constraint expression) can be in these forms. `deploy` compares it
-  in the form that PostgreSQL writes, so these forms are not a change:
-  an alias (`int4`, `varchar`,
+  type and the type of each column of a `TABLE(...)` return type, the
+  source or target type of a cast or the type of a transform, or the
+  type of a cast in an expression of the item before) can be in these
+  forms. `deploy` compares it in the form that PostgreSQL writes, so
+  these forms are not a change: an alias (`int4`, `varchar`,
   `timestamptz`, `decimal`, `bool`), a name in uppercase, `float` and
   `float(p)` (`double precision`, or `real` for a precision of 1 to
   24), `char` and `bit` with no length (`character(1)`, `bit(1)`),
   `timestamp(3)` (`timestamp(3) without time zone`), spaces in a
-  modifier (`decimal(10, 2)`), `numeric(10)` (`numeric(10,0)`), and an
-  array bound, `ARRAY` or an array type name (`int[3]`,
-  `integer ARRAY` and `_int4` are `integer[]`). PostgreSQL keeps no
-  typmod in a parameter, a return, a cast or a transform type, so
-  there `varchar(10)` is `character varying` and `bpchar` is
-  `character`. A quoted name, such as `"char"`, and a type that is not
-  a built-in type keep their names.
+  modifier (`decimal(10, 2)`), `numeric(10)` (`numeric(10,0)`), an
+  array bound, `ARRAY` or the array type name of a built-in type
+  (`int[3]`, `integer ARRAY` and `_int4` are `integer[]`, `_text` is
+  `text[]`, and `_varchar(4)` is `character varying(4)[]`), and the
+  quoted name of a built-in type (`"int4"` is `integer`, and
+  `"varchar"(10)` is `character varying(10)`). PostgreSQL keeps no
+  typmod in a parameter, a return, a `TABLE(...)` column, a cast or a
+  transform type, so there `varchar(10)` is `character varying` and
+  `bpchar` is `character`. `"char"` and `"bit"` keep their quotes, as
+  PostgreSQL writes them. A quoted name that is not the name of a
+  type in `pg_catalog` (`"integer"` is not a type name) and a type
+  that is not a built-in type keep their names: `_mood` and
+  `public._text` are not changed.
 
-  `deploy` compares these as they are written, so write them as `pull`
-  writes them: a cast in a `CHECK`, a `WHERE` or a `DEFAULT`
-  expression, a quoted built-in name such as `"int4"`, `serial`, an
-  array type name of a type that is not in the list above (such as
-  `_text`), and a column type in a `TABLE(...)` return type.
+  `deploy` compares a `serial`, `bigserial` or `smallserial` column
+  type as it is written, so write a serial column as `pull` writes
+  it: an `integer` (or `bigint` or `smallint`) column with
+  `nullable: false` and the default `nextval('<schema>.<sequence>'::regclass)`,
+  and the sequence as its own file with `owned_by`.
 
 - A storage parameter (`storage_parameters` of a table, a
   materialized view or an index) can be a YAML number or boolean:
@@ -371,7 +379,15 @@ revocations:
     | `SELECT pg_catalog.abs(x) + pg_catalog.int4(1);` | `SELECT (abs(x) + 1);` |
 
   PostgreSQL removes the `pg_catalog.` schema, adds the casts and
-  parentheses it infers, and evaluates a cast of a constant. A name in
+  parentheses it infers, and evaluates a cast of a constant.
+
+  An output column of a constant with no type, such as `SELECT 'a'`,
+  is `SELECT 'a'::text`. When `deploy` makes the routine from that
+  body, PostgreSQL writes `SELECT 'a'::text AS text`, because the name
+  of the column is now the name of the type. `deploy` compares the two
+  bodies as equal: it removes an `AS` name that is the name that
+  PostgreSQL gives to the column, for a constant with a cast (also in
+  parentheses, with `COLLATE`, or in a subquery of one value). A name in
   any other schema keeps its schema (`s.g()`). A body in `definition`
   (`AS $$ ... $$`) is kept as it is written, so this does not apply to
   it. To get the form for a body, create the function in a scratch

@@ -1,0 +1,273 @@
+//! A SQL-standard routine body (`BEGIN ATOMIC ... END`) in the form
+//! that deploy compares.
+//!
+//! PostgreSQL keeps the body as a parsed query, and writes it again
+//! from that query. A string literal or a NULL that has no type gets
+//! its type when PostgreSQL reads it, and PostgreSQL writes it with a
+//! cast: `SELECT 'x'` is `SELECT 'x'::text`. The output column of `'x'`
+//! has the name `?column?`, and PostgreSQL writes no `AS` for that
+//! name. But the output column of `'x'::text` has the name `text` (the
+//! name of the type), so the routine that deploy makes from the body
+//! that pull wrote is `SELECT 'x'::text AS text`. The two bodies do
+//! the same work: the name of an output column of a statement in a
+//! routine body has no effect on the result of the routine.
+
+use tree_sitter::Node;
+
+use crate::ddl::NodeExt;
+use crate::deploy::identity_type;
+
+/// The body without each `AS` name of an output column that is the
+/// name that PostgreSQL gives to the column when it has no `AS`, for a
+/// column that is a constant with a cast (`'x'::text AS text`), also
+/// in parentheses or with a COLLATE clause, and for a subquery that
+/// gives one of these columns. A body that the grammar cannot read
+/// stays as it is.
+pub(crate) fn canonical_sql_body(body: &str) -> String {
+    // the grammar reads a body only in its statement
+    let prefix = "CREATE FUNCTION f() RETURNS void LANGUAGE sql ";
+    let source = format!("{prefix}{body};");
+    let mut parser = tree_sitter::Parser::new();
+    if parser
+        .set_language(&tree_sitter_postgres::LANGUAGE.into())
+        .is_err()
+    {
+        return body.to_string();
+    }
+    let Some(tree) = parser.parse(&source, None) else {
+        return body.to_string();
+    };
+    let root = tree.root_node();
+    let Some(routine) = root.find("opt_routine_body") else {
+        return body.to_string();
+    };
+    if root.has_error() {
+        return body.to_string();
+    }
+    // the text from the end of each expression to the end of its name
+    let mut targets = Vec::new();
+    targets_in(&routine, &mut targets);
+    let mut removed: Vec<(usize, usize)> = targets
+        .into_iter()
+        .filter_map(|target| {
+            let expression = target.child_of_kind("a_expr")?;
+            let label = target.child_of_kind("ColLabel")?;
+            target.child_of_kind("kw_as")?;
+            let name = column_name(&expression, &source)?;
+            (name == identifier(label.text(&source)))
+                .then(|| (expression.end_byte(), target.end_byte()))
+        })
+        .collect();
+    removed.sort_unstable();
+    let mut result = String::with_capacity(body.len());
+    let mut position = prefix.len();
+    for (start, end) in removed {
+        result.push_str(&source[position..start]);
+        position = end;
+    }
+    result.push_str(&source[position..prefix.len() + body.len()]);
+    result
+}
+
+/// Each output column in the tree, also in a subquery
+fn targets_in<'tree>(node: &Node<'tree>, targets: &mut Vec<Node<'tree>>) {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.kind() == "target_el" {
+            targets.push(child);
+        }
+        targets_in(&child, targets);
+    }
+}
+
+/// The name that PostgreSQL gives to an output column of the
+/// expression with no `AS`, as `FigureColname` finds it: none for a
+/// constant, which then has the name `?column?`. The outer option is
+/// none for an expression of another kind, whose name is not found
+/// here.
+fn column_name(node: &Node, source: &str) -> Option<String> {
+    name_of(node, source)?
+}
+
+fn name_of(node: &Node, source: &str) -> Option<Option<String>> {
+    let mut cursor = node.walk();
+    let children: Vec<Node> = node.children(&mut cursor).collect();
+    let kinds: Vec<&str> = children.iter().map(Node::kind).collect();
+    match (node.kind(), kinds.as_slice()) {
+        ("AexprConst", _) => Some(None),
+        // a subquery of one value: the name of the column of the
+        // subquery
+        ("c_expr", ["select_with_parens"]) => {
+            subquery_name(&children[0], source)
+        }
+        (_, [_]) => name_of(&children[0], source),
+        // a cast: the name of its argument, or else the name of the type
+        (_, [_, "::", "Typename"]) => match name_of(&children[0], source)? {
+            None => Some(Some(type_name(children[2].text(source)))),
+            name => Some(name),
+        },
+        (_, [_, "kw_collate", _]) => name_of(&children[0], source),
+        ("c_expr", ["(", "a_expr", ")"]) => name_of(&children[1], source),
+        _ => None,
+    }
+}
+
+/// The name of the first output column of a subquery that is one
+/// SELECT, not a set operation
+fn subquery_name(node: &Node, source: &str) -> Option<Option<String>> {
+    let select = node
+        .child_of_kind("select_no_parens")?
+        .child_of_kind("simple_select")?;
+    select.child_of_kind("kw_select")?;
+    let target = select.find("target_el")?;
+    match target.child_of_kind("ColLabel") {
+        Some(label) => Some(Some(identifier(label.text(source)))),
+        None => name_of(&target.child_of_kind("a_expr")?, source),
+    }
+}
+
+/// The name that PostgreSQL gives to a cast column: the last name of
+/// the type as the grammar reads it, which is the name in pg_type for
+/// a built-in type (`character varying` is `varchar`)
+fn type_name(data_type: &str) -> String {
+    let data_type = identity_type(data_type);
+    let data_type = data_type.trim_end_matches("[]");
+    let name = match data_type {
+        "bigint" => "int8",
+        "bit varying" => "varbit",
+        "boolean" => "bool",
+        "character" => "bpchar",
+        "character varying" => "varchar",
+        "double precision" => "float8",
+        "integer" => "int4",
+        "real" => "float4",
+        "smallint" => "int2",
+        "time with time zone" => "timetz",
+        "time without time zone" => "time",
+        "timestamp with time zone" => "timestamptz",
+        "timestamp without time zone" => "timestamp",
+        other => other,
+    };
+    // the last name, after a `.` that is not in quotes
+    let mut quoted = false;
+    let mut start = 0;
+    for (index, c) in name.char_indices() {
+        match c {
+            '"' => quoted = !quoted,
+            '.' if !quoted => start = index + 1,
+            _ => {}
+        }
+    }
+    identifier(&name[start..])
+}
+
+/// A name as PostgreSQL keeps it: a quoted name with no quotes, and a
+/// name with no quotes in lowercase
+fn identifier(name: &str) -> String {
+    match name.strip_prefix('"').and_then(|n| n.strip_suffix('"')) {
+        Some(quoted) => quoted.replace("\"\"", "\""),
+        None => name.to_lowercase(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn atomic(statements: &str) -> String {
+        format!("BEGIN ATOMIC\n {statements}\nEND")
+    }
+
+    /// The body that pull writes against the body of the routine that
+    /// deploy makes from it, as PostgreSQL 18 writes each one
+    fn same(pulled: &str, made: &str) {
+        let pulled = atomic(pulled);
+        let made = atomic(made);
+        assert_eq!(canonical_sql_body(&made), pulled, "{made}");
+        assert_eq!(canonical_sql_body(&pulled), pulled, "{pulled}");
+    }
+
+    #[test]
+    fn literal_column_names_are_not_a_change() {
+        same("SELECT 'e\\f'::text;", "SELECT 'e\\f'::text AS text;");
+        same(
+            "SELECT 'x'::text,\n     2,\n     NULL::text,\n     \
+             ('y'::text COLLATE \"C\");",
+            "SELECT 'x'::text AS text,\n     2,\n     NULL::text AS text,\n     \
+             ('y'::text COLLATE \"C\") AS text;",
+        );
+        same(
+            "SELECT 'x'::text\n UNION\n  SELECT DISTINCT 'y'::text\n   \
+             WHERE ('z'::text = 'z'::text)\n  ORDER BY 1;",
+            "SELECT 'x'::text AS text\n UNION\n  SELECT DISTINCT 'y'::text \
+             AS text\n   WHERE ('z'::text = 'z'::text)\n  ORDER BY 1;",
+        );
+        same(
+            "SELECT 'q'::text;\n SELECT ( SELECT 'x'::text);",
+            "SELECT 'q'::text AS text;\n SELECT ( SELECT 'x'::text AS text) \
+             AS text;",
+        );
+        same(
+            "SELECT 'x'::character varying;",
+            "SELECT 'x'::character varying AS \"varchar\";",
+        );
+        same("SELECT '-1'::integer;", "SELECT '-1'::integer AS int4;");
+        same(
+            "SELECT '-1.5'::numeric;",
+            "SELECT '-1.5'::numeric AS \"numeric\";",
+        );
+        same(
+            "SELECT '3000000000'::bigint;",
+            "SELECT '3000000000'::bigint AS int8;",
+        );
+        same("SELECT '1'::\"bit\";", "SELECT '1'::\"bit\" AS \"bit\";");
+        same(
+            "SELECT '2020-01-01 00:00:00+00'::timestamp with time zone;",
+            "SELECT '2020-01-01 00:00:00+00'::timestamp with time zone AS \
+             timestamptz;",
+        );
+        same(
+            "SELECT 'x'::character(3);",
+            "SELECT 'x'::character(3) AS bpchar;",
+        );
+        same("SELECT '{}'::text[];", "SELECT '{}'::text[] AS text;");
+        same(
+            "SELECT 'a'::public.mood;",
+            "SELECT 'a'::public.mood AS mood;",
+        );
+    }
+
+    #[test]
+    fn other_column_names_stay() {
+        let stays = |statements: &str| {
+            let body = atomic(statements);
+            assert_eq!(canonical_sql_body(&body), body, "{body}");
+        };
+        // the name is not the name that PostgreSQL gives the column
+        stays("SELECT 'x'::text AS label;");
+        stays("SELECT 'x'::text AS \"Text\";");
+        stays("SELECT 'x'::text AS int4;");
+        stays("SELECT (t.b)::text AS text\n    FROM t;");
+        stays("SELECT now() AS now;");
+        stays("SELECT ARRAY['x'::text] AS \"array\";");
+        stays("SELECT ( SELECT 'x'::text AS label) AS text;");
+        // a column name in a string stays
+        stays("SELECT 'x::text AS text'::text AS label;");
+        // not a body that PostgreSQL can read
+        stays("SELECT 'x'::text AS text");
+        assert_eq!(canonical_sql_body("RETURN 'x'::text"), "RETURN 'x'::text");
+    }
+
+    /// A real change of the body is still a change
+    #[test]
+    fn changed_literals_stay_different() {
+        assert_ne!(
+            canonical_sql_body(&atomic("SELECT 'x'::text AS text;")),
+            canonical_sql_body(&atomic("SELECT 'y'::text;"))
+        );
+        assert_ne!(
+            canonical_sql_body(&atomic("SELECT 'x'::text AS text;")),
+            canonical_sql_body(&atomic("SELECT 'x'::character varying;"))
+        );
+    }
+}
