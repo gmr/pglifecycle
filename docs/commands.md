@@ -521,6 +521,18 @@ again with the settings:
 PGOPTIONS='-c standard_conforming_strings=on' pg_dump -E UTF8 -Fc --schema-only -d mydb -f mydb.dump
 ```
 
+libpq uses `PGOPTIONS` only when the connection does not set `options`.
+An `options` value in the `--dbname` connection string (such as
+`dbname=mydb options='-c statement_timeout=0'` or
+`postgresql:///mydb?options=...`), or in the service of the connection
+in `pg_service.conf`, replaces `PGOPTIONS`. Then the dump uses the
+`standard_conforming_strings` value of that `options` value, or of the
+database. `pull` and `deploy` refuse the dump when the setting is off,
+and tell which setting is off. To use the connection, add
+`-c standard_conforming_strings=on` to the end of its `options` value.
+The same is true for a `--dump` file that you make through such a
+connection.
+
 The `--style` value is one of libpgfmt's styles — `river`, `mozilla`,
 `aweber`, `dbt`, `gitlab`, `kickstarter`, `mattmc3`, or `pg_dump` — and
 controls only how view/materialized view queries and function bodies are

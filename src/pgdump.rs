@@ -272,7 +272,9 @@ fn stderr_of(output: &Output) -> String {
 /// each literal with the setting on, as the build and the deploy script
 /// write it. When a setting occurs two times, the server uses the last
 /// value, thus this value replaces the value of the database, the role
-/// and the caller.
+/// and the caller. libpq does not use PGOPTIONS when the connection
+/// string or its service sets `options`; then pull refuses a dump with
+/// the setting off (see `pull::check_session`).
 fn dump_options(caller: Option<OsString>) -> OsString {
     let mut options = caller.unwrap_or_default();
     if !options.is_empty() {
