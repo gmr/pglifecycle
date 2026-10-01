@@ -16,6 +16,14 @@
 # 4. A class change that needs a drop fails while an index uses the
 #    class. The transaction rolls back, so no other change of the same
 #    deploy is made. Without the index, the change is made.
+# 5. A member that only the family of a class with no family has is
+#    dropped from the family only with --allow-drop. An ADD in the slot
+#    of such a member is withheld with the drop.
+# 6. A class change that needs a drop, for a class with a member in its
+#    family, drops that member from the family first.
+# 7. A class moves to a new family while its old family is only in the
+#    database: the drop of the old family drops the class too, and the
+#    rebuild of the class does not fail.
 
 # $1 is a query that must return t, $2 says what the step checks
 expect_opclass() {
@@ -287,3 +295,86 @@ expect_opclass "SELECT count(*) = 1 FROM pg_amop a
     WHERE c.opcname = 'int_class' AND a.amoplefttype = a.amoprighttype" \
     "the operator class was not made again"
 expect_empty_plan "a changed operator class converges"
+
+# a member that only the family of a class with no family has: the
+# family is not dropped, as that drops the class too, but the member is
+# dropped from it, only with --allow-drop
+psql -d "${TARGET_DB}" -q -v ON_ERROR_STOP=1 \
+    -c "ALTER OPERATOR FAMILY test.gate_int_ops USING btree
+            ADD OPERATOR 3 = (integer, bigint);"
+expect_opclass_withheld 1 "the implied family member drop was not withheld"
+./target/debug/pglifecycle deploy --apply --allow-drop -d "${TARGET_DB}" \
+    "${WORKDIR}/project"
+expect_opclass "SELECT NOT EXISTS (SELECT FROM pg_amop a
+    JOIN pg_opfamily f ON f.oid = a.amopfamily
+    WHERE f.opfname = 'gate_int_ops' AND a.amoprighttype = 'bigint'::regtype)
+    AND EXISTS (SELECT FROM pg_opclass WHERE opcname = 'gate_int_ops')" \
+    "the implied family member was not dropped"
+expect_empty_plan "a member of an implied family is dropped"
+
+# another function in the slot of a member that the class gives, in its
+# implied family: the ADD needs the DROP, so it is withheld with it
+psql -d "${TARGET_DB}" -q -v ON_ERROR_STOP=1 <<'SQL'
+ALTER OPERATOR FAMILY test.gate_int_ops USING btree
+    DROP FUNCTION 2 (integer, integer);
+ALTER OPERATOR FAMILY test.gate_int_ops USING btree
+    ADD FUNCTION 2 (integer, integer) btint8sortsupport(internal);
+SQL
+expect_opclass_withheld 2 "the implied family member change was not withheld"
+if ! psql -d "${TARGET_DB}" -q -v ON_ERROR_STOP=1 \
+        -f "${WORKDIR}/withheld.sql"; then
+    echo "Convergence gate FAILED: the script without --allow-drop" \
+        "does not run" >&2
+    exit 1
+fi
+./target/debug/pglifecycle deploy --apply --allow-drop -d "${TARGET_DB}" \
+    "${WORKDIR}/project"
+expect_opclass "SELECT EXISTS (SELECT FROM pg_amproc p
+    JOIN pg_opfamily f ON f.oid = p.amprocfamily
+    WHERE f.opfname = 'gate_int_ops' AND p.amprocnum = 2
+      AND p.amproc = 'btint4sortsupport'::regproc)" \
+    "the changed implied family member was not set back"
+expect_empty_plan "a changed member of an implied family converges"
+
+# a class change that needs a drop, for a class whose sort support
+# function PostgreSQL keeps in its family: the rebuild drops that
+# member from the family first, as the create gives it again
+perl -0pi -e "s/  - \{strategy: 4, name: '>='\}\n(  - \{strategy: 5, name: '>'\}\n  functions:\n  - support: 2\n)/\$1/" \
+    "${WORKDIR}/project/operator_classes/test.yaml"
+[ "$(grep -c "strategy: 4, name: '>='" \
+    "${WORKDIR}/project/operator_classes/test.yaml")" = 1 ]
+expect_opclass_withheld 2 "the rebuild of the class was not withheld"
+./target/debug/pglifecycle deploy --apply --allow-drop -d "${TARGET_DB}" \
+    "${WORKDIR}/project"
+expect_opclass "SELECT
+    (SELECT count(*) = 4 FROM pg_amop a
+        JOIN pg_opfamily f ON f.oid = a.amopfamily
+        WHERE f.opfname = 'gate_int_ops')
+    AND (SELECT count(*) = 2 FROM pg_amproc p
+        JOIN pg_opfamily f ON f.oid = p.amprocfamily
+        WHERE f.opfname = 'gate_int_ops')" \
+    "the class with a member in its family was not made again"
+expect_empty_plan "a class with a member in its family is made again"
+
+# the class moves to a new family, and its old family is then only in
+# the database. Dropping the old family drops the class too, so the
+# drop of the class in the rebuild must not fail
+cat >> "${WORKDIR}/project/operator_families/test.yaml" <<'YAML'
+- name: gate_family
+  schema: test
+  method: btree
+YAML
+perl -0pi -e 's/(- name: gate_int_ops\n  schema: test\n  method: btree\n)/$1  family: test.gate_family\n/' \
+    "${WORKDIR}/project/operator_classes/test.yaml"
+grep -q 'family: test.gate_family' \
+    "${WORKDIR}/project/operator_classes/test.yaml"
+expect_opclass_withheld 2 "the move of the class was not withheld"
+./target/debug/pglifecycle deploy --apply --allow-drop -d "${TARGET_DB}" \
+    "${WORKDIR}/project"
+expect_opclass "SELECT
+    NOT EXISTS (SELECT FROM pg_opfamily WHERE opfname = 'gate_int_ops')
+    AND (SELECT f.opfname = 'gate_family' FROM pg_opclass c
+        JOIN pg_opfamily f ON f.oid = c.opcfamily
+        WHERE c.opcname = 'gate_int_ops')" \
+    "the class did not move to its new family"
+expect_empty_plan "a class moves to a new family"
