@@ -25,14 +25,14 @@ properties:
       by an absolute path name.
     type: string
   options:
-    type: array
-    items:
-      type: object
-      propertyNames:
-        pattern: ^(seq_page_cost|random_page_cost|effective_io_concurrency)$
-      patternProperties:
-        "^.*$":
-          type: number
+    title: Options
+    description: >
+      The parameters of the tablespace, by name. Each value is a number.
+    type: object
+    propertyNames:
+      pattern: ^(seq_page_cost|random_page_cost|effective_io_concurrency|maintenance_io_concurrency)$
+    additionalProperties:
+      type: number
   comment:
     title: Comment
     description: An optional comment about the tablespace.

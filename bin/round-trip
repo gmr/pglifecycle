@@ -9,9 +9,9 @@
 #
 # Plus a second restore with ownership applied, which the comparing
 # restore cannot check because it runs --no-owner, a round trip of the
-# settings and the comments of a role and a user, which pull reads from
-# pg_dumpall, and a restore of a built project with text that is not
-# ASCII into a LATIN1 and a UTF8 database.
+# settings and the comments of a role and a user, and of a tablespace,
+# which pull reads from pg_dumpall, and a restore of a built project
+# with text that is not ASCII into a LATIN1 and a UTF8 database.
 #
 # Requires a PostgreSQL superuser connection (defaults target the
 # compose.yaml container; override with PGHOST/PGPORT/PGUSER) and the
@@ -42,6 +42,9 @@ RESTORED_DB="${NAME}_restored"
 OWNED_DB="${NAME}_owned"
 SETTINGS_ROLE="${NAME}_settings"
 SETTINGS_USER="${NAME} Settings User"
+TABLESPACE="${NAME} Space"
+TABLESPACE_OWNER="${NAME} Space Owner"
+TABLESPACE_USER="${NAME}_space_user"
 ENC_DB_PREFIX="${NAME}_enc"
 WORKDIR="$(mktemp -d)"
 
@@ -51,9 +54,17 @@ drop_settings_roles() {
         -c "DROP ROLE IF EXISTS \"${SETTINGS_USER}\""
 }
 
+drop_tablespace() {
+    psql -d postgres -q -v ON_ERROR_STOP=1 \
+        -c "DROP TABLESPACE IF EXISTS \"${TABLESPACE}\"" \
+        -c "DROP ROLE IF EXISTS \"${TABLESPACE_OWNER}\"" \
+        -c "DROP ROLE IF EXISTS \"${TABLESPACE_USER}\""
+}
+
 cleanup() {
     rm -rf "$WORKDIR"
     drop_settings_roles >/dev/null 2>&1 || true
+    drop_tablespace >/dev/null 2>&1 || true
     bin/drop-database "${RESTORED_DB}" \
         >/dev/null 2>&1 || true
     bin/drop-database "${OWNED_DB}" \
@@ -142,8 +153,11 @@ fi
 # one name that has a comma, and a string with a comma for a setting
 # that is not a list. The role also gets a comment and a setting with a
 # backslash and characters that are not ASCII, which pg_dumpall writes
-# as escape strings (E'...'). The settings and the comments that the
-# build restores must be the settings and the comments that pull read.
+# as escape strings (E'...'). The comment and a setting have a newline
+# and a semicolon, thus pg_dumpall writes each of them on more than one
+# line; the second line of the comment starts with a backslash. The
+# settings and the comments that the build restores must be the
+# settings and the comments that pull read.
 # Each name of a list is quoted in pg_db_role_setting, so the
 # comparison is exact. The restore applies the owners, as a plain
 # pg_restore does.
@@ -152,12 +166,15 @@ export PGCLIENTENCODING=UTF8
 drop_settings_roles
 psql -d postgres -q -v ON_ERROR_STOP=1 <<SQL
 CREATE ROLE "${SETTINGS_ROLE}";
-COMMENT ON ROLE "${SETTINGS_ROLE}" IS 'rôle C:\x ''q'' ü';
+COMMENT ON ROLE "${SETTINGS_ROLE}" IS 'rôle C:\x ''q'' ü
+\second; line';
 ALTER ROLE "${SETTINGS_ROLE}" SET search_path TO "\$user", "my schema", public;
 ALTER ROLE "${SETTINGS_ROLE}" SET application_name TO 'x, y';
 ALTER ROLE "${SETTINGS_ROLE}" SET enable_seqscan TO off;
 ALTER ROLE "${SETTINGS_ROLE}" SET "DateStyle" TO 'iso, mdy';
 ALTER ROLE "${SETTINGS_ROLE}" SET roundtrip.path TO 'C:\dossier\é';
+ALTER ROLE "${SETTINGS_ROLE}" SET roundtrip.note TO 'one;
+two';
 CREATE USER "${SETTINGS_USER}";
 ALTER ROLE "${SETTINGS_USER}" SET temp_tablespaces TO 'pg_default', 'a,b';
 ALTER ROLE "${SETTINGS_USER}" SET search_path TO '';
@@ -199,6 +216,88 @@ if diff -u "${WORKDIR}/role-settings-source.txt" \
 else
     echo "Role settings gate FAILED: role settings differ" >&2
     exit 1
+fi
+
+# A tablespace is a cluster object too, so pull reads it with
+# pg_dumpall. Its location must be an empty directory that the server
+# can write, on the host of the server. The superuser makes it with
+# COPY ... TO PROGRAM, so the step needs no access to the container: it
+# works on the compose container and on the service container of CI.
+# The directory is in the parent or in the grandparent of the data
+# directory, the first that the server can write: in the postgres:18
+# image the data directory is /var/lib/postgresql/18/docker, and only
+# /var/lib/postgresql is writable. Where the server cannot make the
+# directory, the step is skipped. The tablespace has an owner, names
+# that need quotes, options, a grant and a comment with a newline. The
+# restore applies the owners, as a plain pg_restore does, and the
+# tablespace that it makes must be the tablespace that pull read.
+echo "==> Tablespace: pull with pg_dumpall, build, restore"
+drop_tablespace
+make_tablespace_dir() {
+    local base
+    base="$(psql -d postgres -tAX -v ON_ERROR_STOP=1 \
+        -c "SHOW data_directory")"
+    for _ in 1 2; do
+        base="$(dirname "${base}")"
+        TABLESPACE_DIR="${base}/pglifecycle-${NAME}-tablespace"
+        if psql -d postgres -q -v ON_ERROR_STOP=1 \
+                -v cmd="mkdir -p '${TABLESPACE_DIR}'" \
+                <<<"COPY (SELECT 1) TO PROGRAM :'cmd'" \
+                2>> "${WORKDIR}/mkdir.log"; then
+            return 0
+        fi
+    done
+    return 1
+}
+if ! make_tablespace_dir; then
+    cat "${WORKDIR}/mkdir.log" >&2
+    echo "Tablespace gate SKIPPED: the server cannot make a directory" \
+        "next to its data directory" >&2
+else
+    psql -d postgres -q -v ON_ERROR_STOP=1 <<SQL
+CREATE ROLE "${TABLESPACE_OWNER}";
+CREATE ROLE "${TABLESPACE_USER}";
+CREATE TABLESPACE "${TABLESPACE}" OWNER "${TABLESPACE_OWNER}"
+    LOCATION '${TABLESPACE_DIR}'
+    WITH (random_page_cost = 1.5, effective_io_concurrency = 20);
+COMMENT ON TABLESPACE "${TABLESPACE}" IS 'it''s fast
+\\second; line';
+GRANT CREATE ON TABLESPACE "${TABLESPACE}" TO "${TABLESPACE_USER}";
+SQL
+    tablespace() {
+        psql -d postgres -tA -v ON_ERROR_STOP=1 -c "
+            SELECT spcname, spcowner::regrole,
+                   pg_tablespace_location(oid), spcoptions, spcacl,
+                   shobj_description(oid, 'pg_tablespace')
+              FROM pg_tablespace
+             WHERE spcname = '${TABLESPACE}'"
+    }
+    tablespace > "${WORKDIR}/tablespace-source.txt"
+    ./target/debug/pglifecycle pull -d "${SOURCE_DB}" \
+        "${WORKDIR}/tablespace"
+    ./target/debug/pglifecycle build "${WORKDIR}/tablespace" \
+        "${WORKDIR}/tablespace.dump"
+    # the entries of the two roles, and of the tablespace, its comment
+    # and its grant, in the order of the archive
+    pg_restore -l "${WORKDIR}/tablespace.dump" \
+        | grep -E " (ROLE  (${TABLESPACE_OWNER}|${TABLESPACE_USER})|(TABLESPACE|COMMENT)  ${TABLESPACE}|ACL  TABLESPACE ${TABLESPACE}) " \
+        > "${WORKDIR}/tablespace.list" || true
+    drop_tablespace
+    pg_restore -d postgres --exit-on-error \
+        -L "${WORKDIR}/tablespace.list" "${WORKDIR}/tablespace.dump"
+    tablespace > "${WORKDIR}/tablespace-restored.txt"
+    if [ ! -s "${WORKDIR}/tablespace-source.txt" ]; then
+        echo "Tablespace gate FAILED: the source has no tablespace" >&2
+        exit 1
+    fi
+    if diff -u "${WORKDIR}/tablespace-source.txt" \
+            "${WORKDIR}/tablespace-restored.txt"; then
+        echo "Tablespace gate passed: the restored tablespace is the same"
+    else
+        echo "Tablespace gate FAILED: the tablespaces differ" >&2
+        exit 1
+    fi
+    drop_tablespace
 fi
 
 # The text of a project is UTF-8, so the build writes the archive in

@@ -464,7 +464,7 @@ pglifecycle pull [OPTIONS] DEST
 | Option | Description |
 | --- | --- |
 | `-D, --dump FILE` | Use an existing `pg_dump -Fc` file instead of connecting |
-| `--no-roles` | Skip cluster role/user extraction (role/user extraction is enabled by default for live connections; always skipped with `--dump`) |
+| `--no-roles` | Skip cluster role/user and tablespace extraction (this extraction is enabled by default for live connections; always skipped with `--dump`) |
 | `--include-password-hashes` | Include role password hashes in users (omitted by default via `pg_dumpall --no-role-passwords`), and the passwords of user mappings and subscription connections |
 | `--include-mode-headers` | Prefix each generated file with editor mode headers (see below) |
 | `-i, --ignore FILE` | File listing project paths to skip writing |
@@ -615,7 +615,7 @@ DDL options:
 | --- | --- |
 | `-x, --no-privileges` | Do not include GRANT/REVOKE |
 | `--no-security-labels` | Do not include security label assignments |
-| `--no-tablespaces` | Do not include tablespace assignments |
+| `--no-tablespaces` | Do not include tablespace assignments or tablespaces |
 
 With `--update`, `DEST` must be an existing project (it must contain
 `project.yaml`). The pull is rendered as usual but only files whose
@@ -630,11 +630,15 @@ that overloaded function files are numbered in dump order
 (`name.yaml`, `name_1.yaml`, …), so adding or removing an overload can
 renumber a sibling's file.
 
-Cluster roles and users are extracted via `pg_dumpall --roles-only`
-whenever `pull` connects to a live database (use `--no-roles` to skip,
-and note they cannot be extracted from a `--dump` file). They are
-classified when written: a role with the `LOGIN` attribute becomes a
-file in `users/`; everything else lands in `roles/`. Roles that appear
+Cluster roles, users and tablespaces are extracted via `pg_dumpall
+--globals-only` whenever `pull` connects to a live database (use
+`--no-roles` to skip them, or `--no-tablespaces` to skip only the
+tablespaces, and note they cannot be extracted from a `--dump` file).
+Each tablespace becomes a file in `tablespaces/`, with its owner,
+location, options and comment; its grants are written to the roles
+that receive them. Roles and users are classified when written: a
+role with the `LOGIN` attribute becomes a file in `users/`; everything
+else lands in `roles/`. Roles that appear
 only as ACL grantees (such as `PUBLIC`) are written with
 `create: false` so `build` defines but never creates them. The
 reserved `pg_*` roles are cluster-managed (and uncreatable), so they

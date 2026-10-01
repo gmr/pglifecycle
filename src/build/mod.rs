@@ -194,6 +194,24 @@
 //!     that is not ASCII changed. The project refuses an `encoding`
 //!     that is not UTF8, and a `stdstrings` of `false`, which the build
 //!     cannot honor. The test-project has `encoding: UTF-8`.
+//! 41. A tablespace and its comment have no owner in their entries.
+//!     The Python gave them the owner of the tablespace, and
+//!     pg_restore cannot set the owner of a tablespace, so each restore
+//!     that applies owners failed with `don't know how to set owner
+//!     for object type "TABLESPACE"`. The CREATE TABLESPACE names the
+//!     owner, as pg_dumpall writes it.
+//! 42. The owner of a tablespace renders as an identifier and its
+//!     location as a string constant, `OWNER "App Owner" LOCATION
+//!     '/srv/data'`. The Python wrote both bare, which does not parse
+//!     for a location or for a name that needs quotes.
+//! 43. A tablespace comes after the role, user or group of the project
+//!     that owns it, and an object in a tablespace of the project comes
+//!     after the tablespace. libpgdump sorts tablespaces and roles
+//!     last, thus the CREATE TABLESPACE failed on a role that did not
+//!     exist yet, and pg_restore could not set `default_tablespace` for
+//!     an object in a tablespace that did not exist yet. The Python
+//!     recorded no order. The test-project materialized view is in the
+//!     `temp` tablespace.
 
 mod acls;
 
@@ -297,6 +315,7 @@ pub fn assemble(project: &Project) -> Result<BuildOutput, String> {
         }
     }
     builder.apply_text_search_references();
+    builder.apply_tablespace_order(project);
     builder.apply_attaches(project)?;
     builder.apply_index_attaches()?;
     builder.split_column_defaults(project)?;
@@ -445,7 +464,9 @@ impl Builder {
     }
 
     /// Add the entry for an inventory item plus its comment entry
-    /// (ports _add_item)
+    /// (ports _add_item). With `no_owner`, the entries have no owner,
+    /// also for an object that has one: pg_restore cannot set the
+    /// owner of some types.
     fn add_item(
         &mut self,
         item: &Item,
@@ -474,8 +495,8 @@ impl Builder {
             item.definition.schema().unwrap_or_default().to_string();
         let tag = item.definition.name();
         let owner = match item.definition.owner() {
+            _ if no_owner => String::new(),
             Some(owner) => owner.to_string(),
-            None if no_owner => String::new(),
             None => self.superuser.clone(),
         };
         let tablespace = item.definition.tablespace().map(str::to_string);
@@ -2549,14 +2570,16 @@ impl Builder {
         let Definition::Tablespace(d) = &item.definition else {
             unreachable!()
         };
+        // the owner is an identifier and the location a string
+        // (deviation 42)
         let mut create = vec![
             "CREATE".into(),
             "TABLESPACE".into(),
             self.item_name(item),
             "OWNER".into(),
-            d.owner.clone(),
+            quote_ident(&d.owner),
             "LOCATION".into(),
-            d.location.clone(),
+            postgres_value(&Value::String(d.location.clone())),
         ];
         if let Some(options) = &d.options {
             let opts: Vec<String> = options
@@ -2567,7 +2590,9 @@ impl Builder {
         }
         let drop =
             vec!["DROP TABLESPACE IF EXISTS".into(), self.item_name(item)];
-        self.add_item(item, create, drop, false)
+        // pg_restore cannot set the owner of a tablespace, thus the
+        // CREATE names it, as pg_dumpall does (deviation 41)
+        self.add_item(item, create, drop, true)
     }
 
     fn dump_text_search(&mut self, item: &Item) -> Result<(), String> {
@@ -2921,6 +2946,56 @@ impl Builder {
             };
             if parent != dump_id
                 && let Some(entry) = self.dump.get_entry_mut(dump_id)
+                && !entry.dependencies.contains(&parent)
+            {
+                entry.dependencies.push(parent);
+            }
+        }
+    }
+
+    /// Order the tablespaces of the project (deviation 43). libpgdump
+    /// sorts a tablespace, a role, a user and a group last. Thus a
+    /// tablespace comes after the role, user or group of the project
+    /// that owns it, and each entry in a tablespace of the project,
+    /// such as a table or an index, comes after the tablespace.
+    fn apply_tablespace_order(&mut self, project: &Project) {
+        let mut roles: HashMap<&str, i32> = HashMap::new();
+        let mut tablespaces: HashMap<&str, (i32, &str)> = HashMap::new();
+        for item in &project.inventory {
+            let Some(&dump_id) = self.dump_id_map.get(&item.id) else {
+                continue;
+            };
+            match &item.definition {
+                Definition::Group(d) => {
+                    roles.insert(&d.name, dump_id);
+                }
+                Definition::Role(d) => {
+                    roles.insert(&d.name, dump_id);
+                }
+                Definition::User(d) => {
+                    roles.insert(&d.name, dump_id);
+                }
+                Definition::Tablespace(d) => {
+                    tablespaces.insert(&d.name, (dump_id, &d.owner));
+                }
+                _ => {}
+            }
+        }
+        let mut edges: Vec<(i32, i32)> = tablespaces
+            .values()
+            .filter_map(|(id, owner)| roles.get(owner).map(|r| (*id, *r)))
+            .collect();
+        for entry in self.dump.entries() {
+            if let Some(&(parent, _)) = entry
+                .tablespace
+                .as_deref()
+                .and_then(|name| tablespaces.get(name))
+            {
+                edges.push((entry.dump_id, parent));
+            }
+        }
+        for (child, parent) in edges {
+            if let Some(entry) = self.dump.get_entry_mut(child)
                 && !entry.dependencies.contains(&parent)
             {
                 entry.dependencies.push(parent);

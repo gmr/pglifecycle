@@ -7,14 +7,14 @@ use serde_json::{Map, Value};
 use tree_sitter::Node;
 
 use crate::ddl::object::string_value;
-use crate::ddl::{NodeExt, Statement, any_name, unquote};
+use crate::ddl::{NodeExt, Statement, any_name, unquote, unquote_role};
 use crate::models::{
     AccessMethod, Aggregate, Argument, Cast, Collation, Conversion,
     EventTrigger, EventTriggerFilter, FilteredPublicationTable, Language,
     Operator, OperatorClass, OperatorClassFunction, OperatorClassOperator,
     OperatorFamily, Publication, PublicationTable, Rule, Statistics,
-    Subscription, TextSearchConfig, TextSearchDict, TextSearchParser,
-    TextSearchTemplate, Transform,
+    Subscription, Tablespace, TextSearchConfig, TextSearchDict,
+    TextSearchParser, TextSearchTemplate, Transform,
 };
 
 /// A text search object and the schema it belongs to
@@ -536,6 +536,68 @@ pub(crate) fn create_access_method(
         handler: handler.to_string(),
         comment: None,
     }))
+}
+
+/// CREATE TABLESPACE → Tablespace. pg_dumpall writes the owner and the
+/// location here, and the options in an ALTER TABLESPACE.
+pub(crate) fn create_tablespace(
+    node: &Node,
+    src: &str,
+) -> Result<Statement, String> {
+    let (Some(name), Some(location)) =
+        (node.child_of_kind("name"), node.child_of_kind("Sconst"))
+    else {
+        return Err(String::from("CREATE TABLESPACE without a location"));
+    };
+    let owner = node
+        .child_of_kind("OptTableSpaceOwner")
+        .and_then(|n| n.child_of_kind("RoleSpec"))
+        .map(|n| unquote_role(n.text(src)))
+        .unwrap_or_default();
+    Ok(Statement::CreateTablespace(Tablespace {
+        name: unquote(name.text(src)),
+        owner,
+        location: string_value(&location, src),
+        options: tablespace_options(node, src),
+        comment: None,
+    }))
+}
+
+/// ALTER TABLESPACE ... SET (options)
+pub(crate) fn alter_tablespace(
+    node: &Node,
+    src: &str,
+) -> Result<Statement, String> {
+    let name = node
+        .child_of_kind("name")
+        .ok_or_else(|| String::from("ALTER TABLESPACE without a name"))?;
+    if node.child_of_kind("kw_set").is_none() {
+        return Ok(Statement::Unsupported(String::from("AlterTblSpcStmt")));
+    }
+    Ok(Statement::AlterTablespace {
+        name: unquote(name.text(src)),
+        options: tablespace_options(node, src).unwrap_or_default(),
+    })
+}
+
+/// The options of a tablespace statement. Each option of a tablespace
+/// is a number, and the project keeps it as a number.
+fn tablespace_options(node: &Node, src: &str) -> Option<Map<String, Value>> {
+    let options = crate::ddl::object::reloptions(node, src)?;
+    Some(
+        options
+            .into_iter()
+            .map(|(key, value)| {
+                let text = value.as_str().unwrap_or_default();
+                let number = text
+                    .parse::<i64>()
+                    .map(Value::from)
+                    .or_else(|_| text.parse::<f64>().map(Value::from))
+                    .unwrap_or(value);
+                (key, number)
+            })
+            .collect(),
+    )
 }
 
 /// The family name and the index method (`USING`) of an operator
@@ -1212,6 +1274,69 @@ mod tests {
         let mut statements = parser.parse(sql).unwrap();
         assert_eq!(statements.len(), 1, "expected one statement");
         statements.remove(0)
+    }
+
+    /// pg_dumpall writes the owner and the location in the CREATE, and
+    /// the options in an ALTER
+    #[test]
+    fn parses_tablespace_statements() {
+        let Statement::CreateTablespace(tablespace) = parse_one(
+            "CREATE TABLESPACE \"Fast Space\" OWNER \"ts owner\" \
+             LOCATION E'/srv/it''s\\\\x';",
+        ) else {
+            panic!("expected CreateTablespace")
+        };
+        assert_eq!(
+            tablespace,
+            Tablespace {
+                name: String::from("Fast Space"),
+                owner: String::from("ts owner"),
+                location: String::from("/srv/it's\\x"),
+                options: None,
+                comment: None,
+            }
+        );
+        let Statement::CreateTablespace(tablespace) = parse_one(
+            "CREATE TABLESPACE t OWNER app LOCATION '/srv/t' \
+             WITH (random_page_cost = 1.5);",
+        ) else {
+            panic!("expected CreateTablespace")
+        };
+        assert_eq!(
+            tablespace.options,
+            serde_json::json!({"random_page_cost": 1.5})
+                .as_object()
+                .cloned()
+        );
+        assert_eq!(
+            parse_one(
+                "ALTER TABLESPACE \"Fast Space\" SET (seq_page_cost=1.5, \
+                 effective_io_concurrency=20);"
+            ),
+            Statement::AlterTablespace {
+                name: String::from("Fast Space"),
+                options: serde_json::json!({
+                    "seq_page_cost": 1.5,
+                    "effective_io_concurrency": 20,
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            }
+        );
+        let Statement::Comment {
+            on,
+            target,
+            comment,
+        } = parse_one(
+            "COMMENT ON TABLESPACE \"Fast Space\" IS E'it''s\nC:\\\\x';",
+        )
+        else {
+            panic!("expected Comment")
+        };
+        assert_eq!(on, "TABLESPACE");
+        assert_eq!(target.name, "Fast Space");
+        assert_eq!(comment, "it's\nC:\\x");
     }
 
     #[test]

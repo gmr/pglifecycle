@@ -173,6 +173,30 @@ mod tests {
         assert!(!validate_object("schema", "bad", &data));
     }
 
+    /// The options of a tablespace are numbers by name, as the model
+    /// keeps them and as pull writes them
+    #[test]
+    fn validates_tablespace_options_by_name() {
+        let tablespace = |options| {
+            let data = json!({
+                "name": "fast",
+                "owner": "postgres",
+                "location": "/srv/fast",
+                "options": options,
+            });
+            validate_object("tablespace", "fast", &data)
+        };
+        assert!(tablespace(json!({
+            "seq_page_cost": 1.5,
+            "random_page_cost": 2,
+            "effective_io_concurrency": 20,
+            "maintenance_io_concurrency": 10,
+        })));
+        assert!(!tablespace(json!([{"seq_page_cost": 1.5}])));
+        assert!(!tablespace(json!({"seq_page_cost": "1.5"})));
+        assert!(!tablespace(json!({"fillfactor": 70})));
+    }
+
     /// PostgreSQL rejects PERIOD on one side of a foreign key only
     #[test]
     fn foreign_key_period_needs_both_sides() {

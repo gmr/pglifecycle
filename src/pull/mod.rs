@@ -314,9 +314,12 @@ pub fn snapshot(
         // role extraction is best-effort: a locked-down cluster (e.g.
         // RDS restricts pg_authid) should not abort the whole schema
         // export, so a failure is warned and skipped, not propagated
-        if let Err(error) =
-            extract_roles(conn, include_passwords, &mut assembly)
-        {
+        if let Err(error) = extract_roles(
+            conn,
+            include_passwords,
+            !ddl.no_tablespaces,
+            &mut assembly,
+        ) {
             log::warn!(
                 "Skipping roles and users: {error}. Use --no-roles to \
                  silence this, or connect with sufficient privileges."
@@ -495,10 +498,12 @@ fn encoding_in(bytes: &[u8]) -> Option<String> {
     (!value.is_empty()).then(|| value.to_string())
 }
 
-/// Dump cluster roles via pg_dumpall and merge them into `assembly`
+/// Dump cluster roles, and the tablespaces if `tablespaces` is set,
+/// via pg_dumpall and merge them into `assembly`
 fn extract_roles(
     conn: &cli::Connection,
     include_passwords: bool,
+    tablespaces: bool,
     assembly: &mut Assembly,
 ) -> Result<(), String> {
     let file = tempfile::Builder::new()
@@ -506,7 +511,7 @@ fn extract_roles(
         .suffix(".sql")
         .tempfile()
         .map_err(|e| format!("failed to create temp file: {e}"))?;
-    pgdump::dump_roles(conn, file.path(), include_passwords)?;
+    pgdump::dump_roles(conn, file.path(), include_passwords, tablespaces)?;
     let text = std::fs::read_to_string(file.path()).map_err(|e| {
         format!("failed to read roles dump {}: {e}", file.path().display())
     })?;
@@ -677,6 +682,8 @@ pub struct Assembly {
     pub operator_families: Vec<models::OperatorFamily>,
     pub operator_classes: Vec<models::OperatorClass>,
     pub access_methods: Vec<models::AccessMethod>,
+    /// From the globals dump of pg_dumpall, as the roles
+    pub tablespaces: Vec<models::Tablespace>,
     pub roles: BTreeMap<String, RoleState>,
     pub remaining: Vec<Remaining>,
     /// The objects that each function and procedure depends on in the
@@ -839,6 +846,7 @@ impl Assembly {
             ("foreign data wrappers", self.foreign_data_wrappers.len()),
             ("servers", self.servers.len()),
             ("user mappings", self.user_mappings.len()),
+            ("tablespaces", self.tablespaces.len()),
             ("users", users),
             ("roles", roles),
         ]
@@ -1044,28 +1052,28 @@ impl Assembly {
             .collect();
     }
 
-    /// Parse a `pg_dumpall --roles-only` SQL dump, skipping comments,
-    /// SET statements, and psql meta-commands (PG17 wraps the output
-    /// in `\restrict` / `\unrestrict`)
+    /// Parse a `pg_dumpall --globals-only` SQL dump one statement at a
+    /// time, skipping comments, SET statements, and psql meta-commands
+    /// (PG17 wraps the output in `\restrict` / `\unrestrict`). A
+    /// statement can have more than one line: pg_dumpall writes a
+    /// comment or a setting with a newline so.
     pub fn ingest_roles(&mut self, text: &str) -> Result<(), String> {
         let mut parser = ddl::Parser::new()?;
-        for line in text.lines() {
-            let line = line.trim();
-            if line.is_empty()
-                || line.starts_with("--")
-                || line.starts_with("SET ")
-                || line.starts_with('\\')
-            {
+        for statement in ddl::split_statements(text) {
+            if statement.starts_with("SET ") {
                 continue;
             }
-            match parser.parse(line) {
+            match parser.parse(statement) {
                 Ok(statements) => {
-                    for statement in statements {
-                        self.apply_role_statement(statement, line);
+                    for parsed in statements {
+                        self.apply_role_statement(parsed, statement);
                     }
                 }
                 Err(error) => {
-                    log::warn!("Failed to parse role line {line:?}: {error}");
+                    log::warn!(
+                        "Failed to parse the statement {statement:?} of \
+                         the globals dump: {error}"
+                    );
                 }
             }
         }
@@ -1589,7 +1597,9 @@ impl Assembly {
             Statement::RoleMembership { .. }
             | Statement::CreateRole(_)
             | Statement::AlterRole(_)
-            | Statement::AlterRoleSetting { .. } => {
+            | Statement::AlterRoleSetting { .. }
+            | Statement::CreateTablespace(_)
+            | Statement::AlterTablespace { .. } => {
                 self.apply_role_statement(
                     statement,
                     entry.defn.as_deref().unwrap_or_default(),
@@ -1654,16 +1664,54 @@ impl Assembly {
             } if on == "ROLE" => {
                 self.role(&target.name).comment = Some(comment);
             }
+            Statement::CreateTablespace(tablespace) => {
+                self.tablespaces.push(tablespace);
+            }
+            Statement::AlterTablespace { name, options } => {
+                match self.tablespace(&name) {
+                    Some(tablespace) => {
+                        tablespace
+                            .options
+                            .get_or_insert_default()
+                            .extend(options);
+                    }
+                    None => {
+                        log::warn!("Options of unknown tablespace {name}");
+                        self.push_role_remaining(source);
+                    }
+                }
+            }
+            Statement::Comment {
+                on,
+                target,
+                comment,
+            } if on == "TABLESPACE" => match self.tablespace(&target.name) {
+                Some(tablespace) => tablespace.comment = Some(comment),
+                None => {
+                    log::warn!("Comment on unknown tablespace {target}");
+                    self.push_role_remaining(source);
+                }
+            },
+            Statement::Acl(acl) => self.apply_acl(&acl),
             other => {
                 log::warn!("Unexpected statement in roles dump: {other:?}");
-                self.remaining.push(Remaining {
-                    desc: String::from("ROLE"),
-                    namespace: None,
-                    tag: None,
-                    defn: Some(source.to_string()),
-                });
+                self.push_role_remaining(source);
             }
         }
+    }
+
+    fn tablespace(&mut self, name: &str) -> Option<&mut models::Tablespace> {
+        self.tablespaces.iter_mut().find(|t| t.name == name)
+    }
+
+    /// Keep a statement of the globals dump that has nowhere to go
+    fn push_role_remaining(&mut self, source: &str) {
+        self.remaining.push(Remaining {
+            desc: String::from("ROLE"),
+            namespace: None,
+            tag: None,
+            defn: Some(source.to_string()),
+        });
     }
 
     fn role(&mut self, name: &str) -> &mut RoleState {
@@ -3776,6 +3824,99 @@ mod tests {
         let readonly = &assembly.roles["readonly"];
         assert!(readonly.created);
         assert_eq!(readonly.options.login, Some(false));
+    }
+
+    /// pg_dumpall writes a comment or a setting with a newline on more
+    /// than one line, and a line of an escape string can start with a
+    /// backslash
+    #[test]
+    fn ingests_role_statements_with_more_than_one_line() {
+        let mut assembly = Assembly::default();
+        assembly
+            .ingest_roles(
+                "\\restrict abc123\n\
+                 CREATE ROLE app;\n\
+                 COMMENT ON ROLE app IS E'one; C:\\\\x\n\\\\two ''q''';\n\
+                 ALTER ROLE app SET application_name TO 'a;\nb';\n\
+                 \\unrestrict abc123\n",
+            )
+            .unwrap();
+        let app = &assembly.roles["app"];
+        assert_eq!(app.comment.as_deref(), Some("one; C:\\x\n\\two 'q'"));
+        assert_eq!(
+            app.settings.get("application_name"),
+            Some(&Value::String("a;\nb".into()))
+        );
+        assert!(assembly.remaining.is_empty(), "{:?}", assembly.remaining);
+    }
+
+    /// `pg_dumpall --globals-only` writes each tablespace after the
+    /// roles: its owner and location in the CREATE, its options in an
+    /// ALTER, then its grants and its comment
+    #[test]
+    fn ingests_tablespaces() {
+        let mut assembly = Assembly::default();
+        assembly
+            .ingest_roles(
+                "CREATE ROLE \"ts owner\";\n\
+                 CREATE ROLE reader;\n\
+                 CREATE TABLESPACE \"Fast Space\" OWNER \"ts owner\" \
+                 LOCATION '/srv/it''s';\n\
+                 ALTER TABLESPACE \"Fast Space\" SET (seq_page_cost=1.5, \
+                 effective_io_concurrency=20);\n\
+                 GRANT ALL ON TABLESPACE \"Fast Space\" TO reader;\n\
+                 COMMENT ON TABLESPACE \"Fast Space\" IS E'it''s fast\n\
+                 C:\\\\x';\n\
+                 CREATE TABLESPACE plain OWNER postgres LOCATION '/srv/p';\n",
+            )
+            .unwrap();
+        assert!(assembly.remaining.is_empty(), "{:?}", assembly.remaining);
+        assert_eq!(
+            assembly.tablespaces,
+            vec![
+                models::Tablespace {
+                    name: String::from("Fast Space"),
+                    owner: String::from("ts owner"),
+                    location: String::from("/srv/it's"),
+                    options: serde_json::json!({
+                        "seq_page_cost": 1.5,
+                        "effective_io_concurrency": 20,
+                    })
+                    .as_object()
+                    .cloned(),
+                    comment: Some(String::from("it's fast\nC:\\x")),
+                },
+                models::Tablespace {
+                    name: String::from("plain"),
+                    owner: String::from("postgres"),
+                    location: String::from("/srv/p"),
+                    options: None,
+                    comment: None,
+                },
+            ]
+        );
+        assert_eq!(
+            Value::Object(
+                assembly.roles["reader"].grants.sections["tablespaces"]
+                    .clone()
+            ),
+            serde_json::json!({"Fast Space": ["ALL"]})
+        );
+    }
+
+    /// A tablespace statement with no tablespace is kept, so that the
+    /// pull fails and no text is lost
+    #[test]
+    fn keeps_tablespace_statements_with_no_tablespace() {
+        let mut assembly = Assembly::default();
+        assembly
+            .ingest_roles(
+                "ALTER TABLESPACE gone SET (seq_page_cost=2);\n\
+                 COMMENT ON TABLESPACE gone IS 'x';\n",
+            )
+            .unwrap();
+        assert_eq!(assembly.remaining.len(), 2);
+        assert!(assembly.tablespaces.is_empty());
     }
 
     /// `COMMENT ON ROLE` in the roles dump is captured on the role's

@@ -57,7 +57,8 @@ fn dump_args(
     args
 }
 
-/// Dump cluster roles to `path` as SQL via `pg_dumpall --roles-only`.
+/// Dump cluster roles, and the tablespaces if `tablespaces` is set,
+/// to `path` as SQL via `pg_dumpall --globals-only`.
 /// Password hashes are omitted (`--no-role-passwords`) unless
 /// `include_passwords` is set, to keep secrets out of the project.
 ///
@@ -69,8 +70,9 @@ pub fn dump_roles(
     conn: &cli::Connection,
     path: &Path,
     include_passwords: bool,
+    tablespaces: bool,
 ) -> Result<(), String> {
-    match run_dump_roles(conn, path, include_passwords) {
+    match run_dump_roles(conn, path, include_passwords, tablespaces) {
         Err(error)
             if should_retry_without_passwords(include_passwords, &error) =>
         {
@@ -78,7 +80,7 @@ pub fn dump_roles(
                 "Cannot read password hashes ({error}); retrying roles \
                  without passwords"
             );
-            run_dump_roles(conn, path, false)
+            run_dump_roles(conn, path, false, tablespaces)
         }
         result => result,
     }
@@ -88,8 +90,9 @@ fn run_dump_roles(
     conn: &cli::Connection,
     path: &Path,
     include_passwords: bool,
+    tablespaces: bool,
 ) -> Result<(), String> {
-    let args = dump_roles_args(conn, path, include_passwords);
+    let args = dump_roles_args(conn, path, include_passwords, tablespaces);
     execute("pg_dumpall", args, conn)
 }
 
@@ -99,11 +102,15 @@ fn dump_roles_args(
     conn: &cli::Connection,
     path: &Path,
     include_passwords: bool,
+    tablespaces: bool,
 ) -> Vec<OsString> {
     let mut args = connection_args(conn);
     args.push("-f".into());
     args.push(path.into());
-    args.push("-r".into());
+    args.push("-g".into());
+    if !tablespaces {
+        args.push("--no-tablespaces".into());
+    }
     args.extend(["-E".into(), "UTF8".into()]);
     if !include_passwords {
         args.push("--no-role-passwords".into());
@@ -411,10 +418,27 @@ mod tests {
         let args = dump_args(&connection(false), &DumpDdl::default(), path);
         assert!(has_pair(&args, "-E", "UTF8"), "{args:?}");
         for include_passwords in [false, true] {
-            let args =
-                dump_roles_args(&connection(false), path, include_passwords);
+            let args = dump_roles_args(
+                &connection(false),
+                path,
+                include_passwords,
+                true,
+            );
             assert!(has_pair(&args, "-E", "UTF8"), "{args:?}");
         }
+    }
+
+    /// The globals dump has the roles and the tablespaces, and only the
+    /// roles with --no-tablespaces
+    #[test]
+    fn dumps_the_globals() {
+        let path = Path::new("globals.sql");
+        let args = dump_roles_args(&connection(false), path, false, true);
+        assert!(args.iter().any(|a| a == "-g"), "{args:?}");
+        assert!(!args.iter().any(|a| a == "--no-tablespaces"), "{args:?}");
+        let args = dump_roles_args(&connection(false), path, false, false);
+        assert!(args.iter().any(|a| a == "-g"), "{args:?}");
+        assert!(args.iter().any(|a| a == "--no-tablespaces"), "{args:?}");
     }
 
     #[test]

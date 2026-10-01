@@ -34,6 +34,7 @@ const MANAGED_DIRS: &[&str] = &[
     "statistics",
     "subscriptions",
     "tables",
+    "tablespaces",
     "text_search",
     "transforms",
     "types",
@@ -214,6 +215,10 @@ fn stale_files(
         if (*dir == "roles" || *dir == "users") && !roles_extracted {
             continue;
         }
+        // the tablespaces come from the same pg_dumpall run
+        if *dir == "tablespaces" && (!roles_extracted || args.no_tablespaces) {
+            continue;
+        }
         let top = root.join(dir);
         if !top.is_dir() {
             continue;
@@ -318,6 +323,34 @@ mod tests {
             stale_files(root, &BTreeMap::new(), &BTreeSet::new(), &args)
                 .unwrap();
         assert!(stale.is_empty(), "expected no stale files, got {stale:?}");
+    }
+
+    /// Tablespaces come from the same pg_dumpall run as the roles, so
+    /// `--dump` and `--no-roles` do not stale them, and neither does
+    /// `--no-tablespaces`, which leaves them out of that run. A live
+    /// pull still stales them.
+    #[test]
+    fn stales_tablespaces_only_when_they_are_extracted() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        touch(root, "tablespaces/fast.yaml");
+        let dump = root.join("unused.dump");
+        for extra in [
+            &["--dump", dump.to_str().unwrap()][..],
+            &["--no-roles"],
+            &["--no-tablespaces"],
+        ] {
+            let args = pull_args(extra, &root.join("project"));
+            let stale =
+                stale_files(root, &BTreeMap::new(), &BTreeSet::new(), &args)
+                    .unwrap();
+            assert!(stale.is_empty(), "{extra:?} gives stale {stale:?}");
+        }
+        let args = pull_args(&[], &root.join("project"));
+        let stale =
+            stale_files(root, &BTreeMap::new(), &BTreeSet::new(), &args)
+                .unwrap();
+        assert_eq!(stale, vec![PathBuf::from("tablespaces/fast.yaml")]);
     }
 
     /// Without `--dump`/`--no-roles`, a live pull does extract roles, so
