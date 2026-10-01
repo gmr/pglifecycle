@@ -229,12 +229,14 @@
 //!     for a location or for a name that needs quotes.
 //! 44. A tablespace comes after the role, user or group of the project
 //!     that owns it, and an object in a tablespace of the project comes
-//!     after the tablespace. libpgdump sorts tablespaces and roles
-//!     last, thus the CREATE TABLESPACE failed on a role that did not
-//!     exist yet, and pg_restore could not set `default_tablespace` for
-//!     an object in a tablespace that did not exist yet. The Python
-//!     recorded no order. The test-project materialized view is in the
-//!     `temp` tablespace.
+//!     after the tablespace. A table whose `index_tablespace` is a
+//!     tablespace of the project also comes after it, because its
+//!     CREATE TABLE makes the constraint index there. libpgdump sorts
+//!     tablespaces and roles last, thus the CREATE TABLESPACE failed on
+//!     a role that did not exist yet, and pg_restore could not set
+//!     `default_tablespace` for an object in a tablespace that did not
+//!     exist yet, or make an index in it. The Python recorded no order.
+//!     The test-project materialized view is in the `temp` tablespace.
 
 mod acls;
 mod calls;
@@ -3075,10 +3077,14 @@ impl Builder {
     /// sorts a tablespace, a role, a user and a group last. Thus a
     /// tablespace comes after the role, user or group of the project
     /// that owns it, and each entry in a tablespace of the project,
-    /// such as a table or an index, comes after the tablespace.
+    /// such as a table or an index, comes after the tablespace. A table
+    /// also comes after its `index_tablespace`: the CREATE TABLE makes
+    /// the index of each inline constraint in it, and that index has
+    /// no entry of its own.
     fn apply_tablespace_order(&mut self, project: &Project) {
         let mut roles: HashMap<&str, i32> = HashMap::new();
         let mut tablespaces: HashMap<&str, (i32, &str)> = HashMap::new();
+        let mut index_tablespaces: Vec<(i32, &str)> = Vec::new();
         for item in &project.inventory {
             let Some(&dump_id) = self.dump_id_map.get(&item.id) else {
                 continue;
@@ -3096,6 +3102,11 @@ impl Builder {
                 Definition::Tablespace(d) => {
                     tablespaces.insert(&d.name, (dump_id, &d.owner));
                 }
+                Definition::Table(d) => {
+                    if let Some(name) = &d.index_tablespace {
+                        index_tablespaces.push((dump_id, name));
+                    }
+                }
                 _ => {}
             }
         }
@@ -3103,6 +3114,9 @@ impl Builder {
             .values()
             .filter_map(|(id, owner)| roles.get(owner).map(|r| (*id, *r)))
             .collect();
+        edges.extend(index_tablespaces.iter().filter_map(|(id, name)| {
+            tablespaces.get(name).map(|(parent, _)| (*id, *parent))
+        }));
         for entry in self.dump.entries() {
             if let Some(&(parent, _)) = entry
                 .tablespace

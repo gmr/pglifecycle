@@ -519,6 +519,35 @@ fn outside_items() -> Vec<Item> {
                 .unwrap(),
             ),
         ),
+        // deviation 44: the index of the primary key is in a
+        // tablespace of the project, and the table is not
+        item(
+            11,
+            ObjectType::Tablespace,
+            Definition::Tablespace(
+                serde_json::from_value(serde_json::json!({
+                    "name": "fastdisk",
+                    "owner": "Space Owner",
+                    "location": "/srv/fastdisk",
+                }))
+                .unwrap(),
+            ),
+        ),
+        item(
+            12,
+            ObjectType::Table,
+            Definition::Table(
+                serde_json::from_value(serde_json::json!({
+                    "name": "ledger",
+                    "schema": "test",
+                    "owner": "postgres",
+                    "columns": [{"name": "id", "data_type": "integer"}],
+                    "primary_key": ["id"],
+                    "index_tablespace": "fastdisk",
+                }))
+                .unwrap(),
+            ),
+        ),
     ]
 }
 
@@ -968,6 +997,19 @@ fn corrects_objects_outside_the_test_project() {
             .dependencies
             .contains(&owner),
         "the tablespace does not depend on its owner"
+    );
+    // the CREATE TABLE makes the index of the primary key in the
+    // tablespace, so the table comes after the tablespace
+    let fastdisk = id_of("TABLESPACE", "fastdisk");
+    let ledger = id_of("TABLE", "ledger");
+    assert!(
+        output
+            .dump
+            .get_entry(ledger)
+            .unwrap()
+            .dependencies
+            .contains(&fastdisk),
+        "the table does not depend on its index tablespace"
     );
     for (desc, tag) in OUTSIDE_OWNERLESS {
         let entry = output
