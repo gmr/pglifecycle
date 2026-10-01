@@ -1120,3 +1120,171 @@ fn records_inventory_dependency_edges() {
         ]
     );
 }
+
+/// Deviation 45: each entry that names a role, a user or a group of
+/// the project comes after it in the archive. libpgdump sorts these
+/// types last, and pg_restore runs the entries in the order of the
+/// archive, so the owner statement of a schema failed with `role
+/// "app_owner" does not exist`, and so did a policy that named a role.
+/// Only the entry of an item gets an edge to a role: deploy finds the
+/// item of a child entry, such as a comment, through its edges.
+#[test]
+fn orders_roles_before_the_entries_that_name_them() {
+    let item = |id, desc, definition| Item {
+        id,
+        desc,
+        definition,
+        dependencies: BTreeSet::new(),
+    };
+    let inventory = vec![
+        item(
+            0,
+            ObjectType::Role,
+            Definition::Role(
+                serde_json::from_value(
+                    serde_json::json!({"name": "app_owner"}),
+                )
+                .unwrap(),
+            ),
+        ),
+        item(
+            1,
+            ObjectType::User,
+            Definition::User(
+                serde_json::from_value(serde_json::json!({
+                    "name": "app_user",
+                    "grants": {
+                        "schemata": {"app": ["USAGE"]},
+                        "tables": {"app.things": ["SELECT"]},
+                    },
+                }))
+                .unwrap(),
+            ),
+        ),
+        item(
+            2,
+            ObjectType::Group,
+            Definition::Group(
+                serde_json::from_value(
+                    serde_json::json!({"name": "app_group"}),
+                )
+                .unwrap(),
+            ),
+        ),
+        item(
+            3,
+            ObjectType::Schema,
+            Definition::Schema(
+                serde_json::from_value(
+                    serde_json::json!({"name": "app", "owner": "app_owner"}),
+                )
+                .unwrap(),
+            ),
+        ),
+        item(
+            4,
+            ObjectType::Table,
+            Definition::Table(
+                serde_json::from_value(serde_json::json!({
+                    "name": "things",
+                    "schema": "app",
+                    "owner": "app_owner",
+                    "comment": "Things",
+                    "columns": [{"name": "id", "data_type": "integer"}],
+                    "row_level_security": {"enabled": true},
+                    "policies": [{
+                        "name": "readers",
+                        "command": "SELECT",
+                        "roles": ["app_group"],
+                        "using": "true",
+                    }],
+                }))
+                .unwrap(),
+            ),
+        ),
+        item(
+            5,
+            ObjectType::DefaultPrivileges,
+            Definition::DefaultPrivileges(
+                serde_json::from_value(serde_json::json!({
+                    "name": "app_owner",
+                    "grants": [{
+                        "object_type": "TABLES",
+                        "grantee": "app_user",
+                        "privileges": ["SELECT"],
+                    }],
+                }))
+                .unwrap(),
+            ),
+        ),
+        item(
+            6,
+            ObjectType::UserMapping,
+            Definition::UserMapping(
+                serde_json::from_value(serde_json::json!({
+                    "name": "app_user",
+                    "servers": [{"name": "remote"}],
+                }))
+                .unwrap(),
+            ),
+        ),
+    ];
+    let project = project::Project {
+        name: "roles".into(),
+        superuser: "postgres".into(),
+        default_schema: "public".into(),
+        path: std::path::PathBuf::new(),
+        inventory,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("build.dump");
+    build::build(&project, &path).unwrap();
+    let dump = libpgdump::load(&path).unwrap();
+    let order: Vec<String> = dump
+        .entries()
+        .iter()
+        .map(|e| {
+            format!("{} {}", e.desc.as_str(), e.tag.as_deref().unwrap_or(""))
+        })
+        .collect();
+    let position = |name: &str| {
+        order
+            .iter()
+            .position(|e| e == name)
+            .unwrap_or_else(|| panic!("missing entry {name}: {order:?}"))
+    };
+    for (entry, role) in [
+        ("SCHEMA app", "ROLE app_owner"),
+        ("TABLE things", "ROLE app_owner"),
+        ("ROW SECURITY things", "ROLE app_owner"),
+        ("POLICY things readers", "ROLE app_owner"),
+        ("POLICY things readers", "GROUP app_group"),
+        ("ACL SCHEMA app", "USER app_user"),
+        ("ACL TABLE things", "ROLE app_owner"),
+        ("ACL TABLE things", "USER app_user"),
+        (
+            "DEFAULT ACL DEFAULT PRIVILEGES FOR TABLES",
+            "ROLE app_owner",
+        ),
+        ("DEFAULT ACL DEFAULT PRIVILEGES FOR TABLES", "USER app_user"),
+        ("USER MAPPING app_user", "USER app_user"),
+    ] {
+        assert!(
+            position(role) < position(entry),
+            "{entry} comes before {role}: {order:?}"
+        );
+    }
+    let table = dump
+        .entries()
+        .iter()
+        .find(|e| e.desc.as_str() == "TABLE")
+        .unwrap();
+    let comment = dump
+        .entries()
+        .iter()
+        .find(|e| {
+            e.desc.as_str() == "COMMENT" && e.tag.as_deref() == Some("things")
+        })
+        .unwrap();
+    assert_eq!(comment.dependencies, [table.dump_id]);
+}

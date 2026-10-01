@@ -10,16 +10,17 @@
 # Plus a second restore with ownership applied, which the comparing
 # restore cannot check because it runs --no-owner, a round trip of the
 # settings and the comments of a role and a user, and of a tablespace,
-# which pull reads from pg_dumpall, and a restore of a built project
-# with text that is not ASCII into a LATIN1 and a UTF8 database.
+# which pull reads from pg_dumpall, a restore of a built project with
+# objects that its roles own, and a restore of a built project with
+# text that is not ASCII into a LATIN1 and a UTF8 database.
 #
 # Requires a PostgreSQL superuser connection (defaults target the
 # compose.yaml container; override with PGHOST/PGPORT/PGUSER) and the
 # postgres client tools on PATH. All commands run via psql/pg_dump
 # against scratch databases, named NAME_source, NAME_restored,
-# NAME_owned, NAME_enc_latin1 and NAME_enc_utf8, that are dropped and
-# recreated. FIXTURE defaults to
-# fixtures/schema.sql and NAME to roundtrip.
+# NAME_owned, NAME_roles, NAME_enc_latin1 and NAME_enc_utf8, that are
+# dropped and recreated. FIXTURE defaults to fixtures/schema.sql and
+# NAME to roundtrip.
 #
 # pull formats routine bodies, so a fixture that is not written in the
 # formatter's style dumps its bodies differently after the round trip.
@@ -45,6 +46,10 @@ SETTINGS_USER="${NAME} Settings User"
 TABLESPACE="${NAME} Space"
 TABLESPACE_OWNER="${NAME} Space Owner"
 TABLESPACE_USER="${NAME}_space_user"
+ROLES_DB="${NAME}_roles"
+ROLES_OWNER="${NAME} Owner"
+ROLES_USER="${NAME}_reader"
+ROLES_GROUP="${NAME}_readers"
 ENC_DB_PREFIX="${NAME}_enc"
 WORKDIR="$(mktemp -d)"
 
@@ -52,6 +57,13 @@ drop_settings_roles() {
     psql -d postgres -q -v ON_ERROR_STOP=1 \
         -c "DROP ROLE IF EXISTS \"${SETTINGS_ROLE}\"" \
         -c "DROP ROLE IF EXISTS \"${SETTINGS_USER}\""
+}
+
+drop_project_roles() {
+    psql -d postgres -q -v ON_ERROR_STOP=1 \
+        -c "DROP ROLE IF EXISTS \"${ROLES_OWNER}\"" \
+        -c "DROP ROLE IF EXISTS \"${ROLES_USER}\"" \
+        -c "DROP ROLE IF EXISTS \"${ROLES_GROUP}\""
 }
 
 drop_tablespace() {
@@ -65,6 +77,8 @@ cleanup() {
     rm -rf "$WORKDIR"
     drop_settings_roles >/dev/null 2>&1 || true
     drop_tablespace >/dev/null 2>&1 || true
+    bin/drop-database "${ROLES_DB}" >/dev/null 2>&1 || true
+    drop_project_roles >/dev/null 2>&1 || true
     bin/drop-database "${RESTORED_DB}" \
         >/dev/null 2>&1 || true
     bin/drop-database "${OWNED_DB}" \
@@ -299,6 +313,85 @@ SQL
     fi
     drop_tablespace
 fi
+
+# A role, a user and a group of a project own a schema and a table, are
+# in a policy, get grants and have default privileges. pg_restore runs
+# the entries in the order of the archive, so each role must come
+# before the first entry that names it. The restore makes the roles
+# and applies the owners, as a plain pg_restore does, into an empty
+# database.
+echo "==> Project roles: build, restore with owners into an empty database"
+mkdir -p "${WORKDIR}/roles-project/"{roles,users,groups,schemata,tables/app}
+mkdir -p "${WORKDIR}/roles-project/default_privileges"
+printf -- '---\nname: roles\nsuperuser: %s\n' "${PGUSER}" \
+    > "${WORKDIR}/roles-project/project.yaml"
+printf -- '---\nname: %s\n' "${ROLES_OWNER}" \
+    > "${WORKDIR}/roles-project/roles/owner.yaml"
+printf -- '---\nname: %s\n' "${ROLES_GROUP}" \
+    > "${WORKDIR}/roles-project/groups/readers.yaml"
+cat > "${WORKDIR}/roles-project/users/reader.yaml" <<YAML
+---
+name: ${ROLES_USER}
+grants:
+  schemata:
+    app:
+      - USAGE
+  tables:
+    app.things:
+      - SELECT
+YAML
+cat > "${WORKDIR}/roles-project/schemata/app.yaml" <<YAML
+---
+name: app
+owner: ${ROLES_OWNER}
+YAML
+cat > "${WORKDIR}/roles-project/tables/app/things.yaml" <<YAML
+---
+schema: app
+name: things
+owner: ${ROLES_OWNER}
+columns:
+  - name: id
+    data_type: integer
+row_level_security:
+  enabled: true
+policies:
+  - name: readers
+    command: SELECT
+    roles:
+      - ${ROLES_GROUP}
+    using: 'true'
+YAML
+cat > "${WORKDIR}/roles-project/default_privileges/owner.yaml" <<YAML
+---
+name: ${ROLES_OWNER}
+grants:
+  - object_type: TABLES
+    grantee: ${ROLES_USER}
+    privileges:
+      - SELECT
+YAML
+./target/debug/pglifecycle build "${WORKDIR}/roles-project" \
+    "${WORKDIR}/roles.project.dump"
+bin/drop-database "${ROLES_DB}"
+drop_project_roles
+psql -d postgres -q -c "CREATE DATABASE ${ROLES_DB}"
+pg_restore -d "${ROLES_DB}" --exit-on-error "${WORKDIR}/roles.project.dump"
+owners="$(psql -d "${ROLES_DB}" -tAX -v ON_ERROR_STOP=1 -c "
+    SELECT (SELECT nspowner::regrole FROM pg_namespace
+             WHERE nspname = 'app')
+           || ' ' || 'app.things'::regclass::text || ' '
+           || (SELECT relowner::regrole FROM pg_class
+                WHERE oid = 'app.things'::regclass)")"
+expected="\"${ROLES_OWNER}\" app.things \"${ROLES_OWNER}\""
+if [ "${owners}" != "${expected}" ]; then
+    echo "Project roles gate FAILED: the owners are '${owners}'," \
+        "not '${expected}'" >&2
+    exit 1
+fi
+echo "Project roles gate passed: the roles own their objects"
+bin/drop-database "${ROLES_DB}"
+drop_project_roles
 
 # The text of a project is UTF-8, so the build writes the archive in
 # UTF8 and pg_restore converts the text to the encoding of the
