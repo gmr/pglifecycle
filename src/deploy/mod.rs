@@ -665,8 +665,21 @@ fn owned_by(entry: &libpgdump::Entry, defn: &str) -> Option<(String, String)> {
     if entry.desc != libpgdump::ObjectType::Sequence {
         return None;
     }
-    let (create, column) = defn.rsplit_once(" OWNED BY ")?;
-    let column = column.strip_suffix(";\n")?;
+    // the last clause outside the double quotes of a name. A doubled
+    // quote changes the state two times
+    let mut quoted = false;
+    let mut clause = None;
+    for (index, c) in defn.char_indices() {
+        match c {
+            '"' => quoted = !quoted,
+            _ if !quoted && defn[index..].starts_with(" OWNED BY ") => {
+                clause = Some(index);
+            }
+            _ => {}
+        }
+    }
+    let (create, column) = defn.split_at(clause?);
+    let column = column[" OWNED BY ".len()..].strip_suffix(";\n")?;
     let name = format!(
         "{}.{}",
         quote_ident(entry.namespace.as_deref()?),
@@ -2378,5 +2391,38 @@ mod tests {
                        nextval('test.\"s(v)\"'::regclass);\n"];
         let sql = function_order_plan(&[], &["p"], &alters);
         assert_eq!(sql, ["CREATE SEQUENCE test.\"s(v)\";\n", alters[0]]);
+    }
+
+    /// OWNED BY is found outside the double quotes of a name
+    #[test]
+    fn owned_by_skips_quoted_names() {
+        let defn = "CREATE SEQUENCE test.o OWNED BY test.t.\"n OWNED BY \
+                    x\";\n";
+        let mut dump = libpgdump::new("test", "UTF8", "18.0").expect("dump");
+        let dump_id = dump
+            .add_entry(
+                libpgdump::ObjectType::Sequence,
+                Some("test"),
+                Some("o"),
+                None,
+                Some(defn),
+                None,
+                None,
+                &[],
+            )
+            .expect("add entry");
+        let entry = dump
+            .entries()
+            .iter()
+            .find(|entry| entry.dump_id == dump_id)
+            .expect("sequence entry");
+        assert_eq!(
+            owned_by(entry, defn),
+            Some((
+                "CREATE SEQUENCE test.o;\n".to_string(),
+                "ALTER SEQUENCE test.o OWNED BY test.t.\"n OWNED BY x\";\n"
+                    .to_string(),
+            ))
+        );
     }
 }
