@@ -104,6 +104,10 @@ jobs:
       # service container. python3-yaml is for bin/coverage-gate, which
       # reads the generated remaining.yaml; its defn entries are block
       # scalars of arbitrary SQL, so line matching will not do.
+      # The 18 binaries go first on PATH. Without a host in the
+      # arguments or in PGHOST, pg_wrapper selects the client of the
+      # local cluster of the runner, which is older. A deploy gate step
+      # removes PGHOST and selects the server through a service.
       - name: Install gate dependencies
         run: |
           sudo install -d /usr/share/postgresql-common/pgdg
@@ -114,7 +118,8 @@ jobs:
             | sudo tee /etc/apt/sources.list.d/pgdg.list
           sudo apt-get update
           sudo apt-get install -y postgresql-client-18 python3-yaml
-          pg_dump --version
+          echo /usr/lib/postgresql/18/bin >> "$GITHUB_PATH"
+          /usr/lib/postgresql/18/bin/pg_dump --version
 
       # The bin/ scripts are called directly rather than through `just`:
       # the recipes discover the compose.yaml container's mapped port,
