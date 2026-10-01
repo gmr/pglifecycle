@@ -3690,7 +3690,7 @@ fn inline_column(
 
 /// Parse the `schema.name` a `nextval('schema.name'::regclass)` default
 /// points at, so the split-out DEFAULT entry can depend on that sequence
-fn nextval_target(default: &str) -> Option<(String, String)> {
+pub(crate) fn nextval_target(default: &str) -> Option<(String, String)> {
     let start = default.find('\'')? + 1;
     let rest = &default[start..];
     let end = rest.find('\'')?;
