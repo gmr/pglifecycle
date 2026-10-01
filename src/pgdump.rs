@@ -130,7 +130,7 @@ fn dump_roles_args(
         args.push("-d".into());
         args.push(match is_uri(connection) {
             true => connection.into(),
-            false => format!("{} {connection}", server_keywords(conn)).into(),
+            false => format!("{}{connection}", server_keywords(conn)).into(),
         });
     }
     args.push("-f".into());
@@ -155,29 +155,46 @@ fn dump_roles_env(conn: &cli::Connection) -> Vec<(&'static str, OsString)> {
     if !roles_connection_string(conn).is_some_and(is_uri) {
         return Vec::new();
     }
-    let mut env = vec![
-        ("PGHOST", OsString::from(&conn.host)),
-        ("PGPORT", OsString::from(conn.port.to_string())),
-    ];
-    if let Some(username) = &conn.username {
-        env.push(("PGUSER", OsString::from(username)));
-    }
-    env
+    server_values(conn)
+        .into_iter()
+        .map(|(_, _, name, value)| (name, OsString::from(value)))
+        .collect()
 }
 
-/// The values of `-h`, `-p` and `-U` as `keyword='value'` pairs
+/// The values of `-h`, `-p` and `-U` as `keyword='value'` pairs, each
+/// with a space after it
 fn server_keywords(conn: &cli::Connection) -> String {
     let quote = |value: &str| {
         format!("'{}'", value.replace('\\', "\\\\").replace('\'', "\\'"))
     };
-    let mut pairs = vec![
-        format!("host={}", quote(&conn.host)),
-        format!("port={}", quote(&conn.port.to_string())),
-    ];
-    if let Some(username) = &conn.username {
-        pairs.push(format!("user={}", quote(username)));
-    }
-    pairs.join(" ")
+    server_values(conn)
+        .into_iter()
+        .map(|(_, keyword, _, value)| format!("{keyword}={} ", quote(&value)))
+        .collect()
+}
+
+/// The values of `-h`, `-p` and `-U` that are set, each with its flag,
+/// its libpq keyword and its environment variable. libpq selects the
+/// values that are not set from the environment, a service and its
+/// defaults.
+fn server_values(
+    conn: &cli::Connection,
+) -> Vec<(&'static str, &'static str, &'static str, String)> {
+    [
+        ("-h", "host", "PGHOST", conn.host.clone()),
+        (
+            "-p",
+            "port",
+            "PGPORT",
+            conn.port.map(|port| port.to_string()),
+        ),
+        ("-U", "user", "PGUSER", conn.username.clone()),
+    ]
+    .into_iter()
+    .filter_map(|(flag, keyword, name, value)| {
+        Some((flag, keyword, name, value?))
+    })
+    .collect()
 }
 
 /// `args` without the `-h`, `-p` and `-U` flags and their values
@@ -253,20 +270,18 @@ fn ddl_args(ddl: &DumpDdl) -> Vec<String> {
     args
 }
 
-/// The connection flags shared by every client tool. `-w` is always
-/// passed: the tools prompt on /dev/tty, where a live progress bar
-/// overwrites the prompt, so pglifecycle prompts itself instead (see
-/// [`run`]) and hands the password over in the environment.
+/// The connection flags shared by every client tool. `-h`, `-p` and
+/// `-U` are passed only when they are set, thus libpq selects the
+/// other values from the environment, a service and its defaults. `-w`
+/// is always passed: the tools prompt on /dev/tty, where a live
+/// progress bar overwrites the prompt, so pglifecycle prompts itself
+/// instead (see [`run`]) and hands the password over in the
+/// environment.
 fn connection_args(conn: &cli::Connection) -> Vec<OsString> {
-    let mut args: Vec<OsString> = vec![
-        "-h".into(),
-        conn.host.clone().into(),
-        "-p".into(),
-        conn.port.to_string().into(),
-    ];
-    if let Some(username) = &conn.username {
-        args.push("-U".into());
-        args.push(username.into());
+    let mut args: Vec<OsString> = Vec::new();
+    for (flag, _, _, value) in server_values(conn) {
+        args.push(flag.into());
+        args.push(value.into());
     }
     args.push("-w".into());
     if let Some(role) = &conn.role {
@@ -325,8 +340,13 @@ fn prompt_password(
     program: &str,
     conn: &cli::Connection,
 ) -> Result<String, String> {
-    let user = conn.username.as_deref().unwrap_or_default();
-    let prompt = format!("Password for {program} as {user}: ");
+    // the user that libpq selects when -U is not set
+    let user = conn
+        .username
+        .clone()
+        .or_else(|| std::env::var("PGUSER").ok());
+    let prompt =
+        format!("Password for {program} as {}: ", user.unwrap_or_default());
     progress::suspend(|| rpassword::prompt_password(prompt))
         .map_err(|e| format!("failed to read password: {e}"))
 }
@@ -404,12 +424,30 @@ const UNREADABLE: &str = "(unreadable connection string)";
 /// The URI schemes of a libpq connection string
 const URI_SCHEMES: [&str; 2] = ["postgresql://", "postgres://"];
 
+/// The host that libpq connects to when no host is set
+const DEFAULT_HOST: &str = match cfg!(windows) {
+    true => "localhost",
+    false => "local socket",
+};
+
 /// A label of the connection that has no password:
 /// `dbname@host:port`, or `host:port` when no database name is given.
 /// When `--dbname` is a connection string, its values have priority
-/// over `--host` and `--port`, as in pg_dump and psql. A service in
-/// pg_service.conf is not read, and the label does not show the user.
+/// over `--host` and `--port`, as in pg_dump and psql. Then come
+/// PGHOST, PGHOSTADDR and PGPORT, and then the defaults of libpq.
+/// pg_service.conf is not read, thus when a service is named and the
+/// host is not known, the label shows `service NAME` in place of
+/// `host:port`. The label does not show the user.
 pub fn label(conn: &cli::Connection) -> String {
+    label_in(conn, |name| std::env::var(name).ok())
+}
+
+/// [`label`] with `env` as the environment
+fn label_in(
+    conn: &cli::Connection,
+    env: impl Fn(&str) -> Option<String>,
+) -> String {
+    let env = |name: &str| env(name).filter(|value| !value.is_empty());
     let target = match conn.dbname.as_deref() {
         None => Target::default(),
         Some(dbname) if !is_connection_string(dbname) => Target {
@@ -424,11 +462,28 @@ pub fn label(conn: &cli::Connection) -> String {
     let host = target
         .host
         .or(target.hostaddr)
-        .unwrap_or_else(|| conn.host.clone());
-    let port = target.port.unwrap_or_else(|| conn.port.to_string());
+        .or_else(|| conn.host.clone())
+        .or_else(|| env("PGHOST"))
+        .or_else(|| env("PGHOSTADDR"));
+    let port = target
+        .port
+        .or_else(|| conn.port.map(|port| port.to_string()))
+        .or_else(|| env("PGPORT"));
+    let service = target.service.or_else(|| env("PGSERVICE"));
+    let server = match (host, port, service) {
+        (Some(host), Some(port), _) => format!("{host}:{port}"),
+        // the service can set the port
+        (Some(host), None, Some(_)) => host,
+        (None, _, Some(service)) => format!("service {service}"),
+        (host, port, None) => format!(
+            "{}:{}",
+            host.as_deref().unwrap_or(DEFAULT_HOST),
+            port.as_deref().unwrap_or("5432")
+        ),
+    };
     match target.dbname {
-        Some(dbname) => format!("{dbname}@{host}:{port}"),
-        None => format!("{host}:{port}"),
+        Some(dbname) => format!("{dbname}@{server}"),
+        None => server,
     }
 }
 
@@ -453,6 +508,7 @@ struct Target {
     host: Option<String>,
     hostaddr: Option<String>,
     port: Option<String>,
+    service: Option<String>,
 }
 
 impl Target {
@@ -474,6 +530,7 @@ impl Target {
                 "host" => &mut target.host,
                 "hostaddr" => &mut target.hostaddr,
                 "port" => &mut target.port,
+                "service" => &mut target.service,
                 _ => continue,
             };
             *slot = (!value.is_empty()).then_some(value);
@@ -701,8 +758,8 @@ mod tests {
     fn connection(password: bool) -> cli::Connection {
         cli::Connection {
             dbname: Some("app".into()),
-            host: "localhost".into(),
-            port: 5432,
+            host: Some("localhost".into()),
+            port: Some(5432),
             username: Some("postgres".into()),
             no_password: false,
             password,
@@ -853,6 +910,108 @@ mod tests {
     fn label_of_a_plain_name_has_the_host_and_port() {
         assert_eq!(label_of(Some("app")), "app@localhost:5432");
         assert_eq!(label_of(None), "localhost:5432");
+    }
+
+    /// A connection without `--host`, `--port` and `--username`
+    fn unset_server(dbname: Option<&str>) -> cli::Connection {
+        cli::Connection {
+            host: None,
+            port: None,
+            username: None,
+            ..connection_to(dbname)
+        }
+    }
+
+    /// The label of `conn` with `vars` as the environment
+    fn label_with(conn: &cli::Connection, vars: &[(&str, &str)]) -> String {
+        label_in(conn, |name| {
+            vars.iter()
+                .find(|(var, _)| *var == name)
+                .map(|(_, value)| value.to_string())
+        })
+    }
+
+    #[test]
+    fn label_without_server_options_uses_the_environment() {
+        let conn = unset_server(Some("app"));
+        let env = [("PGHOST", "db"), ("PGPORT", "6543")];
+        assert_eq!(label_with(&conn, &env), "app@db:6543");
+        assert_eq!(
+            label_with(&conn, &[("PGHOSTADDR", "10.0.0.1")]),
+            "app@10.0.0.1:5432"
+        );
+        // the options have priority over the environment
+        assert_eq!(
+            label_with(&connection_to(Some("app")), &env),
+            "app@localhost:5432"
+        );
+        let conn = unset_server(Some("host=other dbname=app"));
+        assert_eq!(label_with(&conn, &env), "app@other:6543");
+    }
+
+    #[test]
+    fn label_without_server_options_names_the_service() {
+        let conn = unset_server(Some("service=prod password=s3cret"));
+        assert_eq!(label_with(&conn, &[]), "service prod");
+        let conn = unset_server(Some("app"));
+        let env = [("PGSERVICE", "prod")];
+        assert_eq!(label_with(&conn, &env), "app@service prod");
+        let env = [("PGSERVICE", "prod"), ("PGHOST", "db")];
+        assert_eq!(label_with(&conn, &env), "app@db");
+        // an empty value is not set
+        assert_eq!(
+            label_with(&conn, &[("PGSERVICE", ""), ("PGHOST", "")]),
+            format!("app@{DEFAULT_HOST}:5432")
+        );
+    }
+
+    #[test]
+    fn passes_only_the_server_options_that_are_set() {
+        let path = Path::new("f");
+        let conn = unset_server(Some("app"));
+        let args = dump_args(&conn, &DumpDdl::default(), path);
+        assert_no_server_flags(&args);
+        assert!(has_pair(&args, "-d", "app"), "{args:?}");
+        let args = dump_roles_args(&conn, path, false, &DumpDdl::default());
+        assert_no_server_flags(&args);
+        let mut conn = unset_server(Some("app"));
+        conn.port = Some(6543);
+        let args = dump_args(&conn, &DumpDdl::default(), path);
+        assert!(has_pair(&args, "-p", "6543"), "{args:?}");
+        assert!(!args.contains(&OsString::from("-h")), "{args:?}");
+        assert!(!args.contains(&OsString::from("-U")), "{args:?}");
+        let args = dump_args(&connection(false), &DumpDdl::default(), path);
+        assert!(has_pair(&args, "-h", "localhost"), "{args:?}");
+        assert!(has_pair(&args, "-p", "5432"), "{args:?}");
+        assert!(has_pair(&args, "-U", "postgres"), "{args:?}");
+    }
+
+    /// Without the options, pg_dumpall gets the connection string as it
+    /// is, and libpq selects the server of a service or the environment
+    #[test]
+    fn dumps_the_roles_of_a_connection_string_without_server_options() {
+        let path = Path::new("roles.sql");
+        for dbname in ["service=prod", "postgresql://db:6543/app"] {
+            let conn = unset_server(Some(dbname));
+            let args =
+                dump_roles_args(&conn, path, false, &DumpDdl::default());
+            assert!(has_pair(&args, "-d", dbname), "{args:?}");
+            assert_no_server_flags(&args);
+            assert!(dump_roles_env(&conn).is_empty());
+        }
+    }
+
+    #[test]
+    fn server_options_have_no_default() {
+        use clap::Parser;
+        let cli = cli::Cli::try_parse_from(["pglifecycle", "pull", "dest"])
+            .expect("the arguments parse");
+        let cli::Action::Pull(pull) = cli.action else {
+            panic!("not a pull");
+        };
+        assert_eq!(pull.connection.host, None);
+        assert_eq!(pull.connection.port, None);
+        assert_eq!(pull.connection.username, None);
     }
 
     #[test]

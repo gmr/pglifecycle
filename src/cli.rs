@@ -172,8 +172,9 @@ pub struct Deploy {
 }
 
 /// PostgreSQL connection options shared by commands that talk to a
-/// database; mirrors the client tools and their PG* environment
-/// variables
+/// database; mirrors the client tools. pglifecycle gives the client
+/// tools only the options that are set, thus libpq selects the other
+/// values from its environment variables, a service and its defaults
 #[derive(Args)]
 pub struct Connection {
     /// database name to connect to
@@ -185,33 +186,19 @@ pub struct Connection {
     )]
     pub dbname: Option<String>,
 
-    /// database server host or socket directory
-    #[arg(
-        short = 'h',
-        long,
-        env = "PGHOST",
-        default_value = "localhost",
-        help_heading = "Connection Options"
-    )]
-    pub host: String,
+    /// database server host or socket directory (default: libpq
+    /// selects it from PGHOST, a service or its default)
+    #[arg(short = 'h', long, help_heading = "Connection Options")]
+    pub host: Option<String>,
 
-    /// database server port number
-    #[arg(
-        short,
-        long,
-        env = "PGPORT",
-        default_value_t = 5432,
-        help_heading = "Connection Options"
-    )]
-    pub port: u16,
+    /// database server port number (default: libpq selects it from
+    /// PGPORT, a service or its default)
+    #[arg(short, long, help_heading = "Connection Options")]
+    pub port: Option<u16>,
 
-    /// The PostgreSQL username to operate as
-    #[arg(
-        short = 'U',
-        long,
-        env = "PGUSER",
-        help_heading = "Connection Options"
-    )]
+    /// The PostgreSQL username to operate as (default: libpq selects it
+    /// from PGUSER, a service or the operating system user)
+    #[arg(short = 'U', long, help_heading = "Connection Options")]
     pub username: Option<String>,
 
     /// never prompt for password

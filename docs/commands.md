@@ -584,15 +584,18 @@ is stuck on a pathological statement — the statement in flight at that
 moment is written to the same report before exiting, turning a hang into
 a reproducer.
 
-Connection options mirror the PostgreSQL client tools and honor the
-standard `PGHOST`, `PGPORT`, `PGUSER`, and `PGDATABASE` environment
-variables:
+Connection options mirror the PostgreSQL client tools. pglifecycle
+gives `pg_dump`, `pg_dumpall`, and `psql` only the options that you
+set. For the other values, libpq uses the standard environment
+variables (`PGHOST`, `PGPORT`, `PGUSER`, `PGSERVICE`, and the other
+`PG*` variables), a service in `pg_service.conf`, and then its
+defaults. `--dbname` also uses `PGDATABASE`:
 
 | Option | Description |
 | --- | --- |
 | `-d, --dbname NAME` | Database name to connect to |
-| `-h, --host HOST` | Server host or socket directory (default `localhost`) |
-| `-p, --port PORT` | Server port (default `5432`) |
+| `-h, --host HOST` | Server host or socket directory |
+| `-p, --port PORT` | Server port |
 | `-U, --username NAME` | Username to operate as |
 | `-w, --no-password` | Never prompt for a password |
 | `-W, --password` | Prompt for a password up front |
@@ -603,8 +606,11 @@ URI (`postgresql://user@db:5432/app`). Its values have priority over
 `--host`, `--port`, `--username` and the environment, for `pg_dump`,
 `pg_dumpall` and `psql`. The banner, the logs and the `-- source:`
 header of the deploy script show the connection as `dbname@host:port`,
-without the password. When pglifecycle cannot read the connection
-string, they show `(unreadable connection string)`.
+without the password. When no host is set, they show the default of
+libpq (`local socket`), or `service NAME` when a service is named.
+pglifecycle does not read `pg_service.conf`. When pglifecycle cannot
+read the connection string, they show `(unreadable connection
+string)`.
 
 pglifecycle does its own password prompting rather than letting
 `pg_dump`, `pg_dumpall`, and `psql` prompt: they write the prompt to

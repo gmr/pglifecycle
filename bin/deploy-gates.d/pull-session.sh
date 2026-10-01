@@ -352,6 +352,62 @@ if ! diff -u <(enc_dump_schema deploy_enc_plain) \
 fi
 echo "Convergence gate passed: deploy through a connection string"
 
+# Without -h, -p and -U, libpq selects the server: pglifecycle does
+# not give pg_dump, pg_dumpall and psql a default host or port. The
+# step removes PGHOST, PGPORT and PGUSER from the environment and
+# names a service that has the server. The pull and the deploy must
+# use the server of the service, and the client tools must not get
+# -h, -p or -U.
+cat > "${WORKDIR}/svc_service.conf" <<SERVICES
+[svc_server]
+host=${PGHOST}
+port=${PGPORT}
+user=${PGUSER}
+SERVICES
+svc_env=(-u PGHOST -u PGPORT -u PGUSER -u PGDATABASE
+    PGSERVICEFILE="${WORKDIR}/svc_service.conf" PGSERVICE=svc_server)
+# $1 is the output of a command; $2 says what the command is
+svc_no_server_flags() {
+    if grep 'Executing .*\(pg_dump\|pg_dumpall\|psql\)' "$1" \
+            | grep -qE ' -(h|p|U) '; then
+        grep 'Executing' "$1" >&2
+        enc_fail "$2 gave -h, -p or -U to a client tool"
+    fi
+}
+svc_out="${WORKDIR}/svc.out"
+rm -rf "${WORKDIR}/svc-pull"
+if ! env "${svc_env[@]}" ./target/debug/pglifecycle --debug pull \
+        -d deploy_enc_plain "${WORKDIR}/svc-pull" > "${svc_out}" 2>&1; then
+    cat "${svc_out}" >&2
+    enc_fail "the pull through a service failed"
+fi
+svc_no_server_flags "${svc_out}" "the pull through a service"
+if ! grep -qF "Creating deploy_enc_plain@service svc_server → " \
+        "${svc_out}" || grep -q 'Skipping roles' "${svc_out}"; then
+    cat "${svc_out}" >&2
+    enc_fail "the pull through a service did not name the service"
+fi
+grep -qxF "comment: rôle ü" "${WORKDIR}/svc-pull/roles/${enc_role}.yaml" \
+    || enc_fail "the pull through a service does not have the roles"
+enc_same_project "${WORKDIR}/svc-pull" "pull through a service"
+if ! env "${svc_env[@]}" ./target/debug/pglifecycle --debug deploy \
+        -o "${WORKDIR}/svc-plan.sql" -d deploy_conn_target \
+        "${WORKDIR}/enc-plain" > "${svc_out}" 2>&1; then
+    cat "${svc_out}" >&2
+    enc_fail "deploy through a service failed"
+fi
+svc_no_server_flags "${svc_out}" "deploy through a service"
+if ! grep -qxF -- "-- source: deploy_conn_target@service svc_server" \
+        "${WORKDIR}/svc-plan.sql"; then
+    head -5 "${WORKDIR}/svc-plan.sql" >&2
+    enc_fail "the header of the deploy script does not name the service"
+fi
+if ! grep -q '^-- no changes' "${WORKDIR}/svc-plan.sql"; then
+    cat "${WORKDIR}/svc-plan.sql" >&2
+    enc_fail "deploy through a service did not compare with its server"
+fi
+echo "Convergence gate passed: pull and deploy through a service"
+
 for db in "${enc_dbs[@]}"; do
     bin/drop-database "${db}"
 done
