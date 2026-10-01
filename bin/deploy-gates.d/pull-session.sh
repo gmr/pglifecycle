@@ -26,7 +26,8 @@
 # The step does not use the project or the target of the other steps.
 
 enc_dbs=(deploy_enc_plain deploy_enc_latin1 deploy_enc_client
-    deploy_enc_scs deploy_enc_utf8_target deploy_enc_latin1_target)
+    deploy_enc_scs deploy_enc_utf8_target deploy_enc_latin1_target
+    deploy_conn_target)
 enc_role='deploy_enc_rôle'
 # the settings that a session must not use for the dump
 enc_hostile=(PGCLIENTENCODING=LATIN1
@@ -274,6 +275,82 @@ enc_refused_live "a service with other options" "service=enc_other"
     "${WORKDIR}/enc-options"
 enc_same_project "${WORKDIR}/enc-options" \
     "a connection string with options that end with the setting on"
+
+# A connection string or a URI in --dbname selects the server of
+# pg_dump, pg_dumpall and psql. Its host, port and user have priority
+# over PGHOST, PGPORT and PGUSER, thus the step sets these to a server
+# that does not exist. The roles must come from the server of the
+# connection string. The output, the debug log, the project and the
+# deploy script must not have the password of the connection string:
+# the banner and the script header show only the database and the
+# server.
+conn_secret='pglc-gate-s3cret'
+conn_env=(PGHOST=pglc-no-such-host.invalid PGPORT=1 PGUSER=pglc_nobody)
+conn_server="host=${PGHOST} port=${PGPORT} user=${PGUSER}"
+conn_password="password='${conn_secret} \\' x'"
+conn_uri="postgresql://${PGUSER}:${conn_secret}@${PGHOST}:${PGPORT}"
+conn_uri+="/deploy%5Fenc_plain?password=${conn_secret}"
+
+# $1 is a file or a directory that must not have the password; $2 says
+# what it is
+conn_no_secret() {
+    if grep -rqF "${conn_secret}" "$1"; then
+        grep -rF "${conn_secret}" "$1" >&2
+        enc_fail "$2 has the password of the connection string"
+    fi
+}
+
+# $1 says what the step checks, $2 is the --dbname value
+conn_pull() {
+    local project="${WORKDIR}/conn-pull" out="${WORKDIR}/conn-pull.out"
+    rm -rf "${project}"
+    if ! env "${conn_env[@]}" ./target/debug/pglifecycle --debug pull \
+            -d "$2" "${project}" > "${out}" 2>&1; then
+        cat "${out}" >&2
+        enc_fail "the pull through $1 failed"
+    fi
+    conn_no_secret "${out}" "the output of the pull through $1"
+    conn_no_secret "${project}" "the project of the pull through $1"
+    local banner="Creating deploy_enc_plain@${PGHOST}:${PGPORT} → "
+    if ! grep -qF "${banner}" "${out}" || grep -q 'Skipping roles' "${out}"
+    then
+        cat "${out}" >&2
+        enc_fail "the pull through $1 did not use its server"
+    fi
+    grep -qxF "comment: rôle ü" "${project}/roles/${enc_role}.yaml" \
+        || enc_fail "the pull through $1 does not have the roles"
+    enc_same_project "${project}" "pull through $1"
+}
+conn_pull "a connection string" \
+    "${conn_server} dbname=deploy_enc_plain ${conn_password}"
+conn_pull "a URI" "${conn_uri}"
+
+# the plan and psql of --apply also use the server of the connection
+# string
+conn_target="${conn_server} dbname=deploy_conn_target ${conn_password}"
+psql -X -q -d postgres -v ON_ERROR_STOP=1 \
+    -c "CREATE DATABASE deploy_conn_target"
+for flags in "-o ${WORKDIR}/conn-plan.sql" --apply; do
+    # shellcheck disable=SC2086 # the flags are words
+    if ! env "${conn_env[@]}" ./target/debug/pglifecycle --debug deploy \
+            ${flags} -d "${conn_target}" "${WORKDIR}/enc-plain" \
+            > "${WORKDIR}/conn-deploy.out" 2>&1; then
+        cat "${WORKDIR}/conn-deploy.out" >&2
+        enc_fail "deploy ${flags} through a connection string failed"
+    fi
+    conn_no_secret "${WORKDIR}/conn-deploy.out" "the output of deploy ${flags}"
+done
+conn_no_secret "${WORKDIR}/conn-plan.sql" "the deploy script"
+if ! grep -qxF -- "-- source: deploy_conn_target@${PGHOST}:${PGPORT}" \
+        "${WORKDIR}/conn-plan.sql"; then
+    head -5 "${WORKDIR}/conn-plan.sql" >&2
+    enc_fail "the header of the deploy script does not name the server"
+fi
+if ! diff -u <(enc_dump_schema deploy_enc_plain) \
+        <(enc_dump_schema deploy_conn_target); then
+    enc_fail "deploy --apply through a connection string did not apply"
+fi
+echo "Convergence gate passed: deploy through a connection string"
 
 for db in "${enc_dbs[@]}"; do
     bin/drop-database "${db}"
