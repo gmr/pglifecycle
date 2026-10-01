@@ -522,6 +522,17 @@ BEGIN
   RETURN 1;
 END;
 $$;
+-- An overload of the validator that is written in the language. The
+-- language uses only `plcopy_validator(oid)`, and pg_dump orders it
+-- after that overload only. An edge to each overload of the bare
+-- validator name makes a dependency loop with the other overload
+-- (build deviation 39).
+CREATE FUNCTION test.plcopy_validator(n INTEGER) RETURNS INTEGER
+    LANGUAGE plcopy AS $$
+BEGIN
+  RETURN n;
+END;
+$$;
 
 -- Publications: tables with a column list and a row filter, a schema,
 -- and every table. pg_dump writes each table as its own entry.
@@ -757,6 +768,34 @@ END;
 CREATE FUNCTION test.a_reads_view() RETURNS INTEGER LANGUAGE sql
     RETURN (SELECT test.sum_ints(1) AS sum_ints FROM test.active_users);
 
+-- A default and a check that call a function that reads the same
+-- table. The table needs the function and the function needs the
+-- table, so pg_dump makes the table without them, then the function,
+-- then the default (TOC entry "DEFAULT") and the check (TOC entry
+-- "CHECK CONSTRAINT") as their own entries. The build does the same
+-- (build deviation 38).
+CREATE TABLE test.tickets (id INTEGER NOT NULL, n INTEGER);
+CREATE FUNCTION test.next_ticket() RETURNS INTEGER LANGUAGE sql
+    RETURN (SELECT COALESCE(max(n), 0) + 1 FROM test.tickets);
+ALTER TABLE test.tickets ALTER COLUMN n SET DEFAULT test.next_ticket();
+CREATE TABLE test.quotas (id INTEGER, n INTEGER);
+CREATE FUNCTION test.quota_ok(v INTEGER) RETURNS BOOLEAN LANGUAGE sql
+    RETURN v <= (SELECT count(*) FROM test.quotas);
+ALTER TABLE test.quotas
+    ADD CONSTRAINT quotas_n_check CHECK (test.quota_ok(n));
+COMMENT ON CONSTRAINT quotas_n_check ON test.quotas IS 'Within the quota';
+
+-- A column whose type is the row type of another table. Name order
+-- puts `a_segments` before `z_points`, and tables share one priority,
+-- so the table of the row type has to be ordered first (build
+-- deviation 39).
+CREATE TABLE test.z_points (x INTEGER, y INTEGER);
+CREATE TABLE test.a_segments (
+    id       INTEGER,
+    start_at test.z_points,
+    stops    test.z_points[]
+);
+
 -- Routines that set a list setting. PostgreSQL searches pg_temp first
 -- when search_path does not name it, so a SECURITY DEFINER function
 -- names pg_temp last. pg_dump writes each element as a string
@@ -792,6 +831,13 @@ CREATE OPERATOR test.!!! (FUNCTION = int4um, RIGHTARG = INTEGER);
 -- an overload of the same operator, with its own comment
 CREATE OPERATOR test.!!! (FUNCTION = int8um, RIGHTARG = BIGINT);
 COMMENT ON OPERATOR test.!!! (NONE, BIGINT) IS 'Negates a bigint';
+
+-- A SQL-standard body that uses an operator of this schema. Type order
+-- puts a function before an operator, so pg_dump's edge to the
+-- operator has to go in `dependencies`, and the operator has to come
+-- after its own function.
+CREATE FUNCTION test.a_uses_operator(a INTEGER, b INTEGER) RETURNS BOOLEAN
+    LANGUAGE sql IMMUTABLE RETURN a OPERATOR(test.=~=) b;
 
 -- Access methods: a table method and an index method, with the
 -- handlers of the built-in ones. A table and a materialized view use

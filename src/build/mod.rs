@@ -180,11 +180,36 @@
 //!     comma, and an empty list for each setting of a routine, a role
 //!     or a user, which rendered a SET with no value. No test-project
 //!     role or user has a setting.
+//! 38. A column default or a CHECK constraint that calls a function
+//!     that needs the table renders as its own entry after the
+//!     function, as pg_dump writes it (`repairTableAttrDefMultiLoop`
+//!     and `repairTableConstraintMultiLoop` in pg_dump_sort.c): a
+//!     `DEFAULT` entry, `ALTER TABLE ONLY t ALTER COLUMN c SET DEFAULT
+//!     ...`, and a `CHECK CONSTRAINT` entry, `ALTER TABLE t ADD
+//!     CONSTRAINT c CHECK (...)`. A function with a SQL-standard body
+//!     that reads the table comes after the table, and PostgreSQL
+//!     finds the functions of a default or a check when it makes the
+//!     table, so the Python's inline form failed in every order. A
+//!     table also comes after each function that its CREATE TABLE
+//!     calls. No test-project default or check calls a function.
+//! 39. An object comes after these objects, which its definition
+//!     names and which the Python did not order: the table, view or
+//!     materialized view of a column's row type; the functions of an
+//!     operator; and, for a function field of an aggregate, a cast, a
+//!     conversion, a type, a language, a transform, an access method
+//!     or an event trigger, the one overload that PostgreSQL calls. An
+//!     edge to each overload of the name could make a dependency loop
+//!     with an overload that uses the object. The field also finds a
+//!     function whose name includes its argument types, as
+//!     test-project names them, so the test-project conversion and
+//!     event trigger now come after their functions.
 
 mod acls;
+mod calls;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
+use std::rc::Rc;
 
 use serde_json::{Map, Value};
 
@@ -239,6 +264,7 @@ pub fn assemble(project: &Project) -> Result<BuildOutput, String> {
         text_search_refs: Vec::new(),
         partition_ids: HashMap::new(),
         superuser: project.superuser.clone(),
+        calls: Rc::new(calls::table_calls(project)),
     };
     let task =
         progress::bar(project.inventory.len() as u64, "Assembling archive");
@@ -281,6 +307,7 @@ pub fn assemble(project: &Project) -> Result<BuildOutput, String> {
             entry.dependencies.extend(deps);
         }
     }
+    builder.apply_calls(project);
     builder.apply_text_search_references();
     builder.apply_attaches(project)?;
     builder.apply_index_attaches()?;
@@ -342,6 +369,10 @@ struct Builder {
     /// name): it is not an item, so an ACL on it depends on this entry
     partition_ids: HashMap<(String, String), i32>,
     superuser: String,
+    /// The functions that the defaults and checks of each table call,
+    /// by the table's inventory id (deviation 38). Shared, so that a
+    /// method can read them while it adds entries
+    calls: Rc<HashMap<usize, calls::TableCalls>>,
 }
 
 impl Builder {
@@ -558,12 +589,14 @@ impl Builder {
 
     /// Emit the standalone `DEFAULT` entries: the
     /// `SET DEFAULT nextval(...)` ones held out of their `CREATE TABLE`
-    /// by [`sequence_backed_default`], and the inherited-column
+    /// by [`sequence_backed_default`], the ones that call a function
+    /// that needs the table (deviation 38), and the inherited-column
     /// defaults in `column_defaults`, which no `CREATE TABLE` form can
-    /// carry inline. Each depends on its table, and on the referenced
-    /// sequence when there is one, so pg_restore orders it after both,
-    /// breaking the SERIAL dependency cycle the way pg_dump's separate
-    /// `DEFAULT` TOC entries do.
+    /// carry inline. Each depends on its table, on the referenced
+    /// sequence when there is one, and on the functions of the project
+    /// that it calls, so pg_restore orders it after them, breaking the
+    /// dependency loop the way pg_dump's separate `DEFAULT` TOC entries
+    /// do.
     fn split_column_defaults(
         &mut self,
         project: &Project,
@@ -583,6 +616,8 @@ impl Builder {
             let Some(&table_id) = self.dump_id_map.get(&item.id) else {
                 continue;
             };
+            let all_calls = Rc::clone(&self.calls);
+            let calls = all_calls.get(&item.id);
             let mut defaults: Vec<(&str, String)> = Vec::new();
             // a default on an inherited column, which no CREATE TABLE
             // form renders inline whatever the table's shape
@@ -607,8 +642,25 @@ impl Builder {
                     }
                 }
             }
+            // a default that calls a function that needs the table, in
+            // each form of CREATE TABLE that has the default
+            for column in d.columns.as_deref().unwrap_or_default() {
+                if let Some(default) = &column.default
+                    && separate_default(calls, column)
+                    && !defaults.iter().any(|(name, _)| *name == column.name)
+                {
+                    defaults.push((&column.name, render_default(default)));
+                }
+            }
             for (column, default) in defaults {
                 let mut deps = vec![table_id];
+                deps.extend(
+                    calls
+                        .and_then(|calls| calls.defaults.get(column))
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|f| self.dump_id_map.get(f).copied()),
+                );
                 if default.contains("nextval(")
                     && let Some(key) = nextval_target(&default)
                     && let Some(&seq_id) = sequence_ids.get(&key)
@@ -642,6 +694,55 @@ impl Builder {
             }
         }
         Ok(())
+    }
+
+    /// Order each table after the functions that its CREATE TABLE calls
+    /// in a default or a check, as pg_dump orders it, and each CHECK
+    /// CONSTRAINT entry after the functions that its check calls
+    /// (deviation 38). The DEFAULT entries get their functions in
+    /// [`Builder::split_column_defaults`]. The entries of the functions
+    /// are all known only after each item has its entries.
+    fn apply_calls(&mut self, project: &Project) {
+        let entry_of = |f: &usize| self.dump_id_map.get(f).copied();
+        let mut edges: Vec<(i32, Vec<i32>)> = Vec::new();
+        for item in &project.inventory {
+            let (Definition::Table(table), Some(calls), Some(&table_id)) = (
+                &item.definition,
+                self.calls.get(&item.id),
+                self.dump_id_map.get(&item.id),
+            ) else {
+                continue;
+            };
+            edges.push((
+                table_id,
+                calls
+                    .inline_functions()
+                    .filter_map(|f| entry_of(&f))
+                    .collect(),
+            ));
+            for (name, functions) in &calls.checks {
+                if !calls.separate_checks.contains(name) {
+                    continue;
+                }
+                let tag = format!("{} {name}", table.name);
+                let check = self.dump.entries().iter().find(|entry| {
+                    entry.desc == libpgdump::ObjectType::CheckConstraint
+                        && entry.tag.as_deref() == Some(tag.as_str())
+                        && entry.dependencies.contains(&table_id)
+                });
+                if let Some(check) = check {
+                    edges.push((
+                        check.dump_id,
+                        functions.iter().filter_map(entry_of).collect(),
+                    ));
+                }
+            }
+        }
+        for (dump_id, deps) in edges {
+            if let Some(entry) = self.dump.get_entry_mut(dump_id) {
+                entry.dependencies.extend(deps);
+            }
+        }
     }
 
     /// `schema.name` with identifier quoting (ports _item_name)
@@ -1858,6 +1959,11 @@ impl Builder {
         let Definition::Table(d) = &item.definition else {
             unreachable!()
         };
+        let all_calls = Rc::clone(&self.calls);
+        let calls = all_calls.get(&item.id);
+        let no_checks = HashSet::new();
+        let separate_checks =
+            calls.map_or(&no_checks, |calls| &calls.separate_checks);
         if let Some(sql) = &d.sql {
             self.add_item(item, vec![sql.clone()], vec![], false)?;
         } else if let Some(server) = &d.server {
@@ -1877,11 +1983,13 @@ impl Builder {
                 create.push(from_type.clone());
                 let mut inner = Vec::new();
                 for column in d.columns.as_deref().unwrap_or_default() {
-                    if let Some(sql) = render_typed_table_column(column) {
+                    if let Some(sql) = render_typed_table_column(
+                        &inline_column(calls, column),
+                    ) {
                         inner.push(sql);
                     }
                 }
-                push_table_constraints(d, &mut inner);
+                push_table_constraints(d, separate_checks, &mut inner);
                 if !inner.is_empty() {
                     create.push(format!("({})", inner.join(", ")));
                 }
@@ -1913,10 +2021,14 @@ impl Builder {
                 create.push("(".into());
                 let mut inner = Vec::new();
                 for column in d.columns.as_deref().unwrap_or_default() {
-                    // sequence-backed defaults are split into a separate
-                    // SET DEFAULT entry (see split_column_defaults), so
-                    // render the column without its default here
-                    if sequence_backed_default(column).is_some() {
+                    // sequence-backed defaults, and defaults that call a
+                    // function that needs the table, are split into a
+                    // separate SET DEFAULT entry (see
+                    // split_column_defaults), so render the column
+                    // without its default here
+                    if sequence_backed_default(column).is_some()
+                        || separate_default(calls, column)
+                    {
                         let mut stripped = column.clone();
                         stripped.default = None;
                         inner.push(render_table_column(&stripped));
@@ -1924,7 +2036,7 @@ impl Builder {
                         inner.push(render_table_column(column));
                     }
                 }
-                push_table_constraints(d, &mut inner);
+                push_table_constraints(d, separate_checks, &mut inner);
                 create.push(inner.join(", "));
                 create.push(")".into());
             }
@@ -2025,8 +2137,10 @@ impl Builder {
             constraint_entries.insert(fk.name.clone(), id);
         }
         for check in d.check_constraints.as_deref().unwrap_or_default() {
-            if check.not_valid == Some(true) {
-                let id = self.dump_not_valid_constraint(
+            if check.not_valid == Some(true)
+                || separate_checks.contains(&check.name)
+            {
+                let id = self.dump_separate_constraint(
                     "CHECK CONSTRAINT",
                     item,
                     d,
@@ -2043,7 +2157,7 @@ impl Builder {
                 let name = not_null.name.clone().unwrap_or_else(|| {
                     format!("{}_{}_not_null", d.name, not_null.column)
                 });
-                let id = self.dump_not_valid_constraint(
+                let id = self.dump_separate_constraint(
                     "CONSTRAINT",
                     item,
                     d,
@@ -2191,7 +2305,7 @@ impl Builder {
             .iter()
             .map(render_table_column)
             .collect();
-        push_table_constraints(table, &mut inner);
+        push_table_constraints(table, &HashSet::new(), &mut inner);
         create.push(inner.join(", "));
         create.push(")".into());
         if let Some(parents) = &table.parents {
@@ -2287,7 +2401,11 @@ impl Builder {
     /// Added with ALTER TABLE it stays not valid, which is how pg_dump
     /// writes it. No ONLY, matching pg_dump: a CHECK added with ONLY is
     /// refused on a table that has children.
-    fn dump_not_valid_constraint(
+    ///
+    /// A CHECK constraint that calls a function that needs the table is
+    /// its own entry too (deviation 38). `assemble` makes it wait for
+    /// the functions that it calls, once each function has its entry.
+    fn dump_separate_constraint(
         &mut self,
         desc: &str,
         parent: &Item,
@@ -3355,6 +3473,28 @@ fn sequence_backed_default(column: &Column) -> Option<&str> {
     default.contains("nextval(").then_some(default)
 }
 
+/// Whether CREATE TABLE leaves out the default of `column`, because a
+/// function that it calls needs the table (deviation 38)
+fn separate_default(
+    calls: Option<&calls::TableCalls>,
+    column: &Column,
+) -> bool {
+    calls.is_some_and(|calls| calls.separate_defaults.contains(&column.name))
+}
+
+/// `column` as CREATE TABLE writes it: without a default that the
+/// build emits as its own entry
+fn inline_column(
+    calls: Option<&calls::TableCalls>,
+    column: &Column,
+) -> Column {
+    let mut column = column.clone();
+    if separate_default(calls, &column) {
+        column.default = None;
+    }
+    column
+}
+
 /// Parse the `schema.name` a `nextval('schema.name'::regclass)` default
 /// points at, so the split-out DEFAULT entry can depend on that sequence
 fn nextval_target(default: &str) -> Option<(String, String)> {
@@ -3962,7 +4102,11 @@ pub(crate) fn render_constraint(
 /// KEY constraint; the model holds one table-wide value, so it is
 /// attached to the primary key when there is one, else to every
 /// unique constraint
-fn push_table_constraints(table: &Table, inner: &mut Vec<String>) {
+fn push_table_constraints(
+    table: &Table,
+    separate_checks: &HashSet<String>,
+    inner: &mut Vec<String>,
+) {
     for constraint in table.unique_constraints.as_deref().unwrap_or_default() {
         let mut sql = render_constraint("UNIQUE", constraint);
         if table.primary_key.is_none()
@@ -3987,8 +4131,11 @@ fn push_table_constraints(table: &Table, inner: &mut Vec<String>) {
             inner.push(render_not_null_constraint(not_null));
         }
     }
+    // and one that calls a function that needs the table (deviation 38)
     for check in table.check_constraints.as_deref().unwrap_or_default() {
-        if check.not_valid != Some(true) {
+        if check.not_valid != Some(true)
+            && !separate_checks.contains(&check.name)
+        {
             inner.push(render_check_constraint(check));
         }
     }
@@ -4401,6 +4548,7 @@ mod tests {
             text_search_refs: Vec::new(),
             partition_ids: HashMap::new(),
             superuser: "postgres".into(),
+            calls: Rc::default(),
         };
         builder.dump_item(item).unwrap();
         builder
@@ -4892,6 +5040,7 @@ mod tests {
             text_search_refs: Vec::new(),
             partition_ids: HashMap::new(),
             superuser: "postgres".into(),
+            calls: Rc::default(),
         };
         builder.dump_item(item).unwrap();
         builder
@@ -4938,6 +5087,7 @@ mod tests {
             text_search_refs: Vec::new(),
             partition_ids: HashMap::new(),
             superuser: "postgres".into(),
+            calls: Rc::default(),
         };
         builder.dump_item(&table_item(0, readings)).unwrap();
         builder.dump_item(&table_item(1, early)).unwrap();
@@ -4985,6 +5135,7 @@ mod tests {
             text_search_refs: Vec::new(),
             partition_ids: HashMap::new(),
             superuser: "postgres".into(),
+            calls: Rc::default(),
         };
         builder.dump_item(item).unwrap();
         builder
@@ -5222,6 +5373,7 @@ mod tests {
             text_search_refs: Vec::new(),
             partition_ids: HashMap::new(),
             superuser: "postgres".into(),
+            calls: Rc::default(),
         };
         builder.dump_item(&item).unwrap();
         let defn = builder
@@ -5273,6 +5425,7 @@ mod tests {
             text_search_refs: Vec::new(),
             partition_ids: HashMap::new(),
             superuser: "postgres".into(),
+            calls: Rc::default(),
         };
         builder.dump_item(&item).unwrap();
         let defn = builder
@@ -5330,6 +5483,7 @@ mod tests {
             text_search_refs: Vec::new(),
             partition_ids: HashMap::new(),
             superuser: "postgres".into(),
+            calls: Rc::default(),
         };
         builder.dump_item(&item).unwrap();
         let rules: Vec<_> = builder
@@ -5395,6 +5549,7 @@ mod tests {
             text_search_refs: Vec::new(),
             partition_ids: HashMap::new(),
             superuser: "postgres".into(),
+            calls: Rc::default(),
         };
         builder.dump_item(&item).unwrap();
         let entries = builder.dump.entries();
@@ -5624,6 +5779,7 @@ mod tests {
             text_search_refs: Vec::new(),
             partition_ids: HashMap::new(),
             superuser: "postgres".into(),
+            calls: Rc::default(),
         };
         builder.dump_item(item).unwrap();
         let entry = builder
@@ -5688,6 +5844,7 @@ mod tests {
             text_search_refs: Vec::new(),
             partition_ids: HashMap::new(),
             superuser: "postgres".into(),
+            calls: Rc::default(),
         };
         builder.dump_item(&item).unwrap();
         let entry = builder

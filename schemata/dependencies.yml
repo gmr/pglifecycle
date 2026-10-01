@@ -12,10 +12,11 @@ description: >
   Each entry names an object as `schema.name`, or unqualified for a
   schemaless type. A function or aggregate carries the argument types
   of one overload (`test.f(integer)`, or `test.agg(*)` for an
-  aggregate with no arguments), since overloads share a name, and a
-  cast its types (`(int4 AS timestamp)`). The argument types compare
-  as PostgreSQL resolves them. A bare function or aggregate name is
-  correct only when one overload has it.
+  aggregate with no arguments), and an operator its left and right
+  argument types (`test.=~=(integer, integer)`), since overloads share
+  a name, and a cast its types (`(int4 AS timestamp)`). The argument
+  types compare as PostgreSQL resolves them. A bare function,
+  aggregate or operator name is correct only when one overload has it.
 type: object
 properties:
   aggregates:
@@ -60,6 +61,14 @@ properties:
       type: string
   materialized_views:
     description: The materialized views this object depends on.
+    type: array
+    items:
+      type: string
+  operators:
+    description: >
+      The operators this object depends on, each with its left and
+      right argument types (`test.=~=(integer, integer)`, or
+      `test.!!!(NONE, integer)` for a prefix operator).
     type: array
     items:
       type: string

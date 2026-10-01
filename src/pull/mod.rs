@@ -670,8 +670,15 @@ struct RoutineParent {
 /// `RETURNS SETOF t`, is recorded for both. The schema and the other
 /// types are not kept: type order already makes them before every
 /// routine.
+///
+/// pg_dump tags an operator with its name only, and overloads share a
+/// name, so an operator is named with its argument types as its
+/// definition gives them: `=~=(integer, integer)`, with `NONE` for no
+/// argument. Type order puts a function before an operator, so the
+/// edge is necessary.
 fn routine_parents(
     entries: &[libpgdump::Entry],
+    parser: &mut ddl::Parser,
 ) -> HashMap<i32, Vec<RoutineParent>> {
     use libpgdump::ObjectType as OT;
     let by_id: HashMap<i32, &libpgdump::Entry> =
@@ -685,6 +692,9 @@ fn routine_parents(
                 .iter()
                 .filter_map(|id| by_id.get(id))
                 .filter_map(|parent| {
+                    if parent.desc == OT::Operator {
+                        return operator_parent(parent, parser);
+                    }
                     let key = match parent.desc {
                         OT::Aggregate => "aggregates",
                         OT::Function => "functions",
@@ -704,6 +714,31 @@ fn routine_parents(
             (entry.dump_id, parents)
         })
         .collect()
+}
+
+/// An operator entry as a [`RoutineParent`], named with its argument
+/// types (see [`routine_parents`]). An entry that does not parse gives
+/// none.
+fn operator_parent(
+    entry: &libpgdump::Entry,
+    parser: &mut ddl::Parser,
+) -> Option<RoutineParent> {
+    let statements = parser.parse(entry.defn.as_deref()?).ok()?;
+    statements
+        .into_iter()
+        .find_map(|statement| match statement {
+            Statement::CreateOperator(operator) => Some(RoutineParent {
+                key: "operators",
+                schema: operator.schema.clone(),
+                tag: format!(
+                    "{}({}, {})",
+                    operator.name,
+                    operator.left_arg.as_deref().unwrap_or("NONE"),
+                    operator.right_arg.as_deref().unwrap_or("NONE"),
+                ),
+            }),
+            _ => None,
+        })
 }
 
 /// Where an ingested index currently lives, for `index_location`
@@ -790,7 +825,7 @@ impl Assembly {
         let mut parser = ddl::Parser::new()?;
         self.dbname = dump.dbname().to_string();
         let entries = dump.entries();
-        self.routine_parents = routine_parents(entries);
+        self.routine_parents = routine_parents(entries, &mut parser);
         let task = progress::spinner("Ingesting entries");
         for entry in entries {
             task.set_message(format!(
@@ -3374,6 +3409,62 @@ mod tests {
         assert_eq!(assembly.views.len(), 1);
         assert_eq!(assembly.functions.len(), 1);
         assert!(assembly.remaining.is_empty());
+    }
+
+    /// An operator that a routine's archive entry depends on is named
+    /// with its argument types, which pg_dump's tag does not have
+    #[test]
+    fn routines_name_an_operator_with_its_argument_types() {
+        let mut dump = libpgdump::new("fixtures", "UTF8", "18.0").unwrap();
+        let mut entry = |desc, tag, defn, deps: &[i32]| {
+            dump.add_entry(
+                desc,
+                Some("test"),
+                Some(tag),
+                Some("postgres"),
+                Some(defn),
+                None,
+                None,
+                deps,
+            )
+            .expect("add_entry failed")
+        };
+        let binary = entry(
+            OT::Operator,
+            "=~=",
+            "CREATE OPERATOR test.=~= (\n    FUNCTION = test.same,\n    \
+             LEFTARG = integer,\n    RIGHTARG = integer\n);",
+            &[],
+        );
+        let prefix = entry(
+            OT::Operator,
+            "!!!",
+            "CREATE OPERATOR test.!!! (\n    FUNCTION = int8um,\n    \
+             RIGHTARG = bigint\n);",
+            &[],
+        );
+        entry(
+            OT::Function,
+            "uses(integer, integer)",
+            "CREATE FUNCTION test.uses(a integer, b integer) RETURNS \
+             boolean LANGUAGE sql RETURN (a OPERATOR(test.=~=) b) AND \
+             (OPERATOR(test.!!!) 1::bigint < 0);",
+            &[binary, prefix],
+        );
+        let mut assembly = Assembly::default();
+        assembly.ingest(&dump).unwrap();
+        let parent = |tag: &str| RoutineParent {
+            key: "operators",
+            schema: String::from("test"),
+            tag: tag.to_string(),
+        };
+        assert_eq!(
+            assembly.function_dependencies,
+            vec![vec![
+                parent("=~=(integer, integer)"),
+                parent("!!!(NONE, bigint)")
+            ]]
+        );
     }
 
     /// A function or procedure keeps the functions and relations that
