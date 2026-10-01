@@ -374,8 +374,6 @@ fn plan(
     // the statements that wait for a function or a sequence, by its
     // archive position
     let mut waiting: BTreeMap<usize, Vec<(bool, Statement)>> = BTreeMap::new();
-    // the archive positions that the statements in `waiting` refer to
-    let mut awaited: HashSet<usize> = HashSet::new();
     for (position, entry) in output.dump.entries().iter().enumerate() {
         let later = waiting.split_off(&position);
         for (destructive, statement) in std::mem::replace(&mut waiting, later)
@@ -446,11 +444,10 @@ fn plan(
                 fails_open: false,
             });
         if changes.iter().all(|c| *c == Change::Added) {
-            // a statement that waits for the sequence can add the
-            // column that owns it, thus OWNED BY waits for the
-            // statements
+            // a statement that waits can add the column that owns the
+            // sequence, thus OWNED BY waits for the statements
             let (defn, owned_by) = match owned_by(entry, &defn) {
-                Some((create, owned_by)) if awaited.contains(&position) => {
+                Some((create, owned_by)) if !waiting.is_empty() => {
                     (create, Some(owned_by))
                 }
                 _ => (defn, None),
@@ -525,15 +522,13 @@ fn plan(
                             kept.push(statement);
                             continue;
                         }
-                        let later = calls_later(
+                        after = after.max(calls_later(
                             &mut parser,
                             &alter.sql,
                             &functions,
                             &sequences,
                             position,
-                        );
-                        after = after.max(later.iter().max().copied());
-                        awaited.extend(later);
+                        ));
                         match after {
                             Some(function) => waiting
                                 .entry(function)
@@ -703,14 +698,20 @@ fn created_entries<'a>(
             && let (Some(schema), Some(tag)) =
                 (entry.namespace.as_deref(), entry.tag.as_deref())
         {
-            let name = tag.split('(').next().unwrap_or_default();
+            // a function tag has its arguments
+            let name = match desc {
+                libpgdump::ObjectType::Function => {
+                    tag.split('(').next().unwrap_or_default()
+                }
+                _ => tag,
+            };
             created.insert((schema, name), position);
         }
     }
     created
 }
 
-/// The archive positions after `position` of the functions in
+/// The last archive position after `position` of the functions in
 /// `functions` that `sql` calls, and of the sequences in `sequences`
 /// that it gives to `nextval`. Only a name with a schema is looked
 /// up: deploy runs with an empty `search_path`
@@ -720,13 +721,11 @@ fn calls_later(
     functions: &HashMap<(&str, &str), usize>,
     sequences: &HashMap<(&str, &str), usize>,
     position: usize,
-) -> Vec<usize> {
+) -> Option<usize> {
     if functions.is_empty() && sequences.is_empty() {
-        return Vec::new();
+        return None;
     }
-    let Some(tree) = parser.parse(sql, None) else {
-        return Vec::new();
-    };
+    let tree = parser.parse(sql, None)?;
     tree.root_node()
         .find_all("func_name")
         .iter()
@@ -746,7 +745,7 @@ fn calls_later(
             functions.get(&(schema?, name.name.as_str())).copied()
         })
         .filter(|later| *later > position)
-        .collect()
+        .max()
 }
 
 /// Log what the plan skipped or excluded so the script is honest
@@ -2100,9 +2099,10 @@ mod tests {
 
     /// A plan for the changed table `test.t` (item 0), the new
     /// functions `test.f` (item 1) and `test.g` (item 2), and the new
-    /// sequences `test.s` (item 3) and `test.o` (item 4), which is
-    /// owned by `test.t.n`, in this archive order: the entries of
-    /// `before`, the table, then the entries of `after`
+    /// sequences `test.s` (item 3), `test.o` (item 4), which is owned
+    /// by `test.t.n`, and `test."s(v)"` (item 5, named `p`), in this
+    /// archive order: the entries of `before`, the table, then the
+    /// entries of `after`
     fn function_order_plan(
         before: &[&str],
         after: &[&str],
@@ -2112,16 +2112,23 @@ mod tests {
         let mut item_ids = HashMap::new();
         let mut add = |dump: &mut libpgdump::Dump, name: &str| {
             let (id, desc, tag, defn) = match name {
-                "s" | "o" => (
-                    if name == "s" { 3 } else { 4 },
+                "s" => (
+                    3,
                     libpgdump::ObjectType::Sequence,
-                    name.to_string(),
-                    if name == "s" {
-                        "CREATE SEQUENCE test.s;\n".to_string()
-                    } else {
-                        "CREATE SEQUENCE test.o OWNED BY test.t.n;\n"
-                            .to_string()
-                    },
+                    "s".to_string(),
+                    "CREATE SEQUENCE test.s;\n".to_string(),
+                ),
+                "o" => (
+                    4,
+                    libpgdump::ObjectType::Sequence,
+                    "o".to_string(),
+                    "CREATE SEQUENCE test.o OWNED BY test.t.n;\n".to_string(),
+                ),
+                "p" => (
+                    5,
+                    libpgdump::ObjectType::Sequence,
+                    "s(v)".to_string(),
+                    "CREATE SEQUENCE test.\"s(v)\";\n".to_string(),
                 ),
                 _ => (
                     if name == "f" { 1 } else { 2 },
@@ -2171,6 +2178,7 @@ mod tests {
                 (2, Change::Added),
                 (3, Change::Added),
                 (4, Change::Added),
+                (5, Change::Added),
             ]),
             changed: BTreeMap::new(),
             removed: BTreeMap::new(),
@@ -2337,5 +2345,38 @@ mod tests {
                 "CREATE SEQUENCE test.o OWNED BY test.t.n;\n",
             ]
         );
+    }
+
+    /// An OWNED BY waits for the statements of a changed table that
+    /// wait for another object, as one of them can add the column that
+    /// owns the sequence
+    #[test]
+    fn owned_by_waits_for_delayed_columns() {
+        let alters = [
+            "ALTER TABLE test.t ALTER COLUMN id SET DEFAULT \
+             nextval('test.s'::regclass);\n",
+            "ALTER TABLE test.t ADD COLUMN n integer;\n",
+        ];
+        let sql = function_order_plan(&[], &["o", "s"], &alters);
+        assert_eq!(
+            sql,
+            [
+                "CREATE SEQUENCE test.o;\n",
+                "CREATE SEQUENCE test.s;\n",
+                alters[0],
+                alters[1],
+                "ALTER SEQUENCE test.o OWNED BY test.t.n;\n",
+            ]
+        );
+    }
+
+    /// A sequence keeps the parentheses of its name, which only the
+    /// name of a function removes
+    #[test]
+    fn sequence_names_keep_their_parentheses() {
+        let alters = ["ALTER TABLE test.t ALTER COLUMN id SET DEFAULT \
+                       nextval('test.\"s(v)\"'::regclass);\n"];
+        let sql = function_order_plan(&[], &["p"], &alters);
+        assert_eq!(sql, ["CREATE SEQUENCE test.\"s(v)\";\n", alters[0]]);
     }
 }
