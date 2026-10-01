@@ -414,16 +414,23 @@ PostgreSQL has almost no ALTER for these types:
   class, for example a btree sort support function and each operator
   of a GiST class, in the family only, and pg_dump writes them there;
   written in the class, they compare equal. A class with no family
-  gets a family of its own name, which deploy does not drop.
+  gets a family of its own name, which deploy does not drop, as that
+  drops the class too. Deploy compares the members of that family
+  with the members that the project classes give, and drops each
+  other member from the family, only with `--allow-drop`.
 - Any other change to a cast or a class drops it and makes it again.
+  The drop of a class does not drop the members that PostgreSQL keeps
+  in its family, and the create gives them again, so deploy drops them
+  from the family first. When a class moves to another family and the
+  old family is only in the database, deploy drops the old family
+  first, and PostgreSQL drops the class with it. Then deploy makes the
+  class again in its new family.
 
 A drop and a create is destructive, so it needs `--allow-drop`. The
 drop does not cascade: when an object depends on the object, for
 example an index on an operator class or a view that uses a cast, the
-drop fails and the transaction rolls back. A class whose members are
-kept in its family cannot be made again while they are there, so a
-rebuild of such a class also fails and rolls back. The comment of each
-of these types changes in place. An aggregate, an operator, a class
+drop fails and the transaction rolls back. The comment of each of
+these types changes in place. An aggregate, an operator, a class
 and a family have an owner; a cast and a transform do not.
 
 An object of a type that `pull` does not yet model (security labels,

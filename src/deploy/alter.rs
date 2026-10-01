@@ -126,6 +126,10 @@ pub(crate) enum Resolution {
     /// No in-place form exists (or is implemented yet): drop and
     /// recreate from the repo definition, gated behind --allow-drop
     Replace,
+    /// [`Resolution::Replace`], after `before`, the statements that the
+    /// drop and the create need first. `drop` drops the object in place
+    /// of the DROP statement of the archive entry.
+    Rebuild { before: Vec<Alter>, drop: String },
 }
 
 /// The indexes of partitioned tables, as (schema, name), that deploy
@@ -189,14 +193,22 @@ fn same_but_comment(a: &Index, b: &Index) -> bool {
 /// Resolve a changed object into in-place statements where supported
 #[cfg(test)]
 pub(crate) fn resolve(repo: &Definition, database: &Definition) -> Resolution {
-    resolve_with(repo, database, &IndexGroups::new())
+    resolve_with(
+        repo,
+        database,
+        &IndexGroups::new(),
+        &operator_class::Families::new(),
+    )
 }
 
-/// [`resolve`], with the index groups that the plan rebuilds
+/// [`resolve`], with the index groups that the plan rebuilds and the
+/// members that the database keeps for each operator class in its
+/// family
 pub(crate) fn resolve_with(
     repo: &Definition,
     database: &Definition,
     groups: &IndexGroups,
+    families: &operator_class::Families,
 ) -> Resolution {
     match (repo, database) {
         (Definition::Table(repo), Definition::Table(db)) => {
@@ -266,7 +278,7 @@ pub(crate) fn resolve_with(
             operator::operator(repo, db)
         }
         (Definition::OperatorClass(repo), Definition::OperatorClass(db)) => {
-            operator_class::operator_class(repo, db)
+            operator_class::operator_class(repo, db, families)
         }
         (Definition::OperatorFamily(repo), Definition::OperatorFamily(db)) => {
             operator_class::operator_family(repo, db)

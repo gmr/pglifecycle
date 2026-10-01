@@ -63,7 +63,8 @@ pub fn deploy(args: &cli::Deploy) -> Result<(), String> {
         });
     }
     let groups = partition_index_groups(&project, &mut diff);
-    let resolutions = resolutions(&project, &diff, &groups);
+    let families = alter::operator_class::families(&project, &assembly);
+    let resolutions = resolutions(&project, &diff, &groups, &families);
     task.finish();
     let mut output = build::assemble(&project)?;
     let task = progress::spinner("Planning changes");
@@ -174,6 +175,7 @@ fn resolutions(
     project: &project::Project,
     diff: &Diff,
     groups: &alter::IndexGroups,
+    families: &alter::operator_class::Families,
 ) -> BTreeMap<usize, Resolution> {
     let inventory_by_id = project
         .inventory
@@ -186,7 +188,7 @@ fn resolutions(
             let repo = inventory_by_id
                 .get(id)
                 .expect("changed item id missing from project inventory");
-            (*id, alter::resolve_with(repo, database, groups))
+            (*id, alter::resolve_with(repo, database, groups, families))
         })
         .collect()
 }
@@ -516,10 +518,30 @@ fn plan(
                     }
                     false
                 }
-                _ => {
+                resolution => {
                     let mut sql = String::new();
-                    if let Some(drop) = &entry.drop_stmt {
-                        sql.push_str(drop);
+                    match resolution {
+                        Some(Resolution::Rebuild { before, drop }) => {
+                            for alter in before {
+                                push(
+                                    true,
+                                    Statement {
+                                        label: alter
+                                            .label
+                                            .clone()
+                                            .unwrap_or_else(|| label.clone()),
+                                        sql: alter.sql.clone(),
+                                        fails_open: alter.fails_open,
+                                    },
+                                );
+                            }
+                            sql.push_str(drop);
+                        }
+                        _ => {
+                            if let Some(drop) = &entry.drop_stmt {
+                                sql.push_str(drop);
+                            }
+                        }
                     }
                     sql.push_str(&defn);
                     if let Some(owner) = &owner {
@@ -548,7 +570,10 @@ fn plan(
         // ALTERs reconcile their own children
         let replaced = owners.iter().any(|id| {
             diff.items.get(id) == Some(&Change::Changed)
-                && matches!(resolutions.get(id), Some(Resolution::Replace))
+                && matches!(
+                    resolutions.get(id),
+                    Some(Resolution::Replace | Resolution::Rebuild { .. })
+                )
         });
         if replaced {
             push(
