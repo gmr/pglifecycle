@@ -545,6 +545,14 @@ pub(crate) fn unstring(text: &str) -> String {
     if text.len() >= 2 && text.starts_with('\'') && text.ends_with('\'') {
         return text[1..text.len() - 1].replace("''", "'");
     }
+    // pg_dumpall writes a string with a backslash as an escape string
+    if text.len() >= 3
+        && (text.starts_with("E'") || text.starts_with("e'"))
+        && text.ends_with('\'')
+    {
+        return unescape(&text[2..text.len() - 1])
+            .unwrap_or_else(|| text.to_string());
+    }
     if text.starts_with('$')
         && let Some(end) = text[1..].find('$')
     {
@@ -554,6 +562,110 @@ pub(crate) fn unstring(text: &str) -> String {
         }
     }
     text.to_string()
+}
+
+/// The value of the body of an escape string constant (`E'...'`), as
+/// PostgreSQL reads it: `''` and `\'` are a quote; `\b`, `\f`, `\n`,
+/// `\r` and `\t` are control characters; `\` and one to three octal
+/// digits, or `\x` and one or two hexadecimal digits, are one byte;
+/// `\u` and four, or `\U` and eight, hexadecimal digits are a Unicode
+/// character, where a UTF-16 surrogate pair is one character; `\` and
+/// any other character is that character. `None` for a body that
+/// PostgreSQL refuses in a UTF8 database.
+fn unescape(body: &str) -> Option<String> {
+    let mut bytes = Vec::with_capacity(body.len());
+    let mut chars = body.chars().peekable();
+    // the high surrogate of a pair, until its low surrogate
+    let mut high: Option<u32> = None;
+    while let Some(c) = chars.next() {
+        let mut buf = [0u8; 4];
+        match c {
+            '\'' => {
+                // a quote in the body is written two times
+                if chars.next() != Some('\'') {
+                    return None;
+                }
+                bytes.push(b'\'');
+            }
+            '\\' => {
+                let escape = chars.next()?;
+                if high.is_some() && !matches!(escape, 'u' | 'U') {
+                    return None;
+                }
+                match escape {
+                    'b' => bytes.push(0x08),
+                    'f' => bytes.push(0x0c),
+                    'n' => bytes.push(b'\n'),
+                    'r' => bytes.push(b'\r'),
+                    't' => bytes.push(b'\t'),
+                    '0'..='7' => {
+                        let mut value = escape.to_digit(8)?;
+                        for _ in 0..2 {
+                            match chars.peek().and_then(|d| d.to_digit(8)) {
+                                Some(digit) => {
+                                    value = value * 8 + digit;
+                                    chars.next();
+                                }
+                                None => break,
+                            }
+                        }
+                        // PostgreSQL keeps the low byte of the value
+                        bytes.push(value as u8);
+                    }
+                    'x' if chars
+                        .peek()
+                        .is_some_and(char::is_ascii_hexdigit) =>
+                    {
+                        let mut value = 0;
+                        for _ in 0..2 {
+                            match chars.peek().and_then(|d| d.to_digit(16)) {
+                                Some(digit) => {
+                                    value = value * 16 + digit;
+                                    chars.next();
+                                }
+                                None => break,
+                            }
+                        }
+                        bytes.push(value as u8);
+                    }
+                    'u' | 'U' => {
+                        let digits = if escape == 'u' { 4 } else { 8 };
+                        let mut value = 0u32;
+                        for _ in 0..digits {
+                            value = value * 16 + chars.next()?.to_digit(16)?;
+                        }
+                        let character = match (high.take(), value) {
+                            (None, 0xd800..=0xdbff) => {
+                                high = Some(value);
+                                continue;
+                            }
+                            (Some(first), 0xdc00..=0xdfff) => char::from_u32(
+                                0x10000
+                                    + ((first - 0xd800) << 10)
+                                    + (value - 0xdc00),
+                            )?,
+                            (None, _) => char::from_u32(value)?,
+                            (Some(_), _) => return None,
+                        };
+                        bytes.extend_from_slice(
+                            character.encode_utf8(&mut buf).as_bytes(),
+                        );
+                    }
+                    other => bytes.extend_from_slice(
+                        other.encode_utf8(&mut buf).as_bytes(),
+                    ),
+                }
+            }
+            _ if high.is_some() => return None,
+            other => {
+                bytes.extend_from_slice(other.encode_utf8(&mut buf).as_bytes())
+            }
+        }
+    }
+    if high.is_some() || bytes.contains(&0) {
+        return None;
+    }
+    String::from_utf8(bytes).ok()
 }
 
 /// Parse a `reloptions` node (`key = value, ...` inside `WITH (...)`)
@@ -879,6 +991,52 @@ mod tests {
         assert_eq!(unstring("$$body$$"), "body");
         assert_eq!(unstring("$_$ BEGIN END $_$"), " BEGIN END ");
         assert_eq!(unstring("'it''s'"), "it's");
+    }
+
+    /// pg_dumpall writes a string with a backslash as an escape string
+    /// constant, with each backslash written two times
+    #[test]
+    fn unstrings_escape_strings() {
+        assert_eq!(unstring(r"E'rôle C:\\x ''q'' ü'"), r"rôle C:\x 'q' ü");
+        assert_eq!(unstring(r"e'it\'s'"), "it's");
+        assert_eq!(unstring(r"E'\b\f\n\r\t'"), "\u{8}\u{c}\n\r\t");
+        assert_eq!(unstring(r"E'\q\é'"), "qé");
+        assert_eq!(unstring("E''"), "");
+    }
+
+    /// An octal escape has one to three digits and a hexadecimal escape
+    /// one or two; each gives one byte, and the bytes are UTF-8
+    #[test]
+    fn unstrings_octal_and_hex_escapes() {
+        assert_eq!(unstring(r"E'\101\7\0101'"), "A\u{7}\u{8}1");
+        assert_eq!(unstring(r"E'\x41\x7e\x4'"), "A~\u{4}");
+        assert_eq!(unstring(r"E'\xC3\xA9t\303\251'"), "été");
+        // with no hexadecimal digit, \x is an x
+        assert_eq!(unstring(r"E'\xg'"), "xg");
+    }
+
+    #[test]
+    fn unstrings_unicode_escapes() {
+        assert_eq!(unstring(r"E'\u00e9\U0001F600'"), "é😀");
+        // a UTF-16 surrogate pair is one character
+        assert_eq!(unstring(r"E'\ud83d\ude00!'"), "😀!");
+    }
+
+    /// An escape string that PostgreSQL refuses stays as written, so
+    /// that no text is lost
+    #[test]
+    fn keeps_an_invalid_escape_string() {
+        for text in [
+            r"E'\xff'",
+            r"E'\u12'",
+            r"E'\ud83d'",
+            r"E'\ude00'",
+            r"E'\U00110000'",
+            r"E'\0'",
+            r"E'a\'",
+        ] {
+            assert_eq!(unstring(text), text);
+        }
     }
 
     #[test]

@@ -180,6 +180,20 @@
 //!     comma, and an empty list for each setting of a routine, a role
 //!     or a user, which rendered a SET with no value. No test-project
 //!     role or user has a setting.
+//! 38. A role, a user or a group has no owner in its entry. The Python
+//!     gave it the superuser, and pg_restore cannot set the owner of
+//!     these types, so each restore that applies owners, which is the
+//!     default, failed with `don't know how to set owner for object
+//!     type "ROLE"` (or `"USER"`, or `"GROUP"`). pg_dump writes no
+//!     entry of these types, and it writes no owner for an object that
+//!     has no owner.
+//! 39. The ENCODING entry is always `SET client_encoding = 'UTF8'`.
+//!     The Python wrote the `encoding` of the project, but the text of
+//!     the archive is always UTF-8, so pg_restore read the text of a
+//!     project with `encoding: LATIN1` as LATIN1, and each character
+//!     that is not ASCII changed. The project refuses an `encoding`
+//!     that is not UTF8, and a `stdstrings` of `false`, which the build
+//!     cannot honor. The test-project has `encoding: UTF-8`.
 
 mod acls;
 
@@ -227,7 +241,8 @@ pub struct BuildOutput {
 /// Render the project into an in-memory archive (everything `build`
 /// does except saving it)
 pub fn assemble(project: &Project) -> Result<BuildOutput, String> {
-    let dump = libpgdump::new(&project.name, &project.encoding, "18.0")
+    // the text of the project is UTF-8 (deviation 39)
+    let dump = libpgdump::new(&project.name, "UTF8", "18.0")
         .map_err(|e| e.to_string())?;
     let mut builder = Builder {
         dump,
@@ -1389,7 +1404,8 @@ impl Builder {
             push_bool_option(&mut create, "SUPERUSER", options.superuser);
         }
         let drop = vec!["DROP GROUP IF EXISTS".into(), quote_ident(&d.name)];
-        self.add_item(item, create, drop, false)
+        // pg_restore cannot set the owner of a group (deviation 38)
+        self.add_item(item, create, drop, true)
     }
 
     fn dump_language(&mut self, item: &Item) -> Result<(), String> {
@@ -1682,7 +1698,9 @@ impl Builder {
         } else {
             vec!["DROP ROLE IF EXISTS".into(), quote_ident(&d.name)]
         };
-        self.add_item(item, create, drop, false)?;
+        // a role has no owner, and pg_restore fails on an owner that
+        // it cannot set (deviation 38)
+        self.add_item(item, create, drop, true)?;
         self.dump_role_settings(item, "ROLE", &d.name, d.settings.as_deref())
     }
 
@@ -3145,7 +3163,8 @@ impl Builder {
         } else {
             vec!["DROP USER IF EXISTS".into(), quote_ident(&d.name)]
         };
-        self.add_item(item, create, drop, false)?;
+        // pg_restore cannot set the owner of a user (deviation 38)
+        self.add_item(item, create, drop, true)?;
         self.dump_role_settings(item, "USER", &d.name, d.settings.as_deref())
     }
 
@@ -5080,8 +5099,6 @@ mod tests {
         }]);
         let project = Project {
             name: String::from("t"),
-            encoding: String::from("UTF8"),
-            stdstrings: true,
             superuser: String::from("postgres"),
             default_schema: String::from("public"),
             path: std::path::PathBuf::new(),
@@ -5833,8 +5850,6 @@ mod tests {
         };
         let project = Project {
             name: "t".into(),
-            encoding: "UTF-8".into(),
-            stdstrings: true,
             superuser: "postgres".into(),
             default_schema: "public".into(),
             path: PathBuf::new(),
@@ -5970,8 +5985,6 @@ mod tests {
     fn text_search_project(inventory: Vec<Item>) -> Project {
         Project {
             name: "t".into(),
-            encoding: "UTF8".into(),
-            stdstrings: true,
             superuser: "postgres".into(),
             default_schema: "public".into(),
             path: std::path::PathBuf::new(),

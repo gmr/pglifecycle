@@ -920,8 +920,6 @@ mod tests {
     fn project(items: Vec<(ObjectType, Definition)>) -> Project {
         Project {
             name: String::from("test"),
-            encoding: String::from("UTF8"),
-            stdstrings: true,
             superuser: String::from("postgres"),
             default_schema: String::from("public"),
             path: std::path::PathBuf::new(),

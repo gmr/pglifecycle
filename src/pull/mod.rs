@@ -450,13 +450,14 @@ fn stdstrings_error(setting: &str, source: &Source) -> String {
 
 /// Whether an encoding name is UTF8. PostgreSQL ignores case and the
 /// characters that are not letters or digits, thus UTF-8 is UTF8.
-fn is_utf8(encoding: &str) -> bool {
+/// Unicode is an alias of UTF8.
+pub(crate) fn is_utf8(encoding: &str) -> bool {
     let name: String = encoding
         .chars()
         .filter(char::is_ascii_alphanumeric)
         .map(|c| c.to_ascii_uppercase())
         .collect();
-    name == "UTF8"
+    name == "UTF8" || name == "UNICODE"
 }
 
 /// The encoding that the ENCODING entry of an archive records, found
@@ -646,8 +647,6 @@ fn section_key(target: AclTarget) -> &'static str {
 #[derive(Debug, Default)]
 pub struct Assembly {
     pub dbname: String,
-    pub encoding: Option<String>,
-    pub stdstrings: Option<bool>,
     pub extensions: Vec<models::Extension>,
     pub languages: Vec<models::Language>,
     pub schemas: Vec<models::Schema>,
@@ -870,22 +869,16 @@ impl Assembly {
             match &entry.desc {
                 // pg_dump writes a shell type only for a base type
                 // that it also dumps, and build writes the shell again
-                // for each base type
+                // for each base type. check_session refuses a dump that
+                // is not in UTF8 with standard_conforming_strings on,
+                // and build always writes these settings.
                 OT::Database
+                | OT::Encoding
                 | OT::SearchPath
                 | OT::SequenceSet
                 | OT::ShellType
+                | OT::StdStrings
                 | OT::TableData => {}
-                OT::Encoding => {
-                    self.encoding = entry.defn.as_deref().and_then(set_value);
-                }
-                OT::StdStrings => {
-                    self.stdstrings = entry
-                        .defn
-                        .as_deref()
-                        .and_then(set_value)
-                        .map(|v| v == "on");
-                }
                 OT::Extension => self.extensions.push(extension(entry)),
                 desc if MODELED_DESCS.contains(desc) => {
                     let Some(defn) = &entry.defn else { continue };
@@ -3412,8 +3405,6 @@ mod tests {
     fn ingests_project_settings() {
         let assembly = assembled();
         assert_eq!(assembly.dbname, "fixtures");
-        assert_eq!(assembly.encoding.as_deref(), Some("UTF8"));
-        assert_eq!(assembly.stdstrings, Some(true));
     }
 
     #[test]
@@ -4165,6 +4156,7 @@ mod tests {
     fn is_utf8_ignores_case_and_punctuation() {
         assert!(is_utf8("UTF8"));
         assert!(is_utf8("utf-8"));
+        assert!(is_utf8("Unicode"));
         assert!(!is_utf8("LATIN1"));
         assert!(!is_utf8("SQL_ASCII"));
     }

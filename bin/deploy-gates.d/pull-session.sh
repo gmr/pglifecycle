@@ -56,10 +56,11 @@ enc_same_project() {
             "${WORKDIR}/enc-plain" "$1"; then
         enc_fail "$2: the project is not the project of the reference"
     fi
-    if ! grep -qx 'encoding: UTF8' "$1/project.yaml" \
-        || ! grep -qx 'stdstrings: true' "$1/project.yaml"; then
+    # the fields are obsolete: the build always writes UTF8 with
+    # standard_conforming_strings on
+    if grep -qE '^(encoding|stdstrings):' "$1/project.yaml"; then
         cat "$1/project.yaml" >&2
-        enc_fail "$2: project.yaml does not have UTF8 and stdstrings"
+        enc_fail "$2: project.yaml has the obsolete encoding or stdstrings"
     fi
     echo "Convergence gate passed: $2"
 }

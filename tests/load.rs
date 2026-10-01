@@ -11,7 +11,6 @@ use pglifecycle::{project, yamlio};
 fn loads_the_full_test_project() {
     let project = project::load(Path::new("test-project")).unwrap();
     assert_eq!(project.name, "test-project");
-    assert_eq!(project.encoding, "UTF-8");
 
     let mut counts: HashMap<&'static str, usize> = HashMap::new();
     for item in &project.inventory {
@@ -116,6 +115,51 @@ fn definitions_round_trip_through_yaml_emission() {
             "{} {} changed through emission",
             item.desc.as_str(),
             item.definition.name()
+        );
+    }
+}
+
+/// Load a project that has only `project.yaml`, with `extra` added to
+/// it
+fn load_project_file(extra: &str) -> Result<project::Project, String> {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("project.yaml"),
+        format!("---\nname: settings\n{extra}"),
+    )
+    .unwrap();
+    project::load(dir.path())
+}
+
+/// The text of a project is UTF-8 and has standard conforming strings,
+/// and build always writes the archive so. The obsolete `encoding` and
+/// `stdstrings` fields load only with these values, in any spelling
+/// that PostgreSQL accepts
+#[test]
+fn loads_the_obsolete_session_fields_only_with_utf8_and_true() {
+    for extra in [
+        "",
+        "encoding: UTF8\n",
+        "encoding: UTF-8\n",
+        "encoding: utf8\n",
+        "encoding: Utf_8\n",
+        "encoding: Unicode\n",
+        "stdstrings: true\n",
+    ] {
+        load_project_file(extra)
+            .unwrap_or_else(|e| panic!("{extra:?} did not load: {e}"));
+    }
+    for (extra, field) in [
+        ("encoding: LATIN1\n", "encoding"),
+        ("encoding: SQL_ASCII\n", "encoding"),
+        ("stdstrings: false\n", "stdstrings"),
+    ] {
+        let error = load_project_file(extra)
+            .err()
+            .unwrap_or_else(|| panic!("{extra:?} loaded"));
+        assert!(
+            error.contains(field) && error.contains("Remove"),
+            "the error for {extra:?} must name the field and the fix: {error}"
         );
     }
 }

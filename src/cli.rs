@@ -64,10 +64,6 @@ pub struct Build {
 
 #[derive(Args)]
 pub struct Create {
-    /// Specify the database encoding
-    #[arg(long, default_value = "UTF-8")]
-    pub encoding: String,
-
     /// Write to destination path even if it already exists
     #[arg(long)]
     pub force: bool,
@@ -79,10 +75,6 @@ pub struct Create {
     /// Do not create .gitkeep files
     #[arg(long)]
     pub no_gitkeep: bool,
-
-    /// Turn off standard conforming strings (< Postgres 9.1 behavior)
-    #[arg(long)]
-    pub no_stdstrings: bool,
 
     /// Specify the superuser name
     #[arg(long, default_value = "postgres")]
