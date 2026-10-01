@@ -1491,7 +1491,8 @@ fn aggregate_calls(a: &Aggregate) -> Vec<(&str, Vec<Vec<String>>)> {
 /// PostgreSQL calls it with (CREATE OPERATOR): the operator function
 /// takes the argument types of the operator, the restriction estimator
 /// `(internal, oid, internal, integer)`, and the join estimator
-/// `(internal, oid, internal, smallint, internal)`
+/// `(internal, oid, internal, smallint, internal)` or
+/// `(internal, oid, internal, smallint)`
 fn operator_calls(o: &Operator) -> Vec<(&str, Vec<Vec<String>>)> {
     let arguments = [&o.left_arg, &o.right_arg]
         .into_iter()
@@ -1509,9 +1510,10 @@ fn operator_calls(o: &Operator) -> Vec<(&str, Vec<Vec<String>>)> {
     if let Some(join) = &o.join {
         calls.push((
             join,
-            signatures(&[&[
-                "internal", "oid", "internal", "smallint", "internal",
-            ]]),
+            signatures(&[
+                &["internal", "oid", "internal", "smallint", "internal"],
+                &["internal", "oid", "internal", "smallint"],
+            ]),
         ));
     }
     calls
@@ -1524,20 +1526,12 @@ fn type_calls(t: &crate::models::Type) -> Vec<(&str, Vec<Vec<String>>)> {
     let fields = [
         (
             &t.input,
-            signatures(&[
-                &["cstring"],
-                &["cstring", "oid"],
-                &["cstring", "oid", "integer"],
-            ]),
+            signatures(&[&["cstring"], &["cstring", "oid", "integer"]]),
         ),
         (&t.output, vec![vec![own.clone()]]),
         (
             &t.receive,
-            signatures(&[
-                &["internal"],
-                &["internal", "oid"],
-                &["internal", "oid", "integer"],
-            ]),
+            signatures(&[&["internal"], &["internal", "oid", "integer"]]),
         ),
         (&t.send, vec![vec![own]]),
         (&t.typmod_in, signatures(&[&["cstring[]"]])),
@@ -2340,6 +2334,84 @@ mod tests {
             |id: usize| loader.project.inventory[id].dependencies.clone();
         assert_eq!(deps(operator), [binary].into());
         assert_eq!(deps(negation), [prefix].into());
+    }
+
+    /// PostgreSQL 18 calls a type input or receive function with one
+    /// or three arguments (findTypeInputFunction and
+    /// findTypeReceiveFunction in typecmds.c). A type does not come
+    /// after an overload with two arguments
+    #[test]
+    fn type_io_functions_take_one_or_three_arguments() {
+        let mut loader = Loader::new(Path::new("."));
+        add(
+            &mut loader,
+            ObjectType::Function,
+            function_entry("t_in", &["cstring", "oid"]),
+        );
+        let input = add(
+            &mut loader,
+            ObjectType::Function,
+            function_entry("t_in", &["cstring", "oid", "integer"]),
+        );
+        add(
+            &mut loader,
+            ObjectType::Function,
+            function_entry("t_recv", &["internal", "oid"]),
+        );
+        let receive = add(
+            &mut loader,
+            ObjectType::Function,
+            function_entry("t_recv", &["internal", "oid", "integer"]),
+        );
+        let base = add(
+            &mut loader,
+            ObjectType::Type,
+            json!({"name": "t", "schema": "test", "owner": "postgres",
+                   "input": "test.t_in", "receive": "test.t_recv"}),
+        );
+        loader.apply_structural_dependencies();
+        assert_eq!(
+            loader.project.inventory[base].dependencies,
+            [input, receive].into()
+        );
+    }
+
+    /// PostgreSQL 18 also calls a join estimator with four arguments,
+    /// `(internal, oid, internal, smallint)` (ValidateJoinEstimator in
+    /// operatorcmds.c). An operator comes after that overload only
+    #[test]
+    fn operators_order_a_four_argument_join_estimator() {
+        let mut loader = Loader::new(Path::new("."));
+        let function = add(
+            &mut loader,
+            ObjectType::Function,
+            function_entry("same", &["integer", "integer"]),
+        );
+        let join = add(
+            &mut loader,
+            ObjectType::Function,
+            function_entry(
+                "same_join",
+                &["internal", "oid", "internal", "smallint"],
+            ),
+        );
+        add(
+            &mut loader,
+            ObjectType::Function,
+            function_entry("same_join", &["internal", "oid", "internal"]),
+        );
+        let operator = add(
+            &mut loader,
+            ObjectType::Operator,
+            json!({"name": "=~=", "schema": "test", "owner": "postgres",
+                   "function": "test.same", "left_arg": "integer",
+                   "right_arg": "integer", "join": "test.same_join"}),
+        );
+        loader.apply_structural_dependencies();
+        assert_eq!(
+            loader.project.inventory[operator].dependencies,
+            [function, join].into()
+        );
     }
 
     /// A column of a relation's row type, also as an array, orders the
