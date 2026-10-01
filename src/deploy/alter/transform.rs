@@ -4,9 +4,9 @@
 //! the language are the identity of a transform, so no change needs a
 //! drop. A transform has no schema and no owner of its own.
 
-use super::names::{signature, type_name};
+use super::names::{argument_type, signature};
 use super::{Resolution, comment_delta, push_comment};
-use crate::deploy::diff::canonical_type;
+use crate::deploy::diff::identity_type;
 use crate::models::Transform;
 use crate::utils::quote_ident;
 
@@ -38,13 +38,13 @@ pub(super) fn transform(repo: &Transform, db: &Transform) -> Resolution {
     }
 }
 
-/// The transform as PostgreSQL keeps it: a canonical type and
-/// canonical functions. The schema only says where the project files
-/// the transform.
+/// The transform as PostgreSQL keeps it: a canonical type with no
+/// typmod, and canonical functions. The schema only says where the
+/// project files the transform.
 pub(crate) fn canonical(transform: &Transform) -> Transform {
     Transform {
         schema: String::new(),
-        data_type: type_name(&transform.data_type),
+        data_type: argument_type(&transform.data_type),
         from_sql: transform.from_sql.as_deref().map(signature),
         to_sql: transform.to_sql.as_deref().map(signature),
         ..transform.clone()
@@ -73,7 +73,7 @@ pub(crate) fn entry_name(entry: &libpgdump::Entry) -> Option<String> {
     let (data_type, language) = tag.rsplit_once(" LANGUAGE ")?;
     Some(format!(
         "FOR {} LANGUAGE {language}",
-        canonical_type(data_type)
+        identity_type(data_type)
     ))
 }
 
@@ -175,5 +175,49 @@ mod tests {
             drop(&transform),
             "DROP TRANSFORM IF EXISTS FOR test.base_int LANGUAGE plpgsql;\n"
         );
+    }
+
+    /// PostgreSQL 18 keeps no typmod in a transform type, and pg_dump
+    /// writes `bpchar` there as `character`
+    #[test]
+    fn transform_types_have_no_typmod() {
+        let mut dump =
+            libpgdump::new("test", "UTF8", "18.0").expect("new dump");
+        let id = dump
+            .add_entry(
+                libpgdump::ObjectType::Transform,
+                None,
+                Some("TRANSFORM FOR character LANGUAGE sql"),
+                None,
+                None,
+                None,
+                None,
+                &[],
+            )
+            .expect("add entry");
+        let entry = dump
+            .entries()
+            .iter()
+            .find(|entry| entry.dump_id == id)
+            .expect("the entry");
+        let transform = |data_type: &str| {
+            parse(json!({
+                "schema": "test", "type": data_type, "language": "sql",
+                "to_sql": "test.to_sql(internal)",
+            }))
+        };
+        let written = transform("bpchar");
+        assert_eq!(
+            entry_name(entry),
+            Some(
+                ObjectKey::new(
+                    ObjectType::Transform,
+                    &Definition::Transform(written.clone())
+                )
+                .name
+            )
+        );
+        assert_eq!(canonical(&written), canonical(&transform("character")));
+        assert_ne!(canonical(&written), canonical(&transform("text")));
     }
 }
