@@ -30,7 +30,9 @@ pub(crate) mod text_search;
 use serde_json::{Map, Value};
 
 use crate::build;
-use crate::deploy::diff::{canonical_collation, canonical_type};
+use crate::deploy::diff::{
+    canonical_collation, canonical_type, identity_type, return_type,
+};
 use crate::models::{
     CheckConstraint, Column, ColumnDefault, ColumnGenerated, ColumnNotNull,
     Definition, Domain, ExcludeConstraint, Extension, ForeignDataWrapper,
@@ -311,10 +313,11 @@ fn qualified(schema: &str, name: &str) -> String {
 }
 
 /// True when two functions' return types are the same modulo type
-/// aliasing (`int4` vs `integer`)
+/// aliasing (`int4` vs `integer`) and typmods, which PostgreSQL does
+/// not keep in a return type
 fn returns_equal(repo: &Function, db: &Function) -> bool {
     match (&repo.returns, &db.returns) {
-        (Some(r), Some(d)) => canonical_type(r) == canonical_type(d),
+        (Some(r), Some(d)) => return_type(r) == return_type(d),
         (r, d) => r == d,
     }
 }
@@ -333,7 +336,7 @@ fn out_parameters(function: &Function) -> Vec<(String, String, String)> {
             (
                 p.mode.clone(),
                 p.name.clone().unwrap_or_default(),
-                canonical_type(&p.data_type),
+                identity_type(&p.data_type),
             )
         })
         .collect()
