@@ -3690,16 +3690,36 @@ fn inline_column(
 
 /// Parse the `schema.name` a `nextval('schema.name'::regclass)` default
 /// points at, so the split-out DEFAULT entry can depend on that sequence
-fn nextval_target(default: &str) -> Option<(String, String)> {
+pub(crate) fn nextval_target(default: &str) -> Option<(String, String)> {
     let start = default.find('\'')? + 1;
-    let rest = &default[start..];
-    let end = rest.find('\'')?;
-    let qualified = &rest[..end];
-    let strip = |s: &str| s.trim_matches('"').to_string();
-    match qualified.rsplit_once('.') {
-        Some((schema, name)) => Some((strip(schema), strip(name))),
-        None => Some((String::new(), strip(qualified))),
+    // the string constant, with each doubled quote made one quote
+    let mut qualified = String::new();
+    let mut chars = default[start..].chars().peekable();
+    loop {
+        match chars.next()? {
+            '\'' if chars.next_if_eq(&'\'').is_some() => {
+                qualified.push('\'');
+            }
+            '\'' => break,
+            c => qualified.push(c),
+        }
     }
+    // the parts of the name, split at each dot outside double quotes
+    let mut parts = vec![String::new()];
+    let mut quoted = false;
+    let mut chars = qualified.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' if quoted && chars.next_if_eq(&'"').is_some() => {
+                parts.last_mut()?.push('"');
+            }
+            '"' => quoted = !quoted,
+            '.' if !quoted => parts.push(String::new()),
+            c => parts.last_mut()?.push(c),
+        }
+    }
+    let name = parts.pop()?;
+    Some((parts.pop().unwrap_or_default(), name))
 }
 
 /// `NOT NULL`, carrying the constraint name and NO INHERIT when the
@@ -6155,6 +6175,14 @@ mod tests {
         assert_eq!(
             nextval_target("nextval('\"S\".\"Q\"'::regclass)"),
             Some(("S".into(), "Q".into()))
+        );
+        assert_eq!(
+            nextval_target("nextval('test.\"s.v\"'::regclass)"),
+            Some(("test".into(), "s.v".into()))
+        );
+        assert_eq!(
+            nextval_target("nextval('\"a\"\"b\".\"it''s\"'::regclass)"),
+            Some(("a\"b".into(), "it's".into()))
         );
     }
 
