@@ -34,8 +34,6 @@ pub fn create(args: &cli::Create) -> Result<(), String> {
     }
     let project = json!({
         "name": name,
-        "encoding": args.encoding,
-        "stdstrings": !args.no_stdstrings,
         "superuser": args.superuser,
     });
     let header = args.include_mode_headers.then_some("project");

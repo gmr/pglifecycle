@@ -13,11 +13,9 @@ pglifecycle create [OPTIONS] DEST
 
 | Option | Description |
 | --- | --- |
-| `--encoding ENCODING` | Database encoding (default `UTF-8`) |
 | `--force` | Write to `DEST` even if it already exists |
 | `--name NAME` | Override the default project name |
 | `--no-gitkeep` | Do not create `.gitkeep` files in empty directories |
-| `--no-stdstrings` | Turn off standard conforming strings |
 | `--superuser NAME` | Superuser name (default `postgres`) |
 | `--include-mode-headers` | Prefix generated files with editor mode headers |
 
@@ -31,6 +29,12 @@ topological sort.
 ```bash
 pglifecycle build PROJECT DEST
 ```
+
+The archive is in UTF8 with `standard_conforming_strings` on, because
+the text of a project is UTF-8 and its SQL is written with that
+setting. pg_restore converts the text to the encoding of the database,
+thus the same archive restores into a UTF8 and into a LATIN1 database.
+Create the database with the encoding before the restore.
 
 ## deploy
 

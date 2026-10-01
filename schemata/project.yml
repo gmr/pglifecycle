@@ -11,13 +11,20 @@ properties:
     description: The name of the database that is saved in the build artifact when generating a dump.
     type: string
   encoding:
-    description: The database encoding to use
+    description: >
+      Obsolete. The text of a project is UTF-8, and build always writes the
+      archive in UTF8; pg_restore converts the text to the encoding of the
+      database. A project loads only if the value names UTF8 (for example
+      `UTF8`, `UTF-8` or `Unicode`). Remove the field.
     type: string
-    default: UTF8
+    deprecated: true
   stdstrings:
-    description: Turn standard confirming strings on/off in the created build artifact
+    description: >
+      Obsolete. The SQL of a project is written with
+      `standard_conforming_strings` on, and build always writes the archive
+      so. A project loads only if the value is `true`. Remove the field.
     type: boolean
-    default: true
+    deprecated: true
   superuser:
     description: The PostgreSQL super user
     type: string

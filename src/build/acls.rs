@@ -712,8 +712,6 @@ mod tests {
         .unwrap();
         Project {
             name: String::from("acls"),
-            encoding: String::from("UTF8"),
-            stdstrings: true,
             superuser: String::from("postgres"),
             default_schema: String::from("public"),
             path: std::path::PathBuf::new(),
@@ -773,8 +771,6 @@ mod tests {
         .unwrap();
         let project = Project {
             name: String::from("acls"),
-            encoding: String::from("UTF8"),
-            stdstrings: true,
             superuser: String::from("postgres"),
             default_schema: String::from("public"),
             path: std::path::PathBuf::new(),
@@ -856,8 +852,6 @@ mod tests {
         .unwrap();
         let project = Project {
             name: String::from("acls"),
-            encoding: String::from("UTF8"),
-            stdstrings: true,
             superuser: String::from("postgres"),
             default_schema: String::from("public"),
             path: std::path::PathBuf::new(),
@@ -898,8 +892,6 @@ mod tests {
     fn project_with(inventory: Vec<Item>) -> Project {
         Project {
             name: String::from("memberships"),
-            encoding: String::from("UTF8"),
-            stdstrings: true,
             superuser: String::from("postgres"),
             default_schema: String::from("public"),
             path: std::path::PathBuf::new(),
