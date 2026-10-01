@@ -671,8 +671,9 @@ fn view_dependencies(
 /// its archive entry depends on (see `pull::routine_parents`) and that
 /// the pulled inventory has, so that the build orders the routine after
 /// it. An object that the inventory does not have is left out, as
-/// `view_dependencies` leaves it out. A function or aggregate is named
-/// with its argument types, which the load resolves to one overload.
+/// `view_dependencies` leaves it out. A function, an aggregate or an
+/// operator is named with its argument types, which the load resolves
+/// to one overload.
 /// It is left out when the inventory has no overload with those
 /// argument types, because the load fails for such an entry.
 fn routine_dependencies(
@@ -681,7 +682,8 @@ fn routine_dependencies(
     relations: &BTreeMap<(String, String), &'static str>,
 ) -> Option<Value> {
     use crate::project::{
-        aggregate_signature, parameter_signature, tag_signature,
+        aggregate_signature, operator_signature, parameter_signature,
+        tag_signature,
     };
     let known = |key: &str, schema: &str, tag: &str| {
         let (name, arguments) =
@@ -694,6 +696,9 @@ fn routine_dependencies(
             "functions" => assembly.functions.iter().any(|f| {
                 same(&f.schema, &f.name)
                     && parameter_signature(&f.parameters) == arguments
+            }),
+            "operators" => assembly.operators.iter().any(|o| {
+                same(&o.schema, &o.name) && operator_signature(o) == arguments
             }),
             "sequences" => {
                 assembly.sequences.iter().any(|s| same(&s.schema, &s.name))
@@ -1387,5 +1392,31 @@ mod tests {
             }))
         );
         assert_eq!(routine_dependencies(None, &assembly, &relations), None);
+    }
+
+    /// An operator is named with its argument types, and only the
+    /// overload that the pulled inventory has is written
+    #[test]
+    fn routine_dependencies_name_an_operator_overload() {
+        let operator: models::Operator = serde_json::from_value(json!({
+            "name": "!!!", "schema": "test", "owner": "postgres",
+            "function": "f", "right_arg": "bigint",
+        }))
+        .unwrap();
+        let assembly = Assembly {
+            operators: vec![operator],
+            ..Assembly::default()
+        };
+        let parent = |tag: &str| crate::pull::RoutineParent {
+            key: "operators",
+            schema: String::from("test"),
+            tag: tag.to_string(),
+        };
+        let parents =
+            vec![parent("!!!(NONE, bigint)"), parent("!!!(NONE, integer)")];
+        assert_eq!(
+            routine_dependencies(Some(&parents), &assembly, &BTreeMap::new()),
+            Some(json!({"operators": ["test.!!!(NONE, bigint)"]}))
+        );
     }
 }
