@@ -1968,9 +1968,6 @@ mod tests {
         assert_eq!(identity_type("public.\"a(b)\""), "public.\"a(b)\"");
     }
 
-    /// PostgreSQL 18 keeps no typmod in a RETURNS TABLE column type,
-    /// and pg_dump writes `TABLE(a integer, b character varying)` for
-    /// `TABLE(a int4, b varchar(3))`
     /// PostgreSQL 18 writes `SELECT 'x'::text` for `SELECT 'x'`, and
     /// `SELECT 'x'::text AS text` for the routine that deploy makes
     /// from that body
@@ -2040,6 +2037,9 @@ mod tests {
         );
     }
 
+    /// PostgreSQL 18 keeps no typmod in a RETURNS TABLE column type,
+    /// and pg_dump writes `TABLE(a integer, b character varying)` for
+    /// `TABLE(a int4, b varchar(3))`
     #[test]
     fn return_table_columns_are_argument_types() {
         let pulled = "TABLE(a integer, b character varying, \"C\" text[])";
