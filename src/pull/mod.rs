@@ -311,12 +311,9 @@ pub fn snapshot(
         // role extraction is best-effort: a locked-down cluster (e.g.
         // RDS restricts pg_authid) should not abort the whole schema
         // export, so a failure is warned and skipped, not propagated
-        if let Err(error) = extract_roles(
-            conn,
-            include_passwords,
-            !ddl.no_tablespaces,
-            &mut assembly,
-        ) {
+        if let Err(error) =
+            extract_roles(conn, include_passwords, ddl, &mut assembly)
+        {
             log::warn!(
                 "Skipping roles and users: {error}. Use --no-roles to \
                  silence this, or connect with sufficient privileges."
@@ -495,12 +492,12 @@ fn encoding_in(bytes: &[u8]) -> Option<String> {
     (!value.is_empty()).then(|| value.to_string())
 }
 
-/// Dump cluster roles, and the tablespaces if `tablespaces` is set,
-/// via pg_dumpall and merge them into `assembly`
+/// Dump cluster roles, and the tablespaces unless `ddl` sets
+/// `no_tablespaces`, via pg_dumpall and merge them into `assembly`
 fn extract_roles(
     conn: &cli::Connection,
     include_passwords: bool,
-    tablespaces: bool,
+    ddl: &pgdump::DumpDdl,
     assembly: &mut Assembly,
 ) -> Result<(), String> {
     let file = tempfile::Builder::new()
@@ -508,7 +505,7 @@ fn extract_roles(
         .suffix(".sql")
         .tempfile()
         .map_err(|e| format!("failed to create temp file: {e}"))?;
-    pgdump::dump_roles(conn, file.path(), include_passwords, tablespaces)?;
+    pgdump::dump_roles(conn, file.path(), include_passwords, ddl)?;
     let text = std::fs::read_to_string(file.path()).map_err(|e| {
         format!("failed to read roles dump {}: {e}", file.path().display())
     })?;
