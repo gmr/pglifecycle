@@ -18,6 +18,7 @@ pub(crate) use diff::{canonical_casts, canonical_collation, identity_type};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::IsTerminal;
 
+use crate::ddl::{self, NodeExt};
 use crate::deploy::alter::Resolution;
 use crate::deploy::diff::{Change, Diff, ObjectKey};
 use crate::models::Definition;
@@ -358,7 +359,24 @@ fn plan(
         .iter()
         .map(|entry| (entry.dump_id, entry))
         .collect();
-    for entry in output.dump.entries() {
+    // the archive position of each function that this deploy creates,
+    // by schema and name. A function that depends on a changed table
+    // comes after the table, but a statement of the table can call it
+    let created = created_functions(output, diff);
+    let mut parser = tree_sitter::Parser::new();
+    parser
+        .set_language(&tree_sitter_postgres::LANGUAGE.into())
+        .map_err(|e| e.to_string())?;
+    // the statements that wait for a function, by its archive position
+    let mut waiting: BTreeMap<usize, Vec<(bool, Statement)>> = BTreeMap::new();
+    for (position, entry) in output.dump.entries().iter().enumerate() {
+        let later = waiting.split_off(&position);
+        for (destructive, statement) in std::mem::replace(&mut waiting, later)
+            .into_values()
+            .flatten()
+        {
+            push(destructive, statement);
+        }
         if args.no_privileges
             && matches!(
                 entry.desc,
@@ -459,6 +477,10 @@ fn plan(
         if let Some(id) = direct {
             let rebuilt = match resolutions.get(id) {
                 Some(Resolution::Statements(alters)) => {
+                    // a statement that calls a function that comes
+                    // later waits for it, and so do the statements
+                    // after it, so that they keep their order
+                    let mut after = None;
                     for alter in alters {
                         let statement = Statement {
                             label: alter
@@ -475,7 +497,19 @@ fn plan(
                             kept.push(statement);
                             continue;
                         }
-                        push(alter.destructive, statement);
+                        after = after.max(calls_later(
+                            &mut parser,
+                            &alter.sql,
+                            &created,
+                            position,
+                        ));
+                        match after {
+                            Some(function) => waiting
+                                .entry(function)
+                                .or_default()
+                                .push((alter.destructive, statement)),
+                            None => push(alter.destructive, statement),
+                        }
                     }
                     false
                 }
@@ -587,12 +621,66 @@ fn plan(
             );
         }
     }
+    for (destructive, statement) in waiting.into_values().flatten() {
+        push(destructive, statement);
+    }
     Ok(Plan {
         included,
         excluded,
         kept,
         included_destructive,
     })
+}
+
+/// The archive position of each function that the deploy creates, by
+/// schema and name. The last overload of a name gives the position
+fn created_functions<'a>(
+    output: &'a build::BuildOutput,
+    diff: &Diff,
+) -> HashMap<(&'a str, &'a str), usize> {
+    let mut created = HashMap::new();
+    for (position, entry) in output.dump.entries().iter().enumerate() {
+        let added = output
+            .item_ids
+            .get(&entry.dump_id)
+            .and_then(|id| diff.items.get(id))
+            == Some(&Change::Added);
+        if entry.desc == libpgdump::ObjectType::Function
+            && added
+            && let (Some(schema), Some(tag)) =
+                (entry.namespace.as_deref(), entry.tag.as_deref())
+        {
+            let name = tag.split('(').next().unwrap_or_default();
+            created.insert((schema, name), position);
+        }
+    }
+    created
+}
+
+/// The last archive position after `position` of the functions in
+/// `created` that `sql` calls. Only a name with a schema is looked
+/// up: deploy runs with an empty `search_path`
+fn calls_later(
+    parser: &mut tree_sitter::Parser,
+    sql: &str,
+    created: &HashMap<(&str, &str), usize>,
+    position: usize,
+) -> Option<usize> {
+    if created.is_empty() {
+        return None;
+    }
+    let tree = parser.parse(sql, None)?;
+    tree.root_node()
+        .find_all("func_name")
+        .iter()
+        .map(|node| ddl::any_name(node, sql))
+        .filter_map(|name| {
+            created
+                .get(&(name.schema.as_deref()?, name.name.as_str()))
+                .copied()
+        })
+        .filter(|function| *function > position)
+        .max()
 }
 
 /// Log what the plan skipped or excluded so the script is honest
@@ -1942,5 +2030,170 @@ mod tests {
         let sql: Vec<&str> =
             unowned.included.iter().map(|s| s.sql.as_str()).collect();
         assert_eq!(sql, ["CREATE TABLE public.added ();\n"]);
+    }
+
+    /// A plan for the changed table `test.t` (item 0) and the new
+    /// functions `test.f` (item 1) and `test.g` (item 2), in this
+    /// archive order: the entries of `before`, the table, then the
+    /// entries of `after`
+    fn function_order_plan(
+        before: &[&str],
+        after: &[&str],
+        alters: &[&str],
+    ) -> Vec<String> {
+        let mut dump = libpgdump::new("test", "UTF8", "18.0").expect("dump");
+        let mut item_ids = HashMap::new();
+        let mut add = |dump: &mut libpgdump::Dump, name: &str| {
+            let id = if name == "f" { 1 } else { 2 };
+            let dump_id = dump
+                .add_entry(
+                    libpgdump::ObjectType::Function,
+                    Some("test"),
+                    Some(&format!("{name}()")),
+                    None,
+                    Some(&format!("CREATE FUNCTION test.{name}();\n")),
+                    None,
+                    None,
+                    &[],
+                )
+                .expect("add function entry");
+            item_ids.insert(dump_id, id);
+        };
+        for name in before {
+            add(&mut dump, name);
+        }
+        let table = dump
+            .add_entry(
+                libpgdump::ObjectType::Table,
+                Some("test"),
+                Some("t"),
+                None,
+                Some("CREATE TABLE test.t (id integer);\n"),
+                None,
+                None,
+                &[],
+            )
+            .expect("add table entry");
+        for name in after {
+            add(&mut dump, name);
+        }
+        item_ids.insert(table, 0);
+        let output = build::BuildOutput { dump, item_ids };
+        let mut diff = Diff {
+            items: BTreeMap::from([
+                (0, Change::Changed),
+                (1, Change::Added),
+                (2, Change::Added),
+            ]),
+            changed: BTreeMap::new(),
+            removed: BTreeMap::new(),
+            owned: BTreeSet::new(),
+            owner_changed: BTreeSet::new(),
+        };
+        diff.changed.insert(
+            0,
+            serde_json::from_value(serde_json::json!({
+                "name": "t", "schema": "test", "owner": "postgres",
+            }))
+            .map(Definition::Table)
+            .expect("table deserializes"),
+        );
+        let alters = alters
+            .iter()
+            .map(|sql| alter::Alter {
+                sql: (*sql).to_string(),
+                destructive: false,
+                label: None,
+                fails_open: false,
+                index_removal: false,
+                schema: None,
+            })
+            .collect();
+        let resolutions =
+            BTreeMap::from([(0, Resolution::Statements(alters))]);
+        let snapshot =
+            libpgdump::new("test", "UTF8", "18.0").expect("new dump");
+        let args = match cli::Cli::parse_from(["pglifecycle", "deploy", "p"])
+            .action
+        {
+            cli::Action::Deploy(deploy) => deploy,
+            _ => unreachable!("parsed the deploy subcommand"),
+        };
+        plan(&diff, &resolutions, &output, &snapshot, &args)
+            .expect("plan succeeds")
+            .included
+            .into_iter()
+            .map(|statement| statement.sql)
+            .collect()
+    }
+
+    /// A function that depends on a changed table comes after it in
+    /// the archive. A statement of the table that calls the function
+    /// waits for its CREATE, and so do the statements after it, which
+    /// keep their order. The statements before it stay at the table
+    #[test]
+    fn changed_table_statements_wait_for_new_functions() {
+        let sql = function_order_plan(
+            &[],
+            &["f", "g"],
+            &[
+                "ALTER TABLE test.t ADD COLUMN v integer;\n",
+                "ALTER TABLE test.t ALTER COLUMN id SET DEFAULT test.f();\n",
+                "ALTER TABLE test.t ADD COLUMN w integer;\n",
+                "CREATE INDEX t_idx ON test.t ((test.g(id)));\n",
+                "CREATE TRIGGER t_trg BEFORE INSERT ON test.t FOR EACH ROW \
+                 EXECUTE FUNCTION test.f();\n",
+            ],
+        );
+        assert_eq!(
+            sql,
+            [
+                "ALTER TABLE test.t ADD COLUMN v integer;\n",
+                "CREATE FUNCTION test.f();\n",
+                "ALTER TABLE test.t ALTER COLUMN id SET DEFAULT test.f();\n",
+                "ALTER TABLE test.t ADD COLUMN w integer;\n",
+                "CREATE FUNCTION test.g();\n",
+                "CREATE INDEX t_idx ON test.t ((test.g(id)));\n",
+                "CREATE TRIGGER t_trg BEFORE INSERT ON test.t FOR EACH ROW \
+                 EXECUTE FUNCTION test.f();\n",
+            ]
+        );
+        // a check waits only for the function that it calls
+        let sql = function_order_plan(
+            &[],
+            &["f", "g"],
+            &["ALTER TABLE test.t ADD CONSTRAINT t_check \
+               CHECK ((test.f() > 0));\n"],
+        );
+        assert_eq!(
+            sql,
+            [
+                "CREATE FUNCTION test.f();\n",
+                "ALTER TABLE test.t ADD CONSTRAINT t_check \
+                 CHECK ((test.f() > 0));\n",
+                "CREATE FUNCTION test.g();\n",
+            ]
+        );
+    }
+
+    /// The statements of a changed table stay at the table when the
+    /// functions that they call come before it, or when the name has
+    /// no schema, which is then a `pg_catalog` function
+    #[test]
+    fn changed_table_statements_keep_their_order() {
+        let alters = [
+            "ALTER TABLE test.t ALTER COLUMN id SET DEFAULT test.f();\n",
+            "ALTER TABLE test.t ALTER COLUMN v SET DEFAULT g();\n",
+        ];
+        let sql = function_order_plan(&["f"], &["g"], &alters);
+        assert_eq!(
+            sql,
+            [
+                "CREATE FUNCTION test.f();\n",
+                alters[0],
+                alters[1],
+                "CREATE FUNCTION test.g();\n",
+            ]
+        );
     }
 }
