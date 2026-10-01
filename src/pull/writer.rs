@@ -89,6 +89,10 @@ pub fn render(
     for server in &assembly.servers {
         writer.save(top_level("servers", &server.name)?, server)?;
     }
+    for tablespace in &assembly.tablespaces {
+        writer
+            .save(top_level("tablespaces", &tablespace.name)?, tablespace)?;
+    }
     writer.write_user_mappings(assembly)?;
     writer.write_roles(assembly)?;
     if !assembly.remaining.is_empty() {

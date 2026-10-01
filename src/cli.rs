@@ -240,9 +240,10 @@ pub struct Pull {
     #[arg(short = 'D', long)]
     pub dump: Option<PathBuf>,
 
-    /// Do not extract cluster roles and users (pg_dumpall). Roles are
-    /// extracted by default when connecting to a live database; they
-    /// are always skipped with --dump (no live connection)
+    /// Do not extract cluster roles, users and tablespaces
+    /// (pg_dumpall). They are extracted by default when connecting to
+    /// a live database; they are always skipped with --dump (no live
+    /// connection)
     #[arg(long)]
     pub no_roles: bool,
 
@@ -352,7 +353,7 @@ pub struct Pull {
     #[arg(long, help_heading = "DDL Options")]
     pub no_security_labels: bool,
 
-    /// do not include tablespace assignments
+    /// do not include tablespace assignments or tablespaces
     #[arg(long, help_heading = "DDL Options")]
     pub no_tablespaces: bool,
 

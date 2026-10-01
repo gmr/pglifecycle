@@ -57,7 +57,9 @@ fn dump_args(
     args
 }
 
-/// Dump cluster roles to `path` as SQL via `pg_dumpall --roles-only`.
+/// Dump cluster roles, and the tablespaces unless `ddl` sets
+/// `no_tablespaces`, to `path` as SQL via `pg_dumpall --globals-only`.
+/// The privileges are omitted if `ddl` sets `no_privileges`.
 /// Password hashes are omitted (`--no-role-passwords`) unless
 /// `include_passwords` is set, to keep secrets out of the project.
 ///
@@ -69,8 +71,9 @@ pub fn dump_roles(
     conn: &cli::Connection,
     path: &Path,
     include_passwords: bool,
+    ddl: &DumpDdl,
 ) -> Result<(), String> {
-    match run_dump_roles(conn, path, include_passwords) {
+    match run_dump_roles(conn, path, include_passwords, ddl) {
         Err(error)
             if should_retry_without_passwords(include_passwords, &error) =>
         {
@@ -78,7 +81,7 @@ pub fn dump_roles(
                 "Cannot read password hashes ({error}); retrying roles \
                  without passwords"
             );
-            run_dump_roles(conn, path, false)
+            run_dump_roles(conn, path, false, ddl)
         }
         result => result,
     }
@@ -88,8 +91,9 @@ fn run_dump_roles(
     conn: &cli::Connection,
     path: &Path,
     include_passwords: bool,
+    ddl: &DumpDdl,
 ) -> Result<(), String> {
-    let args = dump_roles_args(conn, path, include_passwords);
+    let args = dump_roles_args(conn, path, include_passwords, ddl);
     execute("pg_dumpall", args, dump_roles_env(conn), conn)
 }
 
@@ -118,6 +122,7 @@ fn dump_roles_args(
     conn: &cli::Connection,
     path: &Path,
     include_passwords: bool,
+    ddl: &DumpDdl,
 ) -> Vec<OsString> {
     let mut args = connection_args(conn);
     if let Some(connection) = roles_connection_string(conn) {
@@ -130,7 +135,13 @@ fn dump_roles_args(
     }
     args.push("-f".into());
     args.push(path.into());
-    args.push("-r".into());
+    args.push("-g".into());
+    if ddl.no_tablespaces {
+        args.push("--no-tablespaces".into());
+    }
+    if ddl.no_privileges {
+        args.push("--no-privileges".into());
+    }
     args.extend(["-E".into(), "UTF8".into()]);
     if !include_passwords {
         args.push("--no-role-passwords".into());
@@ -711,10 +722,60 @@ mod tests {
         let args = dump_args(&connection(false), &DumpDdl::default(), path);
         assert!(has_pair(&args, "-E", "UTF8"), "{args:?}");
         for include_passwords in [false, true] {
-            let args =
-                dump_roles_args(&connection(false), path, include_passwords);
+            let args = dump_roles_args(
+                &connection(false),
+                path,
+                include_passwords,
+                &DumpDdl::default(),
+            );
             assert!(has_pair(&args, "-E", "UTF8"), "{args:?}");
         }
+    }
+
+    /// The globals dump has the roles and the tablespaces, and only the
+    /// roles with --no-tablespaces
+    #[test]
+    fn dumps_the_globals() {
+        let path = Path::new("globals.sql");
+        let args = dump_roles_args(
+            &connection(false),
+            path,
+            false,
+            &DumpDdl::default(),
+        );
+        assert!(args.iter().any(|a| a == "-g"), "{args:?}");
+        assert!(!args.iter().any(|a| a == "--no-tablespaces"), "{args:?}");
+        let args = dump_roles_args(
+            &connection(false),
+            path,
+            false,
+            &DumpDdl {
+                no_tablespaces: true,
+                ..DumpDdl::default()
+            },
+        );
+        assert!(args.iter().any(|a| a == "-g"), "{args:?}");
+        assert!(args.iter().any(|a| a == "--no-tablespaces"), "{args:?}");
+    }
+
+    /// The globals dump has the privileges, and not with
+    /// --no-privileges
+    #[test]
+    fn dumps_the_globals_without_privileges() {
+        let path = Path::new("globals.sql");
+        let args = dump_roles_args(
+            &connection(false),
+            path,
+            false,
+            &DumpDdl::default(),
+        );
+        assert!(!args.iter().any(|a| a == "--no-privileges"), "{args:?}");
+        let ddl = DumpDdl {
+            no_privileges: true,
+            ..DumpDdl::default()
+        };
+        let args = dump_roles_args(&connection(false), path, false, &ddl);
+        assert!(args.iter().any(|a| a == "--no-privileges"), "{args:?}");
     }
 
     #[test]
@@ -815,7 +876,8 @@ mod tests {
         conn.username = Some(String::from("o'k\\"));
         for dbname in ["host=db port=6543 dbname=app", "service=prod"] {
             conn.dbname = Some(dbname.to_string());
-            let args = dump_roles_args(&conn, path, false);
+            let args =
+                dump_roles_args(&conn, path, false, &DumpDdl::default());
             let expected = format!(
                 "host='localhost' port='5432' user='o\\'k\\\\' {dbname}"
             );
@@ -825,7 +887,7 @@ mod tests {
         }
         let uri = "postgresql://db:6543/app";
         conn.dbname = Some(uri.to_string());
-        let args = dump_roles_args(&conn, path, false);
+        let args = dump_roles_args(&conn, path, false, &DumpDdl::default());
         assert!(has_pair(&args, "-d", uri), "{args:?}");
         assert_no_server_flags(&args);
         assert_eq!(
@@ -849,7 +911,12 @@ mod tests {
     #[test]
     fn dumps_the_roles_of_a_plain_name_with_the_flags() {
         let conn = connection_to(Some("app"));
-        let args = dump_roles_args(&conn, Path::new("roles.sql"), false);
+        let args = dump_roles_args(
+            &conn,
+            Path::new("roles.sql"),
+            false,
+            &DumpDdl::default(),
+        );
         // pg_dumpall reads -d only as a connection string
         assert!(!args.contains(&OsString::from("-d")), "{args:?}");
         assert!(has_pair(&args, "-h", "localhost"), "{args:?}");
@@ -872,7 +939,8 @@ mod tests {
             line.contains(" -d (connection string to app@db:5432) "),
             "{line}"
         );
-        let args = dump_roles_args(&conn, Path::new("f"), false);
+        let args =
+            dump_roles_args(&conn, Path::new("f"), false, &DumpDdl::default());
         let line = command_line("pg_dumpall", &args, &[], &conn);
         assert!(!line.contains("s3cret"), "{line}");
         assert!(

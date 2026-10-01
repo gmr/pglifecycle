@@ -12,11 +12,13 @@ mod function;
 mod misc;
 mod object;
 mod policy;
+mod split;
 mod table;
 mod trigger;
 mod view;
 
 pub use misc::TextSearchObject;
+pub use split::split_statements;
 pub(crate) use table::apply_constraint;
 
 use tree_sitter::Node;
@@ -109,6 +111,13 @@ pub enum Statement {
     CreateConversion(models::Conversion),
     CreateLanguage(models::Language),
     CreateAccessMethod(models::AccessMethod),
+    CreateTablespace(models::Tablespace),
+    /// ALTER TABLESPACE ... SET (options): pg_dumpall writes the
+    /// options of a tablespace so, after its CREATE
+    AlterTablespace {
+        name: String,
+        options: serde_json::Map<String, serde_json::Value>,
+    },
     CreateOperatorFamily(models::OperatorFamily),
     /// ALTER OPERATOR FAMILY ... ADD: members that belong to the family
     /// and to none of its classes
@@ -391,6 +400,10 @@ fn dispatch(node: &Node, src: &str) -> Result<Vec<Statement>, String> {
         }
         "CreatePLangStmt" => Ok(vec![misc::create_language(node, src)?]),
         "CreateAmStmt" => Ok(vec![misc::create_access_method(node, src)?]),
+        "CreateTableSpaceStmt" => {
+            Ok(vec![misc::create_tablespace(node, src)?])
+        }
+        "AlterTblSpcStmt" => Ok(vec![misc::alter_tablespace(node, src)?]),
         "CreateOpFamilyStmt" => {
             Ok(vec![misc::create_operator_family(node, src)?])
         }

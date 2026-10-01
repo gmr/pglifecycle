@@ -51,6 +51,9 @@ const DEVIATIONS: &[(&str, &str, &str)] = &[
     ("SERVER", "", "localhost"),
     // Python interpolated a Python list repr into WHEN TAG IN
     ("EVENT TRIGGER", "", "disable_alter_domain"),
+    // deviation 43: Python rendered the location bare, which does not
+    // parse
+    ("TABLESPACE", "", "temp"),
     // deviation 32: Python rendered the connection and the WITH
     // parameters bare, which does not parse
     ("SUBSCRIPTION", "", "localhost_test"),
@@ -142,8 +145,16 @@ const CORRECTED_DROPS: &[(&str, &str, &str, &str)] = &[
 /// Deviation 38: pg_restore cannot set the owner of a role, a user or
 /// a group, so these entries have no owner. Python gave them the
 /// superuser. They are compared exactly, with no owner.
-const OWNERLESS: &[(&str, &str, &str)] =
-    &[("GROUP", "", "developers"), ("USER", "", "fwd_user")];
+///
+/// Deviation 42: pg_restore cannot set the owner of a tablespace
+/// either, so the tablespace and its comment have no owner. The CREATE
+/// names the owner.
+const OWNERLESS: &[(&str, &str, &str)] = &[
+    ("GROUP", "", "developers"),
+    ("USER", "", "fwd_user"),
+    ("TABLESPACE", "", "temp"),
+    ("COMMENT", "", "temp"),
+];
 
 /// (desc, namespace, tag, required defn fragment) for the corrected
 /// Rust entries replacing the deviations above
@@ -168,6 +179,13 @@ const CORRECTED: &[(&str, &str, &str, &str)] = &[
         "",
         "disable_alter_domain",
         "WHEN TAG IN ('ALTER DOMAIN')",
+    ),
+    // deviation 43: the location is a string constant
+    (
+        "TABLESPACE",
+        "",
+        "temp",
+        "CREATE TABLESPACE temp OWNER postgres LOCATION '/tmp';\n",
     ),
     (
         "SUBSCRIPTION",
@@ -473,6 +491,63 @@ fn outside_items() -> Vec<Item> {
                 ),
             )
         },
+        // deviations 42, 43 and 44
+        item(
+            9,
+            ObjectType::Role,
+            Definition::Role(
+                serde_json::from_value(serde_json::json!({
+                    "name": "Space Owner",
+                }))
+                .unwrap(),
+            ),
+        ),
+        item(
+            10,
+            ObjectType::Tablespace,
+            Definition::Tablespace(
+                serde_json::from_value(serde_json::json!({
+                    "name": "Fast Space",
+                    "owner": "Space Owner",
+                    "location": "/srv/it's",
+                    "options": {
+                        "seq_page_cost": 1.5,
+                        "effective_io_concurrency": 20,
+                    },
+                    "comment": "It's fast",
+                }))
+                .unwrap(),
+            ),
+        ),
+        // deviation 44: the index of the primary key is in a
+        // tablespace of the project, and the table is not
+        item(
+            11,
+            ObjectType::Tablespace,
+            Definition::Tablespace(
+                serde_json::from_value(serde_json::json!({
+                    "name": "fastdisk",
+                    "owner": "Space Owner",
+                    "location": "/srv/fastdisk",
+                }))
+                .unwrap(),
+            ),
+        ),
+        item(
+            12,
+            ObjectType::Table,
+            Definition::Table(
+                serde_json::from_value(serde_json::json!({
+                    "name": "ledger",
+                    "schema": "test",
+                    "owner": "postgres",
+                    "columns": [{"name": "id", "data_type": "integer"}],
+                    "primary_key": ["id"],
+                    "index_tablespace": "fastdisk",
+                }))
+                .unwrap(),
+            ),
+        ),
     ]
 }
 
@@ -592,7 +667,31 @@ const OUTSIDE_CORRECTED: &[(&str, &str, &str, &str, &str)] = &[
         "ALTER TABLE test.tickets DROP CONSTRAINT IF EXISTS \
          tickets_n_check;\n",
     ),
+    // deviation 43: the owner is an identifier and the location a
+    // string constant. The Python wrote both bare, which does not
+    // parse for a location or for a name that needs quotes
+    (
+        "TABLESPACE",
+        "",
+        "Fast Space",
+        "CREATE TABLESPACE \"Fast Space\" OWNER \"Space Owner\" LOCATION \
+         $$/srv/it's$$ WITH (seq_page_cost=1.5,effective_io_concurrency=20);\n",
+        "DROP TABLESPACE IF EXISTS \"Fast Space\";\n",
+    ),
+    (
+        "COMMENT",
+        "",
+        "Fast Space",
+        "COMMENT ON TABLESPACE \"Fast Space\" IS $$It's fast$$;\n;\n",
+        "",
+    ),
 ];
+
+/// Deviation 42: (desc, tag) of the entries that [`outside_items`]
+/// give that have no owner. pg_restore cannot set the owner of a
+/// tablespace; the CREATE names it.
+const OUTSIDE_OWNERLESS: &[(&str, &str)] =
+    &[("TABLESPACE", "Fast Space"), ("COMMENT", "Fast Space")];
 
 fn build_archive() -> libpgdump::Dump {
     let project = project::load(Path::new("test-project")).unwrap();
@@ -878,6 +977,55 @@ fn corrects_objects_outside_the_test_project() {
             .collect();
         assert_eq!(settings, *defns, "{desc} {tag} settings");
     }
+    // deviation 44: a tablespace comes after the role that owns it
+    let id_of = |desc: &str, tag: &str| {
+        output
+            .dump
+            .entries()
+            .iter()
+            .find(|e| e.desc.as_str() == desc && e.tag.as_deref() == Some(tag))
+            .map(|e| e.dump_id)
+            .unwrap_or_else(|| panic!("missing entry {desc} {tag}"))
+    };
+    let tablespace = id_of("TABLESPACE", "Fast Space");
+    let owner = id_of("ROLE", "Space Owner");
+    assert!(
+        output
+            .dump
+            .get_entry(tablespace)
+            .unwrap()
+            .dependencies
+            .contains(&owner),
+        "the tablespace does not depend on its owner"
+    );
+    // the CREATE TABLE makes the index of the primary key in the
+    // tablespace, so the table comes after the tablespace
+    let fastdisk = id_of("TABLESPACE", "fastdisk");
+    let ledger = id_of("TABLE", "ledger");
+    assert!(
+        output
+            .dump
+            .get_entry(ledger)
+            .unwrap()
+            .dependencies
+            .contains(&fastdisk),
+        "the table does not depend on its index tablespace"
+    );
+    for (desc, tag) in OUTSIDE_OWNERLESS {
+        let entry = output
+            .dump
+            .entries()
+            .iter()
+            .find(|e| {
+                e.desc.as_str() == *desc && e.tag.as_deref() == Some(*tag)
+            })
+            .unwrap_or_else(|| panic!("missing entry {desc} {tag}"));
+        assert_eq!(
+            entry.owner.as_deref().unwrap_or_default(),
+            "",
+            "{desc} {tag} has an owner"
+        );
+    }
 }
 
 #[test]
@@ -921,7 +1069,8 @@ fn records_inventory_dependency_edges() {
         })
         .collect();
     edges.sort();
-    // the same 10 inventory edges the loader resolves, plus the edge
+    // the same 10 inventory edges the loader resolves, the edge from
+    // an object to its tablespace (deviation 44), plus the edge
     // from the FK CONSTRAINT entry to its own table (Python recorded
     // no dependency edges at all; libpgdump's weighted toposort uses
     // these to order the archive). A foreign key needs no edge to the
@@ -952,8 +1101,9 @@ fn records_inventory_dependency_edges() {
             "FK CONSTRAINT:addresses addresses_user_id -> TABLE:addresses",
             "FUNCTION:utf8_to_latin1(integer, integer, cstring, internal, \
              integer) -> PROCEDURAL LANGUAGE:plpython3u",
+            // deviation 44: an object in a tablespace comes after it
             "MATERIALIZED VIEW:user_addresses -> \
-             TABLE:addresses, TABLE:users",
+             TABLE:addresses, TABLE:users, TABLESPACE:temp",
             "SERVER:localhost -> EXTENSION:postgres_fdw",
             "TABLE:addresses -> TYPE:address_type",
             "TABLE:users -> DOMAIN:bcp47_locale, DOMAIN:email_address, \
