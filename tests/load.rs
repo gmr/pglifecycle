@@ -76,13 +76,19 @@ fn resolves_dependencies() {
         .collect();
     edges.sort();
     // the exact edge set the Python implementation resolves, plus the
-    // edge from a routine to its procedural language
+    // edge from a routine to its procedural language, and the edges
+    // from the conversion and the event trigger to the functions that
+    // they call (build deviation 41)
     assert_eq!(
         edges,
         vec![
             "AGGREGATE:test_agg -> \
              FUNCTION:test_aggregate(integer, integer)",
+            "CONVERSION:myconv -> FUNCTION:utf8_to_latin1(integer, integer, \
+             cstring, internal, integer)",
             "DOMAIN:bcp47_locale -> EXTENSION:citext",
+            "EVENT TRIGGER:disable_alter_domain -> \
+             FUNCTION:disable_alter_domain()",
             "FUNCTION:utf8_to_latin1(integer, integer, cstring, internal, \
              integer) -> PROCEDURAL LANGUAGE:plpython3u",
             "MATERIALIZED VIEW:user_addresses -> \

@@ -66,26 +66,37 @@ primary_key:
   field, such as the relations of a view query or the objects of a
   SQL-standard function body (`BEGIN ATOMIC` or `RETURN`). PostgreSQL
   checks such a body when it creates the function, so the function
-  must come after each function, aggregate, table, view or sequence
-  that the body uses. pull writes these entries for views,
+  must come after each function, aggregate, operator, table, view or
+  sequence that the body uses. pull writes these entries for views,
   materialized views, functions and procedures. A restore and a deploy
   do not check a string body (`AS $$ ... $$`), and PostgreSQL does not
   record what one uses, so pull writes no entries for it.
 - An entry names an object as `schema.name`. A function or aggregate
   entry also gives the argument types of one overload, as
   pull writes them: `test.f(integer, text)`, or `test.agg(*)` for an
-  aggregate with no arguments. The types compare as PostgreSQL
-  resolves them, so `int4`, `INTEGER` and `pg_catalog.int4` are the
-  same type. An entry with no argument list is correct only when one
-  overload has the name. If more than one overload has the name, or no
-  overload has the argument types, the load fails. An entry for an
-  object that the project does not have gives a warning and orders
-  nothing.
+  aggregate with no arguments. An operator entry gives its left and
+  right argument types: `test.=~=(integer, integer)`, or
+  `test.!!!(NONE, integer)` for a prefix operator. The types compare
+  as PostgreSQL resolves them, so `int4`, `INTEGER` and
+  `pg_catalog.int4` are the same type. An entry with no argument list
+  is correct only when one overload has the name. If more than one
+  overload has the name, or no overload has the argument types, the
+  load fails. An entry for an object that the project does not have
+  gives a warning and orders nothing.
 - A foreign key needs no entry: the build adds each foreign key after
   all tables. The load ignores a table-on-table entry unless the table
-  inherits from, or is `LIKE`, the other table, and gives a warning.
-  The definition already states those two relationships, so a table
-  needs no entries for them.
+  inherits from, or is `LIKE`, the other table, or has a column of the
+  other table's row type, and gives a warning. The definition already
+  states those three relationships, so a table needs no entries for
+  them.
+- A function field of an aggregate, a cast, a conversion, a type, a
+  language, a transform, an access method or an event trigger needs no
+  entry either. The load orders the object after the overload that
+  PostgreSQL calls: for example, the state function of an aggregate
+  with the state type and the arguments of the aggregate. A field that
+  gives the argument types (`test.f(integer)`) names that overload.
+  When no overload has the argument types, the load orders the object
+  after each overload of the name.
 - ACL grants and revocations live on the grantee's role, user, or
   group file under `grants:`/`revocations:`, keyed by object:
 

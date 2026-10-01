@@ -2,8 +2,8 @@
 
 mod load;
 pub(crate) use load::{
-    aggregate_signature, generated_name, parameter_signature, split_sql_name,
-    tag_signature,
+    aggregate_signature, generated_name, operator_signature,
+    parameter_signature, split_sql_name, tag_signature,
 };
 pub mod validate;
 

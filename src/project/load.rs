@@ -7,7 +7,9 @@ use serde_json::Value;
 
 use crate::constants::{DEPENDENCIES, ObjectType, READ_ORDER};
 use crate::deploy::identity_type;
-use crate::models::{Aggregate, Definition, FunctionParameter, Item};
+use crate::models::{
+    Aggregate, Definition, FunctionParameter, Item, Operator, Table,
+};
 use crate::project::{Project, validate};
 use crate::yamlio;
 
@@ -333,11 +335,16 @@ impl Loader {
 
     /// Order each object after the objects its own definition names,
     /// which have to exist before it is created: a table's `INHERITS`
-    /// parents and `LIKE` source; the functions an aggregate, cast,
-    /// conversion or event trigger calls; the types an aggregate or
-    /// cast uses; and a publication's tables and schemas. Text search
-    /// objects are ordered one by one in the build instead, because a
-    /// container stands for a whole schema and is too coarse to order.
+    /// parents, `LIKE` source and the relations of its columns' row
+    /// types; the functions an aggregate, cast, conversion, operator or
+    /// event trigger calls; the types an aggregate or cast uses; and a
+    /// publication's tables and schemas. A function field names one
+    /// overload where PostgreSQL fixes its argument types (see
+    /// [`Loader::resolve_function`]), because an edge to each overload
+    /// of the name can make a dependency loop with an overload that
+    /// uses the object. Text search objects are ordered one by one in
+    /// the build instead, because a container stands for a whole schema
+    /// and is too coarse to order.
     ///
     /// A pulled project carries only the INHERITS edge in its
     /// `dependencies` block, and never has a `LIKE`, since pg_dump
@@ -352,13 +359,9 @@ impl Loader {
         for (id, item) in self.project.inventory.iter().enumerate() {
             let own_schema = item.definition.schema().unwrap_or_default();
             let mut references: Vec<(ObjectType, String)> = Vec::new();
-            let functions = |names: &[&Option<String>]| {
-                names
-                    .iter()
-                    .filter_map(|name| name.as_deref())
-                    .map(|name| (ObjectType::Function, name.to_string()))
-                    .collect::<Vec<_>>()
-            };
+            // the functions that the definition names, each with the
+            // argument lists that PostgreSQL calls it with
+            let mut calls: Vec<(&str, Vec<Vec<String>>)> = Vec::new();
             match &item.definition {
                 Definition::Table(table) => {
                     let sources =
@@ -368,18 +371,19 @@ impl Loader {
                     for source in sources {
                         references.push((ObjectType::Table, source.clone()));
                     }
+                    // a column of the row type of a relation
+                    for name in row_type_names(table) {
+                        for desc in [
+                            ObjectType::Table,
+                            ObjectType::View,
+                            ObjectType::MaterializedView,
+                        ] {
+                            references.push((desc, name.clone()));
+                        }
+                    }
                 }
                 Definition::Aggregate(a) => {
-                    references.extend(functions(&[
-                        &Some(a.sfunc.clone()),
-                        &a.ffunc,
-                        &a.combinefunc,
-                        &a.serialfunc,
-                        &a.deserialfunc,
-                        &a.msfunc,
-                        &a.minvfunc,
-                        &a.mffunc,
-                    ]));
+                    calls.extend(aggregate_calls(a));
                     let types = a
                         .arguments
                         .iter()
@@ -390,7 +394,23 @@ impl Loader {
                     references.extend(types.flat_map(type_references));
                 }
                 Definition::Cast(c) => {
-                    references.extend(functions(&[&c.function]));
+                    if let Some(function) = &c.function {
+                        // the source value, then the typmod and whether
+                        // the cast is explicit, when the function takes
+                        // them
+                        let candidates = c.source_type.iter().flat_map(|s| {
+                            [
+                                vec![s.clone()],
+                                vec![s.clone(), "integer".into()],
+                                vec![
+                                    s.clone(),
+                                    "integer".into(),
+                                    "boolean".into(),
+                                ],
+                            ]
+                        });
+                        calls.push((function, candidates.collect()));
+                    }
                     references.extend(
                         [&c.source_type, &c.target_type]
                             .into_iter()
@@ -400,10 +420,24 @@ impl Loader {
                     );
                 }
                 Definition::Conversion(c) => {
-                    references.extend(functions(&[&c.function]));
+                    if let Some(function) = &c.function {
+                        // PostgreSQL 14 added the last argument
+                        let arguments = ["integer", "integer", "cstring"]
+                            .into_iter()
+                            .chain(["internal", "integer"])
+                            .map(String::from)
+                            .collect::<Vec<_>>();
+                        let mut with_flag = arguments.clone();
+                        with_flag.push("boolean".into());
+                        calls.push((function, vec![with_flag, arguments]));
+                    }
                 }
                 Definition::Transform(t) => {
-                    references.extend(functions(&[&t.from_sql, &t.to_sql]));
+                    for function in
+                        [&t.from_sql, &t.to_sql].into_iter().flatten()
+                    {
+                        calls.push((function, signatures(&[&["internal"]])));
+                    }
                     references.extend(type_references(t.data_type.clone()));
                     references.push((
                         ObjectType::ProceduralLanguage,
@@ -416,10 +450,12 @@ impl Loader {
                         .push((ObjectType::MaterializedView, s.table.clone()));
                 }
                 Definition::EventTrigger(t) => {
-                    references.extend(functions(&[&t.function]));
+                    if let Some(function) = &t.function {
+                        calls.push((function, vec![Vec::new()]));
+                    }
                 }
                 Definition::AccessMethod(m) => {
-                    references.extend(functions(&[&Some(m.handler.clone())]));
+                    calls.push((&m.handler, signatures(&[&["internal"]])));
                 }
                 Definition::OperatorFamily(f) => {
                     references
@@ -449,23 +485,22 @@ impl Loader {
                         c.functions.as_deref(),
                     ));
                 }
-                Definition::Type(t) => {
-                    references.extend(functions(&[
-                        &t.input,
-                        &t.output,
-                        &t.receive,
-                        &t.send,
-                        &t.typmod_in,
-                        &t.typmod_out,
-                        &t.analyze,
-                    ]));
-                }
+                Definition::Type(t) => calls.extend(type_calls(t)),
+                // a function that uses the operator in a SQL-standard
+                // body can put the operator before the functions that
+                // it names in the sort, so these need edges too
+                Definition::Operator(o) => calls.extend(operator_calls(o)),
                 Definition::Language(l) => {
-                    references.extend(functions(&[
-                        &l.handler,
-                        &l.inline_handler,
-                        &l.validator,
-                    ]));
+                    let fields: [(&Option<String>, &[&str]); 3] = [
+                        (&l.handler, &[]),
+                        (&l.inline_handler, &["internal"]),
+                        (&l.validator, &["oid"]),
+                    ];
+                    for (function, arguments) in fields {
+                        if let Some(function) = function {
+                            calls.push((function, signatures(&[arguments])));
+                        }
+                    }
                 }
                 Definition::Function(f) => {
                     references.extend(f.language.iter().map(|language| {
@@ -490,11 +525,27 @@ impl Loader {
                 }
                 _ => {}
             }
+            for (function, candidates) in &calls {
+                for parent in
+                    self.resolve_function(function, own_schema, candidates)
+                {
+                    if parent != id {
+                        edges.push((id, parent));
+                    }
+                }
+            }
             for (desc, reference) in references {
-                // a function reference may carry its argument list
-                let reference =
-                    reference.split('(').next().unwrap_or_default();
-                let (namespace, tag) = split_sql_name(reference);
+                if desc == ObjectType::Function {
+                    for parent in
+                        self.resolve_function(&reference, own_schema, &[])
+                    {
+                        if parent != id {
+                            edges.push((id, parent));
+                        }
+                    }
+                    continue;
+                }
+                let (namespace, tag) = split_sql_name(&reference);
                 let (namespace, tag) = match desc {
                     ObjectType::Schema | ObjectType::ProceduralLanguage => {
                         (String::new(), reference.to_string())
@@ -548,6 +599,63 @@ impl Loader {
         for (id, parent) in edges {
             self.project.inventory[id].dependencies.insert(parent);
         }
+    }
+
+    /// The overloads that a function field names. `reference` is a
+    /// function name, with or without a schema, and with or without its
+    /// argument types. A name without a schema is in `own_schema`.
+    ///
+    /// An argument list in the reference names the overload that has
+    /// those argument types. Otherwise the first of `candidates` that
+    /// an overload has names it: the argument types that PostgreSQL
+    /// calls the function with, such as the state type and the
+    /// arguments of an aggregate's state function. When no overload
+    /// matches, the reference names each overload that has the name,
+    /// because a missing edge fails a restore, and an edge too many at
+    /// worst orders an object later than necessary.
+    fn resolve_function(
+        &self,
+        reference: &str,
+        own_schema: &str,
+        candidates: &[Vec<String>],
+    ) -> Vec<usize> {
+        let (name, arguments) = match tag_signature(reference) {
+            Some((name, arguments)) => (name, Some(arguments)),
+            None => (reference, None),
+        };
+        let (namespace, tag) = split_sql_name(name);
+        let namespace = if namespace.is_empty() {
+            own_schema.to_string()
+        } else {
+            namespace
+        };
+        let overloads = lookup_items(
+            &self.index,
+            ObjectType::Function,
+            Some(&namespace),
+            &tag,
+        );
+        let candidates: Vec<Vec<String>> = match arguments {
+            Some(arguments) => vec![arguments],
+            None => candidates
+                .iter()
+                .map(|types| types.iter().map(|t| identity_type(t)).collect())
+                .collect(),
+        };
+        for signature in candidates {
+            let found: Vec<usize> = overloads
+                .iter()
+                .copied()
+                .filter(|&i| {
+                    routine_signature(&self.project.inventory[i].definition)
+                        == signature
+                })
+                .collect();
+            if !found.is_empty() {
+                return found;
+            }
+        }
+        overloads
     }
 
     fn apply_cached_dependencies(&mut self) -> Result<(), String> {
@@ -606,10 +714,11 @@ impl Loader {
     /// Whether `dep` is a table-to-table edge a project pulled before
     /// build deviation 14 recorded for a foreign key.
     ///
-    /// Two relations between tables order their creation, and both
-    /// name the other table in the dependent table's own definition:
-    /// INHERITS through `parents`, and LIKE through `like_table`. An
-    /// edge either of those backs is kept. A foreign key used to add
+    /// Three relations between tables order their creation, and each
+    /// names the other table in the dependent table's own definition:
+    /// INHERITS through `parents`, LIKE through `like_table`, and a
+    /// column of the other table's row type through its `data_type`.
+    /// An edge one of those backs is kept. A foreign key used to add
     /// an edge too, so that an inline `FOREIGN KEY` clause would find
     /// its referenced table. The build now emits every foreign key as
     /// its own post-data entry, which already sorts after every table,
@@ -642,15 +751,19 @@ impl Loader {
             || table
                 .like_table
                 .as_ref()
-                .is_some_and(|like| names_the_parent(&like.name));
+                .is_some_and(|like| names_the_parent(&like.name))
+            || row_type_names(table)
+                .iter()
+                .any(|name| names_the_row_type(name, &table.schema, dep));
         if ordered {
             return false;
         }
         log::warn!(
             "Ignoring the dependency of table {}.{} on table {}.{}: a \
-             table dependency orders only INHERITS and LIKE, and the \
-             build adds each foreign key after all tables. Remove the \
-             entry from the dependencies of {}.{}.",
+             table dependency orders only INHERITS, LIKE and a column of \
+             the other table's row type, and the build adds each foreign \
+             key after all tables. Remove the entry from the \
+             dependencies of {}.{}.",
             table.schema,
             table.name,
             dep.parent_namespace,
@@ -736,6 +849,15 @@ impl Loader {
             return;
         }
         let id = self.project.inventory.len();
+        // a routine whose name includes its argument types, as
+        // test-project/functions writes it, is also an overload of its
+        // name without them
+        if let Some((bare, _)) = routine_name_signature(ot, &definition) {
+            self.index
+                .entry(index_key(ot, definition.schema(), bare))
+                .or_default()
+                .push(id);
+        }
         self.index.entry(key).or_default().push(id);
         self.project.inventory.push(Item {
             id,
@@ -806,7 +928,10 @@ fn resolve_dependency(
     let namespace = Some(dep.parent_namespace.as_str());
     if !matches!(
         desc,
-        ObjectType::Function | ObjectType::Procedure | ObjectType::Aggregate
+        ObjectType::Function
+            | ObjectType::Procedure
+            | ObjectType::Aggregate
+            | ObjectType::Operator
     ) {
         return Ok(lookup_items(index, desc, namespace, &dep.parent_tag));
     }
@@ -912,13 +1037,56 @@ pub(crate) fn tag_signature(tag: &str) -> Option<(&str, Vec<String>)> {
 /// is not an argument. The arguments of an ordered-set aggregate are
 /// its direct arguments, then its ORDER BY arguments, as pg_dump lists
 /// them.
+///
+/// A routine with no parameters whose name includes its argument
+/// types, as test-project/functions writes it, has the argument types
+/// of its name. The signature of an operator is its left and its right
+/// argument type, `NONE` for no argument.
 fn routine_signature(definition: &Definition) -> Vec<String> {
     match definition {
+        Definition::Function(f) if f.parameters.is_none() => {
+            name_signature(&f.name)
+        }
+        Definition::Procedure(p) if p.parameters.is_none() => {
+            name_signature(&p.name)
+        }
         Definition::Function(f) => parameter_signature(&f.parameters),
         Definition::Procedure(p) => parameter_signature(&p.parameters),
         Definition::Aggregate(a) => aggregate_signature(a),
+        Definition::Operator(o) => operator_signature(o),
         _ => Vec::new(),
     }
+}
+
+/// The argument types in a routine name, as [`tag_signature`] reads
+/// them, or none for a name with no argument list
+fn name_signature(name: &str) -> Vec<String> {
+    tag_signature(name)
+        .map(|(_, arguments)| arguments)
+        .unwrap_or_default()
+}
+
+/// The name without its argument types, and the argument types, of a
+/// function or procedure whose name includes them, as
+/// test-project/functions writes it
+fn routine_name_signature(
+    ot: ObjectType,
+    definition: &Definition,
+) -> Option<(&str, Vec<String>)> {
+    let name = match (ot, definition) {
+        (ObjectType::Function, Definition::Function(f)) => &f.name,
+        (ObjectType::Procedure, Definition::Procedure(p)) => &p.name,
+        _ => return None,
+    };
+    tag_signature(name)
+}
+
+/// The [`routine_signature`] of an operator
+pub(crate) fn operator_signature(operator: &Operator) -> Vec<String> {
+    [&operator.left_arg, &operator.right_arg]
+        .into_iter()
+        .map(|arg| identity_type(arg.as_deref().unwrap_or("NONE")))
+        .collect()
 }
 
 /// The [`routine_signature`] of a function or procedure
@@ -1217,6 +1385,171 @@ fn type_references(data_type: String) -> Option<(ObjectType, String)> {
         .trim()
         .to_string();
     (!name.is_empty()).then_some((ObjectType::Type, name))
+}
+
+/// The names of the types of a table's columns, without an array
+/// suffix or a modifier. A name that is a relation's is its row type,
+/// which the relation has to exist for.
+fn row_type_names(table: &Table) -> Vec<String> {
+    table
+        .columns
+        .iter()
+        .flatten()
+        .filter_map(|column| type_references(column.data_type.clone()))
+        .map(|(_, name)| name)
+        .collect()
+}
+
+/// Whether a column type `name` of a table in `schema` is the row type
+/// of the table that `dep` names. A type name without a schema is in
+/// the schema of the table, as `apply_structural_dependencies` reads
+/// it.
+fn names_the_row_type(
+    name: &str,
+    schema: &str,
+    dep: &CachedDependency,
+) -> bool {
+    let (namespace, tag) = split_sql_name(name);
+    let namespace = if namespace.is_empty() {
+        schema.to_string()
+    } else {
+        namespace
+    };
+    tag == dep.parent_tag && namespace == dep.parent_namespace
+}
+
+/// Argument lists of type names, as `apply_structural_dependencies`
+/// gives them for a function field
+fn signatures(lists: &[&[&str]]) -> Vec<Vec<String>> {
+    lists
+        .iter()
+        .map(|list| list.iter().map(|t| t.to_string()).collect())
+        .collect()
+}
+
+/// The support functions of an aggregate, each with the argument types
+/// that PostgreSQL calls it with (pg_aggregate.c). `S` is the state
+/// type, `A` the arguments and, for an ordered-set aggregate, `D` the
+/// direct arguments and `O` the ORDER BY arguments:
+///
+/// - the state function takes `(S, A)`, or `(S, O)`
+/// - the final function takes `(S)`, or `(S, D)`; with
+///   `FINALFUNC_EXTRA` it takes `(S, A)`, or `(S, D, O)`
+/// - the combine function takes `(S, S)`, the serial function
+///   `(internal)`, and the deserial function `(bytea, internal)`
+/// - the moving-aggregate functions take the moving state type in
+///   place of `S`
+fn aggregate_calls(a: &Aggregate) -> Vec<(&str, Vec<Vec<String>>)> {
+    let types = |arguments: &[crate::models::Argument]| {
+        arguments
+            .iter()
+            .map(|a| a.data_type.clone())
+            .collect::<Vec<_>>()
+    };
+    let direct = types(&a.arguments);
+    let ordered = a.order_by.as_deref().map(types);
+    let with = |state: &str, arguments: &[&[String]]| {
+        let mut list = vec![state.to_string()];
+        for part in arguments {
+            list.extend(part.iter().cloned());
+        }
+        vec![list]
+    };
+    let state = a.state_data_type.as_str();
+    let mstate = a.mstate_data_type.as_deref().unwrap_or(state);
+    let (transition, extra): (&[String], Vec<&[String]>) = match &ordered {
+        Some(ordered) => (ordered, vec![&direct, ordered]),
+        None => (&direct, vec![&direct]),
+    };
+    let finals = |state: &str, extra_arguments: Option<bool>| match (
+        extra_arguments == Some(true),
+        &ordered,
+    ) {
+        (true, _) => with(state, &extra),
+        (false, Some(_)) => with(state, &[&direct]),
+        (false, None) => with(state, &[]),
+    };
+    let mut calls = vec![(a.sfunc.as_str(), with(state, &[transition]))];
+    let fields = [
+        (&a.ffunc, finals(state, a.finalfunc_extra)),
+        (&a.combinefunc, with(state, &[&[state.to_string()]])),
+        (&a.serialfunc, signatures(&[&["internal"]])),
+        (&a.deserialfunc, signatures(&[&["bytea", "internal"]])),
+        (&a.msfunc, with(mstate, &[&direct])),
+        (&a.minvfunc, with(mstate, &[&direct])),
+        (&a.mffunc, finals(mstate, a.mfinalfunc_extra)),
+    ];
+    for (function, candidates) in fields {
+        if let Some(function) = function {
+            calls.push((function.as_str(), candidates));
+        }
+    }
+    calls
+}
+
+/// The functions of an operator, each with the argument types that
+/// PostgreSQL calls it with (CREATE OPERATOR): the operator function
+/// takes the argument types of the operator, the restriction estimator
+/// `(internal, oid, internal, integer)`, and the join estimator
+/// `(internal, oid, internal, smallint, internal)`
+fn operator_calls(o: &Operator) -> Vec<(&str, Vec<Vec<String>>)> {
+    let arguments = [&o.left_arg, &o.right_arg]
+        .into_iter()
+        .flatten()
+        .filter(|arg| !arg.eq_ignore_ascii_case("NONE"))
+        .cloned()
+        .collect();
+    let mut calls = vec![(o.function.as_str(), vec![arguments])];
+    if let Some(restrict) = &o.restrict {
+        calls.push((
+            restrict,
+            signatures(&[&["internal", "oid", "internal", "integer"]]),
+        ));
+    }
+    if let Some(join) = &o.join {
+        calls.push((
+            join,
+            signatures(&[&[
+                "internal", "oid", "internal", "smallint", "internal",
+            ]]),
+        ));
+    }
+    calls
+}
+
+/// The I/O functions of a base type, each with the argument types that
+/// PostgreSQL accepts for it (CREATE TYPE)
+fn type_calls(t: &crate::models::Type) -> Vec<(&str, Vec<Vec<String>>)> {
+    let own = format!("{}.{}", t.schema, t.name);
+    let fields = [
+        (
+            &t.input,
+            signatures(&[
+                &["cstring"],
+                &["cstring", "oid"],
+                &["cstring", "oid", "integer"],
+            ]),
+        ),
+        (&t.output, vec![vec![own.clone()]]),
+        (
+            &t.receive,
+            signatures(&[
+                &["internal"],
+                &["internal", "oid"],
+                &["internal", "oid", "integer"],
+            ]),
+        ),
+        (&t.send, vec![vec![own]]),
+        (&t.typmod_in, signatures(&[&["cstring[]"]])),
+        (&t.typmod_out, signatures(&[&["integer"]])),
+        (&t.analyze, signatures(&[&["internal"]])),
+    ];
+    fields
+        .into_iter()
+        .filter_map(|(function, candidates)| {
+            function.as_deref().map(|function| (function, candidates))
+        })
+        .collect()
 }
 
 /// Drop null-valued keys so explicit YAML nulls compare equal to
@@ -1838,5 +2171,283 @@ mod tests {
         let dep = &loader.pending_dependencies[0];
         assert_eq!(dep.parent_desc, ObjectType::Server);
         assert_eq!(dep.parent_tag, "myserver");
+    }
+
+    /// Add `entry` as an object of type `ot`, and give its id
+    fn add(loader: &mut Loader, ot: ObjectType, mut entry: Value) -> usize {
+        loader.cache_and_remove_dependencies(&mut entry);
+        loader.add_definition(ot, entry, None);
+        loader.project.inventory.len() - 1
+    }
+
+    /// A function `test.<name>` with `types` as its IN parameters
+    fn function_entry(name: &str, types: &[&str]) -> Value {
+        let parameters: Vec<Value> = types
+            .iter()
+            .map(|data_type| json!({"mode": "IN", "data_type": data_type}))
+            .collect();
+        json!({"name": name, "schema": "test", "owner": "postgres",
+               "parameters": parameters})
+    }
+
+    /// A function field names the overload that PostgreSQL calls: an
+    /// aggregate's state function takes the state type and the
+    /// arguments, or the ORDER BY arguments of an ordered-set
+    /// aggregate, and a language validator takes an oid. An edge to
+    /// the other overload makes a dependency loop when that overload
+    /// uses the object. A name with argument types names that
+    /// overload, and a name that no candidate matches names each
+    /// overload, as before
+    #[test]
+    fn function_fields_resolve_the_overload_that_is_called() {
+        let mut loader = Loader::new(Path::new("."));
+        let step = add(
+            &mut loader,
+            ObjectType::Function,
+            function_entry("step", &["int4", "integer"]),
+        );
+        let other = add(
+            &mut loader,
+            ObjectType::Function,
+            function_entry("step", &["text", "integer"]),
+        );
+        let aggregate = add(
+            &mut loader,
+            ObjectType::Aggregate,
+            json!({"name": "agg", "schema": "test", "owner": "postgres",
+                   "sfunc": "test.step", "state_data_type": "integer",
+                   "arguments": [{"data_type": "integer"}]}),
+        );
+        let ordered = add(
+            &mut loader,
+            ObjectType::Aggregate,
+            json!({"name": "sorted", "schema": "test", "owner": "postgres",
+                   "sfunc": "step", "state_data_type": "text",
+                   "arguments": [{"data_type": "bigint"}],
+                   "order_by": [{"data_type": "integer"}]}),
+        );
+        let explicit = add(
+            &mut loader,
+            ObjectType::Cast,
+            json!({"schema": "test", "owner": "postgres",
+                   "source_type": "integer", "target_type": "text",
+                   "function": "test.step(text, int4)"}),
+        );
+        let unmatched = add(
+            &mut loader,
+            ObjectType::Aggregate,
+            json!({"name": "wide", "schema": "test", "owner": "postgres",
+                   "sfunc": "test.step", "state_data_type": "bigint",
+                   "arguments": [{"data_type": "bigint"}]}),
+        );
+        let validator = add(
+            &mut loader,
+            ObjectType::Function,
+            function_entry("check", &["oid"]),
+        );
+        add(
+            &mut loader,
+            ObjectType::Function,
+            json!({"name": "check", "schema": "test", "owner": "postgres",
+                   "language": "copy",
+                   "parameters": [{"mode": "IN", "data_type": "integer"}]}),
+        );
+        let language = add(
+            &mut loader,
+            ObjectType::ProceduralLanguage,
+            json!({"name": "copy", "validator": "test.check"}),
+        );
+        loader.apply_structural_dependencies();
+        let deps =
+            |id: usize| loader.project.inventory[id].dependencies.clone();
+        assert_eq!(deps(aggregate), [step].into());
+        assert_eq!(deps(ordered), [other].into());
+        assert_eq!(deps(explicit), [other].into());
+        assert_eq!(deps(unmatched), [step, other].into());
+        assert_eq!(deps(language), [validator].into());
+    }
+
+    /// A function field also finds a function whose name includes its
+    /// argument types, as test-project/functions writes it, by the name
+    /// without them
+    #[test]
+    fn function_fields_find_a_name_with_argument_types() {
+        let mut loader = Loader::new(Path::new("."));
+        let trigger_function = add(
+            &mut loader,
+            ObjectType::Function,
+            json!({"name": "on_ddl()", "schema": "test", "owner": "postgres",
+                   "returns": "event_trigger"}),
+        );
+        let conversion_function = add(
+            &mut loader,
+            ObjectType::Function,
+            json!({"name": "convert(integer, integer, cstring, internal, \
+                            integer)",
+                   "schema": "test", "owner": "postgres"}),
+        );
+        let trigger = add(
+            &mut loader,
+            ObjectType::EventTrigger,
+            json!({"name": "ddl", "event": "ddl_command_start",
+                   "function": "test.on_ddl()"}),
+        );
+        let conversion = add(
+            &mut loader,
+            ObjectType::Conversion,
+            json!({"name": "c", "schema": "test", "owner": "postgres",
+                   "encoding_from": "UTF8", "encoding_to": "LATIN1",
+                   "function": "convert"}),
+        );
+        loader.apply_structural_dependencies();
+        let deps =
+            |id: usize| loader.project.inventory[id].dependencies.clone();
+        assert_eq!(deps(trigger), [trigger_function].into());
+        assert_eq!(deps(conversion), [conversion_function].into());
+    }
+
+    /// An operator comes after the overload of its function that takes
+    /// its argument types
+    #[test]
+    fn operators_order_their_function() {
+        let mut loader = Loader::new(Path::new("."));
+        let binary = add(
+            &mut loader,
+            ObjectType::Function,
+            function_entry("same", &["integer", "integer"]),
+        );
+        let prefix = add(
+            &mut loader,
+            ObjectType::Function,
+            function_entry("same", &["integer"]),
+        );
+        let operator = add(
+            &mut loader,
+            ObjectType::Operator,
+            json!({"name": "=~=", "schema": "test", "owner": "postgres",
+                   "function": "test.same", "left_arg": "integer",
+                   "right_arg": "integer"}),
+        );
+        let negation = add(
+            &mut loader,
+            ObjectType::Operator,
+            json!({"name": "!!!", "schema": "test", "owner": "postgres",
+                   "function": "test.same", "left_arg": "NONE",
+                   "right_arg": "int4"}),
+        );
+        loader.apply_structural_dependencies();
+        let deps =
+            |id: usize| loader.project.inventory[id].dependencies.clone();
+        assert_eq!(deps(operator), [binary].into());
+        assert_eq!(deps(negation), [prefix].into());
+    }
+
+    /// A column of a relation's row type, also as an array, orders the
+    /// relation first. A `dependencies` entry that names that table is
+    /// kept, as one that INHERITS backs is, and an entry for a foreign
+    /// key is still dropped
+    #[test]
+    fn row_type_columns_order_their_relation() {
+        let mut loader = Loader::new(Path::new("."));
+        let points = add(
+            &mut loader,
+            ObjectType::Table,
+            json!({"name": "z_points", "schema": "test", "owner": "postgres",
+                   "columns": [{"name": "x", "data_type": "integer"}]}),
+        );
+        let other = add(
+            &mut loader,
+            ObjectType::Table,
+            json!({"name": "other", "schema": "test", "owner": "postgres",
+                   "columns": [{"name": "x", "data_type": "integer"}]}),
+        );
+        let view = add(
+            &mut loader,
+            ObjectType::View,
+            json!({"name": "v", "schema": "test", "owner": "postgres",
+                   "query": "SELECT 1 AS n"}),
+        );
+        let segments = add(
+            &mut loader,
+            ObjectType::Table,
+            json!({"name": "a_segments", "schema": "test",
+                   "owner": "postgres",
+                   "columns": [
+                       {"name": "start_at", "data_type": "test.z_points"},
+                       {"name": "stops", "data_type": "test.z_points[]"},
+                       {"name": "row", "data_type": "v"},
+                   ],
+                   "dependencies": {"tables": ["test.z_points",
+                                               "test.other"]}}),
+        );
+        loader.apply_cached_dependencies().unwrap();
+        assert_eq!(
+            loader.project.inventory[segments].dependencies,
+            [points].into(),
+            "the row-type entry is kept and the foreign-key entry dropped"
+        );
+        loader.apply_structural_dependencies();
+        assert_eq!(
+            loader.project.inventory[segments].dependencies,
+            [points, view].into()
+        );
+        assert!(
+            !loader.project.inventory[segments]
+                .dependencies
+                .contains(&other)
+        );
+    }
+
+    /// An operator entry names one overload by its left and right
+    /// argument types, `NONE` for no argument, as pull writes it
+    #[test]
+    fn operator_dependency_resolves_by_signature() {
+        let mut loader = Loader::new(Path::new("."));
+        let operator = |left: &str, right: &str| {
+            json!({"name": "!!!", "schema": "test", "owner": "postgres",
+                   "function": "f", "left_arg": left, "right_arg": right})
+        };
+        add(
+            &mut loader,
+            ObjectType::Operator,
+            operator("NONE", "integer"),
+        );
+        let bigint = add(
+            &mut loader,
+            ObjectType::Operator,
+            operator("NONE", "bigint"),
+        );
+        let binary = add(
+            &mut loader,
+            ObjectType::Operator,
+            json!({"name": "=~=", "schema": "test", "owner": "postgres",
+                   "function": "f", "left_arg": "integer",
+                   "right_arg": "integer"}),
+        );
+        let dependent = add(
+            &mut loader,
+            ObjectType::Function,
+            json!({"name": "uses", "schema": "test", "owner": "postgres",
+                   "dependencies": {"operators": [
+                       "test.!!!(NONE, int8)", "test.=~="]}}),
+        );
+        loader.apply_cached_dependencies().unwrap();
+        assert_eq!(loader.errors, 0);
+        assert_eq!(
+            loader.project.inventory[dependent].dependencies,
+            [bigint, binary].into()
+        );
+        // two overloads have the name `!!!`
+        let ambiguous = add(
+            &mut loader,
+            ObjectType::Function,
+            json!({"name": "uses_bare", "schema": "test", "owner": "postgres",
+                   "dependencies": {"operators": ["test.!!!"]}}),
+        );
+        loader
+            .cached_dependencies
+            .retain(|dep| dep.item == ambiguous);
+        loader.apply_cached_dependencies().unwrap();
+        assert_eq!(loader.errors, 1);
     }
 }
