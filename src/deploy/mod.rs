@@ -458,15 +458,23 @@ fn plan(
     // deploy creates, by schema and name. A function that depends on a
     // changed table comes after the table, and so does a sequence that
     // sorts after it, but a statement of the table can call them
-    let functions =
-        created_entries(output, diff, libpgdump::ObjectType::Function);
-    let sequences =
-        created_entries(output, diff, libpgdump::ObjectType::Sequence);
-    let shells = new_shell_types(output, diff);
     let mut parser = tree_sitter::Parser::new();
     parser
         .set_language(&tree_sitter_postgres::LANGUAGE.into())
         .map_err(|e| e.to_string())?;
+    let functions = created_entries(
+        &mut parser,
+        output,
+        diff,
+        libpgdump::ObjectType::Function,
+    );
+    let sequences = created_entries(
+        &mut parser,
+        output,
+        diff,
+        libpgdump::ObjectType::Sequence,
+    );
+    let shells = new_shell_types(output, diff);
     // the statements that wait for a function or a sequence, by its
     // archive position
     let mut waiting: BTreeMap<usize, Vec<(bool, Statement)>> = BTreeMap::new();
@@ -989,11 +997,12 @@ fn owned_by(entry: &libpgdump::Entry, defn: &str) -> Option<(String, String)> {
 /// The archive position of each object of type `desc` that the
 /// deploy creates, by schema and name. The last overload of a function
 /// name gives the position
-fn created_entries<'a>(
-    output: &'a build::BuildOutput,
+fn created_entries(
+    parser: &mut tree_sitter::Parser,
+    output: &build::BuildOutput,
     diff: &Diff,
     desc: libpgdump::ObjectType,
-) -> HashMap<(&'a str, &'a str), usize> {
+) -> HashMap<(String, String), usize> {
     let mut created = HashMap::new();
     for (position, entry) in output.dump.entries().iter().enumerate() {
         let added = output
@@ -1006,17 +1015,33 @@ fn created_entries<'a>(
             && let (Some(schema), Some(tag)) =
                 (entry.namespace.as_deref(), entry.tag.as_deref())
         {
-            // a function tag has its arguments
+            // the tag of a function is its name, which can include its
+            // argument types or a `(`, thus the CREATE gives the name
             let name = match desc {
-                libpgdump::ObjectType::Function => {
-                    crate::utils::split_signature(tag).map_or(tag, |(n, _)| n)
-                }
-                _ => tag,
+                libpgdump::ObjectType::Function => entry
+                    .defn
+                    .as_deref()
+                    .and_then(|defn| created_function(parser, defn))
+                    .unwrap_or_else(|| tag.to_string()),
+                _ => tag.to_string(),
             };
-            created.insert((schema, name), position);
+            created.insert((schema.to_string(), name), position);
         }
     }
     created
+}
+
+/// The name, without its schema, of the function that `defn` creates
+fn created_function(
+    parser: &mut tree_sitter::Parser,
+    defn: &str,
+) -> Option<String> {
+    let tree = parser.parse(defn, None)?;
+    let name = tree
+        .root_node()
+        .find("CreateFunctionStmt")?
+        .child_of_kind("func_name")?;
+    Some(ddl::any_name(&name, defn).name)
 }
 
 /// The shell type entries of the base types that this deploy creates.
@@ -1055,8 +1080,8 @@ fn new_shell_types(output: &build::BuildOutput, diff: &Diff) -> HashSet<i32> {
 fn calls_later(
     parser: &mut tree_sitter::Parser,
     sql: &str,
-    functions: &HashMap<(&str, &str), usize>,
-    sequences: &HashMap<(&str, &str), usize>,
+    functions: &HashMap<(String, String), usize>,
+    sequences: &HashMap<(String, String), usize>,
     position: usize,
 ) -> Option<usize> {
     if functions.is_empty() && sequences.is_empty() {
@@ -1075,11 +1100,9 @@ fn calls_later(
                 // the argument is a regclass literal, as in a default
                 let (schema, name) =
                     build::nextval_target(node.parent()?.text(sql))?;
-                return sequences
-                    .get(&(schema.as_str(), name.as_str()))
-                    .copied();
+                return sequences.get(&(schema, name)).copied();
             }
-            functions.get(&(schema?, name.name.as_str())).copied()
+            functions.get(&(schema?.to_string(), name.name)).copied()
         })
         .filter(|later| *later > position)
         .max()
@@ -2929,7 +2952,8 @@ mod tests {
     /// A plan for the changed table `test.t` (item 0), the new
     /// functions `test.f` (item 1) and `test.g` (item 2), and the new
     /// sequences `test.s` (item 3), `test.o` (item 4), which is owned
-    /// by `test.t.n`, and `test."s(v)"` (item 5, named `p`), in this
+    /// by `test.t.n`, `test."s(v)"` (item 5, named `p`), and the new
+    /// function `test."f(x)"` (item 6, named `x`), in this
     /// archive order: the entries of `before`, the table, then the
     /// entries of `after`
     fn function_order_plan(
@@ -2958,6 +2982,13 @@ mod tests {
                     libpgdump::ObjectType::Sequence,
                     "s(v)".to_string(),
                     "CREATE SEQUENCE test.\"s(v)\";\n".to_string(),
+                ),
+                // a build tag is the name, with no argument types
+                "x" => (
+                    6,
+                    libpgdump::ObjectType::Function,
+                    "f(x)".to_string(),
+                    "CREATE FUNCTION test.\"f(x)\"(IN integer);\n".to_string(),
                 ),
                 _ => (
                     if name == "f" { 1 } else { 2 },
@@ -3008,6 +3039,7 @@ mod tests {
                 (3, Change::Added),
                 (4, Change::Added),
                 (5, Change::Added),
+                (6, Change::Added),
             ]),
             changed: BTreeMap::new(),
             removed: BTreeMap::new(),
@@ -3214,6 +3246,19 @@ mod tests {
                        nextval('test.\"s(v)\"'::regclass);\n"];
         let sql = function_order_plan(&[], &["p"], &alters);
         assert_eq!(sql, ["CREATE SEQUENCE test.\"s(v)\";\n", alters[0]]);
+    }
+
+    /// A function name keeps the parentheses of its name. The tag of
+    /// a built function is its name, which has no argument types
+    #[test]
+    fn function_names_keep_their_parentheses() {
+        let alters = ["ALTER TABLE test.t ALTER COLUMN id SET DEFAULT \
+                       test.\"f(x)\"(1);\n"];
+        let sql = function_order_plan(&[], &["x"], &alters);
+        assert_eq!(
+            sql,
+            ["CREATE FUNCTION test.\"f(x)\"(IN integer);\n", alters[0]]
+        );
     }
 
     /// OWNED BY is found outside the double quotes of a name

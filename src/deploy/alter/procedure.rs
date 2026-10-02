@@ -6,6 +6,7 @@
 use super::{Resolution, comment_delta};
 use crate::deploy::diff::identity_type;
 use crate::models::Procedure;
+use crate::project::routine_base_name;
 use crate::utils::{quote_ident, quote_routine_name};
 
 pub(super) fn procedure(repo: &Procedure, db: &Procedure) -> Resolution {
@@ -58,7 +59,8 @@ fn replaceable(repo: &Procedure, db: &Procedure) -> bool {
 
 /// The qualified name and the input types, which is all that `COMMENT
 /// ON PROCEDURE` reads. A name that has its argument list and no
-/// `parameters` keeps its list.
+/// `parameters` keeps its list, and a name that has the types of its
+/// parameters at its end is the name without them.
 fn signature(procedure: &Procedure) -> String {
     let parameters = procedure.parameters.as_deref().unwrap_or_default();
     let name = if parameters.is_empty() && procedure.name.contains('(') {
@@ -69,7 +71,8 @@ fn signature(procedure: &Procedure) -> String {
             .filter(|p| p.mode != "OUT")
             .map(|p| p.data_type.as_str())
             .collect();
-        format!("{}({})", quote_ident(&procedure.name), types.join(", "))
+        let name = routine_base_name(&procedure.name, &procedure.parameters);
+        format!("{}({})", quote_ident(name), types.join(", "))
     };
     format!("{}.{name}", quote_ident(&procedure.schema))
 }
@@ -175,6 +178,23 @@ mod tests {
             "language": "sql", "definition": "SELECT 'x'",
         }));
         assert_eq!(signature(&p), "test.p(integer)");
+    }
+
+    /// The argument types at the end of a name are not part of the
+    /// name when they are the types of the parameters, as in the build
+    #[test]
+    fn a_name_with_the_parameter_types_is_the_name_without_them() {
+        let p = |name: &str| {
+            parse(json!({
+                "name": name, "schema": "test", "owner": "postgres",
+                "parameters": [
+                    {"mode": "IN", "name": "a", "data_type": "integer"},
+                ],
+                "language": "sql", "definition": "SELECT 1",
+            }))
+        };
+        assert_eq!(signature(&p("p(integer)")), "test.p(integer)");
+        assert_eq!(signature(&p("p(x)")), "test.\"p(x)\"(integer)");
     }
 
     #[test]
