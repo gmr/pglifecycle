@@ -474,7 +474,8 @@ fn choose_constraint_name_in(
 /// UTF8, or an encoding with one byte for each character (LATIN1 and
 /// the other single-byte encodings). For the other multibyte
 /// encodings (EUC_JP and the like), a name that has more than ASCII
-/// is accepted only when PostgreSQL did not cut it.
+/// is accepted only when PostgreSQL did not cut it: a width of zero
+/// bytes gives the name that is not cut.
 pub(crate) fn is_generated_name(
     name: &str,
     name1: &str,
@@ -482,14 +483,9 @@ pub(crate) fn is_generated_name(
     label: &str,
     used: &BTreeSet<String>,
 ) -> bool {
-    let uncut = match name2 {
-        Some(name2) => format!("{name1}_{name2}_{label}"),
-        None => format!("{name1}_{label}"),
-    };
-    name == uncut
-        || [char::len_utf8, |_| 1].into_iter().any(|width| {
-            choose_constraint_name_in(width, name1, name2, label, used) == name
-        })
+    [char::len_utf8, |_| 1, |_| 0].into_iter().any(|width| {
+        choose_constraint_name_in(width, name1, name2, label, used) == name
+    })
 }
 
 #[cfg(test)]
@@ -673,6 +669,16 @@ mod tests {
             &none
         ));
         assert!(!is_generated_name("users_pk", "users", None, "pkey", &none));
+        // a name in use is not the one that PostgreSQL gives, also when
+        // PostgreSQL does not cut it
+        let used = BTreeSet::from([String::from("users_id_not_null")]);
+        assert!(!is_generated_name(
+            "users_id_not_null",
+            "users",
+            Some("id"),
+            "not_null",
+            &used
+        ));
     }
 
     #[test]
