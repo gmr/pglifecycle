@@ -400,9 +400,8 @@ fn take_raw(
         return None;
     }
     let bare = |name: &str| {
-        name.split('(')
-            .next()
-            .unwrap_or(name)
+        crate::utils::split_signature(name)
+            .map_or(name, |(name, _)| name)
             .trim_end()
             .to_string()
     };

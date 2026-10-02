@@ -21,7 +21,7 @@ use serde_json::{Map, Value};
 
 use crate::ddl::{self, Acl, AclTarget, QualifiedName, RoleDef, Statement};
 use crate::models;
-use crate::utils::quote_ident;
+use crate::utils::{quote_ident, split_signature};
 use crate::{cli, diagnostics, pgdump, progress};
 
 /// Every TOC entry type that pull models. pull parses the DDL of each
@@ -2041,7 +2041,7 @@ impl Assembly {
             function.comment = Some(comment.to_string());
             return true;
         }
-        let base = name.split('(').next().unwrap_or(name);
+        let base = split_signature(name).map_or(name, |(base, _)| base);
         let mut candidates = self
             .functions
             .iter_mut()
@@ -2073,7 +2073,7 @@ impl Assembly {
             procedure.comment = Some(comment.to_string());
             return true;
         }
-        let base = name.split('(').next().unwrap_or(name);
+        let base = split_signature(name).map_or(name, |(base, _)| base);
         let mut candidates = self
             .procedures
             .iter_mut()

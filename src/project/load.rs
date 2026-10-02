@@ -852,7 +852,7 @@ impl Loader {
         // a routine whose name includes its argument types, as
         // test-project/functions writes it, is also an overload of its
         // name without them
-        if let Some((bare, _)) = routine_name_signature(ot, &definition) {
+        if let Some(bare) = routine_bare_name(ot, &definition) {
             self.index
                 .entry(index_key(ot, definition.schema(), bare))
                 .or_default()
@@ -1022,7 +1022,7 @@ fn split_arguments(arguments: &str) -> Vec<String> {
 /// [`routine_signature`] writes them. A tag with no argument list
 /// gives `None`.
 pub(crate) fn tag_signature(tag: &str) -> Option<(&str, Vec<String>)> {
-    let (name, arguments) = tag.split_once('(')?;
+    let (name, arguments) = crate::utils::split_signature(tag)?;
     let arguments = split_arguments(arguments)
         .iter()
         .map(|a| identity_type(a))
@@ -1058,6 +1058,26 @@ fn routine_signature(definition: &Definition) -> Vec<String> {
     }
 }
 
+/// The name of a function or procedure without the argument types
+/// that its name can include, as test-project/functions writes it.
+/// When the routine has parameters, the list at the end of the name
+/// is its argument types only if it has the types of the parameters:
+/// the name of `f(x)` with an `integer` parameter is `f(x)`.
+pub(crate) fn routine_base_name<'a>(
+    name: &'a str,
+    parameters: &Option<Vec<FunctionParameter>>,
+) -> &'a str {
+    match tag_signature(name) {
+        Some((base, arguments))
+            if parameters.is_none()
+                || parameter_signature(parameters) == arguments =>
+        {
+            base
+        }
+        _ => name,
+    }
+}
+
 /// The argument types in a routine name, as [`tag_signature`] reads
 /// them, or none for a name with no argument list
 fn name_signature(name: &str) -> Vec<String> {
@@ -1066,19 +1086,20 @@ fn name_signature(name: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// The name without its argument types, and the argument types, of a
-/// function or procedure whose name includes them, as
-/// test-project/functions writes it
-fn routine_name_signature(
-    ot: ObjectType,
-    definition: &Definition,
-) -> Option<(&str, Vec<String>)> {
-    let name = match (ot, definition) {
-        (ObjectType::Function, Definition::Function(f)) => &f.name,
-        (ObjectType::Procedure, Definition::Procedure(p)) => &p.name,
+/// The name without its argument types of a function or procedure
+/// whose name includes them, as test-project/functions writes it
+fn routine_bare_name(ot: ObjectType, definition: &Definition) -> Option<&str> {
+    let (name, parameters) = match (ot, definition) {
+        (ObjectType::Function, Definition::Function(f)) => {
+            (&f.name, &f.parameters)
+        }
+        (ObjectType::Procedure, Definition::Procedure(p)) => {
+            (&p.name, &p.parameters)
+        }
         _ => return None,
     };
-    tag_signature(name)
+    let bare = routine_base_name(name, parameters);
+    (bare != name).then_some(bare)
 }
 
 /// The [`routine_signature`] of an operator
@@ -1592,6 +1613,35 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    /// A list at the end of a name is the argument types when the
+    /// routine has no parameters, or when it has their types
+    #[test]
+    fn routine_base_name_keeps_a_name_with_parentheses() {
+        let parameters = |types: &[&str]| {
+            Some(
+                types
+                    .iter()
+                    .map(|t| {
+                        serde_json::from_value(
+                            json!({"mode": "IN", "data_type": t}),
+                        )
+                        .unwrap()
+                    })
+                    .collect::<Vec<FunctionParameter>>(),
+            )
+        };
+        let integer = parameters(&["INTEGER"]);
+        assert_eq!(routine_base_name("f(x)", &integer), "f(x)");
+        assert_eq!(routine_base_name("f(x)(integer)", &integer), "f(x)");
+        assert_eq!(routine_base_name("f(integer)", &integer), "f");
+        assert_eq!(routine_base_name("f", &integer), "f");
+        assert_eq!(routine_base_name("f(integer)", &None), "f");
+        assert_eq!(
+            routine_base_name("g\"(y", &parameters(&["text"])),
+            "g\"(y"
+        );
+    }
 
     /// Operator and aggregate overloads share a name, but not an
     /// identity. A type alias gives the same identity as its canonical

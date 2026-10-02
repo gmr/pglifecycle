@@ -240,6 +240,25 @@
 //!     libpgdump 2.3.1 sorts the roles, users and groups before all
 //!     other entries, as pg_dumpall writes them, thus the edges are
 //!     not necessary.
+//! 46. A routine name can have `(` or `"`. The argument list of a
+//!     name or a tag is the parenthesized text at its end, not the
+//!     text after the first `(`. When the routine has parameters, the
+//!     list at the end of its name is its argument types only if it
+//!     has the types of the parameters. The build split the name at
+//!     the first `(`, as the Python did. Thus `CREATE FUNCTION
+//!     test.f(IN integer)` made a function with the wrong name for
+//!     `f(x)`, its comment named a type `x`, which does not exist, and
+//!     its grants did not parse. The comment of such a function names
+//!     the function with no argument types, as the comment of each
+//!     other function does. No test-project routine name has `(` or
+//!     `"` in the name without its arguments.
+//! 47. A user mapping on several servers is one entry for each
+//!     server. The first entry stands for the item, and each later
+//!     entry comes after the one before. The last entry stood for
+//!     the item, as in the Python. Thus only the last entry came after
+//!     the user (deviation 45), and deploy made only the last mapping,
+//!     because it found no item for the other entries. The
+//!     test-project user mapping is on one server.
 
 mod acls;
 mod calls;
@@ -256,7 +275,7 @@ use crate::models::{
     TablePartitionColumn, Trigger, ViewColumn,
 };
 use crate::progress;
-use crate::project::{Project, split_sql_name};
+use crate::project::{Project, routine_base_name, split_sql_name};
 use crate::utils::{
     dollar_quote, postgres_value, quote_ident, raw_value, setting_value,
     user_mapping_subject,
@@ -1340,12 +1359,19 @@ impl Builder {
                         })
                         .collect()
                 };
-                let base =
-                    quote_ident(d.name.split('(').next().unwrap_or_default());
+                let bare = routine_base_name(&d.name, &d.parameters);
+                let base = quote_ident(bare);
                 drop_name =
                     Some(format!("{base}({})", render(false).join(", ")));
                 let func_name = format!("{base}({})", render(true).join(", "));
-                (func_name, None)
+                // a name with no argument types that has a `(`, such as
+                // `f(x)`, is not a signature in the comment target
+                let comment_target = (bare == d.name && bare.contains('('))
+                    .then(|| match d.schema.is_empty() {
+                        true => base.clone(),
+                        false => format!("{}.{base}", quote_ident(&d.schema)),
+                    });
+                (func_name, comment_target)
             }
             // no structured `parameters`: `d.name` may already carry an
             // embedded `(argtypes)` signature (the on-disk convention for
@@ -3319,6 +3345,7 @@ impl Builder {
         let Definition::UserMapping(d) = &item.definition else {
             unreachable!()
         };
+        let (mut first, mut previous) = (None, None);
         for server in &d.servers {
             let mut create = vec![
                 "CREATE".into(),
@@ -3343,6 +3370,17 @@ impl Builder {
                 quote_ident(&server.name),
             ];
             self.add_item(item, create, drop, false)?;
+            let dump_id = self.dump_id_map[&item.id];
+            // the first entry stands for the item, and each later
+            // entry comes after the one before (deviation 47)
+            if let (Some(first), Some(previous)) = (first, previous) {
+                self.dump_id_map.insert(item.id, first);
+                if let Some(entry) = self.dump.get_entry_mut(dump_id) {
+                    entry.dependencies.push(previous);
+                }
+            }
+            first = first.or(Some(dump_id));
+            previous = Some(dump_id);
         }
         Ok(())
     }

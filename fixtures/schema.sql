@@ -496,6 +496,10 @@ CREATE FOREIGN DATA WRAPPER gate_fdw OPTIONS (debug 'true');
 CREATE SERVER gate_srv FOREIGN DATA WRAPPER gate_fdw
     OPTIONS (host 'h', dbname 'w');
 CREATE USER MAPPING FOR postgres SERVER gate_srv OPTIONS (usr 'u');
+-- a user mapping on a second server is a second archive entry of the
+-- same item, which deploy also makes
+CREATE SERVER gate_srv_b FOREIGN DATA WRAPPER gate_fdw;
+CREATE USER MAPPING FOR postgres SERVER gate_srv_b OPTIONS (usr 'b');
 CREATE FOREIGN TABLE test.gate_ft (id integer)
     SERVER gate_srv OPTIONS (schema_name 'public', table_name 't');
 -- an inheriting foreign table: its columns come from the parent, so it
@@ -983,6 +987,21 @@ CREATE PROCEDURE "Quoted Schema"."Quoted Proc"() LANGUAGE sql AS $$
  SELECT 1;
 $$;
 COMMENT ON PROCEDURE "Quoted Schema"."Quoted Proc"() IS 'A quoted procedure';
+-- routines whose names have "(" or '"': the argument list is the
+-- parenthesized text at the end of a tag, not the text after the
+-- first "("
+CREATE FUNCTION "Quoted Schema"."f(x)"(n INTEGER) RETURNS INTEGER
+    LANGUAGE sql IMMUTABLE AS $$
+ SELECT n;
+$$;
+COMMENT ON FUNCTION "Quoted Schema"."f(x)"(INTEGER) IS 'A name with parentheses';
+REVOKE EXECUTE ON FUNCTION "Quoted Schema"."f(x)"(INTEGER) FROM PUBLIC;
+CREATE FUNCTION "Quoted Schema"."g""(y"(t TEXT) RETURNS TEXT
+    LANGUAGE sql IMMUTABLE AS $$
+ SELECT t;
+$$;
+COMMENT ON FUNCTION "Quoted Schema"."g""(y"(TEXT) IS 'A name with a quote';
+REVOKE EXECUTE ON FUNCTION "Quoted Schema"."g""(y"(TEXT) FROM PUBLIC;
 
 -- Transforms for the base type: one with both functions and a
 -- comment, and one with only its TO SQL function

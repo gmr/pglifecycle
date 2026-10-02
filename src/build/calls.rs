@@ -20,7 +20,7 @@ use tree_sitter::Parser;
 use crate::build::render_default;
 use crate::ddl::{NodeExt, any_name};
 use crate::models::{Definition, Table};
-use crate::project::Project;
+use crate::project::{Project, routine_base_name};
 
 /// The functions that the expressions of one table call, as inventory
 /// ids
@@ -200,7 +200,7 @@ fn function_index(project: &Project) -> HashMap<(String, String), Vec<usize>> {
     let mut index: HashMap<(String, String), Vec<usize>> = HashMap::new();
     for item in &project.inventory {
         if let Definition::Function(f) = &item.definition {
-            let name = f.name.split('(').next().unwrap_or_default().trim_end();
+            let name = routine_base_name(&f.name, &f.parameters);
             index
                 .entry((f.schema.clone(), name.to_string()))
                 .or_default()
