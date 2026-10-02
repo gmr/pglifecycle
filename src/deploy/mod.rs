@@ -13,7 +13,9 @@ mod alter;
 mod diff;
 mod routine_body;
 
-pub(crate) use diff::{canonical_casts, canonical_collation, identity_type};
+pub(crate) use diff::{
+    canonical_casts, canonical_collation, identity_type, null_default,
+};
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::IsTerminal;
