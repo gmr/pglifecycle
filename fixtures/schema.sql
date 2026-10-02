@@ -1025,3 +1025,27 @@ CREATE SUBSCRIPTION gate_sub
     CONNECTION 'dbname=pglifecycle_nowhere' PUBLICATION gate_pub, "Gate Pub"
     WITH (connect = false, binary = true, streaming = off, origin = none);
 COMMENT ON SUBSCRIPTION gate_sub IS 'A subscription with no publisher';
+
+-- Settings of the database, and of a role in the database. A statement
+-- must name the database, and the gates give the fixture other
+-- database names, so the names come from current_database(). The
+-- settings do not change what a session of the gates does: the
+-- search_path has the default schemas first, DateStyle is the default
+-- value, and the other names are custom settings or the default
+-- tablespace.
+DO $$
+BEGIN
+    EXECUTE format('ALTER DATABASE %I SET work_mem TO %L',
+                   current_database(), '64MB');
+    EXECUTE format('ALTER DATABASE %I SET search_path TO %L, %L, %L',
+                   current_database(), '$user', 'public', 'Gate Path');
+    EXECUTE format('ALTER DATABASE %I SET "DateStyle" TO %L',
+                   current_database(), 'ISO, MDY');
+    EXECUTE format('ALTER DATABASE %I SET gate.note TO %L',
+                   current_database(), 'it''s');
+    EXECUTE format('ALTER ROLE postgres IN DATABASE %I SET gate.role_note TO %L',
+                   current_database(), 'r');
+    EXECUTE format('ALTER ROLE postgres IN DATABASE %I SET temp_tablespaces TO %L',
+                   current_database(), 'pg_default');
+END
+$$;

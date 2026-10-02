@@ -36,6 +36,23 @@ setting. pg_restore converts the text to the encoding of the database,
 thus the same archive restores into a UTF8 and into a LATIN1 database.
 Create the database with the encoding before the restore.
 
+The `settings` and `role_settings` of `project.yaml` go in one
+`DATABASE PROPERTIES` entry, as `pg_dump` writes them: `ALTER DATABASE
+name SET ...` and `ALTER ROLE role IN DATABASE name SET ...`, where
+`name` is the `name` of the project. PostgreSQL has no statement that
+sets a setting of the current database without its name, thus the
+archive cannot use the name of the database that you restore into.
+`pg_restore` restores this entry only with `--create`, as for an
+archive of `pg_dump`. The archive has no `DATABASE` entry, thus with
+`--create` `pg_restore` makes no database: it restores all entries into
+the database of `-d`. To restore the settings, create the database with
+the name of the project, then restore into it:
+
+```bash
+createdb app
+pg_restore --create -d app app.dump
+```
+
 ## deploy
 
 Compare a live database (or an existing dump) against the project and
@@ -222,6 +239,17 @@ reconciled in place where PostgreSQL can express it:
   never strips a live credential.
 - **Foreign tables** — `OPTIONS` changes and comments in place; a server
   or column change falls back to drop+recreate.
+- **Database settings** — the `settings` and `role_settings` of
+  `project.yaml`. A setting that is different, or that only the
+  project has, gets `ALTER DATABASE name SET` (or `ALTER ROLE role IN
+  DATABASE name SET`), and a setting that only the database has gets
+  `RESET`. `name` is the name of the database that deploy reads (with
+  `--dump`, the database of the dump). The names and the values compare
+  as for a routine's settings: a name has no case, and a number or a
+  boolean is its text. These statements come after all other
+  statements. A setting changes only the sessions that start after the
+  script. Deploy does not make roles, so a role in `role_settings` must
+  exist (deploy warns when it does not).
 - Everything else falls back to drop+recreate.
 
 ### Destructive statements and limits
@@ -234,6 +262,11 @@ any are pending. Trigger and constraint drops issued while
 reconciling a table are *not* gated: they lose no data and the project
 is authoritative. A changed index is also dropped and made again
 without a gate.
+
+A `RESET` of a database setting is not gated. It loses no data, and a
+changed value replaces the value of the database as a `RESET` does. A
+project that does not have a setting of the database thus resets it:
+pull the project again to record the settings.
 
 An index that the database has and the project does not is **kept**
 unless `--allow-drop-indexes` is given. Such an index is often made at
@@ -562,7 +595,7 @@ pglifecycle pull [OPTIONS] DEST
 | Option | Description |
 | --- | --- |
 | `-D, --dump FILE` | Use an existing `pg_dump -Fc` file instead of connecting |
-| `--no-roles` | Skip cluster role/user and tablespace extraction (this extraction is enabled by default for live connections; always skipped with `--dump`) |
+| `--no-roles` | Skip cluster role/user and tablespace extraction (this extraction is enabled by default for live connections; always skipped with `--dump`). The settings of a role in the database come from `pg_dump`, thus pull still reads them |
 | `--include-password-hashes` | Include role password hashes in users (omitted by default via `pg_dumpall --no-role-passwords`), and the passwords of user mappings and subscription connections |
 | `--include-mode-headers` | Prefix each generated file with editor mode headers (see below) |
 | `-i, --ignore FILE` | File listing project paths to skip writing |
@@ -598,6 +631,10 @@ The entry was preserved in ./project/remaining.yaml; re-run with
 
 A `COMMENT` entry counts as unmodeled when the model has no place for
 it, such as a comment on an object type that `pull` does not model.
+A `DATABASE PROPERTIES` entry counts as unmodeled when it has a
+property of the database other than a setting (`CONNECTION LIMIT`,
+`IS_TEMPLATE` or `ALLOW_CONNECTIONS`). `pull` keeps the settings in the
+entry, and the entry also goes to `remaining.yaml`.
 
 The project directory is written either way, so `remaining.yaml` is
 there to inspect. `--allow-unsupported` downgrades the failure to a

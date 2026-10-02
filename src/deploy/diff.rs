@@ -2732,6 +2732,7 @@ mod tests {
             superuser: String::from("postgres"),
             default_schema: String::from("public"),
             path: std::path::PathBuf::new(),
+            settings: Default::default(),
             inventory: vec![
                 definition(
                     ObjectType::Domain,

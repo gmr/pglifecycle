@@ -10,6 +10,7 @@
 //! in-place form — are excluded unless `--allow-drop` is given.
 
 mod alter;
+mod database;
 mod diff;
 mod privileges;
 mod routine_body;
@@ -93,8 +94,10 @@ pub fn deploy(args: &cli::Deploy) -> Result<(), String> {
         args,
         creator(args).as_deref(),
     )?;
-    let plan =
+    let mut plan =
         plan(&diff, &resolutions, &output, &snapshot, &privileges, args)?;
+    plan.included
+        .extend(database::statements(&project.settings, &assembly));
     task.finish();
     report(&diff, &plan, &assembly);
     // a --dump file has no roles, thus only a live database is checked
@@ -3561,6 +3564,7 @@ mod tests {
             superuser: "postgres".into(),
             default_schema: "public".into(),
             path: std::path::PathBuf::new(),
+            settings: Default::default(),
             inventory,
         };
         let diff = Diff {

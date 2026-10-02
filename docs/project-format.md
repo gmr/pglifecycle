@@ -7,7 +7,7 @@ database object, validated against the JSON-Schema definitions in
 ```text
 my-project/
 ├── project.yaml          # name, superuser, extensions, languages,
-│                         # access methods
+│                         # access methods, database settings
 ├── schemata/             # one file per schema
 │   └── test.yaml
 ├── tables/               # <schema>/<table>.yaml
@@ -463,6 +463,27 @@ name: app
 settings:
 - search_path: [$user, public]
 - work_mem: 64MB
+```
+
+- The settings of the database are in `project.yaml`. `settings` sets
+  each setting when a session connects to the database (`ALTER
+  DATABASE ... SET`), and `role_settings` sets them when one role
+  connects to it (`ALTER ROLE ... IN DATABASE ... SET`), keyed by the
+  role name. Each list has the form of a role's `settings`. The role
+  does not have to be in the project. `pull` reads both from `pg_dump`,
+  thus also with `--no-roles` and `--dump`. `build` writes them as
+  `pg_dump` does (see [build](commands.md#build)), and `deploy` makes
+  them the settings of the database:
+
+```yaml
+---
+name: app
+settings:
+- search_path: [$user, public]
+- work_mem: 64MB
+role_settings:
+  app_user:
+  - statement_timeout: 5s
 ```
 
 - A foreign key can leave out its `name`. The project then uses the

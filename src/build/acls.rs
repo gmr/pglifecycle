@@ -712,6 +712,7 @@ mod tests {
             superuser: String::from("postgres"),
             default_schema: String::from("public"),
             path: std::path::PathBuf::new(),
+            settings: Default::default(),
             inventory: vec![
                 Item {
                     id: 0,
@@ -771,6 +772,7 @@ mod tests {
             superuser: String::from("postgres"),
             default_schema: String::from("public"),
             path: std::path::PathBuf::new(),
+            settings: Default::default(),
             inventory: vec![Item {
                 id: 0,
                 desc: ObjectType::Procedure,
@@ -852,6 +854,7 @@ mod tests {
             superuser: String::from("postgres"),
             default_schema: String::from("public"),
             path: std::path::PathBuf::new(),
+            settings: Default::default(),
             inventory: vec![
                 Item {
                     id: 0,
@@ -892,6 +895,7 @@ mod tests {
             superuser: String::from("postgres"),
             default_schema: String::from("public"),
             path: std::path::PathBuf::new(),
+            settings: Default::default(),
             inventory,
         }
     }

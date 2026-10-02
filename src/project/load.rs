@@ -65,6 +65,7 @@ impl Loader {
                 superuser: String::from("postgres"),
                 default_schema: String::from("public"),
                 path: path.to_path_buf(),
+                settings: Default::default(),
                 inventory: Vec::new(),
             },
             cached_dependencies: Vec::new(),
@@ -137,6 +138,16 @@ impl Loader {
                  obsolete stdstrings field",
                 path.display()
             ));
+        }
+        if let Ok(settings) =
+            serde_json::from_value(project["settings"].clone())
+        {
+            self.project.settings.database = settings;
+        }
+        if let Ok(roles) =
+            serde_json::from_value(project["role_settings"].clone())
+        {
+            self.project.settings.roles = roles;
         }
         for entry in array_field(&project, "extensions") {
             self.add_definition(ObjectType::Extension, entry, Some(&path));
