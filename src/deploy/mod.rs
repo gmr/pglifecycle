@@ -719,12 +719,17 @@ fn missing_roles<'a>(
             continue;
         };
         for node in tree.root_node().find_all("RoleSpec") {
-            let role = ddl::unquote_role(node.text(&statement.sql));
-            if role == "PUBLIC"
+            let text = node.text(&statement.sql);
+            let role = ddl::unquote(text);
+            // a quoted keyword is an ordinary role name, but
+            // PostgreSQL reads "public" as PUBLIC
+            let keyword = !text.starts_with('"')
+                && ["current_role", "current_user", "session_user"]
+                    .contains(&role.as_str());
+            if role == "public"
+                || keyword
                 || role.starts_with("pg_")
                 || roles.contains(&role)
-                || ["current_role", "current_user", "session_user"]
-                    .contains(&role.as_str())
             {
                 continue;
             }
@@ -2615,6 +2620,27 @@ mod tests {
                 ),
                 (String::from("viewer"), vec!["DEFAULT PRIVILEGES"]),
             ])
+        );
+    }
+
+    /// A quoted keyword is an ordinary role name. Only `"public"`
+    /// stays the pseudo-role, because PostgreSQL reads it as PUBLIC
+    #[test]
+    fn missing_roles_checks_quoted_keywords() {
+        let statements = vec![Statement {
+            label: String::from("ACL public.TABLE t"),
+            sql: String::from(
+                "GRANT SELECT ON TABLE public.t TO \"current_user\";\n\
+                 GRANT SELECT ON TABLE public.t TO \"PUBLIC\";\n\
+                 GRANT SELECT ON TABLE public.t TO \"public\";\n",
+            ),
+            fails_open: false,
+        }];
+        let missing =
+            missing_roles(&statements, &BTreeSet::new()).expect("parses");
+        assert_eq!(
+            missing.keys().collect::<Vec<_>>(),
+            vec!["PUBLIC", "current_user"]
         );
     }
 }
