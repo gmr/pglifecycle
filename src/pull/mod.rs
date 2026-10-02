@@ -4305,7 +4305,7 @@ mod tests {
         assert_eq!(
             entry.defn.as_deref(),
             Some(
-                "ALTER DATABASE app SET TimeZone TO 'UTC';\n\
+                "ALTER DATABASE app SET \"TimeZone\" TO 'UTC';\n\
                  ALTER DATABASE app SET search_path TO '$user', \
                  'my schema';\n\
                  ALTER DATABASE app SET work_mem TO '64MB';\n\

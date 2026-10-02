@@ -96,8 +96,10 @@ pub fn deploy(args: &cli::Deploy) -> Result<(), String> {
     )?;
     let mut plan =
         plan(&diff, &resolutions, &output, &snapshot, &privileges, args)?;
-    plan.included
-        .extend(database::statements(&project.settings, &assembly));
+    let (settings, resets) =
+        database::statements(&project.settings, &assembly);
+    plan.included.extend(settings);
+    plan.resets = resets;
     task.finish();
     report(&diff, &plan, &assembly);
     // a --dump file has no roles, thus only a live database is checked
@@ -285,6 +287,10 @@ struct Plan {
     /// owns: their object is not in the project, so the plan does not
     /// have them
     unowned: Vec<String>,
+    /// The settings of the database, and of a role in it, that the
+    /// plan resets, as `name of label`. A RESET is not destructive, but
+    /// it can remove a setting that a DBA made
+    resets: Vec<String>,
 }
 
 /// Assemble the ordered plan: DROPs for database-only objects first
@@ -784,6 +790,7 @@ fn plan(
         kept,
         included_destructive,
         unowned,
+        resets: Vec::new(),
     })
 }
 
@@ -1111,21 +1118,55 @@ fn calls_later(
         .max()
 }
 
+/// The warnings for the entries of the snapshot that pull could not
+/// model. The DATABASE PROPERTIES entry can have properties that pull
+/// does not model, as CONNECTION LIMIT, but the plan still changes the
+/// settings of the entry, thus it gets its own warning
+fn unmodeled_warnings(assembly: &pull::Assembly) -> Vec<String> {
+    let properties = "DATABASE PROPERTIES";
+    let mut warnings = Vec::new();
+    let unmodeled = assembly
+        .remaining
+        .iter()
+        .filter(|entry| entry.desc != properties)
+        .count();
+    if unmodeled > 0 {
+        let plural = if unmodeled == 1 { "object" } else { "objects" };
+        let descs: Vec<String> = assembly
+            .unmodeled_descs()
+            .into_iter()
+            .filter(|desc| desc != properties)
+            .collect();
+        warnings.push(format!(
+            "{unmodeled} database {plural} ({}) cannot be modeled by this \
+             version and are not represented in the plan; they were left \
+             untouched",
+            descs.join(", ")
+        ));
+    }
+    if assembly
+        .remaining
+        .iter()
+        .any(|entry| entry.desc == properties)
+    {
+        warnings.push(format!(
+            "{properties}: the database has properties, as CONNECTION \
+             LIMIT, that this version cannot model; they were left \
+             untouched, but the plan changes the settings of the database \
+             and of its roles as the project gives them"
+        ));
+    }
+    warnings
+}
+
 /// Log what the plan skipped or excluded so the script is honest
 /// about what it does not cover
 fn report(diff: &Diff, plan: &Plan, assembly: &pull::Assembly) {
     // objects the snapshot could not model are absent from the diff
     // entirely, so without this the plan is silent about schema it is
     // leaving untouched in the database
-    let unmodeled = assembly.remaining.len();
-    if unmodeled > 0 {
-        let plural = if unmodeled == 1 { "object" } else { "objects" };
-        log::warn!(
-            "{unmodeled} database {plural} ({}) cannot be modeled by this \
-             version and are not represented in the plan; they were left \
-             untouched",
-            assembly.unmodeled_descs().join(", ")
-        );
+    for warning in unmodeled_warnings(assembly) {
+        log::warn!("{warning}");
     }
     let undiffable = diff
         .items
@@ -1138,6 +1179,12 @@ fn report(diff: &Diff, plan: &Plan, assembly: &pull::Assembly) {
              database but cannot be compared: the project writes them as \
              raw sql, which deploy does not compare; they were left \
              untouched"
+        );
+    }
+    for reset in &plan.resets {
+        log::warn!(
+            "Setting {reset}: the project does not have it, thus deploy \
+             resets it"
         );
     }
     for label in &plan.unowned {
@@ -1268,6 +1315,13 @@ fn render_script(
         ));
     } else {
         script.push_str("-- destructive statements: none\n");
+    }
+    if !plan.resets.is_empty() {
+        script.push_str(&format!(
+            "-- settings reset: {} ({})\n",
+            plan.resets.len(),
+            one_line(&plan.resets.join(", "))
+        ));
     }
     if !plan.kept.is_empty() {
         script.push_str(&format!(
@@ -2651,6 +2705,7 @@ mod tests {
             }],
             included_destructive: 0,
             unowned: Vec::new(),
+            resets: Vec::new(),
         };
         let script = render_script(&plan, "test", "db", None);
         for line in script.lines() {
@@ -2675,6 +2730,7 @@ mod tests {
             kept: Vec::new(),
             included_destructive: 0,
             unowned: Vec::new(),
+            resets: Vec::new(),
         };
         let script = render_script(&plan, "test", "db", None);
         assert!(!script.contains("\nDROP TABLE"), "{script}");
@@ -2686,6 +2742,66 @@ mod tests {
             script.contains(&format!("-- WARNING: {label} withheld")),
             "{script}"
         );
+    }
+
+    /// A RESET is not destructive, but it can remove a setting that a
+    /// DBA made, thus the header names each setting that the plan
+    /// resets
+    #[test]
+    fn script_names_the_settings_it_resets() {
+        let plan = Plan {
+            included: vec![Statement {
+                label: "DATABASE app".to_string(),
+                sql: "ALTER DATABASE app RESET work_mem;\n".to_string(),
+                fails_open: false,
+            }],
+            excluded: Vec::new(),
+            kept: Vec::new(),
+            included_destructive: 0,
+            unowned: Vec::new(),
+            resets: vec![
+                "work_mem of DATABASE app".to_string(),
+                "a\nb of ROLE x IN DATABASE app".to_string(),
+            ],
+        };
+        let script = render_script(&plan, "test", "db", None);
+        assert!(
+            script.contains(
+                "-- destructive statements: none\n\
+                 -- settings reset: 2 (work_mem of DATABASE app, a\\nb of \
+                 ROLE x IN DATABASE app)\n"
+            ),
+            "{script}"
+        );
+    }
+
+    /// deploy changes the settings of a DATABASE PROPERTIES entry that
+    /// pull could not model, thus the warning does not say that the
+    /// entry was left untouched
+    #[test]
+    fn unmodeled_database_properties_warning_is_true() {
+        let remaining = |desc: &str| pull::Remaining {
+            desc: desc.to_string(),
+            namespace: None,
+            tag: None,
+            defn: None,
+        };
+        let mut assembly = pull::Assembly::default();
+        assembly.remaining.push(remaining("DATABASE PROPERTIES"));
+        let warnings = unmodeled_warnings(&assembly);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].starts_with("DATABASE PROPERTIES: "));
+        assert!(warnings[0].contains("the plan changes the settings"));
+        assembly.remaining.push(remaining("EVENT TRIGGER"));
+        let warnings = unmodeled_warnings(&assembly);
+        assert_eq!(
+            warnings[0],
+            "1 database object (EVENT TRIGGER) cannot be modeled by this \
+             version and are not represented in the plan; they were left \
+             untouched"
+        );
+        assert_eq!(warnings.len(), 2);
+        assert!(unmodeled_warnings(&pull::Assembly::default()).is_empty());
     }
 
     /// The statements run with the session settings of pg_restore that
@@ -2703,6 +2819,7 @@ mod tests {
             kept: Vec::new(),
             included_destructive: 0,
             unowned: Vec::new(),
+            resets: Vec::new(),
         };
         let script = render_script(&plan, "test", "db", None);
         assert_eq!(
@@ -2735,6 +2852,7 @@ mod tests {
             kept: Vec::new(),
             included_destructive: 0,
             unowned: Vec::new(),
+            resets: Vec::new(),
         };
         let script = render_script(&plan, "test", "db", Some("App Owner"));
         assert!(

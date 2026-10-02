@@ -442,7 +442,10 @@ fn outside_items() -> Vec<Item> {
             Definition::User(
                 serde_json::from_value(serde_json::json!({
                     "name": "App User",
-                    "settings": [{"temp_tablespaces": ["a,b"]}],
+                    "settings": [
+                        {"temp_tablespaces": ["a,b"]},
+                        {"app.user": "x"},
+                    ],
                 }))
                 .unwrap(),
             ),
@@ -620,7 +623,11 @@ const OUTSIDE_SETTINGS: &[(&str, &str, &[&str])] = &[
     (
         "USER",
         "App User",
-        &["ALTER USER \"App User\" SET temp_tablespaces TO 'a,b';\n"],
+        &[
+            "ALTER USER \"App User\" SET temp_tablespaces TO 'a,b';\n",
+            // deviation 48: the name is quoted as pg_dumpall quotes it
+            "ALTER USER \"App User\" SET \"app.user\" TO 'x';\n",
+        ],
     ),
 ];
 
@@ -790,6 +797,7 @@ const OUTSIDE_CORRECTED: &[(&str, &str, &str, &str, &str)] = &[
         "outside",
         "ALTER DATABASE outside SET search_path TO '$user', 'my schema';\n\
          ALTER DATABASE outside SET work_mem TO '64MB';\n\
+         ALTER DATABASE outside SET \"app.user\" TO 'a';\n\
          ALTER ROLE \"App User\" IN DATABASE outside SET enable_seqscan \
          TO False;\n",
         "",
@@ -806,6 +814,7 @@ fn outside_settings() -> project::DatabaseSettings {
                 serde_json::json!({"search_path": ["$user", "my schema"]}),
             ),
             setting(serde_json::json!({"work_mem": "64MB"})),
+            setting(serde_json::json!({"app.user": "a"})),
         ],
         roles: [(
             String::from("App User"),
