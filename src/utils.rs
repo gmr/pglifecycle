@@ -364,11 +364,153 @@ pub fn raw_value(value: &Value) -> String {
     }
 }
 
+/// The name PostgreSQL gives an object that has no name of its own,
+/// `<name1>_<name2>_<label>` or `<name1>_<label>` (ports `makeObjectName`
+/// in `src/backend/commands/indexcmds.c`). The name is cut to 63 bytes:
+/// it takes a byte from the longer of the two names until the name
+/// fits, then cuts each name back to a character boundary, as
+/// `pg_mbcliplen` does. PostgreSQL adds a number to the label when the
+/// name is in use in the schema; that case is not known here.
+pub(crate) fn make_object_name(
+    name1: &str,
+    name2: Option<&str>,
+    label: &str,
+) -> String {
+    // NAMEDATALEN - 1
+    const MAX: usize = 63;
+    let overhead = label.len() + 1 + usize::from(name2.is_some());
+    let available = MAX - overhead;
+    let mut name1_len = name1.len();
+    let mut name2_len = name2.map_or(0, str::len);
+    while name1_len + name2_len > available {
+        if name1_len > name2_len {
+            name1_len -= 1;
+        } else {
+            name2_len -= 1;
+        }
+    }
+    let mut name = clip(name1, name1_len).to_string();
+    if let Some(name2) = name2 {
+        name.push('_');
+        name.push_str(clip(name2, name2_len));
+    }
+    name.push('_');
+    name.push_str(label);
+    name
+}
+
+/// The longest start of `name` that is not more than `len` bytes and
+/// ends on a character boundary, as `pg_mbcliplen` gives
+fn clip(name: &str, mut len: usize) -> &str {
+    while !name.is_char_boundary(len) {
+        len -= 1;
+    }
+    &name[..len]
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
 
     use super::*;
+
+    /// Each expected name is the one PostgreSQL 18 gave the object
+    #[test]
+    fn makes_object_names_as_postgres() {
+        let a40 = "a".repeat(40);
+        let c40 = "c".repeat(40);
+        let t63 = "t".repeat(63);
+        assert_eq!(
+            make_object_name("addresses", Some("user_id"), "fkey"),
+            "addresses_user_id_fkey"
+        );
+        assert_eq!(make_object_name("users", None, "pkey"), "users_pkey");
+        assert_eq!(
+            make_object_name(&a40, Some(&"b".repeat(40)), "fkey"),
+            format!("{}_{}_fkey", "a".repeat(29), "b".repeat(28))
+        );
+        assert_eq!(
+            make_object_name(&a40, Some(&c40), "not_null"),
+            format!("{}_{}_not_null", "a".repeat(27), "c".repeat(26))
+        );
+        assert_eq!(
+            make_object_name(&a40, Some(&c40), "check"),
+            format!("{}_{}_check", "a".repeat(28), "c".repeat(28))
+        );
+        assert_eq!(
+            make_object_name(&a40, Some(&c40), "key"),
+            format!("{}_{}_key", "a".repeat(29), "c".repeat(29))
+        );
+        assert_eq!(
+            make_object_name(&a40, Some(&c40), "seq"),
+            format!("{}_{}_seq", "a".repeat(29), "c".repeat(29))
+        );
+        assert_eq!(
+            make_object_name(&a40, Some("ee_ff_dd"), "key"),
+            format!("{a40}_ee_ff_dd_key")
+        );
+        assert_eq!(
+            make_object_name(&a40, None, "pkey"),
+            format!("{a40}_pkey")
+        );
+        assert_eq!(
+            make_object_name(&t63, None, "pkey"),
+            format!("{}_pkey", "t".repeat(58))
+        );
+        assert_eq!(
+            make_object_name(&t63, Some("id"), "not_null"),
+            format!("{}_id_not_null", "t".repeat(51))
+        );
+        assert_eq!(
+            make_object_name(&t63, Some("x"), "not_null"),
+            format!("{}_x_not_null", "t".repeat(52))
+        );
+        assert_eq!(
+            make_object_name(&"d".repeat(61), None, "not_null"),
+            format!("{}_not_null", "d".repeat(54))
+        );
+    }
+
+    /// PostgreSQL balances the byte lengths first, then cuts each name
+    /// back to a character boundary. Each expected name is the one
+    /// PostgreSQL 18 gave the object, in a UTF8 database.
+    #[test]
+    fn makes_multibyte_object_names_as_postgres() {
+        let e20 = "\u{e9}".repeat(20);
+        let e31 = "\u{e9}".repeat(31);
+        assert_eq!(
+            make_object_name(&e20, Some(&"x".repeat(35)), "not_null"),
+            format!("{}_{}_not_null", "\u{e9}".repeat(13), "x".repeat(26))
+        );
+        assert_eq!(
+            make_object_name(&e20, None, "pkey"),
+            format!("{e20}_pkey")
+        );
+        assert_eq!(
+            make_object_name(&e31, None, "pkey"),
+            format!("{}_pkey", "\u{e9}".repeat(29))
+        );
+        assert_eq!(
+            make_object_name(&e31, Some("id"), "not_null"),
+            format!("{}_id_not_null", "\u{e9}".repeat(25))
+        );
+        assert_eq!(
+            make_object_name(&e31, Some(&"\u{15d}".repeat(20)), "not_null"),
+            format!(
+                "{}_{}_not_null",
+                "\u{e9}".repeat(13),
+                "\u{15d}".repeat(13)
+            )
+        );
+        assert_eq!(
+            make_object_name(
+                &"\u{e9}".repeat(20),
+                Some(&"x".repeat(35)),
+                "fkey"
+            ),
+            format!("{}_{}_fkey", "\u{e9}".repeat(14), "x".repeat(28))
+        );
+    }
 
     #[test]
     fn quotes_identifiers() {

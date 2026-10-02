@@ -543,9 +543,9 @@ impl<'a> ObjectIndex<'a> {
                     },
                     None => (
                         table.schema.clone(),
-                        crate::project::generated_name(
+                        crate::utils::make_object_name(
                             &table.name,
-                            &column.name,
+                            Some(&column.name),
                             "seq",
                         ),
                     ),

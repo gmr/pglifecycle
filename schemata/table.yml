@@ -248,7 +248,7 @@ properties:
       no column entry to carry `nullable: false`.
 
       Omit `name` when the constraint carries the name PostgreSQL generates
-      by default, `<table>_<column>_not_null`.
+      by default, `<table>_<column>_not_null` cut to 63 bytes.
     type: array
     items:
       title: NOT NULL Constraint
