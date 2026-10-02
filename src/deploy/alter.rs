@@ -43,8 +43,8 @@ use crate::models::{
 };
 use crate::project::{routine_base_name, split_sql_name};
 use crate::utils::{
-    dollar_quote, postgres_value, quote_ident, quote_routine_name, raw_value,
-    user_mapping_subject,
+    dollar_quote, make_object_name, postgres_value, quote_ident,
+    quote_routine_name, raw_value, user_mapping_subject,
 };
 
 mod procedure;
@@ -648,14 +648,16 @@ fn constraint_names(table: &Table) -> std::collections::BTreeSet<String> {
     use crate::models::ConstraintColumns;
     let mut names = std::collections::BTreeSet::new();
     let generated = |columns: &[String], suffix: &str| {
-        format!("{}_{}_{suffix}", table.name, columns.join("_"))
+        make_object_name(&table.name, Some(&columns.join("_")), suffix)
     };
     let mut columns_constraint = |c: &ConstraintColumns, suffix: &str| {
         let name = match c {
             ConstraintColumns::Detailed {
                 name: Some(name), ..
             } => name.clone(),
-            _ if suffix == "pkey" => format!("{}_pkey", table.name),
+            _ if suffix == "pkey" => {
+                make_object_name(&table.name, None, suffix)
+            }
             ConstraintColumns::Name(column) => {
                 generated(std::slice::from_ref(column), suffix)
             }
@@ -682,7 +684,7 @@ fn constraint_names(table: &Table) -> std::collections::BTreeSet<String> {
     names.extend(table.foreign_keys.iter().flatten().map(|f| f.name.clone()));
     for not_null in table.not_null_constraints.iter().flatten() {
         names.insert(not_null.name.clone().unwrap_or_else(|| {
-            format!("{}_{}_not_null", table.name, not_null.column)
+            make_object_name(&table.name, Some(&not_null.column), "not_null")
         }));
     }
     for column in table.columns.iter().flatten() {
@@ -693,7 +695,11 @@ fn constraint_names(table: &Table) -> std::collections::BTreeSet<String> {
                     .as_ref()
                     .and_then(|n| n.name.clone())
                     .unwrap_or_else(|| {
-                        format!("{}_{}_not_null", table.name, column.name)
+                        make_object_name(
+                            &table.name,
+                            Some(&column.name),
+                            "not_null",
+                        )
                     }),
             );
         }
@@ -912,7 +918,7 @@ fn validate_local_not_nulls(
             });
         if matches {
             let name = not_null.name.clone().unwrap_or_else(|| {
-                format!("{}_{}_not_null", db.name, not_null.column)
+                make_object_name(&db.name, Some(&not_null.column), "not_null")
             });
             alters.push(Alter::new(format!(
                 "ALTER TABLE {table} VALIDATE CONSTRAINT {};\n",
@@ -988,7 +994,7 @@ fn not_null_name(relation: &str, column: &Column) -> String {
         .and_then(|c| c.name.as_ref())
     {
         Some(name) => name.clone(),
-        None => format!("{relation}_{}_not_null", column.name),
+        None => make_object_name(relation, Some(&column.name), "not_null"),
     }
 }
 
@@ -1411,7 +1417,11 @@ fn constraints(
         // an unnamed one carries the name PostgreSQL generates
         |not_null| {
             not_null.name.clone().unwrap_or_else(|| {
-                format!("{}_{}_not_null", repo.name, not_null.column)
+                make_object_name(
+                    &repo.name,
+                    Some(&not_null.column),
+                    "not_null",
+                )
             })
         },
         alters,
@@ -2651,6 +2661,31 @@ mod tests {
                 "ALTER TABLE test.users RENAME CONSTRAINT \
                  users_email_not_null TO email_nn;\n",
             ]
+        );
+    }
+
+    /// The name PostgreSQL generates for a long column is cut to 63
+    /// bytes, and the rename goes to that name
+    #[test]
+    fn column_not_null_rename_to_a_cut_name() {
+        let column = "c".repeat(60);
+        let mut repo = base_table();
+        repo["columns"] = serde_json::json!([
+            {"name": column, "data_type": "text", "nullable": false},
+        ]);
+        let mut db = base_table();
+        db["columns"] = serde_json::json!([
+            {"name": column, "data_type": "text", "nullable": false,
+             "not_null_constraint": {"name": "c_nn"}},
+        ]);
+        let alters = statements(table(&parse_table(repo), &parse_table(db)));
+        assert_eq!(
+            sql(&alters),
+            vec![format!(
+                "ALTER TABLE test.users RENAME CONSTRAINT c_nn TO \
+                 users_{}_not_null;\n",
+                "c".repeat(48)
+            )]
         );
     }
 

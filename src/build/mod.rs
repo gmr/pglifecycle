@@ -2227,7 +2227,11 @@ impl Builder {
                 // an unnamed one has the name PostgreSQL generates, and
                 // the entry's tag and DROP both need a name
                 let name = not_null.name.clone().unwrap_or_else(|| {
-                    format!("{}_{}_not_null", d.name, not_null.column)
+                    crate::utils::make_object_name(
+                        &d.name,
+                        Some(&not_null.column),
+                        "not_null",
+                    )
                 });
                 let id = self.dump_separate_constraint(
                     "CONSTRAINT",
