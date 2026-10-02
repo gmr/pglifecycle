@@ -534,7 +534,7 @@ pub fn cluster_roles(
 }
 
 /// A dump entry that was not assembled into the project models
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct Remaining {
     pub desc: String,
     pub namespace: Option<String>,
@@ -2593,13 +2593,19 @@ impl Assembly {
         descs
     }
 
+    /// Keep `entry` for remaining.yaml. An entry with more than one
+    /// statement, as DATABASE PROPERTIES, comes here one time for each
+    /// statement that pull cannot model, but it is kept one time
     fn push_remaining(&mut self, entry: &libpgdump::Entry) {
-        self.remaining.push(Remaining {
+        let remaining = Remaining {
             desc: entry.desc.as_str().to_string(),
             namespace: entry.namespace.clone().filter(|n| !n.is_empty()),
             tag: entry.tag.clone(),
             defn: entry.defn.clone(),
-        });
+        };
+        if self.remaining.last() != Some(&remaining) {
+            self.remaining.push(remaining);
+        }
     }
 }
 
@@ -4321,10 +4327,13 @@ mod tests {
             "",
             "app",
             "ALTER DATABASE app CONNECTION LIMIT = 5;\n\
-             ALTER DATABASE app SET work_mem TO '64MB';\n",
+             ALTER DATABASE app SET work_mem TO '64MB';\n\
+             ALTER DATABASE app IS_TEMPLATE = true;\n",
         );
         let mut assembly = Assembly::default();
         assembly.ingest(&dump).unwrap();
+        // the entry is in remaining one time, not one time for each
+        // property that pull cannot model
         assert_eq!(assembly.remaining.len(), 1);
         assert_eq!(assembly.remaining[0].desc, "DATABASE PROPERTIES");
         assert_eq!(assembly.settings.len(), 1);

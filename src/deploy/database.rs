@@ -220,7 +220,10 @@ mod tests {
     #[test]
     fn setting_names_are_quoted() {
         let mut project = DatabaseSettings {
-            database: vec![settings(json!({"app.user": "a"}))],
+            database: vec![
+                settings(json!({"app.user": "a"})),
+                settings(json!({"app.\"q": "b"})),
+            ],
             ..Default::default()
         };
         project
@@ -236,6 +239,8 @@ mod tests {
             sql(&statements),
             [
                 "ALTER DATABASE app SET \"app.user\" TO 'a';\n",
+                // a double quote in the name is doubled
+                "ALTER DATABASE app SET \"app.\"\"q\" TO 'b';\n",
                 "ALTER DATABASE app RESET \"DateStyle\";\n",
                 "ALTER ROLE app IN DATABASE app SET \"x.y\" TO '1';\n",
                 "ALTER ROLE app IN DATABASE app RESET \"app.order\";\n",
