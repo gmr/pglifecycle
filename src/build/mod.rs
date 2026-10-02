@@ -257,10 +257,11 @@
 //! 47. A user mapping on several servers is one entry for each
 //!     server. The first entry stands for the item, and each later
 //!     entry comes after the one before. The last entry stood for
-//!     the item, as in the Python. Thus only the last entry came after
-//!     the user (deviation 45), and deploy made only the last mapping,
-//!     because it found no item for the other entries. The
-//!     test-project user mapping is on one server.
+//!     the item, as in the Python, and deploy made only the last
+//!     mapping, because it found no item for the other entries.
+//!     libpgdump sorts the user first, and the chain keeps each later
+//!     entry tied to the item. The test-project user mapping is on one
+//!     server.
 
 mod acls;
 mod calls;
