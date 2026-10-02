@@ -152,8 +152,8 @@ if [ "$(psql -d "${TARGET_DB}" -tAc "SELECT count(*) FROM pg_constraint
             'gate_names_éééééééé_ŝŝŝŝŝŝŝŝŝŝŝŝŝ_not_null',
             'gate_names_child_ccccccccccccccccccccccccccccccccccccccccc_pkey',
             'gate_names_dddddddddddddddd_cccccccccccccccccccccccccc_not_null',
-            'gate_names_ddddddddddddddd_cccccccccccccccccccccccccc_not_null1')")" \
-        != 10 ]; then
+            'gate_names_ddddddddddddddd_cccccccccccccccccccccccccc_not_null1'
+        )")" != 10 ]; then
     echo "Convergence gate FAILED: the generated names are not cut" >&2
     psql -d "${TARGET_DB}" -tAc "SELECT conname FROM pg_constraint
         WHERE conname LIKE 'gate_names%'" >&2

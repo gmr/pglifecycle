@@ -2668,6 +2668,49 @@ mod tests {
         assert_eq!(sql(&alters), Vec::<String>::new());
     }
 
+    /// In a LATIN1 database, PostgreSQL does not cut the primary key
+    /// name of a table of 31 `é` (36 bytes there, 67 in UTF-8). The
+    /// database side goes through the statements that pg_dump writes,
+    /// as in deploy, and compares equal to the unnamed primary key.
+    #[test]
+    fn latin1_primary_key_name_is_no_change() {
+        let e31 = "\u{e9}".repeat(31);
+        let mut parser = crate::ddl::Parser::new().unwrap();
+        let mut parsed = parser
+            .parse(&format!(
+                "CREATE TABLE test.\"{e31}\" (\n    \
+                 id integer NOT NULL\n);\n\
+                 ALTER TABLE ONLY test.\"{e31}\"\n    \
+                 ADD CONSTRAINT \"{e31}_pkey\" PRIMARY KEY (id);"
+            ))
+            .unwrap()
+            .into_iter();
+        let Some(crate::ddl::Statement::CreateTable(mut db)) = parsed.next()
+        else {
+            panic!("expected CreateTable")
+        };
+        let Some(crate::ddl::Statement::AddConstraint {
+            name,
+            constraint,
+            ..
+        }) = parsed.next()
+        else {
+            panic!("expected AddConstraint")
+        };
+        crate::ddl::apply_constraint(&mut db, name, constraint);
+        db.owner = "postgres".into();
+        let repo = parse_table(serde_json::json!({
+            "name": e31,
+            "schema": "test",
+            "owner": "postgres",
+            "columns": [
+                {"name": "id", "data_type": "integer", "nullable": false},
+            ],
+            "primary_key": ["id"],
+        }));
+        assert_eq!(sql(&statements(table(&repo, &db))), Vec::<&str>::new());
+    }
+
     /// A NO INHERIT change alone reconciles through ALTER CONSTRAINT,
     /// under the name the repository records
     #[test]
