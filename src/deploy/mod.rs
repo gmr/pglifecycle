@@ -429,6 +429,7 @@ fn plan(
         created_entries(output, diff, libpgdump::ObjectType::Function);
     let sequences =
         created_entries(output, diff, libpgdump::ObjectType::Sequence);
+    let shells = new_shell_types(output, diff);
     let mut parser = tree_sitter::Parser::new();
     parser
         .set_language(&tree_sitter_postgres::LANGUAGE.into())
@@ -455,6 +456,23 @@ fn plan(
         let direct = output.item_ids.get(&entry.dump_id);
         // changed default privileges are emitted above
         if direct.is_some_and(|id| defaults.contains(id)) {
+            continue;
+        }
+        // a shell type has no dependencies, thus no owners. It comes
+        // only with a new base type
+        if entry.desc == libpgdump::ObjectType::ShellType {
+            if shells.contains(&entry.dump_id)
+                && let Some(defn) = &entry.defn
+            {
+                push(
+                    false,
+                    Statement {
+                        label: entry_label(entry),
+                        sql: defn.clone(),
+                        fails_open: false,
+                    },
+                );
+            }
             continue;
         }
         let owners = entry_owners(entry, output, &entries_by_id);
@@ -895,6 +913,35 @@ fn created_entries<'a>(
         }
     }
     created
+}
+
+/// The shell type entries of the base types that this deploy creates.
+/// A function that takes a new base type fails without its shell type,
+/// as PostgreSQL makes a shell type only for a function that returns
+/// the type
+fn new_shell_types(output: &build::BuildOutput, diff: &Diff) -> HashSet<i32> {
+    let shells: HashSet<i32> = output
+        .dump
+        .entries()
+        .iter()
+        .filter(|entry| entry.desc == libpgdump::ObjectType::ShellType)
+        .map(|entry| entry.dump_id)
+        .collect();
+    output
+        .dump
+        .entries()
+        .iter()
+        .filter(|entry| {
+            entry.desc == libpgdump::ObjectType::Type
+                && output
+                    .item_ids
+                    .get(&entry.dump_id)
+                    .and_then(|id| diff.items.get(id))
+                    == Some(&Change::Added)
+        })
+        .flat_map(|entry| entry.dependencies.iter().copied())
+        .filter(|dep| shells.contains(dep))
+        .collect()
 }
 
 /// The last archive position after `position` of the functions in
@@ -2393,6 +2440,92 @@ mod tests {
         let sql: Vec<&str> =
             unowned.included.iter().map(|s| s.sql.as_str()).collect();
         assert_eq!(sql, ["CREATE TABLE public.added ();\n"]);
+    }
+
+    /// A new base type gets its shell type before its I/O function,
+    /// which takes the type. A base type that the database has gets
+    /// no shell type, also for a new function that takes it
+    #[test]
+    fn shell_type_comes_only_with_a_new_base_type() {
+        let mut dump = libpgdump::new("test", "UTF8", "18.0").expect("dump");
+        let mut entry = |desc, tag: &str, defn: &str, deps: &[i32]| {
+            dump.add_entry(
+                desc,
+                Some("test"),
+                Some(tag),
+                None,
+                Some(defn),
+                None,
+                None,
+                deps,
+            )
+            .expect("add entry")
+        };
+        let shell = entry(
+            libpgdump::ObjectType::ShellType,
+            "b",
+            "CREATE TYPE test.b;\n",
+            &[],
+        );
+        let function = entry(
+            libpgdump::ObjectType::Function,
+            "b_out(test.b)",
+            "CREATE FUNCTION test.b_out(test.b);\n",
+            &[shell],
+        );
+        let base = entry(
+            libpgdump::ObjectType::Type,
+            "b",
+            "CREATE TYPE test.b (INPUT = test.b_in, OUTPUT = test.b_out);\n",
+            &[shell, function],
+        );
+        let output = build::BuildOutput {
+            dump,
+            item_ids: HashMap::from([(base, 0), (function, 1)]),
+        };
+        let snapshot =
+            libpgdump::new("test", "UTF8", "18.0").expect("new dump");
+        let args = match cli::Cli::parse_from(["pglifecycle", "deploy", "p"])
+            .action
+        {
+            cli::Action::Deploy(deploy) => deploy,
+            _ => unreachable!("parsed the deploy subcommand"),
+        };
+        let plan_for = |base: Change| {
+            let diff = Diff {
+                items: BTreeMap::from([(0, base), (1, Change::Added)]),
+                changed: BTreeMap::new(),
+                removed: BTreeMap::new(),
+                owned: BTreeSet::new(),
+                owner_changed: BTreeSet::new(),
+            };
+            plan(
+                &diff,
+                &BTreeMap::new(),
+                &output,
+                &snapshot,
+                &privileges::Privileges::default(),
+                &args,
+            )
+            .expect("plan succeeds")
+            .included
+            .into_iter()
+            .map(|statement| statement.sql)
+            .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            plan_for(Change::Added),
+            [
+                "CREATE TYPE test.b;\n",
+                "CREATE FUNCTION test.b_out(test.b);\n",
+                "CREATE TYPE test.b (INPUT = test.b_in, OUTPUT = \
+                 test.b_out);\n",
+            ]
+        );
+        assert_eq!(
+            plan_for(Change::Unchanged),
+            ["CREATE FUNCTION test.b_out(test.b);\n"]
+        );
     }
 
     /// A plan for the changed table `test.t` (item 0), the new
