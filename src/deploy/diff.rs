@@ -920,6 +920,12 @@ pub(crate) fn stored_null_default(
             None if trimmed.eq_ignore_ascii_case("null") => break,
             None => {
                 let (operand, cast) = trimmed.rsplit_once("::")?;
+                // the text after the cast is one type name only, not
+                // an operator and an operand after it
+                let cast = cast.trim();
+                if cast_type_length(cast) != cast.len() {
+                    return None;
+                }
                 let cast = canonical_type(cast);
                 let domain = matches!(
                     types.get(&super::alter::names::name(&cast)),
@@ -2678,6 +2684,11 @@ mod tests {
             ("test.dint", "NULL::bigint"),
             ("test.dvc", "NULL::test.dint"),
             ("test.dint", "NULL::test.mood"),
+            // an operator after a cast
+            ("integer[]", "NULL::integer[] || ARRAY[1]"),
+            ("text[]", "NULL::text[] || ARRAY['a']"),
+            ("integer[]", "NULL::integer[] || '{1}'::integer[]"),
+            ("integer", "NULL::integer + 1"),
             // a type that is not in the project
             ("test.other", "NULL"),
             ("test.other[]", "NULL"),
