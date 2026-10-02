@@ -37,6 +37,10 @@ cleanup() {
         >/dev/null 2>&1 || true
     bin/drop-database "${PAGILA_SOURCE_DB}" \
         >/dev/null 2>&1 || true
+    # the apply-role step makes its role a superuser; a failed step
+    # must not leave it so
+    psql -d postgres -q -c \
+        'ALTER ROLE "Gate Applier" NOSUPERUSER' >/dev/null 2>&1 || true
 }
 trap cleanup EXIT INT TERM
 
