@@ -1258,7 +1258,7 @@ fn render_script(
             script.push_str(&format!(
                 "-- WARNING: {} withheld; the database can allow access \
                  the project does not\n",
-                statement.label
+                one_line(&statement.label)
             ));
         }
     } else if plan.included_destructive > 0 {
@@ -1312,10 +1312,20 @@ fn render_script(
         );
     }
     for statement in &plan.included {
-        script
-            .push_str(&format!("\n-- {}\n{}", statement.label, statement.sql));
+        script.push_str(&format!(
+            "\n-- {}\n{}",
+            one_line(&statement.label),
+            statement.sql
+        ));
     }
     script
+}
+
+/// `label` with each line break as its escape, so that the label stays
+/// in its comment. A name, as of a role, can contain a line break, and
+/// the text after the break can run as SQL
+fn one_line(label: &str) -> String {
+    label.replace('\r', "\\r").replace('\n', "\\n")
 }
 
 /// `DROP <type> IF EXISTS <name>` for a database-only object. User
@@ -2639,6 +2649,37 @@ mod tests {
             assert!(line.starts_with("--"), "line runs as SQL: {line}");
         }
         assert!(script.contains("--   DROP TABLE t; --\";\n"));
+    }
+
+    /// A label with a newline, as from a role name, must stay in its
+    /// comment, so no part of it can run
+    #[test]
+    fn label_with_newline_stays_in_its_comment() {
+        let statement = || Statement {
+            label: "ROLE a\nDROP TABLE t;\r\n IN DATABASE db".to_string(),
+            sql: "ALTER ROLE \"a\" RESET work_mem;\n".to_string(),
+            fails_open: true,
+        };
+        let plan = Plan {
+            included: vec![statement()],
+            excluded: vec![statement()],
+            kept: Vec::new(),
+            included_destructive: 0,
+            unowned: Vec::new(),
+        };
+        let script = render_script(&plan, "test", "db", None);
+        assert!(!script.contains("\nDROP TABLE"), "{script}");
+        assert!(!script.contains('\r'), "{script}");
+        assert!(
+            script.contains(
+                "\n-- ROLE a\\nDROP TABLE t;\\r\\n IN DATABASE db\n"
+            ),
+            "{script}"
+        );
+        assert!(
+            script.contains("-- WARNING: ROLE a\\nDROP TABLE t;\\r\\n IN"),
+            "{script}"
+        );
     }
 
     /// The statements run with the session settings of pg_restore that
