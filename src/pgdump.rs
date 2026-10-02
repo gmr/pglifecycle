@@ -43,7 +43,7 @@ fn dump_args(
     ddl: &DumpDdl,
     path: &Path,
 ) -> Vec<OsString> {
-    let mut args = connection_args(conn);
+    let mut args = dump_connection_args(conn);
     if let Some(dbname) = &conn.dbname {
         args.push("-d".into());
         args.push(dbname.into());
@@ -124,7 +124,7 @@ fn dump_roles_args(
     include_passwords: bool,
     ddl: &DumpDdl,
 ) -> Vec<OsString> {
-    let mut args = connection_args(conn);
+    let mut args = dump_connection_args(conn);
     if let Some(connection) = roles_connection_string(conn) {
         args = without_server_flags(args);
         args.push("-d".into());
@@ -224,6 +224,16 @@ fn should_retry_without_passwords(
 /// `psql`, aborting on the first error. Returns psql's stderr on
 /// failure so the caller can map it back to a statement.
 pub fn apply(conn: &cli::Connection, script: &Path) -> Result<(), String> {
+    let output = run("psql", &apply_args(conn, script), &[], conn)?;
+    if !output.status.success() {
+        return Err(stderr_of(&output));
+    }
+    Ok(())
+}
+
+/// The psql arguments for [`apply`]. They have no `--role`: the script
+/// sets the role (see `deploy::render_script`).
+fn apply_args(conn: &cli::Connection, script: &Path) -> Vec<OsString> {
     let mut args = connection_args(conn);
     if let Some(dbname) = &conn.dbname {
         args.push("-d".into());
@@ -236,11 +246,7 @@ pub fn apply(conn: &cli::Connection, script: &Path) -> Result<(), String> {
     args.push("ON_ERROR_STOP=1".into());
     args.push("-f".into());
     args.push(script.into());
-    let output = run("psql", &args, &[], conn)?;
-    if !output.status.success() {
-        return Err(stderr_of(&output));
-    }
-    Ok(())
+    args
 }
 
 /// The user of the connection (`SELECT current_user`), read with psql
@@ -301,6 +307,14 @@ fn connection_args(conn: &cli::Connection) -> Vec<OsString> {
         args.push(value.into());
     }
     args.push("-w".into());
+    args
+}
+
+/// The flags of [`connection_args`] and `--role`, for pg_dump and
+/// pg_dumpall. psql does not have `--role`, thus the deploy script
+/// sets the role itself, as pg_restore does.
+fn dump_connection_args(conn: &cli::Connection) -> Vec<OsString> {
+    let mut args = connection_args(conn);
     if let Some(role) = &conn.role {
         args.push("--role".into());
         args.push(role.into());
@@ -754,6 +768,25 @@ mod tests {
         let args = connection_args(&connection(true));
         assert!(args.contains(&OsString::from("-w")));
         assert!(!args.contains(&OsString::from("-W")));
+    }
+
+    /// psql does not have `--role`, thus only pg_dump and pg_dumpall
+    /// get it; the deploy script sets the role
+    #[test]
+    fn passes_the_role_only_to_the_dump_tools() {
+        let mut conn = connection(false);
+        conn.role = Some("Gate Applier".into());
+        let path = Path::new("f");
+        let args = apply_args(&conn, path);
+        assert!(!args.contains(&OsString::from("--role")), "{args:?}");
+        assert!(has_pair(&args, "-f", "f"), "{args:?}");
+        let args = dump_args(&conn, &DumpDdl::default(), path);
+        assert!(has_pair(&args, "--role", "Gate Applier"), "{args:?}");
+        let args = dump_roles_args(&conn, path, false, &DumpDdl::default());
+        assert!(has_pair(&args, "--role", "Gate Applier"), "{args:?}");
+        conn.dbname = Some("host=db dbname=app".into());
+        let args = dump_roles_args(&conn, path, false, &DumpDdl::default());
+        assert!(has_pair(&args, "--role", "Gate Applier"), "{args:?}");
     }
 
     #[test]
