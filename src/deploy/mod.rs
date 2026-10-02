@@ -1282,8 +1282,9 @@ fn render_script(
     role: Option<&str>,
 ) -> String {
     let mut script = format!(
-        "-- pglifecycle deploy\n-- project: {project}\n-- source: \
-         {source}\n"
+        "-- pglifecycle deploy\n-- project: {}\n-- source: {}\n",
+        one_line(project),
+        one_line(source)
     );
     if !plan.included.is_empty() {
         script.push_str(&format!(
@@ -1376,8 +1377,9 @@ fn render_script(
 }
 
 /// `label` with each control character as its escape, so that the
-/// label stays in its comment. A name, as of a role, can contain a line
-/// break, and the text after the break can run as SQL
+/// label stays in its comment. A name, as of a role or of the project,
+/// can contain a line break, and the text after the break can run as
+/// SQL
 fn one_line(label: &str) -> String {
     let mut line = String::new();
     for c in label.chars() {
@@ -2802,6 +2804,36 @@ mod tests {
         );
         assert_eq!(warnings.len(), 2);
         assert!(unmodeled_warnings(&pull::Assembly::default()).is_empty());
+    }
+
+    /// A project name, as from project.yaml, and a source with a line
+    /// break must stay in their header comments
+    #[test]
+    fn header_with_newline_stays_in_its_comment() {
+        let plan = Plan {
+            included: Vec::new(),
+            excluded: Vec::new(),
+            kept: Vec::new(),
+            included_destructive: 0,
+            unowned: Vec::new(),
+            resets: Vec::new(),
+        };
+        let script = render_script(
+            &plan,
+            "p\nDROP TABLE t;",
+            "s\r\nDROP TABLE u;",
+            None,
+        );
+        for line in script.lines() {
+            assert!(line.starts_with("--"), "line runs as SQL: {line}");
+        }
+        assert!(
+            script.starts_with(
+                "-- pglifecycle deploy\n-- project: p\\nDROP TABLE t;\n\
+                 -- source: s\\r\\nDROP TABLE u;\n"
+            ),
+            "{script}"
+        );
     }
 
     /// The statements run with the session settings of pg_restore that
