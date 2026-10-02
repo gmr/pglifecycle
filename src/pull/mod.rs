@@ -4286,11 +4286,14 @@ mod tests {
             .filter_map(|e| e.defn.as_deref())
             .filter(|defn| defn.starts_with("GRANT"))
             .collect();
+        // the grant of a role that is not in the project depends only
+        // on alice, thus libpgdump sorts it directly after alice, with
+        // the roles
         assert_eq!(
             grants,
             vec![
-                "GRANT developers TO alice;\n",
                 "GRANT pg_read_all_data TO alice;\n",
+                "GRANT developers TO alice;\n",
             ]
         );
     }

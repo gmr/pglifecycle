@@ -3511,6 +3511,86 @@ mod tests {
         assert!(unreadable(&inventory, &diff, &limits).is_empty());
     }
 
+    /// A new table makes its index in a tablespace of the project.
+    /// deploy does not manage tablespaces, thus the index entry has
+    /// only the table as its item
+    #[test]
+    fn index_in_a_tablespace_of_the_project_is_created() {
+        use constants::ObjectType as OT;
+        let inventory = vec![
+            Item {
+                id: 0,
+                desc: OT::Tablespace,
+                definition: Definition::Tablespace(
+                    serde_json::from_value(serde_json::json!({
+                        "name": "fast",
+                        "owner": "postgres",
+                        "location": "/srv/fast",
+                    }))
+                    .expect("tablespace"),
+                ),
+                dependencies: BTreeSet::new(),
+            },
+            Item {
+                id: 1,
+                desc: OT::Table,
+                definition: Definition::Table(
+                    serde_json::from_value(serde_json::json!({
+                        "name": "t",
+                        "schema": "public",
+                        "owner": "postgres",
+                        "columns": [{"name": "n", "data_type": "integer"}],
+                        "indexes": [{
+                            "name": "t_n",
+                            "columns": [{"name": "n"}],
+                            "tablespace": "fast",
+                        }],
+                    }))
+                    .expect("table"),
+                ),
+                dependencies: BTreeSet::new(),
+            },
+        ];
+        let project = project::Project {
+            name: "tablespace".into(),
+            superuser: "postgres".into(),
+            default_schema: "public".into(),
+            path: std::path::PathBuf::new(),
+            inventory,
+        };
+        let diff = Diff {
+            items: BTreeMap::from([(0, Change::Skipped), (1, Change::Added)]),
+            changed: BTreeMap::new(),
+            removed: BTreeMap::new(),
+            owned: BTreeSet::new(),
+            owner_changed: BTreeSet::new(),
+        };
+        let mut output = build::assemble(&project).expect("assemble");
+        output.dump.sort_entries();
+        let snapshot =
+            libpgdump::new("test", "UTF8", "18.0").expect("new snapshot");
+        let cli = cli::Cli::parse_from(["pglifecycle", "deploy", "proj"]);
+        let args = match cli.action {
+            cli::Action::Deploy(deploy) => deploy,
+            _ => unreachable!("parsed the deploy subcommand"),
+        };
+        let plan = plan(
+            &diff,
+            &BTreeMap::new(),
+            &output,
+            &snapshot,
+            &privileges::Privileges::default(),
+            &args,
+        )
+        .expect("plan succeeds");
+        let sql: Vec<&str> =
+            plan.included.iter().map(|s| s.sql.as_str()).collect();
+        assert!(
+            sql.iter().any(|sql| sql.contains("CREATE INDEX t_n")),
+            "the index is not in the plan: {sql:?}"
+        );
+    }
+
     /// A COMMENT entry of the build loses its empty statement; other
     /// entries do not change
     #[test]

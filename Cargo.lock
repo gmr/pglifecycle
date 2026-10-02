@@ -706,9 +706,9 @@ checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
 name = "libpgdump"
-version = "2.3.0"
+version = "2.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "db540dceae4bf3cd82a61a0a01ebfa1248d611271acfd21990441c3b1c283f92"
+checksum = "52c19041e597b4d32f80bca8a71c0f8f7090b74718596d320de52da7075c5ee2"
 dependencies = [
  "flate2",
  "lz4_flex",
