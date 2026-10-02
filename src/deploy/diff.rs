@@ -17,6 +17,7 @@ use crate::models::{
 };
 use crate::project::Project;
 use crate::pull::{Assembly, without_password};
+use crate::utils::quote_ident;
 
 /// Identity of a database object on either side of the diff
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -670,15 +671,16 @@ fn normalized(definition: &Definition) -> Value {
 
 /// The domain with the type of each cast in its default and its CHECK
 /// constraints in the form that PostgreSQL writes (see
-/// [`canonical_casts`]). A NULL default that PostgreSQL does not store
-/// (see [`null_default`]) is no default.
+/// [`canonical_casts`]). A NULL default is in the form that PostgreSQL
+/// stores (see [`stored_null_default`]).
 pub(crate) fn canonical_domain(domain: &Domain) -> Domain {
     let mut domain = domain.clone();
     if let (Some(data_type), Some(default)) =
         (&domain.data_type, &domain.default)
-        && null_default(data_type, default)
+        && let Some(stored) =
+            stored_null_default(data_type, default, &UserTypes::new())
     {
-        domain.default = None;
+        domain.default = stored;
     }
     if let Some(default) = &mut domain.default {
         *default = canonical_casts(default);
@@ -691,20 +693,247 @@ pub(crate) fn canonical_domain(domain: &Domain) -> Domain {
     domain
 }
 
-/// Whether PostgreSQL stores no default for the default on a column
-/// (or a domain) of the type: the default is a NULL with no cast, or
-/// with casts only to the type (`NULL`, `NULL::integer` and
-/// `CAST(NULL AS int)` on an integer column). The type must be a
-/// built-in type with no modifier. PostgreSQL stores a NULL of another
-/// type (`NULL::bigint` on an integer column) as a default, and also a
-/// NULL on a column of a domain or of a type with a modifier
-/// (`varchar(10)`), as it keeps a cast to the column type.
-pub(crate) fn null_default(data_type: &str, default: &str) -> bool {
+/// A type of the project that is not built in, as
+/// [`stored_null_default`] finds it
+pub(crate) enum UserType {
+    /// A domain, with its data type
+    Domain(String),
+    /// An enum, a composite or a range type
+    Other,
+}
+
+/// The [`UserType`]s of the project, by their qualified names in the
+/// form of `names::name`
+pub(crate) type UserTypes = BTreeMap<String, UserType>;
+
+/// The user types of the project
+fn user_types(project: &Project) -> UserTypes {
+    let mut types = UserTypes::new();
+    for item in &project.inventory {
+        let (schema, name, user_type) = match &item.definition {
+            Definition::Domain(domain) => match &domain.data_type {
+                Some(data_type) => (
+                    &domain.schema,
+                    &domain.name,
+                    UserType::Domain(data_type.clone()),
+                ),
+                None => continue,
+            },
+            // a type with no kind is a composite type
+            Definition::Type(user_type)
+                if matches!(
+                    user_type.type_kind.as_deref(),
+                    None | Some("enum" | "composite" | "range")
+                ) =>
+            {
+                (&user_type.schema, &user_type.name, UserType::Other)
+            }
+            _ => continue,
+        };
+        types.insert(
+            super::alter::names::name(&format!(
+                "{}.{}",
+                quote_ident(schema),
+                quote_ident(name)
+            )),
+            user_type,
+        );
+    }
+    types
+}
+
+/// Each NULL default of the project's tables and domains in the form
+/// that PostgreSQL stores (see [`stored_null_default`]), with the
+/// project's domains and other types. The form of a domain or an enum
+/// is not known from the name of the type, thus deploy changes the
+/// project before it compares it. A default on an inherited column
+/// has the type of the column in a parent table of the project.
+pub(crate) fn store_null_defaults(project: &mut Project) {
+    let types = user_types(project);
+    // the parents and the column types of each table
+    let mut tables = BTreeMap::new();
+    for item in &project.inventory {
+        if let Definition::Table(table) = &item.definition {
+            let columns: BTreeMap<String, String> = table
+                .columns
+                .iter()
+                .flatten()
+                .map(|c| (c.name.clone(), c.data_type.clone()))
+                .collect();
+            let parents: Vec<String> = table
+                .parents
+                .iter()
+                .flatten()
+                .map(|p| super::alter::names::name(p))
+                .collect();
+            tables.insert(table_key(table), (parents, columns));
+        }
+    }
+    // the type of the column in the first parent of the table, or in
+    // the parents of the parent, that has it
+    let inherited = |table: &String, column: &str| {
+        let mut queue: Vec<&String> =
+            tables.get(table)?.0.iter().rev().collect();
+        let mut seen = BTreeSet::new();
+        while let Some(parent) = queue.pop() {
+            let Some((grandparents, columns)) = tables.get(parent) else {
+                continue;
+            };
+            if !seen.insert(parent) {
+                continue;
+            }
+            if let Some(data_type) = columns.get(column) {
+                return Some(data_type.clone());
+            }
+            queue.extend(grandparents.iter().rev());
+        }
+        None
+    };
+    for item in &mut project.inventory {
+        match &mut item.definition {
+            Definition::Table(table) => {
+                for column in table.columns.iter_mut().flatten() {
+                    if let Some(Value::String(text)) = &column.default
+                        && let Some(stored) = stored_null_default(
+                            &column.data_type,
+                            text,
+                            &types,
+                        )
+                    {
+                        column.default = stored.map(Value::String);
+                    }
+                }
+                let key = table_key(table);
+                if let Some(defaults) = &mut table.column_defaults {
+                    defaults.retain_mut(|column_default| {
+                        let Value::String(text) = &column_default.default
+                        else {
+                            return true;
+                        };
+                        let stored = inherited(&key, &column_default.column)
+                            .and_then(|data_type| {
+                                stored_null_default(&data_type, text, &types)
+                            });
+                        match stored {
+                            Some(Some(text)) => {
+                                column_default.default = Value::String(text);
+                                true
+                            }
+                            Some(None) => false,
+                            None => true,
+                        }
+                    });
+                    if defaults.is_empty() {
+                        table.column_defaults = None;
+                    }
+                }
+            }
+            Definition::Domain(domain) => {
+                if let (Some(data_type), Some(default)) =
+                    (&domain.data_type, &domain.default)
+                    && let Some(stored) =
+                        stored_null_default(data_type, default, &types)
+                {
+                    domain.default = stored;
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The qualified name of the table in the form of `names::name`
+fn table_key(table: &crate::models::Table) -> String {
+    super::alter::names::name(&format!(
+        "{}.{}",
+        quote_ident(&table.schema),
+        quote_ident(&table.name)
+    ))
+}
+
+/// What PostgreSQL stores for the default on a column (or a domain)
+/// of the type, when the default is a NULL with no cast, or with
+/// casts only to the type of the NULL that PostgreSQL makes for the
+/// column (see [`null_type`]), or to a domain that is the type of the
+/// column. PostgreSQL stores no default (`Some(None)`) when that NULL
+/// has the type of the column: on a column of a built-in type with no
+/// modifier (`NULL::integer` on an integer column), of an interval
+/// with a modifier, of an enum, a composite or a range type, or of an
+/// array of a domain. Otherwise it stores that NULL
+/// (`NULL::character varying` on a varchar(10) column,
+/// `NULL::integer` on a domain over integer), with a cast to the
+/// domain when the default has one (`(NULL::integer)::test.dint`).
+/// `None` is a default that is not such a NULL, or a type that is not
+/// built in and not in `types`.
+pub(crate) fn stored_null_default(
+    data_type: &str,
+    default: &str,
+    types: &UserTypes,
+) -> Option<Option<String>> {
     let data_type = canonical_type(data_type);
-    let element = data_type.trim_end_matches("[]");
-    let built_in = BUILT_IN_TYPES.contains(&element)
+    let null = null_type(&data_type, types, 0)?;
+    let domain = matches!(
+        types.get(&super::alter::names::name(&data_type)),
+        Some(UserType::Domain(_))
+    );
+    let null_cast = format!("::{null}");
+    let domain_cast = format!("::{data_type}");
+    let mut cast_to_domain = false;
+    let mut text = canonical_casts(default);
+    loop {
+        let trimmed = text.trim();
+        let operand = match trimmed
+            .strip_prefix('(')
+            .and_then(|inner| inner.strip_suffix(')'))
+        {
+            Some(inner) => inner,
+            None => match trimmed.strip_suffix(&null_cast) {
+                Some(operand) => operand,
+                None => match trimmed.strip_suffix(&domain_cast) {
+                    Some(operand) if domain => {
+                        cast_to_domain = true;
+                        operand
+                    }
+                    _ if trimmed.eq_ignore_ascii_case("null") => break,
+                    _ => return None,
+                },
+            },
+        };
+        text = operand.to_string();
+    }
+    Some(if domain && cast_to_domain {
+        Some(format!("(NULL::{null})::{data_type}"))
+    } else if null == data_type {
+        None
+    } else {
+        Some(format!("NULL::{null}"))
+    })
+}
+
+/// The type of the NULL that PostgreSQL makes for a NULL default on a
+/// column of the type (a type in the form of [`canonical_type`]), as
+/// it writes it: the type with no modifier, where `character(n)` is
+/// `bpchar` and `bit(n)` is `"bit"`. An interval keeps its modifier,
+/// other than in an array. The NULL of a domain is the NULL of its
+/// data type. `None` is a type that is not built in and not in
+/// `types`.
+fn null_type(
+    data_type: &str,
+    types: &UserTypes,
+    depth: usize,
+) -> Option<String> {
+    let (element, array) = match data_type.strip_suffix("[]") {
+        Some(element) => (element, "[]"),
+        None => (data_type, ""),
+    };
+    let base = match identity_type(element).as_str() {
+        "character" => String::from("bpchar"),
+        "bit" => String::from("\"bit\""),
+        base => base.to_string(),
+    };
+    let built_in = BUILT_IN_TYPES.contains(&base.as_str())
         || matches!(
-            element,
+            base.as_str(),
             "integer"
                 | "smallint"
                 | "bigint"
@@ -721,24 +950,21 @@ pub(crate) fn null_default(data_type: &str, default: &str) -> bool {
                 | "\"char\""
                 | "\"bit\""
         );
-    if !built_in {
-        return false;
+    if built_in {
+        return Some(if array.is_empty() && base == "interval" {
+            element.to_string()
+        } else {
+            format!("{base}{array}")
+        });
     }
-    let cast = format!("::{data_type}");
-    let mut text = canonical_casts(default);
-    loop {
-        let trimmed = text.trim();
-        let operand = match trimmed
-            .strip_prefix('(')
-            .and_then(|inner| inner.strip_suffix(')'))
-        {
-            Some(inner) => inner,
-            None => match trimmed.strip_suffix(&cast) {
-                Some(operand) => operand,
-                None => return trimmed.eq_ignore_ascii_case("null"),
-            },
-        };
-        text = operand.to_string();
+    match types.get(&super::alter::names::name(element))? {
+        // a domain over a domain is limited, so that a loop of domains
+        // in a project that is not valid ends
+        UserType::Domain(base) if array.is_empty() && depth < 16 => {
+            null_type(&canonical_type(base), types, depth + 1)
+        }
+        UserType::Domain(_) if array.is_empty() => None,
+        _ => Some(data_type.to_string()),
     }
 }
 
@@ -2208,33 +2434,127 @@ mod tests {
         );
     }
 
-    /// PostgreSQL 18 stores no default for a NULL of the column type
-    /// (the cases are from a PostgreSQL 18 database)
+    /// What PostgreSQL 18 stores for a NULL default (the cases are from
+    /// a PostgreSQL 18 database)
     #[test]
-    fn null_defaults_of_the_column_type_are_no_default() {
-        for (data_type, default) in [
-            ("integer", "NULL"),
-            ("integer", "null"),
-            ("integer", "(NULL)"),
-            ("int", "NULL::int"),
-            ("integer", "NULL::INT4"),
-            ("integer", "NULL::pg_catalog.int4"),
-            ("integer", "CAST(NULL AS int)"),
-            ("integer", "(NULL)::integer"),
-            ("integer", "((NULL)::integer)"),
-            ("integer", "NULL::integer::integer"),
-            ("integer", "CAST(NULL AS integer)::integer"),
-            ("bigint", "NULL::int8"),
-            ("numeric", "NULL::numeric"),
-            ("varchar", "NULL::character varying"),
-            ("text", "NULL::text"),
-            ("timestamptz", "NULL::timestamp with time zone"),
-            ("integer[]", "NULL::int[]"),
-            ("double precision", "NULL::float8"),
-            ("bpchar", "NULL"),
-            ("\"char\"", "NULL"),
+    fn null_defaults_are_in_the_stored_form() {
+        let mut types = UserTypes::new();
+        for (name, user_type) in [
+            ("test.dint", UserType::Domain("integer".into())),
+            ("test.dvc", UserType::Domain("varchar(10)".into())),
+            ("test.ddint", UserType::Domain("test.dint".into())),
+            ("test.div", UserType::Domain("interval(2)".into())),
+            ("test.dia", UserType::Domain("int[]".into())),
+            ("test.den", UserType::Domain("test.mood".into())),
+            ("test.mood", UserType::Other),
+            ("test.pair", UserType::Other),
         ] {
-            assert!(null_default(data_type, default), "{data_type} {default}");
+            types.insert(name.into(), user_type);
+        }
+        for (data_type, default, stored) in [
+            ("integer", "NULL", None),
+            ("integer", "null", None),
+            ("integer", "(NULL)", None),
+            ("int", "NULL::int", None),
+            ("integer", "NULL::INT4", None),
+            ("integer", "NULL::pg_catalog.int4", None),
+            ("integer", "CAST(NULL AS int)", None),
+            ("integer", "(NULL)::integer", None),
+            ("integer", "((NULL)::integer)", None),
+            ("integer", "NULL::integer::integer", None),
+            ("integer", "CAST(NULL AS integer)::integer", None),
+            ("bigint", "NULL::int8", None),
+            ("numeric", "NULL::numeric", None),
+            ("varchar", "NULL::character varying", None),
+            ("text", "NULL::text", None),
+            ("timestamptz", "NULL::timestamp with time zone", None),
+            ("integer[]", "NULL::int[]", None),
+            ("double precision", "NULL::float8", None),
+            ("bpchar", "NULL", None),
+            ("\"char\"", "NULL", None),
+            ("interval(2)", "NULL", None),
+            ("interval(2)", "NULL::interval(2)", None),
+            ("interval year", "NULL", None),
+            ("varchar(10)", "NULL", Some("NULL::character varying")),
+            (
+                "varchar(10)",
+                "NULL::varchar",
+                Some("NULL::character varying"),
+            ),
+            (
+                "varchar(10)",
+                "CAST(NULL AS varchar)",
+                Some("NULL::character varying"),
+            ),
+            (
+                "varchar(10)",
+                "NULL::character varying",
+                Some("NULL::character varying"),
+            ),
+            ("numeric(5,2)", "NULL", Some("NULL::numeric")),
+            ("char", "NULL", Some("NULL::bpchar")),
+            ("character(3)", "NULL::bpchar", Some("NULL::bpchar")),
+            ("bit", "NULL", Some("NULL::\"bit\"")),
+            ("bit varying(4)", "NULL", Some("NULL::bit varying")),
+            (
+                "timestamp(3)",
+                "NULL",
+                Some("NULL::timestamp without time zone"),
+            ),
+            (
+                "timestamptz(3)",
+                "NULL",
+                Some("NULL::timestamp with time zone"),
+            ),
+            ("timetz(2)", "NULL", Some("NULL::time with time zone")),
+            ("varchar(10)[]", "NULL", Some("NULL::character varying[]")),
+            ("numeric(5,2)[]", "NULL", Some("NULL::numeric[]")),
+            ("interval(2)[]", "NULL", Some("NULL::interval[]")),
+            ("char[]", "NULL", Some("NULL::bpchar[]")),
+            ("bit(3)[]", "NULL", Some("NULL::\"bit\"[]")),
+            ("test.dint", "NULL", Some("NULL::integer")),
+            ("test.dint", "NULL::integer", Some("NULL::integer")),
+            (
+                "test.dint",
+                "NULL::test.dint",
+                Some("(NULL::integer)::test.dint"),
+            ),
+            (
+                "test.dint",
+                "CAST(NULL AS test.dint)",
+                Some("(NULL::integer)::test.dint"),
+            ),
+            (
+                "test.dint",
+                "(NULL::integer)::test.dint",
+                Some("(NULL::integer)::test.dint"),
+            ),
+            ("test.dvc", "NULL", Some("NULL::character varying")),
+            (
+                "test.dvc",
+                "NULL::test.dvc",
+                Some("(NULL::character varying)::test.dvc"),
+            ),
+            ("test.ddint", "NULL", Some("NULL::integer")),
+            (
+                "test.ddint",
+                "NULL::test.ddint",
+                Some("(NULL::integer)::test.ddint"),
+            ),
+            ("test.div", "NULL", Some("NULL::interval(2)")),
+            ("test.dia", "NULL", Some("NULL::integer[]")),
+            ("test.den", "NULL", Some("NULL::test.mood")),
+            ("test.dint[]", "NULL", None),
+            ("test.mood", "NULL", None),
+            ("test.mood", "NULL::test.mood", None),
+            ("test.mood[]", "NULL", None),
+            ("test.pair", "NULL", None),
+        ] {
+            assert_eq!(
+                stored_null_default(data_type, default, &types),
+                Some(stored.map(String::from)),
+                "{data_type} {default}"
+            );
         }
         for (data_type, default) in [
             ("integer", "NULL::bigint"),
@@ -2244,21 +2564,132 @@ mod tests {
             ("integer", "0"),
             ("integer", "'NULL'"),
             ("varchar", "NULL::text"),
-            ("varchar(10)", "NULL"),
+            ("varchar(10)", "NULL::text"),
             ("varchar(10)", "NULL::varchar(10)"),
-            ("numeric(5,2)", "NULL::numeric"),
-            ("char", "NULL"),
-            ("bit", "NULL"),
-            ("timestamp(3)", "NULL"),
-            ("test.dint", "NULL"),
-            ("test.dint", "NULL::test.dint"),
-            ("test.mood", "NULL"),
+            ("numeric(5,2)", "NULL::numeric(5,2)"),
+            ("char(3)", "NULL::char"),
+            ("interval(2)", "NULL::interval"),
+            ("test.dint", "NULL::bigint"),
+            ("test.ddint", "NULL::test.dint"),
+            // a type that is not in the project
+            ("test.other", "NULL"),
+            ("test.other[]", "NULL"),
         ] {
-            assert!(
-                !null_default(data_type, default),
+            assert_eq!(
+                stored_null_default(data_type, default, &types),
+                None,
                 "{data_type} {default}"
             );
         }
+        // with no types, only a built-in type is known
+        assert_eq!(
+            stored_null_default("test.mood", "NULL", &UserTypes::new()),
+            None
+        );
+    }
+
+    /// A NULL default of a table, of an inherited column and of a
+    /// domain of the project is in the form that PostgreSQL stores
+    #[test]
+    fn project_null_defaults_are_stored() {
+        let definition = |desc, value: Value| crate::models::Item {
+            id: 0,
+            desc,
+            definition: match desc {
+                ObjectType::Domain => {
+                    Definition::Domain(serde_json::from_value(value).unwrap())
+                }
+                ObjectType::Type => {
+                    Definition::Type(serde_json::from_value(value).unwrap())
+                }
+                _ => Definition::Table(serde_json::from_value(value).unwrap()),
+            },
+            dependencies: Default::default(),
+        };
+        let mut project = Project {
+            name: String::from("test"),
+            superuser: String::from("postgres"),
+            default_schema: String::from("public"),
+            path: std::path::PathBuf::new(),
+            inventory: vec![
+                definition(
+                    ObjectType::Domain,
+                    serde_json::json!({
+                        "name": "dint", "schema": "test", "owner": "o",
+                        "data_type": "integer",
+                    }),
+                ),
+                definition(
+                    ObjectType::Domain,
+                    serde_json::json!({
+                        "name": "ddint", "schema": "test", "owner": "o",
+                        "data_type": "test.dint", "default": "NULL",
+                    }),
+                ),
+                definition(
+                    ObjectType::Type,
+                    serde_json::json!({
+                        "name": "mood", "schema": "test", "owner": "o",
+                        "type": "enum", "enum": ["a"],
+                    }),
+                ),
+                definition(
+                    ObjectType::Table,
+                    serde_json::json!({
+                        "name": "parent", "schema": "test", "owner": "o",
+                        "columns": [
+                            {"name": "v", "data_type": "varchar(10)"},
+                            {"name": "i", "data_type": "integer"},
+                        ],
+                    }),
+                ),
+                definition(
+                    ObjectType::Table,
+                    serde_json::json!({
+                        "name": "child", "schema": "test", "owner": "o",
+                        "parents": ["test.parent"],
+                        "columns": [
+                            {"name": "d", "data_type": "test.dint",
+                             "default": "NULL"},
+                            {"name": "m", "data_type": "test.mood",
+                             "default": "NULL::test.mood"},
+                        ],
+                        "column_defaults": [
+                            {"column": "v", "default": "NULL"},
+                            {"column": "i", "default": "NULL"},
+                        ],
+                    }),
+                ),
+                definition(
+                    ObjectType::Table,
+                    serde_json::json!({
+                        "name": "grandchild", "schema": "test", "owner": "o",
+                        "parents": ["test.child"],
+                        "column_defaults": [{"column": "i", "default": "NULL"}],
+                    }),
+                ),
+            ],
+        };
+        store_null_defaults(&mut project);
+        let value = |index: usize| {
+            match &project.inventory[index].definition {
+                Definition::Domain(domain) => serde_json::to_value(domain),
+                Definition::Table(table) => serde_json::to_value(table),
+                _ => unreachable!(),
+            }
+            .unwrap()
+        };
+        assert_eq!(value(1)["default"], "NULL::integer");
+        let child = value(4);
+        assert_eq!(child["columns"][0]["default"], "NULL::integer");
+        assert_eq!(child["columns"][1].get("default"), None);
+        assert_eq!(
+            child["column_defaults"],
+            serde_json::json!([
+                {"column": "v", "default": "NULL::character varying"},
+            ])
+        );
+        assert_eq!(value(5).get("column_defaults"), None);
     }
 
     #[test]
