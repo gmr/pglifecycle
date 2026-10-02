@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde_json::Value;
 use tree_sitter::Node;
 
-use super::routine_body::canonical_sql_body;
+use super::routine_body::{canonical_definition, canonical_sql_body};
 use crate::constants::ObjectType;
 use crate::ddl::NodeExt;
 use crate::models::{
@@ -572,6 +572,9 @@ fn normalized(definition: &Definition) -> Value {
                         .collect()
                 }),
                 returns: function.returns.as_deref().map(return_type),
+                definition: function.definition.as_deref().map(|body| {
+                    canonical_definition(body, function.language.as_deref())
+                }),
                 sql_body: function.sql_body.as_deref().map(canonical_sql_body),
                 ..function.clone()
             });
@@ -580,6 +583,9 @@ fn normalized(definition: &Definition) -> Value {
         Definition::Procedure(procedure) => {
             let procedure = procedure.canonical();
             canonical = Definition::Procedure(crate::models::Procedure {
+                definition: procedure.definition.as_deref().map(|body| {
+                    canonical_definition(body, procedure.language.as_deref())
+                }),
                 sql_body: procedure
                     .sql_body
                     .as_deref()
@@ -2558,6 +2564,50 @@ mod tests {
             normalized(&p("SELECT 'y'::text AS text")),
             normalized(&p("SELECT 'x'::text"))
         );
+    }
+
+    /// Pull formats a SQL or PL/pgSQL body, which changes the space at
+    /// its start and end, and a body that a person writes has no such
+    /// space. The space in the body and a changed body stay a change,
+    /// and the space at the start of a PL/Python body stays.
+    #[test]
+    fn routine_body_outer_space_is_not_a_change() {
+        let f = |language: &str, definition: &str| {
+            function(serde_json::json!({
+                "name": "f", "schema": "test", "owner": "postgres",
+                "language": language, "returns": "integer",
+                "definition": definition,
+            }))
+        };
+        let p = |language: &str, definition: &str| {
+            Definition::Procedure(
+                serde_json::from_value(serde_json::json!({
+                    "name": "p", "schema": "test", "owner": "postgres",
+                    "language": language, "definition": definition,
+                }))
+                .unwrap(),
+            )
+        };
+        for routine in [f, p] {
+            for language in ["sql", "PLPGSQL"] {
+                assert_eq!(
+                    normalized(&routine(language, "SELECT 1;")),
+                    normalized(&routine(language, "\n SELECT 1;\n\n"))
+                );
+                assert_ne!(
+                    normalized(&routine(language, "SELECT 1;")),
+                    normalized(&routine(language, " SELECT 2;"))
+                );
+                assert_ne!(
+                    normalized(&routine(language, "SELECT\n1;")),
+                    normalized(&routine(language, "SELECT 1;"))
+                );
+            }
+            assert_ne!(
+                normalized(&routine("plpython3u", " return 1")),
+                normalized(&routine("plpython3u", "return 1"))
+            );
+        }
     }
 
     /// What PostgreSQL 18 stores for a NULL default (the cases are from

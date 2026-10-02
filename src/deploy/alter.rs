@@ -43,8 +43,8 @@ use crate::models::{
 };
 use crate::project::{routine_base_name, split_sql_name};
 use crate::utils::{
-    dollar_quote, postgres_value, quote_ident, quote_routine_name, raw_value,
-    user_mapping_subject,
+    dollar_quote, make_object_name, postgres_value, quote_ident,
+    quote_routine_name, raw_value, user_mapping_subject,
 };
 
 mod procedure;
@@ -226,13 +226,10 @@ pub(crate) fn resolve_with(
         }
         (Definition::Schema(repo), Definition::Schema(db)) => schema(repo, db),
         // CREATE OR REPLACE handles function bodies and view queries in
-        // place; a function whose return type or output-parameter
-        // signature changed cannot be replaced (Postgres rejects an
-        // OR REPLACE that alters the output) and must be dropped first
+        // place; a change that it refuses (see `replaceable`) drops the
+        // function first
         (Definition::Function(repo), Definition::Function(db)) => {
-            if returns_equal(repo, db)
-                && out_parameters(repo) == out_parameters(db)
-            {
+            if replaceable(repo, db) {
                 // a name that carries its argument types keeps them,
                 // and a name with no argument types, such as `f(x)`
                 // with parameters, is one identifier
@@ -320,6 +317,38 @@ fn qualified(schema: &str, name: &str) -> String {
     format!("{}.{}", quote_ident(schema), quote_ident(name))
 }
 
+/// Whether `CREATE OR REPLACE FUNCTION` can change `db` into `repo`.
+/// PostgreSQL 18 (`ProcedureCreate` in src/backend/catalog/pg_proc.c)
+/// refuses to change the kind (a window function is a different kind),
+/// the return type or whether it returns a set, the output row of `OUT`
+/// and `INOUT` parameters, or the name of an input parameter that has a
+/// name, and to remove a default. It also refuses to change the type of
+/// a default, which is the type of its parameter except for a
+/// polymorphic parameter; deploy does not compare that type.
+fn replaceable(repo: &Function, db: &Function) -> bool {
+    let window = |function: &Function| function.window.unwrap_or(false);
+    let inputs = |function: &Function| {
+        function
+            .parameters
+            .iter()
+            .flatten()
+            .filter(|p| !matches!(p.mode.as_str(), "OUT" | "TABLE"))
+            .map(|p| (p.name.clone(), p.default.is_some()))
+            .collect::<Vec<_>>()
+    };
+    let (repo_inputs, db_inputs) = (inputs(repo), inputs(db));
+    let defaults = |inputs: &[(Option<String>, bool)]| {
+        inputs.iter().filter(|(_, default)| *default).count()
+    };
+    window(repo) == window(db)
+        && returns_equal(repo, db)
+        && out_parameters(repo) == out_parameters(db)
+        && repo_inputs.iter().zip(&db_inputs).all(|(r, d)| {
+            d.0.as_deref().is_none_or(str::is_empty) || r.0 == d.0
+        })
+        && defaults(&repo_inputs) >= defaults(&db_inputs)
+}
+
 /// True when two functions' return types are the same modulo type
 /// aliasing (`int4` vs `integer`) and typmods, which PostgreSQL does
 /// not keep in a return type
@@ -330,16 +359,17 @@ fn returns_equal(repo: &Function, db: &Function) -> bool {
     }
 }
 
-/// The `OUT`/`TABLE`-mode parameters that make up a function's output
-/// signature, with types canonicalized so an alias does not spuriously
-/// diff. `CREATE OR REPLACE FUNCTION` cannot change this signature, so
-/// callers must fall back to a drop+recreate when it differs.
+/// The `OUT`/`INOUT`/`TABLE`-mode parameters that make up a function's
+/// output signature, with types canonicalized so an alias does not
+/// spuriously diff. `CREATE OR REPLACE FUNCTION` cannot change this
+/// signature, so callers must fall back to a drop+recreate when it
+/// differs.
 fn out_parameters(function: &Function) -> Vec<(String, String, String)> {
     function
         .parameters
         .iter()
         .flatten()
-        .filter(|p| p.mode == "OUT" || p.mode == "TABLE")
+        .filter(|p| matches!(p.mode.as_str(), "OUT" | "INOUT" | "TABLE"))
         .map(|p| {
             (
                 p.mode.clone(),
@@ -603,14 +633,16 @@ fn constraint_names(table: &Table) -> std::collections::BTreeSet<String> {
     use crate::models::ConstraintColumns;
     let mut names = std::collections::BTreeSet::new();
     let generated = |columns: &[String], suffix: &str| {
-        format!("{}_{}_{suffix}", table.name, columns.join("_"))
+        make_object_name(&table.name, Some(&columns.join("_")), suffix)
     };
     let mut columns_constraint = |c: &ConstraintColumns, suffix: &str| {
         let name = match c {
             ConstraintColumns::Detailed {
                 name: Some(name), ..
             } => name.clone(),
-            _ if suffix == "pkey" => format!("{}_pkey", table.name),
+            _ if suffix == "pkey" => {
+                make_object_name(&table.name, None, suffix)
+            }
             ConstraintColumns::Name(column) => {
                 generated(std::slice::from_ref(column), suffix)
             }
@@ -637,7 +669,7 @@ fn constraint_names(table: &Table) -> std::collections::BTreeSet<String> {
     names.extend(table.foreign_keys.iter().flatten().map(|f| f.name.clone()));
     for not_null in table.not_null_constraints.iter().flatten() {
         names.insert(not_null.name.clone().unwrap_or_else(|| {
-            format!("{}_{}_not_null", table.name, not_null.column)
+            make_object_name(&table.name, Some(&not_null.column), "not_null")
         }));
     }
     for column in table.columns.iter().flatten() {
@@ -648,7 +680,11 @@ fn constraint_names(table: &Table) -> std::collections::BTreeSet<String> {
                     .as_ref()
                     .and_then(|n| n.name.clone())
                     .unwrap_or_else(|| {
-                        format!("{}_{}_not_null", table.name, column.name)
+                        make_object_name(
+                            &table.name,
+                            Some(&column.name),
+                            "not_null",
+                        )
                     }),
             );
         }
@@ -867,7 +903,7 @@ fn validate_local_not_nulls(
             });
         if matches {
             let name = not_null.name.clone().unwrap_or_else(|| {
-                format!("{}_{}_not_null", db.name, not_null.column)
+                make_object_name(&db.name, Some(&not_null.column), "not_null")
             });
             alters.push(Alter::new(format!(
                 "ALTER TABLE {table} VALIDATE CONSTRAINT {};\n",
@@ -943,7 +979,7 @@ fn not_null_name(relation: &str, column: &Column) -> String {
         .and_then(|c| c.name.as_ref())
     {
         Some(name) => name.clone(),
-        None => format!("{relation}_{}_not_null", column.name),
+        None => make_object_name(relation, Some(&column.name), "not_null"),
     }
 }
 
@@ -1366,7 +1402,11 @@ fn constraints(
         // an unnamed one carries the name PostgreSQL generates
         |not_null| {
             not_null.name.clone().unwrap_or_else(|| {
-                format!("{}_{}_not_null", repo.name, not_null.column)
+                make_object_name(
+                    &repo.name,
+                    Some(&not_null.column),
+                    "not_null",
+                )
             })
         },
         alters,
@@ -2609,6 +2649,31 @@ mod tests {
         );
     }
 
+    /// The name PostgreSQL generates for a long column is cut to 63
+    /// bytes, and the rename goes to that name
+    #[test]
+    fn column_not_null_rename_to_a_cut_name() {
+        let column = "c".repeat(60);
+        let mut repo = base_table();
+        repo["columns"] = serde_json::json!([
+            {"name": column, "data_type": "text", "nullable": false},
+        ]);
+        let mut db = base_table();
+        db["columns"] = serde_json::json!([
+            {"name": column, "data_type": "text", "nullable": false,
+             "not_null_constraint": {"name": "c_nn"}},
+        ]);
+        let alters = statements(table(&parse_table(repo), &parse_table(db)));
+        assert_eq!(
+            sql(&alters),
+            vec![format!(
+                "ALTER TABLE test.users RENAME CONSTRAINT c_nn TO \
+                 users_{}_not_null;\n",
+                "c".repeat(48)
+            )]
+        );
+    }
+
     /// A NO INHERIT change alone reconciles through ALTER CONSTRAINT,
     /// under the name the repository records
     #[test]
@@ -3038,6 +3103,81 @@ mod tests {
             resolve(&f("int4"), &f("integer")),
             Resolution::OrReplace { .. }
         ));
+    }
+
+    /// The changes that PostgreSQL 18 refuses in CREATE OR REPLACE
+    /// FUNCTION (`ProcedureCreate` in src/backend/catalog/pg_proc.c)
+    /// drop the function and make it again. The changes that it does
+    /// use OR REPLACE.
+    #[test]
+    fn function_changes_that_or_replace_refuses_replace() {
+        let f = |parameters: serde_json::Value, extra: serde_json::Value| {
+            let mut value = serde_json::json!({
+                "name": "f", "schema": "test", "owner": "postgres",
+                "returns": "integer", "language": "sql",
+                "definition": "SELECT 1", "parameters": parameters,
+            });
+            value
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            Definition::Function(serde_json::from_value(value).unwrap())
+        };
+        let plain = |parameters| f(parameters, serde_json::json!({}));
+        let param = |mode: &str, name: Option<&str>, default: Option<&str>| {
+            let mut p = serde_json::json!({
+                "mode": mode, "data_type": "integer",
+            });
+            if let Some(name) = name {
+                p["name"] = name.into();
+            }
+            if let Some(default) = default {
+                p["default"] = default.into();
+            }
+            p
+        };
+        let replaces = |repo: &Definition, db: &Definition| {
+            matches!(resolve(repo, db), Resolution::Replace)
+        };
+        let ab = |b_default| {
+            plain(serde_json::json!([
+                param("IN", Some("a"), None),
+                param("IN", Some("b"), b_default),
+            ]))
+        };
+        // a removed default
+        assert!(replaces(&ab(None), &ab(Some("0"))));
+        // an added or changed default
+        assert!(!replaces(&ab(Some("0")), &ab(None)));
+        assert!(!replaces(&ab(Some("1")), &ab(Some("0"))));
+        // a renamed input parameter, and a name removed
+        let named =
+            |a: Option<&str>| plain(serde_json::json!([param("IN", a, None)]));
+        assert!(replaces(&named(Some("x")), &named(Some("a"))));
+        assert!(replaces(&named(None), &named(Some("a"))));
+        // a name for a parameter that had none
+        assert!(!replaces(&named(Some("a")), &named(None)));
+        // an INOUT parameter is in the output row
+        let row = |mode: &str| {
+            f(
+                serde_json::json!([
+                    param(mode, Some("a"), None),
+                    param("OUT", Some("b"), None),
+                    param("OUT", Some("c"), None),
+                ]),
+                serde_json::json!({"returns": "record"}),
+            )
+        };
+        assert!(replaces(&row("IN"), &row("INOUT")));
+        // a function that becomes a window function, or a set
+        let window =
+            f(serde_json::json!([]), serde_json::json!({"window": true}));
+        assert!(replaces(&window, &plain(serde_json::json!([]))));
+        let set = f(
+            serde_json::json!([]),
+            serde_json::json!({"returns": "SETOF integer"}),
+        );
+        assert!(replaces(&set, &plain(serde_json::json!([]))));
     }
 
     #[test]
