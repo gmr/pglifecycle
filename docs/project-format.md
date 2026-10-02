@@ -302,10 +302,16 @@ revocations:
   in the `where` of an index or an exclusion constraint, in a `CHECK`
   constraint of a table or a domain, and in a default of a column or a
   domain: `(label)::VARCHAR(20)` compares equal to
-  `(label)::character varying(20)`, which PostgreSQL writes. `deploy`
-  compares the remaining text of the expression as it is, so write it
-  as `pull` writes it. Give a type that is not a built-in type its
-  schema, as `pull` writes it: `(embedding)::public.halfvec(1536)`.
+  `(label)::character varying(20)`, which PostgreSQL writes. In these
+  expressions, and in a generated column, a policy and a trigger
+  `condition`, a cast can also be `label::text` or `CAST(label AS
+  text)`: `deploy` compares it as `(label)::text`, which PostgreSQL
+  writes. A string literal or a NULL keeps no parentheses
+  (`'a'::text`), and an operand in parentheses stays as it is.
+  `deploy` compares the remaining text of the expression as it is, so
+  write it as `pull` writes it. Give a type that is not a built-in
+  type its schema, as `pull` writes it:
+  `(embedding)::public.halfvec(1536)`.
   The deploy script runs with the empty `search_path` of `pg_restore`,
   so a type with no schema is not found and the script fails.
 

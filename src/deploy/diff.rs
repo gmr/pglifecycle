@@ -7,9 +7,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
+use tree_sitter::Node;
 
 use super::routine_body::canonical_sql_body;
 use crate::constants::ObjectType;
+use crate::ddl::NodeExt;
 use crate::models::{
     Definition, Domain, Function, Subscription, canonical_settings,
 };
@@ -1178,17 +1180,19 @@ pub(crate) fn canonical_collation(collation: &str) -> String {
     super::alter::names::name(collation)
 }
 
-/// An expression with the type of each cast (`::type`) in the form
-/// that [`canonical_type`] gives, which is the form PostgreSQL writes:
-/// `(a)::varchar(20)` is `(a)::character varying(20)`, and
-/// `(a)::TIMESTAMP WITH TIME ZONE` is `(a)::timestamp with time
+/// An expression with each cast in the form that [`cast_syntax`]
+/// gives, and with the type of each cast (`::type`) in the form that
+/// [`canonical_type`] gives. These are the forms PostgreSQL writes:
+/// `a::varchar(20)` is `(a)::character varying(20)`, and
+/// `CAST(a AS TIMESTAMP WITH TIME ZONE)` is `(a)::timestamp with time
 /// zone`. Text in a string literal (also an `E'...'` string and a
 /// dollar-quoted string) or in a quoted name stays as it is. This
-/// changes only the type names: deploy compares the remaining text as
-/// it is.
+/// changes only the casts: deploy compares the remaining text as it
+/// is.
 pub(crate) fn canonical_casts(expression: &str) -> String {
+    let expression = cast_syntax(expression);
     let mut result = String::with_capacity(expression.len());
-    let mut rest = expression;
+    let mut rest = expression.as_str();
     // the character before `rest`, which tells if `E` or `$` starts a
     // string or is a part of a name
     let mut previous = None;
@@ -1217,6 +1221,90 @@ pub(crate) fn canonical_casts(expression: &str) -> String {
         rest = &rest[length..];
     }
     result
+}
+
+/// An expression with each cast (`x::type` and `CAST(x AS type)`) in
+/// the form that PostgreSQL writes, `(x)::type`. PostgreSQL keeps the
+/// two forms as one cast, and when it writes the cast, it puts the
+/// operand in parentheses. A string literal or a NULL is a constant
+/// of the type of the cast, which PostgreSQL writes with no
+/// parentheses (`'a'::text`, `NULL::integer`), and so is an empty
+/// `ARRAY[]`. An operand that has parentheses stays as it is. An
+/// expression that the grammar cannot read stays as it is.
+fn cast_syntax(expression: &str) -> String {
+    // the grammar reads an expression only in a statement
+    let prefix = "SELECT ";
+    let source = format!("{prefix}{expression}");
+    let mut parser = tree_sitter::Parser::new();
+    if parser
+        .set_language(&tree_sitter_postgres::LANGUAGE.into())
+        .is_err()
+    {
+        return expression.to_string();
+    }
+    let Some(tree) = parser.parse(&source, None) else {
+        return expression.to_string();
+    };
+    let root = tree.root_node();
+    if root.has_error() {
+        return expression.to_string();
+    }
+    let mut result = String::with_capacity(source.len());
+    write_casts(&root, &source, &mut result);
+    result.split_off(prefix.len())
+}
+
+/// The text of the node with each cast in it in the form that
+/// [`cast_syntax`] gives
+fn write_casts(node: &Node, source: &str, result: &mut String) {
+    let children: Vec<Node> = node.children(&mut node.walk()).collect();
+    let kinds: Vec<&str> = children.iter().map(Node::kind).collect();
+    let cast = match kinds.as_slice() {
+        [_, "::", "Typename"] => Some((children[0], children[2])),
+        ["kw_cast", "(", "a_expr", "kw_as", "Typename", ")"] => {
+            Some((children[2], children[4]))
+        }
+        _ => None,
+    };
+    if let Some((operand, typename)) = cast {
+        let parentheses = !constant_or_parenthesized(&operand);
+        if parentheses {
+            result.push('(');
+        }
+        write_casts(&operand, source, result);
+        if parentheses {
+            result.push(')');
+        }
+        result.push_str("::");
+        result.push_str(typename.text(source));
+        return;
+    }
+    let mut position = node.start_byte();
+    for child in &children {
+        result.push_str(&source[position..child.start_byte()]);
+        write_casts(child, source, result);
+        position = child.end_byte();
+    }
+    result.push_str(&source[position..node.end_byte()]);
+}
+
+/// Whether the operand of a cast is a string literal, a NULL, an empty
+/// `ARRAY[]` or an expression in parentheses
+fn constant_or_parenthesized(operand: &Node) -> bool {
+    let mut node = *operand;
+    loop {
+        let children: Vec<Node> = node.children(&mut node.walk()).collect();
+        let kinds: Vec<&str> = children.iter().map(Node::kind).collect();
+        match (node.kind(), kinds.as_slice()) {
+            ("AexprConst", ["Sconst" | "kw_null"]) => return true,
+            ("c_expr", ["(", _, ")"]) => return true,
+            ("c_expr", ["kw_array", "array_expr"]) => {
+                return children[1].child_count() == 2;
+            }
+            (_, [_]) => node = children[0],
+            _ => return false,
+        }
+    }
 }
 
 /// Whether the character can be in a name that is not quoted
@@ -1848,6 +1936,60 @@ mod tests {
             "((a)::varchar(3)[] IS NULL)",
             "((a)::character varying(3)[] IS NULL)",
         );
+    }
+
+    /// Each hand-written cast syntax against the form that
+    /// `pg_get_constraintdef` gives on PostgreSQL 18
+    #[test]
+    fn canonicalizes_cast_syntax() {
+        let same = |written: &str, stored: &str| {
+            assert_eq!(canonical_casts(written), stored, "{written}");
+            assert_eq!(canonical_casts(stored), stored, "{stored}");
+        };
+        same("(i::int > 0)", "((i)::integer > 0)");
+        same("(CAST(i AS integer) > 0)", "((i)::integer > 0)");
+        same("(cast ( i as int ) > 0)", "((i)::integer > 0)");
+        same("(i :: int > 0)", "((i)::integer > 0)");
+        same("((i::int4 + 1) > 0)", "(((i)::integer + 1) > 0)");
+        same("(- i::int < 0)", "(- (i)::integer < 0)");
+        same("(new.i::int > 0)", "((new.i)::integer > 0)");
+        same("(\"I\"::int > 0)", "((\"I\")::integer > 0)");
+        same("(abs(i)::int > 0)", "((abs(i))::integer > 0)");
+        same("(abs(i::int) > 0)", "(abs((i)::integer) > 0)");
+        same(
+            "(now()::date > '2020-01-01'::date)",
+            "((now())::date > '2020-01-01'::date)",
+        );
+        same("(i::int::bigint > 0)", "(((i)::integer)::bigint > 0)");
+        same(
+            "(CAST(CAST(i AS int) AS bigint) > 0)",
+            "(((i)::integer)::bigint > 0)",
+        );
+        same("(i::int)::bigint", "((i)::integer)::bigint");
+        same("((x).y::int > 0)", "(((x).y)::integer > 0)");
+        // an operand in parentheses stays as it is (PostgreSQL writes
+        // `((j ->> 'k'::text))::integer`)
+        same("(j->>'k')::int", "(j->>'k')::integer");
+        same("(a <> ARRAY[i::int])", "(a <> ARRAY[(i)::integer])");
+        same("(a::bigint[] <> '{}')", "((a)::bigint[] <> '{}')");
+        same("(i::numeric(10,2) > 0)", "((i)::numeric(10,2) > 0)");
+        // a constant that is not a string literal or a NULL
+        same("1::bigint", "(1)::bigint");
+        same("CAST(2 AS bigint)", "(2)::bigint");
+        same("(true::text <> t)", "((true)::text <> t)");
+        // a string literal, a NULL and an empty array stay as they are
+        same("(t <> 'a'::text)", "(t <> 'a'::text)");
+        same("(t <> CAST('a' AS text))", "(t <> 'a'::text)");
+        same("(t <> E'a'::text)", "(t <> E'a'::text)");
+        same("'x'::varchar", "'x'::character varying");
+        same("CAST(NULL AS int)", "NULL::integer");
+        same("ARRAY[]::int[]", "ARRAY[]::integer[]");
+        same(
+            "('a'::text::varchar <> t)",
+            "(('a'::text)::character varying <> t)",
+        );
+        // text that the grammar cannot read stays as it is
+        assert_eq!(canonical_casts("(i::INT4 >"), "(i::integer >");
     }
 
     #[test]
