@@ -76,6 +76,7 @@ pub fn deploy(args: &cli::Deploy) -> Result<(), String> {
     let resolutions = resolutions(&project, &diff, &groups, &families);
     task.finish();
     let mut output = build::assemble(&project)?;
+    without_empty_statements(&mut output);
     let task = progress::spinner("Planning changes");
     output.dump.sort_entries();
     let privileges = privileges::plan(
@@ -1487,6 +1488,33 @@ fn entry_key(entry: &libpgdump::Entry) -> Option<ObjectKey> {
         _ => entry.tag.clone()?,
     };
     Some(ObjectKey { desc, schema, name })
+}
+
+/// The build archive without the empty statement at the end of each
+/// COMMENT entry. The build writes `;` after the comment, and `;`
+/// again after each entry, as the Python build did. pg_restore runs
+/// the empty statement; the script does not carry it.
+fn without_empty_statements(output: &mut build::BuildOutput) {
+    let changed: Vec<(i32, String)> = output
+        .dump
+        .entries()
+        .iter()
+        .filter(|entry| entry.desc == libpgdump::ObjectType::Comment)
+        .filter_map(|entry| {
+            // the comment is a dollar-quoted string, thus the `;`
+            // after it ends the statement
+            let defn = entry.defn.as_deref()?;
+            let statement = defn.strip_suffix(";\n")?;
+            statement
+                .ends_with("$;\n")
+                .then(|| (entry.dump_id, statement.to_string()))
+        })
+        .collect();
+    for (dump_id, defn) in changed {
+        if let Some(entry) = output.dump.get_entry_mut(dump_id) {
+            entry.defn = Some(defn);
+        }
+    }
 }
 
 /// `DESC namespace.tag` for plan labels
@@ -3143,5 +3171,62 @@ mod tests {
         limits.superuser = true;
         limits.hidden_user_mappings.clear();
         assert!(unreadable(&inventory, &diff, &limits).is_empty());
+    }
+
+    /// A COMMENT entry of the build loses its empty statement; other
+    /// entries do not change
+    #[test]
+    fn comment_entries_lose_the_empty_statement() {
+        let mut output = build::BuildOutput {
+            dump: libpgdump::new("test", "UTF8", "18.0")
+                .expect("new output dump"),
+            item_ids: std::collections::HashMap::new(),
+        };
+        let comment = || libpgdump::ObjectType::Comment;
+        let cases = [
+            (
+                comment(),
+                "COMMENT ON SUBSCRIPTION s IS $$c$$;\n;\n",
+                "COMMENT ON SUBSCRIPTION s IS $$c$$;\n",
+            ),
+            (
+                comment(),
+                "COMMENT ON TABLE test.t IS $_$a $$ b$_$;\n;\n",
+                "COMMENT ON TABLE test.t IS $_$a $$ b$_$;\n",
+            ),
+            (
+                comment(),
+                "COMMENT ON TABLE test.t IS NULL;\n",
+                "COMMENT ON TABLE test.t IS NULL;\n",
+            ),
+            (
+                libpgdump::ObjectType::View,
+                "CREATE VIEW test.w AS SELECT 1 -- $;\n;\n",
+                "CREATE VIEW test.w AS SELECT 1 -- $;\n;\n",
+            ),
+        ];
+        let ids: Vec<i32> = cases
+            .iter()
+            .map(|(desc, defn, _)| {
+                output
+                    .dump
+                    .add_entry(
+                        desc.clone(),
+                        None,
+                        Some("x"),
+                        None,
+                        Some(defn),
+                        None,
+                        None,
+                        &[],
+                    )
+                    .expect("add entry")
+            })
+            .collect();
+        without_empty_statements(&mut output);
+        for (id, (_, _, expected)) in ids.iter().zip(cases) {
+            let entry = output.dump.get_entry_mut(*id).expect("entry");
+            assert_eq!(entry.defn.as_deref(), Some(expected));
+        }
     }
 }
