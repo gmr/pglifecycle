@@ -49,7 +49,7 @@ fi
 # a superuser reads all of the database, thus there is no warning
 ./target/debug/pglifecycle deploy -o "${WORKDIR}/read-role.sql" \
     -d "${TARGET_DB}" "${WORKDIR}/project" 2>"${WORKDIR}/read-role.err"
-if grep -q 'cannot read' "${WORKDIR}/read-role.err"; then
+if grep -qi 'cannot read' "${WORKDIR}/read-role.err"; then
     echo "Convergence gate FAILED: a warning for a superuser" >&2
     cat "${WORKDIR}/read-role.err" >&2
     exit 1
