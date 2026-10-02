@@ -297,7 +297,21 @@ grants come from the project. With `-O`, deploy does not set or compare
 owners (as `pg_restore --no-owner`).
 
 Roles, users, groups, and tablespaces are skipped entirely — they are
-cluster-level objects a single-database dump cannot capture.
+cluster-level objects a single-database dump cannot capture. deploy
+does not make, change or drop them, but it gives a warning for each
+role that a statement of the script names and the database does not
+have: a grantee, an `OWNER TO` role, the roles of a policy, the roles
+of `ALTER DEFAULT PRIVILEGES`, and the user of a user mapping. The
+script fails on such a statement until the role exists. deploy reads
+the roles of the database with `pg_dumpall --globals-only`; with
+`--dump` there is no database to read, thus deploy does not check
+roles. PUBLIC, `CURRENT_USER` and the reserved `pg_` roles are not
+checked.
+
+A grant, comment or security label on an object that is not in the
+project, for example a grant on the `public` schema or on a
+`pg_catalog` function, is not in the plan. deploy gives a warning for
+each one.
 
 A publication changes in place: one `ALTER PUBLICATION ... SET` gives
 all its tables and schemas, and `SET (...)` gives its parameters. The
