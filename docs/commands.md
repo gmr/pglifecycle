@@ -272,6 +272,13 @@ again; like a drop, they are gated. When they revoke a grant, the
 script header warns that the database can allow access the project
 does not. With `-x`, deploy does not change default privileges.
 
+Default privileges do not give privileges to the objects that deploy
+makes: the privileges of each object are the built-in privileges of
+its owner and the grants and revocations of the project for that
+object (see the privileges below). Default privileges only change the
+objects that a role makes outside deploy, for example an application
+that makes tables at run time.
+
 deploy gives each object the owner that the project names, as
 pg_restore does. The connecting role owns what the script creates, so
 the script sets the owner with `ALTER … OWNER TO` directly after each
@@ -463,6 +470,17 @@ A raw statement has no structured input types, so it is matched by
 its type, schema and name, and any overload of that name counts. A
 raw cast is the exception: it must have its source and target types,
 and it is matched by them.
+
+The privileges that the project gives an object are the built-in
+privileges of its owner (`acldefault`) and the grants and revocations
+of the project for that object. This is true for new objects and for
+objects that the database has. Default privileges are not part of it:
+they only change objects that a role makes outside deploy. Thus a
+project must give each grant that an object must have. When an object
+that the database has got a privilege from default privileges and the
+project does not give that privilege, deploy plans a `REVOKE`, which
+is withheld without `--allow-drop`. To keep the privilege, add the
+grant to the project (`pull` writes it).
 
 Privileges compare by the privileges that each object has, not by
 the statements as written. The project and pg_dump write the grants
