@@ -849,6 +849,9 @@ impl Loader {
             return;
         }
         let id = self.project.inventory.len();
+        if let Some(warning) = kept_argument_list(ot, &definition) {
+            log::warn!("{warning}");
+        }
         // a routine whose name includes its argument types, as
         // test-project/functions writes it, is also an overload of its
         // name without them
@@ -1062,20 +1065,75 @@ fn routine_signature(definition: &Definition) -> Vec<String> {
 /// that its name can include, as test-project/functions writes it.
 /// When the routine has parameters, the list at the end of the name
 /// is its argument types only if it has the types of the parameters:
-/// the name of `f(x)` with an `integer` parameter is `f(x)`.
+/// the name of `f(x)` with an `integer` parameter is `f(x)`. A mode in
+/// the list is not part of the type, and an `OUT` argument is not an
+/// argument type, as in [`parameter_signature`].
 pub(crate) fn routine_base_name<'a>(
     name: &'a str,
     parameters: &Option<Vec<FunctionParameter>>,
 ) -> &'a str {
     match tag_signature(name) {
-        Some((base, arguments))
+        Some((base, _))
             if parameters.is_none()
-                || parameter_signature(parameters) == arguments =>
+                || parameter_signature(parameters) == input_types(name) =>
         {
             base
         }
         _ => name,
     }
+}
+
+/// The input types of the argument list at the end of a routine name,
+/// without their modes
+fn input_types(name: &str) -> Vec<String> {
+    let Some((_, arguments)) = crate::utils::split_signature(name) else {
+        return Vec::new();
+    };
+    split_arguments(arguments)
+        .iter()
+        .filter_map(|argument| {
+            let (mode, data_type) =
+                argument.split_once(char::is_whitespace).unwrap_or_default();
+            match mode.to_ascii_uppercase().as_str() {
+                "OUT" => None,
+                "IN" | "INOUT" | "VARIADIC" => Some(data_type.trim_start()),
+                _ => Some(argument.as_str()),
+            }
+        })
+        .map(identity_type)
+        .collect()
+}
+
+/// A warning for a function or procedure with parameters whose name
+/// has a list at its end that is not the types of the parameters. The
+/// list is then part of the name, as for `f(x)`, but it can be a
+/// mistake, such as `f(varchar)` for a `text` parameter.
+fn kept_argument_list(
+    ot: ObjectType,
+    definition: &Definition,
+) -> Option<String> {
+    let (name, parameters) = match (ot, definition) {
+        (ObjectType::Function, Definition::Function(f)) => {
+            (&f.name, &f.parameters)
+        }
+        (ObjectType::Procedure, Definition::Procedure(p)) => {
+            (&p.name, &p.parameters)
+        }
+        _ => return None,
+    };
+    if parameters.is_none()
+        || tag_signature(name).is_none()
+        || routine_base_name(name, parameters) != name
+    {
+        return None;
+    }
+    Some(format!(
+        "{} {}.{name}: the list at the end of the name is part of the \
+         name, because it is not the types of the parameters ({})",
+        ot.as_str(),
+        definition.schema().unwrap_or_default(),
+        parameter_signature(parameters).join(", "),
+    ))
 }
 
 /// The argument types in a routine name, as [`tag_signature`] reads
@@ -1640,6 +1698,53 @@ mod tests {
         assert_eq!(
             routine_base_name("g\"(y", &parameters(&["text"])),
             "g\"(y"
+        );
+        // a mode in the name is not part of the type, and an OUT
+        // argument is not an argument type, as in parameter_signature
+        assert_eq!(routine_base_name("f(IN integer)", &integer), "f");
+        assert_eq!(routine_base_name("f(inout int4)", &integer), "f");
+        assert_eq!(routine_base_name("f(integer, OUT text)", &integer), "f");
+        assert_eq!(
+            routine_base_name(
+                "f(VARIADIC integer[])",
+                &parameters(&["integer[]"])
+            ),
+            "f"
+        );
+    }
+
+    /// The loader warns when a list at the end of a routine name is
+    /// part of the name, because it does not have the types of the
+    /// parameters
+    #[test]
+    fn a_kept_argument_list_gives_a_warning() {
+        let function = |name: &str, data_type: &str| {
+            to_definition(
+                ObjectType::Function,
+                json!({"name": name, "schema": "test", "owner": "o",
+                       "parameters": [{"mode": "IN", "data_type": data_type}],
+                       "returns": "integer", "language": "sql",
+                       "definition": "SELECT 1"}),
+            )
+            .unwrap()
+        };
+        let warning = kept_argument_list(
+            ObjectType::Function,
+            &function("f(varchar)", "text"),
+        )
+        .expect("a warning");
+        assert!(warning.contains("test.f(varchar)"), "{warning}");
+        assert!(warning.contains("(text)"), "{warning}");
+        assert_eq!(
+            kept_argument_list(
+                ObjectType::Function,
+                &function("f(integer)", "int4")
+            ),
+            None
+        );
+        assert_eq!(
+            kept_argument_list(ObjectType::Function, &function("f", "text")),
+            None
         );
     }
 

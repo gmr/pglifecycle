@@ -254,14 +254,16 @@
 //!     name or a tag is the parenthesized text at its end, not the
 //!     text after the first `(`. When the routine has parameters, the
 //!     list at the end of its name is its argument types only if it
-//!     has the types of the parameters. The build split the name at
-//!     the first `(`, as the Python did. Thus `CREATE FUNCTION
-//!     test.f(IN integer)` made a function with the wrong name for
-//!     `f(x)`, its comment named a type `x`, which does not exist, and
-//!     its grants did not parse. The comment of such a function names
-//!     the function with no argument types, as the comment of each
-//!     other function does. No test-project routine name has `(` or
-//!     `"` in the name without its arguments.
+//!     has the types of the parameters. A mode in the list is not
+//!     part of the type, and an `OUT` argument is not an argument
+//!     type. The build split the name at the first `(`, as the
+//!     Python did. Thus `CREATE FUNCTION test.f(IN integer)` made a
+//!     function with the wrong name for `f(x)`, its comment named a
+//!     type `x`, which does not exist, and its grants did not parse.
+//!     The comment of such a function names the function with no
+//!     argument types, as the comment of each other function does. No
+//!     test-project routine name has `(` or `"` in the name without
+//!     its arguments.
 //! 47. A user mapping on several servers is one entry for each
 //!     server. The first entry stands for the item, and each later
 //!     entry comes after the one before. The last entry stood for
