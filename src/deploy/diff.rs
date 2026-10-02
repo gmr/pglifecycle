@@ -225,7 +225,8 @@ pub struct Diff {
     /// Inventory item ids that the database has with another owner
     /// than the project. The owner is not part of the definition
     /// comparison: `ALTER ... OWNER TO` changes it in place for every
-    /// type
+    /// type. A sequence that a column owns is not in the set: its
+    /// table's owner change changes it
     pub owner_changed: BTreeSet<usize>,
 }
 
@@ -334,6 +335,7 @@ pub fn diff(project: &Project, assembly: &Assembly) -> Diff {
                         // compare
                         if db.owner().is_some_and(|owner| !owner.is_empty())
                             && item.definition.owner() != db.owner()
+                            && !linked_sequence(&item.definition, &db)
                         {
                             owner_changed.insert(item.id);
                         }
@@ -377,6 +379,22 @@ pub fn diff(project: &Project, assembly: &Assembly) -> Diff {
         removed: database,
         owned,
         owner_changed,
+    }
+}
+
+/// Whether a sequence is owned by the same column in the project and
+/// in the database. PostgreSQL refuses an owner change of such a
+/// sequence on its own: `ALTER TABLE ... OWNER TO` changes it with
+/// its table
+fn linked_sequence(repo: &Definition, db: &Definition) -> bool {
+    use super::alter::names::name;
+    match (repo, db) {
+        (Definition::Sequence(repo), Definition::Sequence(db)) => {
+            repo.owned_by.as_deref().is_some_and(|column| {
+                db.owned_by.as_deref().map(name) == Some(name(column))
+            })
+        }
+        _ => false,
     }
 }
 
@@ -2183,6 +2201,59 @@ mod tests {
         // the fields of an interval are its typmod
         assert_eq!(identity_type("interval day to second(3)"), "interval");
         assert_eq!(identity_type("INTERVAL HOUR[]"), "interval[]");
+    }
+
+    /// PostgreSQL refuses an owner change of a sequence that a column
+    /// owns: the owner change of the table changes it. A sequence that
+    /// a column owns only in the project, or that a column owns only
+    /// in the database, changes its owner on its own
+    #[test]
+    fn linked_sequences_change_owner_with_their_table() {
+        let sequence = |name: &str, owner: &str, owned_by: Option<&str>| {
+            serde_json::from_value::<models::Sequence>(serde_json::json!({
+                "name": name, "schema": "t", "owner": owner,
+                "owned_by": owned_by,
+            }))
+            .expect("sequence deserializes")
+        };
+        let table = |owner: &str| models::Table {
+            schema: String::from("t"),
+            owner: owner.to_string(),
+            ..table("yy", None)
+        };
+        let project = Project {
+            name: String::from("test"),
+            superuser: String::from("postgres"),
+            default_schema: String::from("public"),
+            path: std::path::PathBuf::new(),
+            inventory: [
+                sequence("aa", "o", Some("t.yy.id")),
+                sequence("bb", "o", Some("t.yy.id")),
+                sequence("cc", "o", None),
+            ]
+            .into_iter()
+            .map(|s| (ObjectType::Sequence, Definition::Sequence(s)))
+            .chain([(ObjectType::Table, Definition::Table(table("o")))])
+            .enumerate()
+            .map(|(id, (desc, definition))| models::Item {
+                id,
+                desc,
+                definition,
+                dependencies: BTreeSet::new(),
+            })
+            .collect(),
+        };
+        let mut assembly = Assembly::default();
+        assembly.sequences = vec![
+            sequence("aa", "postgres", Some("t.\"yy\".id")),
+            sequence("bb", "postgres", None),
+            sequence("cc", "postgres", Some("t.yy.id")),
+        ];
+        assembly.tables = vec![table("postgres")];
+        assert_eq!(
+            diff(&project, &assembly).owner_changed,
+            BTreeSet::from([1, 2, 3])
+        );
     }
 
     #[test]

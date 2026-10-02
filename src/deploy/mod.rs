@@ -64,6 +64,14 @@ pub fn deploy(args: &cli::Deploy) -> Result<(), String> {
         None,
         libpgfmt::style::Style::PgDump,
     )?;
+    let conflicts = sequence_owner_conflicts(&project.inventory);
+    if !args.no_owner && !conflicts.is_empty() {
+        log::warn!(
+            "A column owns each of these sequences, thus it has the owner \
+             of its table, not the owner that the project gives: {}",
+            conflicts.join(", ")
+        );
+    }
     // a serial column in the form that PostgreSQL stores, with the
     // sequence that the column owns in the database
     let implied = serial::expand(&mut project, &assembly);
@@ -847,6 +855,52 @@ fn check_roles(plan: &Plan, conn: &cli::Connection) -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+/// The sequences that a column of a project table owns, with another
+/// owner than the table. PostgreSQL gives such a sequence the owner of
+/// its table, and refuses an owner change of the sequence on its own
+fn sequence_owner_conflicts(inventory: &[Item]) -> Vec<String> {
+    use alter::names::name;
+    let columns: HashMap<String, &str> = inventory
+        .iter()
+        .filter_map(|item| match &item.definition {
+            Definition::Table(table) => Some(table),
+            _ => None,
+        })
+        .flat_map(|table| {
+            table.columns.iter().flatten().map(move |column| {
+                let key = name(&format!(
+                    "{}.{}.{}",
+                    quote_ident(&table.schema),
+                    quote_ident(&table.name),
+                    quote_ident(&column.name)
+                ));
+                (key, table.owner.as_str())
+            })
+        })
+        .collect();
+    inventory
+        .iter()
+        .filter_map(|item| match &item.definition {
+            Definition::Sequence(sequence) => Some(sequence),
+            _ => None,
+        })
+        .filter(|sequence| {
+            sequence
+                .owned_by
+                .as_deref()
+                .and_then(|column| columns.get(&name(column)))
+                .is_some_and(|owner| *owner != sequence.owner)
+        })
+        .map(|sequence| {
+            format!(
+                "{}.{}",
+                quote_ident(&sequence.schema),
+                quote_ident(&sequence.name)
+            )
+        })
+        .collect()
 }
 
 /// Warn when the plan changes objects that the role that read the
@@ -3259,6 +3313,48 @@ mod tests {
             sql,
             ["CREATE FUNCTION test.\"f(x)\"(IN integer);\n", alters[0]]
         );
+    }
+
+    /// A sequence that a column owns has the owner of its table in
+    /// PostgreSQL, thus another owner in the project is a conflict
+    #[test]
+    fn sequence_owners_that_differ_from_their_table() {
+        use constants::ObjectType as O;
+        let item = |id, desc, value: serde_json::Value| Item {
+            id,
+            desc,
+            definition: match desc {
+                O::Sequence => Definition::Sequence(
+                    serde_json::from_value(value).unwrap(),
+                ),
+                _ => Definition::Table(serde_json::from_value(value).unwrap()),
+            },
+            dependencies: BTreeSet::new(),
+        };
+        let sequence = |id, name: &str, owner: &str, owned_by: &str| {
+            item(
+                id,
+                O::Sequence,
+                serde_json::json!({
+                    "name": name, "schema": "t", "owner": owner,
+                    "owned_by": owned_by,
+                }),
+            )
+        };
+        let inventory = [
+            item(
+                0,
+                O::Table,
+                serde_json::json!({
+                    "name": "Yy", "schema": "t", "owner": "o",
+                    "columns": [{"name": "id", "data_type": "integer"}],
+                }),
+            ),
+            sequence(1, "same", "o", "t.\"Yy\".id"),
+            sequence(2, "other", "p", "t.\"Yy\".ID"),
+            sequence(3, "no table", "p", "t.zz.id"),
+        ];
+        assert_eq!(sequence_owner_conflicts(&inventory), ["t.other"]);
     }
 
     /// OWNED BY is found outside the double quotes of a name

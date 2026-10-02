@@ -313,11 +313,17 @@ the owner: for example, CREATE TABLE in a new schema, and the indexes,
 comments and grants of a new table. To change the owner of an object
 that the database has, the connecting role must also have the
 privileges of its current owner. To change the owner of a schema, the
-connecting role must have CREATE on the database. A type whose model
-has no owner (for example publications, subscriptions and event
-triggers) keeps the connecting role as owner. So does most of what the
-project writes as raw `sql`: as pg_restore does, deploy sets no owner
-for an archive entry with no DROP statement. A new object gets the
+connecting role must have CREATE on the database. A sequence that a
+column owns (`owned_by`) gets its owner with its table: PostgreSQL
+refuses `ALTER SEQUENCE ... OWNER TO` on such a sequence, and `ALTER
+TABLE ... OWNER TO` changes the owner of both. Thus give the sequence
+the owner of its table; deploy warns when the project gives it another
+owner. An event trigger with no `owner` in its file keeps the owner
+that it has, and a new one gets the connecting role. A type whose
+model has no owner (for example publications and subscriptions) keeps
+the connecting role as owner. So does most of what the project writes
+as raw `sql`: as pg_restore does, deploy sets no owner for an archive
+entry with no DROP statement. A new object gets the
 privileges that the project gives it (see the privileges below), not
 the default privileges of the connecting role or of its owner. With
 `-O`, deploy does not set or compare owners (as `pg_restore

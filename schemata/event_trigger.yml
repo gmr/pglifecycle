@@ -13,6 +13,12 @@ properties:
     title: Name
     description: The event trigger name
     type: string
+  owner:
+    title: Owner
+    description: >
+      The role that owns the event trigger. It must be a superuser.
+      When it is absent, deploy does not set or compare the owner.
+    type: string
   event:
     title: The event that cause the fire to trigger
     enum: [ddl_command_start, ddl_command_end, table_rewrite, sql_drop, login]

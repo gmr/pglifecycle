@@ -1416,7 +1416,8 @@ impl Assembly {
                 conversion.owner = owner;
                 self.conversions.push(conversion);
             }
-            Statement::CreateEventTrigger(trigger) => {
+            Statement::CreateEventTrigger(mut trigger) => {
+                trigger.owner = Some(owner);
                 self.event_triggers.push(trigger);
             }
             Statement::AlterEventTrigger { name, enabled } => {
@@ -3322,6 +3323,10 @@ mod tests {
         assert_eq!(
             assembly.event_triggers[0].enabled.as_deref(),
             Some("DISABLED")
+        );
+        assert_eq!(
+            assembly.event_triggers[0].owner.as_deref(),
+            Some("postgres")
         );
         let publication = &assembly.publications[0];
         assert_eq!(publication.tables.as_ref().unwrap()[0].name(), "s.t");
