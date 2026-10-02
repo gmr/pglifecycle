@@ -67,13 +67,17 @@ fn canonical_expression(expression: &mut Option<String>) {
 
 /// A column default with the type of each cast in the form that
 /// PostgreSQL writes. A default that is not a string has no cast. A
-/// NULL default that PostgreSQL does not store (see
-/// [`crate::deploy::null_default`]) is no default.
+/// NULL default on a column of a built-in type is in the form that
+/// PostgreSQL stores (see [`crate::deploy::stored_null_default`]).
 fn canonical_default(data_type: &str, default: &mut Option<Value>) {
     if let Some(Value::String(text)) = default
-        && crate::deploy::null_default(data_type, text)
+        && let Some(stored) = crate::deploy::stored_null_default(
+            data_type,
+            text,
+            &crate::deploy::UserTypes::new(),
+        )
     {
-        *default = None;
+        *default = stored.map(Value::String);
     }
     if let Some(Value::String(text)) = default {
         *text = crate::deploy::canonical_casts(text);

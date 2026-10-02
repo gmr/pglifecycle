@@ -15,7 +15,8 @@ mod privileges;
 mod routine_body;
 
 pub(crate) use diff::{
-    canonical_casts, canonical_collation, identity_type, null_default,
+    UserTypes, canonical_casts, canonical_collation, identity_type,
+    stored_null_default,
 };
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -41,6 +42,9 @@ pub fn deploy(args: &cli::Deploy) -> Result<(), String> {
     let mut project = project::load(&args.project)?;
     // one item for each text search object, not for each schema
     alter::text_search::split_inventory(&mut project.inventory);
+    // a NULL default in the form that PostgreSQL stores, which the
+    // types of the project tell
+    diff::store_null_defaults(&mut project);
     let source = source_label(args);
     log::info!("Comparing {} against {source}", project.name);
     let ddl = pgdump::DumpDdl {
