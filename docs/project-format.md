@@ -354,7 +354,11 @@ revocations:
   the sequence. A change to a smaller type (`bigserial` to `serial`)
   is destructive: `deploy` changes the column and the sequence only
   with `--allow-drop`. `deploy` compares the privileges of the
-  sequence only when the project grants privileges on it. Do not
+  sequence only when the project grants privileges on it. A serial
+  column has a sequence with the default options: when the database
+  sequence has other options (for example `increment_by: 10`),
+  `deploy` changes them back to the defaults. To keep other options,
+  write the column and the sequence as `pull` writes them. Do not
   write the sequence of a serial column as its own file: write the
   column in one of the two forms.
 
