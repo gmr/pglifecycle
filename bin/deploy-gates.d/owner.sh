@@ -170,3 +170,16 @@ expect_owner "SELECT bool_and(pg_get_userbyid(relowner) = 'postgres')
                                 'test.gate_linked_a'::regclass)" \
     "the owner of a table and its linked sequence was not set back"
 expect_empty_plan "a linked sequence gets its owner with its table"
+
+# a sequence that the database does not link, with another owner:
+# OWNED BY needs the owner of the table, thus the plan sets the owner
+# of the sequence first
+psql -d "${TARGET_DB}" -q -v ON_ERROR_STOP=1 \
+    -c 'ALTER SEQUENCE test.gate_linked_a OWNED BY NONE' \
+    -c 'ALTER SEQUENCE test.gate_linked_a OWNER TO "Gate Owner"'
+./target/debug/pglifecycle deploy --apply -d "${TARGET_DB}" \
+    "${WORKDIR}/project"
+expect_owner "SELECT pg_get_userbyid(relowner) = 'postgres'
+    FROM pg_class WHERE oid = 'test.gate_linked_a'::regclass" \
+    "the owner of a sequence to link was not set back"
+expect_empty_plan "a sequence gets its owner before OWNED BY"
