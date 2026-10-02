@@ -106,6 +106,10 @@ pub fn deploy(args: &cli::Deploy) -> Result<(), String> {
 /// `--role`, or the user of the connection. A `--dump` file does not
 /// say which role runs the script, thus there is none
 fn creator(args: &cli::Deploy) -> Option<String> {
+    // --no-privileges compares no privileges, thus no query is necessary
+    if args.no_privileges {
+        return None;
+    }
     if args.dump.is_some() {
         log::debug!(
             "A dump does not give the role that runs the script; deploy \
