@@ -11,6 +11,7 @@
 
 mod alter;
 mod diff;
+mod privileges;
 mod routine_body;
 
 pub(crate) use diff::{
@@ -73,7 +74,17 @@ pub fn deploy(args: &cli::Deploy) -> Result<(), String> {
     let mut output = build::assemble(&project)?;
     let task = progress::spinner("Planning changes");
     output.dump.sort_entries();
-    let plan = plan(&diff, &resolutions, &output, &snapshot, args)?;
+    let privileges = privileges::plan(
+        &project,
+        &diff,
+        &resolutions,
+        &output,
+        &snapshot,
+        args,
+        creator(args).as_deref(),
+    )?;
+    let plan =
+        plan(&diff, &resolutions, &output, &snapshot, &privileges, args)?;
     task.finish();
     report(&diff, &plan, &assembly);
     // a --dump file has no roles, thus only a live database is checked
@@ -91,6 +102,36 @@ pub fn deploy(args: &cli::Deploy) -> Result<(), String> {
         apply(&plan, &script, args)?;
     }
     Ok(())
+}
+
+/// The role that runs the script and thus makes the new objects:
+/// `--role`, or the user of the connection. A `--dump` file does not
+/// say which role runs the script, thus there is none
+fn creator(args: &cli::Deploy) -> Option<String> {
+    // --no-privileges compares no privileges, thus no query is necessary
+    if args.no_privileges {
+        return None;
+    }
+    if args.dump.is_some() {
+        log::debug!(
+            "A dump does not give the role that runs the script; deploy \
+             assumes that it has the built-in default privileges"
+        );
+        return None;
+    }
+    if let Some(role) = &args.connection.role {
+        return Some(role.clone());
+    }
+    match pgdump::current_user(&args.connection) {
+        Ok(user) => Some(user),
+        Err(error) => {
+            log::warn!(
+                "Cannot read the user of the connection, thus new objects \
+                 can keep the default privileges of that user: {error}"
+            );
+            None
+        }
+    }
 }
 
 /// Execute the plan against the database via psql, refusing if
@@ -238,6 +279,7 @@ fn plan(
     resolutions: &BTreeMap<usize, Resolution>,
     output: &build::BuildOutput,
     snapshot: &libpgdump::Dump,
+    privileges: &privileges::Privileges,
     args: &cli::Deploy,
 ) -> Result<Plan, String> {
     let mut included = Vec::new();
@@ -406,28 +448,7 @@ fn plan(
         if direct.is_some_and(|id| defaults.contains(id)) {
             continue;
         }
-        let owners: Vec<usize> = match direct {
-            Some(id) => vec![*id],
-            None => {
-                // walk the dependency graph until it reaches inventory
-                // items, so comments/ACLs on child entries still map to
-                // the object that owns them
-                let mut items = Vec::new();
-                let mut seen = HashSet::new();
-                let mut stack: Vec<i32> = entry.dependencies.clone();
-                while let Some(dep) = stack.pop() {
-                    if !seen.insert(dep) {
-                        continue;
-                    }
-                    if let Some(id) = output.item_ids.get(&dep) {
-                        items.push(*id);
-                    } else if let Some(parent) = entries_by_id.get(&dep) {
-                        stack.extend(parent.dependencies.iter().copied());
-                    }
-                }
-                items
-            }
-        };
+        let owners = entry_owners(entry, output, &entries_by_id);
         if owners.is_empty() {
             if matches!(
                 entry.desc,
@@ -475,7 +496,11 @@ fn plan(
                 false,
                 Statement {
                     label: label.clone(),
-                    sql: format!("{defn}{}", owner.unwrap_or_default()),
+                    sql: format!(
+                        "{defn}{}{}",
+                        owner.unwrap_or_default(),
+                        after_create(privileges, entry)
+                    ),
                     fails_open: false,
                 },
             );
@@ -627,6 +652,7 @@ fn plan(
                     if let Some(owner) = &owner {
                         sql.push_str(owner);
                     }
+                    sql.push_str(&after_create(privileges, entry));
                     push(
                         true,
                         Statement {
@@ -669,6 +695,18 @@ fn plan(
     for (destructive, statement) in waiting.into_values().flatten() {
         push(destructive, statement);
     }
+    // the privileges of the objects that the database has, after each
+    // statement that changes an object or its owner
+    for alter in &privileges.existing {
+        push(
+            alter.destructive,
+            Statement {
+                label: alter.label.clone().unwrap_or_default(),
+                sql: alter.sql.clone(),
+                fails_open: alter.fails_open,
+            },
+        );
+    }
     Ok(Plan {
         included,
         excluded,
@@ -676,6 +714,46 @@ fn plan(
         included_destructive,
         unowned,
     })
+}
+
+/// The items that own an archive entry: the entry's own item, or
+/// else the items that the dependency graph reaches, so that comments
+/// and ACLs on child entries still map to the object that owns them
+fn entry_owners(
+    entry: &libpgdump::Entry,
+    output: &build::BuildOutput,
+    entries_by_id: &HashMap<i32, &libpgdump::Entry>,
+) -> Vec<usize> {
+    if let Some(id) = output.item_ids.get(&entry.dump_id) {
+        return vec![*id];
+    }
+    let mut items = Vec::new();
+    let mut seen = HashSet::new();
+    let mut stack: Vec<i32> = entry.dependencies.clone();
+    while let Some(dep) = stack.pop() {
+        if !seen.insert(dep) {
+            continue;
+        }
+        if let Some(id) = output.item_ids.get(&dep) {
+            items.push(*id);
+        } else if let Some(parent) = entries_by_id.get(&dep) {
+            stack.extend(parent.dependencies.iter().copied());
+        }
+    }
+    items
+}
+
+/// The privilege statements that come directly after the CREATE of an
+/// archive entry, in the same plan statement
+fn after_create(
+    privileges: &privileges::Privileges,
+    entry: &libpgdump::Entry,
+) -> String {
+    privileges
+        .after_create
+        .get(&entry.dump_id)
+        .cloned()
+        .unwrap_or_default()
 }
 
 /// Warn about each role that the script needs and the database does
@@ -1444,8 +1522,15 @@ mod tests {
             _ => unreachable!("parsed the deploy subcommand"),
         };
 
-        let plan = plan(&diff, &BTreeMap::new(), &output, &snapshot, &args)
-            .expect("plan succeeds");
+        let plan = plan(
+            &diff,
+            &BTreeMap::new(),
+            &output,
+            &snapshot,
+            &privileges::Privileges::default(),
+            &args,
+        )
+        .expect("plan succeeds");
 
         assert!(plan.excluded.is_empty());
         assert_eq!(
@@ -1679,8 +1764,15 @@ mod tests {
             cli::Action::Deploy(deploy) => deploy,
             _ => unreachable!("parsed the deploy subcommand"),
         };
-        let plan = plan(&diff, &BTreeMap::new(), &output, &snapshot, &args)
-            .expect("plan succeeds");
+        let plan = plan(
+            &diff,
+            &BTreeMap::new(),
+            &output,
+            &snapshot,
+            &privileges::Privileges::default(),
+            &args,
+        )
+        .expect("plan succeeds");
         assert!(plan.included.is_empty());
         assert_eq!(plan.excluded.len(), 1);
         assert_eq!(plan.excluded[0].label, "DEFAULT PRIVILEGES app");
@@ -1733,8 +1825,15 @@ mod tests {
             _ => unreachable!("parsed the deploy subcommand"),
         };
         let args = parse(&["pglifecycle", "deploy", "proj"]);
-        let plan = plan(&diff, &resolutions, &output, &snapshot, &args)
-            .expect("plan succeeds");
+        let plan = plan(
+            &diff,
+            &resolutions,
+            &output,
+            &snapshot,
+            &privileges::Privileges::default(),
+            &args,
+        )
+        .expect("plan succeeds");
         assert!(plan.excluded.is_empty());
         assert_eq!(plan.included.len(), 1);
         assert_eq!(plan.included[0].label, "DEFAULT PRIVILEGES app ON TABLES");
@@ -1745,9 +1844,15 @@ mod tests {
         );
         // --no-privileges leaves default privileges as they are
         let args = parse(&["pglifecycle", "deploy", "-x", "proj"]);
-        let unchanged =
-            super::plan(&diff, &resolutions, &output, &snapshot, &args)
-                .expect("plan succeeds");
+        let unchanged = super::plan(
+            &diff,
+            &resolutions,
+            &output,
+            &snapshot,
+            &privileges::Privileges::default(),
+            &args,
+        )
+        .expect("plan succeeds");
         assert!(unchanged.included.is_empty());
     }
 
@@ -1831,8 +1936,15 @@ mod tests {
             cli::Action::Deploy(deploy) => deploy,
             _ => unreachable!("parsed the deploy subcommand"),
         };
-        let plan = plan(&diff, &resolutions, &output, &snapshot, &args)
-            .expect("plan succeeds");
+        let plan = plan(
+            &diff,
+            &resolutions,
+            &output,
+            &snapshot,
+            &privileges::Privileges::default(),
+            &args,
+        )
+        .expect("plan succeeds");
         let sql: Vec<&str> =
             plan.included.iter().map(|s| s.sql.as_str()).collect();
         assert_eq!(
@@ -1939,8 +2051,15 @@ mod tests {
             cli::Action::Deploy(deploy) => deploy,
             _ => unreachable!("parsed the deploy subcommand"),
         };
-        let plan = plan(&diff, &resolutions, &output, &snapshot, &args)
-            .expect("plan succeeds");
+        let plan = plan(
+            &diff,
+            &resolutions,
+            &output,
+            &snapshot,
+            &privileges::Privileges::default(),
+            &args,
+        )
+        .expect("plan succeeds");
         assert!(plan.excluded.is_empty());
         let sql: Vec<&str> =
             plan.included.iter().map(|s| s.sql.as_str()).collect();
@@ -2182,8 +2301,15 @@ mod tests {
                 cli::Action::Deploy(deploy) => deploy,
                 _ => unreachable!("parsed the deploy subcommand"),
             };
-            plan(&diff, &BTreeMap::new(), &output, &snapshot, &args)
-                .expect("plan succeeds")
+            plan(
+                &diff,
+                &BTreeMap::new(),
+                &output,
+                &snapshot,
+                &privileges::Privileges::default(),
+                &args,
+            )
+            .expect("plan succeeds")
         };
         let owned = plan_with(&["pglifecycle", "deploy", "p"]);
         let sql: Vec<&str> =
@@ -2321,12 +2447,19 @@ mod tests {
             cli::Action::Deploy(deploy) => deploy,
             _ => unreachable!("parsed the deploy subcommand"),
         };
-        plan(&diff, &resolutions, &output, &snapshot, &args)
-            .expect("plan succeeds")
-            .included
-            .into_iter()
-            .map(|statement| statement.sql)
-            .collect()
+        plan(
+            &diff,
+            &resolutions,
+            &output,
+            &snapshot,
+            &privileges::Privileges::default(),
+            &args,
+        )
+        .expect("plan succeeds")
+        .included
+        .into_iter()
+        .map(|statement| statement.sql)
+        .collect()
     }
 
     /// A function that depends on a changed table comes after it in
@@ -2559,8 +2692,15 @@ mod tests {
             cli::Action::Deploy(deploy) => deploy,
             _ => unreachable!("parsed the deploy subcommand"),
         };
-        let plan = plan(&diff, &BTreeMap::new(), &output, &snapshot, &args)
-            .expect("plan succeeds");
+        let plan = plan(
+            &diff,
+            &BTreeMap::new(),
+            &output,
+            &snapshot,
+            &privileges::Privileges::default(),
+            &args,
+        )
+        .expect("plan succeeds");
         assert!(plan.included.is_empty());
         assert_eq!(
             plan.unowned,

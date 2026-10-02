@@ -243,6 +243,23 @@ pub fn apply(conn: &cli::Connection, script: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// The user of the connection (`SELECT current_user`), read with psql
+pub fn current_user(conn: &cli::Connection) -> Result<String, String> {
+    let mut args = connection_args(conn);
+    if let Some(dbname) = &conn.dbname {
+        args.push("-d".into());
+        args.push(dbname.into());
+    }
+    for arg in ["-X", "-A", "-t", "-c", "SELECT current_user"] {
+        args.push(arg.into());
+    }
+    let output = run("psql", &args, &[], conn)?;
+    if !output.status.success() {
+        return Err(stderr_of(&output));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
 /// The DDL-suppression and object-exclusion flags for a pg_dump
 /// invocation, in a stable order
 fn ddl_args(ddl: &DumpDdl) -> Vec<String> {

@@ -242,6 +242,12 @@ pub struct Acl {
     /// The grantee roles
     pub roles: Vec<String>,
     pub with_grant_option: bool,
+    /// `REVOKE GRANT OPTION FOR`: the statement takes away only the
+    /// right to grant the privileges
+    pub grant_option_for: bool,
+    /// The object as the statement writes it, after ON (for example
+    /// `TABLE test.users`)
+    pub on: String,
 }
 
 /// One granted/revoked privilege, with columns for column grants

@@ -75,7 +75,7 @@ pub(crate) struct Alter {
 }
 
 impl Alter {
-    fn new(sql: String) -> Self {
+    pub(crate) fn new(sql: String) -> Self {
         Self {
             sql,
             destructive: false,
