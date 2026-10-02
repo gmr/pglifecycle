@@ -88,8 +88,14 @@ pg_dump -d "${SOURCE_DB}" -Fc --schema-only -f "${WORKDIR}/source.dump"
 echo "==> Gate 1: equivalence (deploy --apply into an empty database)"
 bin/drop-database "${TARGET_DB}"
 psql -d postgres -q -c "CREATE DATABASE ${TARGET_DB}"
-./target/debug/pglifecycle deploy --apply -d "${TARGET_DB}" \
-    "${WORKDIR}/project"
+./target/debug/pglifecycle deploy --apply -o "${WORKDIR}/equivalence.sql" \
+    -d "${TARGET_DB}" "${WORKDIR}/project"
+# the script has no empty statement: a COMMENT of the build ends in
+# one, as the Python build wrote it
+if grep -n '^;$' "${WORKDIR}/equivalence.sql" >&2; then
+    echo "Equivalence gate FAILED: the script has an empty statement" >&2
+    exit 1
+fi
 dump_schema "${SOURCE_DB}" > "${WORKDIR}/source.sql"
 dump_schema "${TARGET_DB}" > "${WORKDIR}/target.sql"
 if diff -u "${WORKDIR}/source.sql" "${WORKDIR}/target.sql"; then
