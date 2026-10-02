@@ -1423,16 +1423,16 @@ fn cascade_keeps(
     else {
         return Vec::new();
     };
-    let mut seen: HashSet<i32> = user_type
-        .dependencies
+    // the type depends on its I/O functions, not on its shell type,
+    // thus find the shell type by its name
+    let mut seen: HashSet<i32> = entries
         .iter()
-        .copied()
-        .filter(|dep| {
-            entries.iter().any(|entry| {
-                entry.dump_id == *dep
-                    && entry.desc == libpgdump::ObjectType::ShellType
-            })
+        .filter(|entry| {
+            entry.desc == libpgdump::ObjectType::ShellType
+                && entry.namespace == user_type.namespace
+                && entry.tag == user_type.tag
         })
+        .map(|entry| entry.dump_id)
         .chain([user_type.dump_id])
         .collect();
     let mut pending: Vec<i32> = seen.iter().copied().collect();
@@ -2013,7 +2013,8 @@ mod tests {
             "DROP TYPE IF EXISTS test.mood;\n"
         );
 
-        // pg_dump makes the I/O functions depend on the shell type
+        // pg_dump makes the I/O functions depend on the shell type, and
+        // the type depend on its I/O functions
         let mut snapshot =
             libpgdump::new("test", "UTF8", "18.0").expect("new dump");
         let mut add = |desc, tag: &str, deps: &[i32]| {
@@ -2034,7 +2035,7 @@ mod tests {
         let read_id = add(OT::Function, "gate_shell_read(cstring)", &[shell]);
         let emit_id =
             add(OT::Function, "gate_shell_emit(test.gate_shell)", &[shell]);
-        let type_id = add(OT::Type, "gate_shell", &[shell, read_id, emit_id]);
+        let type_id = add(OT::Type, "gate_shell", &[read_id, emit_id]);
         add(OT::Table, "keeper", &[type_id]);
         // a CHECK constraint and an index are entries of their own, and
         // CASCADE drops them from the table that holds them
