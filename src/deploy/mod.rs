@@ -1321,11 +1321,19 @@ fn render_script(
     script
 }
 
-/// `label` with each line break as its escape, so that the label stays
-/// in its comment. A name, as of a role, can contain a line break, and
-/// the text after the break can run as SQL
+/// `label` with each control character as its escape, so that the
+/// label stays in its comment. A name, as of a role, can contain a line
+/// break, and the text after the break can run as SQL
 fn one_line(label: &str) -> String {
-    label.replace('\r', "\\r").replace('\n', "\\n")
+    let mut line = String::new();
+    for c in label.chars() {
+        if c.is_control() {
+            line.extend(c.escape_default());
+        } else {
+            line.push(c);
+        }
+    }
+    line
 }
 
 /// `DROP <type> IF EXISTS <name>` for a database-only object. User
@@ -2656,7 +2664,8 @@ mod tests {
     #[test]
     fn label_with_newline_stays_in_its_comment() {
         let statement = || Statement {
-            label: "ROLE a\nDROP TABLE t;\r\n IN DATABASE db".to_string(),
+            label: "ROLE x\nDROP TABLE t; -- IN DATABASE d\r\nDROP TABLE u;\t"
+                .to_string(),
             sql: "ALTER ROLE \"a\" RESET work_mem;\n".to_string(),
             fails_open: true,
         };
@@ -2669,15 +2678,12 @@ mod tests {
         };
         let script = render_script(&plan, "test", "db", None);
         assert!(!script.contains("\nDROP TABLE"), "{script}");
-        assert!(!script.contains('\r'), "{script}");
+        assert!(!script.contains(['\r', '\t']), "{script}");
+        let label = "ROLE x\\nDROP TABLE t; -- IN DATABASE d\\r\\n\
+                     DROP TABLE u;\\t";
+        assert!(script.contains(&format!("\n-- {label}\n")), "{script}");
         assert!(
-            script.contains(
-                "\n-- ROLE a\\nDROP TABLE t;\\r\\n IN DATABASE db\n"
-            ),
-            "{script}"
-        );
-        assert!(
-            script.contains("-- WARNING: ROLE a\\nDROP TABLE t;\\r\\n IN"),
+            script.contains(&format!("-- WARNING: {label} withheld")),
             "{script}"
         );
     }
