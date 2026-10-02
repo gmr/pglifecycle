@@ -17,6 +17,24 @@ use tree_sitter::Node;
 use crate::ddl::NodeExt;
 use crate::deploy::identity_type;
 
+/// The body (`definition`) of a routine in `language` in the form that
+/// deploy compares. Pull formats a SQL or PL/pgSQL body, and the
+/// formatter adds or removes space at the start and end of the body. A
+/// body that a person writes often has no such space. That space has no
+/// effect in these languages, so it is removed. The space in the body
+/// stays. A body in another language stays as it is: for example, the
+/// space at the start of a PL/Python body is its indent.
+pub(crate) fn canonical_definition(
+    body: &str,
+    language: Option<&str>,
+) -> String {
+    let formatted = language.is_some_and(|language| {
+        language.eq_ignore_ascii_case("sql")
+            || language.eq_ignore_ascii_case("plpgsql")
+    });
+    if formatted { body.trim() } else { body }.to_string()
+}
+
 /// The body without each `AS` name of an output column that is the
 /// name that PostgreSQL gives to the column when it has no `AS`, for a
 /// column that is a constant with a cast (`'x'::text AS text`), also
