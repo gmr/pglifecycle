@@ -351,10 +351,12 @@ revocations:
   (`<table>_<column>_seq1` when the name is in use) is also found. A
   new table or a new column is made with the serial type. A change
   from `serial` to `bigserial` changes the column type and the type of
-  the sequence. `deploy` compares the privileges of the sequence only
-  when the project grants privileges on it. Do not write the sequence
-  of a serial column as its own file: write the column in one of the
-  two forms.
+  the sequence. A change to a smaller type (`bigserial` to `serial`)
+  is destructive: `deploy` changes the column and the sequence only
+  with `--allow-drop`. `deploy` compares the privileges of the
+  sequence only when the project grants privileges on it. Do not
+  write the sequence of a serial column as its own file: write the
+  column in one of the two forms.
 
 - A storage parameter (`storage_parameters` of a table, a
   materialized view or an index) can be a YAML number or boolean:

@@ -83,9 +83,27 @@ pub(crate) fn expand(
                 quote_ident(&table.name),
                 quote_ident(&column.name)
             ));
-            let Some(sequence) = assembly.sequences.iter().find(|s| {
-                s.owned_by.as_deref().map(names::name).as_ref() == Some(&owner)
-            }) else {
+            let owned: Vec<&Sequence> = assembly
+                .sequences
+                .iter()
+                .filter(|s| {
+                    s.owned_by.as_deref().map(names::name).as_ref()
+                        == Some(&owner)
+                })
+                .collect();
+            // the column can own more than one sequence: use the
+            // sequence that its default names, else the first one
+            let used = match &existing.default {
+                Some(Value::String(text)) => build::nextval_target(text),
+                _ => None,
+            };
+            let Some(sequence) = owned
+                .iter()
+                .find(|s| {
+                    used.as_ref() == Some(&(s.schema.clone(), s.name.clone()))
+                })
+                .or(owned.first())
+            else {
                 continue;
             };
             let target = (sequence.schema.clone(), sequence.name.clone());
@@ -119,7 +137,10 @@ pub(crate) fn expand(
                 definition: Definition::Sequence(Sequence {
                     name: sequence.name.clone(),
                     schema: sequence.schema.clone(),
-                    owner: table.owner.clone(),
+                    // PostgreSQL refuses an owner change of a sequence
+                    // that a column owns: ALTER TABLE ... OWNER TO
+                    // changes it with the table
+                    owner: sequence.owner.clone(),
                     sql: None,
                     // pg_dump writes no AS for bigint
                     data_type: (data_type != "bigint")
@@ -236,7 +257,8 @@ mod tests {
 
     /// A serial column that the database has is in the stored form,
     /// with the sequence that it owns in the database, found by OWNED
-    /// BY. A new serial column stays serial.
+    /// BY. The sequence keeps the owner that it has in the database. A
+    /// new serial column stays serial.
     #[test]
     fn expands_serial_columns() {
         let mut project = project(
@@ -279,17 +301,17 @@ mod tests {
             sequences,
             vec![
                 serde_json::json!({
-                    "name": "t_id_seq1", "schema": "test", "owner": "o",
+                    "name": "t_id_seq1", "schema": "test", "owner": "postgres",
                     "data_type": "integer", "increment_by": 1,
                     "start_with": 1, "cache": 1, "owned_by": "test.t.id",
                 }),
                 serde_json::json!({
-                    "name": "t_b_seq", "schema": "test", "owner": "o",
+                    "name": "t_b_seq", "schema": "test", "owner": "postgres",
                     "increment_by": 1, "start_with": 1, "cache": 1,
                     "owned_by": "test.t.b",
                 }),
                 serde_json::json!({
-                    "name": "it's", "schema": "test", "owner": "o",
+                    "name": "it's", "schema": "test", "owner": "postgres",
                     "data_type": "integer", "increment_by": 1,
                     "start_with": 1, "cache": 1,
                     "owned_by": "test.t.\"Q\"",
@@ -316,6 +338,40 @@ mod tests {
             unreachable!()
         };
         assert_eq!(sequence.data_type, None);
+    }
+
+    /// Of two sequences that the column owns, deploy uses the sequence
+    /// that the database default names, not the first one
+    #[test]
+    fn owned_sequence_of_the_default() {
+        let mut assembly = database();
+        assembly.tables[0].columns.as_mut().unwrap()[0].default =
+            Some(Value::String("nextval('test.t_id_seq2'::regclass)".into()));
+        let old: Sequence = serde_json::from_value(serde_json::json!({
+            "name": "t_id_seq", "schema": "test", "owner": "postgres",
+            "data_type": "integer", "owned_by": "test.t.id",
+        }))
+        .unwrap();
+        let mut current = old.clone();
+        current.name = String::from("t_id_seq2");
+        assembly.sequences = vec![old, current];
+        let mut project = project(
+            vec![serde_json::json!({
+                "name": "t", "schema": "test", "owner": "o",
+                "columns": [{"name": "id", "data_type": "serial"}],
+            })],
+            vec![],
+        );
+        expand(&mut project, &assembly);
+        assert_eq!(
+            columns(&project)[0]["default"],
+            "nextval('test.t_id_seq2'::regclass)"
+        );
+        let Definition::Sequence(sequence) = &project.inventory[1].definition
+        else {
+            unreachable!()
+        };
+        assert_eq!(sequence.name, "t_id_seq2");
     }
 
     /// A sequence that the project lists is not added again, and a

@@ -126,6 +126,24 @@ done
     -d "${TARGET_DB}" "${WORKDIR}/project"
 expect_empty_plan "serial to bigserial converges"
 
+# bigserial to serial makes the sequence narrower. Without --allow-drop
+# the script does not change the sequence, as it does not change the
+# column
+serial_table serial "- name: added
+  data_type: serial"
+./target/debug/pglifecycle deploy -o "${WORKDIR}/serial-narrow.sql" \
+    -d "${TARGET_DB}" "${WORKDIR}/project"
+if grep -Eq '^ALTER SEQUENCE test\.gate_serial_id_seq AS integer;' \
+    "${WORKDIR}/serial-narrow.sql"; then
+    echo "Convergence gate FAILED: a narrower sequence type is in" \
+        "the script without --allow-drop" >&2
+    cat "${WORKDIR}/serial-narrow.sql" >&2
+    exit 1
+fi
+./target/debug/pglifecycle deploy --apply --allow-drop \
+    -d "${TARGET_DB}" "${WORKDIR}/project"
+expect_empty_plan "bigserial to serial converges"
+
 rm "${table}" "${collides}" "${taken}"
 psql -d "${TARGET_DB}" -q -v ON_ERROR_STOP=1 \
     -c "DROP TABLE test.gate_serial, test.gate_serial_c;" \

@@ -1703,21 +1703,40 @@ fn triggers(
     true
 }
 
+/// The size in bytes of a sequence type. A sequence with no type is a
+/// bigint sequence.
+fn sequence_width(data_type: Option<&str>) -> u8 {
+    match data_type.map(names::name).as_deref() {
+        Some("smallint" | "int2") => 2,
+        Some("integer" | "int" | "int4") => 4,
+        _ => 8,
+    }
+}
+
 /// Sequence reconciliation: a single ALTER SEQUENCE of the changed
 /// options, plus a comment delta. Every sequence property is
-/// alterable in place, so this never falls back to a rebuild.
+/// alterable in place, so this never falls back to a rebuild. A
+/// narrower type is a statement of its own, and it is destructive: the
+/// values of the sequence or of its column can be out of its range.
 fn sequence(repo: &Sequence, db: &Sequence) -> Resolution {
     if repo.sql != db.sql {
         return Resolution::Replace;
     }
     let name = qualified(&repo.schema, &repo.name);
+    let mut alters = Vec::new();
     let mut clauses: Vec<String> = Vec::new();
-    // a sequence with no type is a bigint sequence
     if repo.data_type != db.data_type {
-        clauses.push(format!(
-            "AS {}",
-            repo.data_type.as_deref().unwrap_or("bigint")
-        ));
+        let clause =
+            format!("AS {}", repo.data_type.as_deref().unwrap_or("bigint"));
+        if sequence_width(repo.data_type.as_deref())
+            < sequence_width(db.data_type.as_deref())
+        {
+            alters.push(Alter::destructive(format!(
+                "ALTER SEQUENCE {name} {clause};\n"
+            )));
+        } else {
+            clauses.push(clause);
+        }
     }
     if repo.increment_by != db.increment_by
         && let Some(increment) = repo.increment_by
@@ -1759,7 +1778,6 @@ fn sequence(repo: &Sequence, db: &Sequence) -> Resolution {
             None => "OWNED BY NONE".into(),
         });
     }
-    let mut alters = Vec::new();
     if !clauses.is_empty() {
         alters.push(Alter::new(format!(
             "ALTER SEQUENCE {name} {};\n",
@@ -3174,6 +3192,47 @@ mod tests {
         let alters =
             statements(sequence(&parse_sequence(repo), &parse_sequence(db)));
         assert_eq!(sql(&alters), vec!["ALTER SEQUENCE test.s AS bigint;\n"]);
+    }
+
+    /// A sequence type that is narrower can make the sequence too
+    /// small for its values or for its column: the change is
+    /// destructive. A wider type is not.
+    #[test]
+    fn narrower_sequence_type_is_destructive() {
+        let typed = |data_type: Option<&str>| {
+            parse_sequence(serde_json::json!({
+                "name": "s", "schema": "test", "owner": "postgres",
+                "data_type": data_type, "increment_by": 1,
+            }))
+        };
+        let changes = [
+            (None, Some("integer"), true),
+            (Some("integer"), Some("smallint"), true),
+            (None, Some("smallint"), true),
+            (Some("integer"), None, false),
+            (Some("smallint"), Some("integer"), false),
+        ];
+        for (db, repo, destructive) in changes {
+            let alters = statements(sequence(&typed(repo), &typed(db)));
+            assert_eq!(alters.len(), 1, "{db:?} to {repo:?}");
+            assert_eq!(
+                alters[0].destructive, destructive,
+                "{db:?} to {repo:?}"
+            );
+        }
+        // the other options do not wait for --allow-drop
+        let mut repo = typed(Some("integer"));
+        repo.increment_by = Some(2);
+        let alters = statements(sequence(&repo, &typed(None)));
+        assert_eq!(
+            sql(&alters),
+            vec![
+                "ALTER SEQUENCE test.s AS integer;\n",
+                "ALTER SEQUENCE test.s INCREMENT BY 2;\n",
+            ]
+        );
+        assert!(alters[0].destructive);
+        assert!(!alters[1].destructive);
     }
 
     #[test]
