@@ -1333,47 +1333,13 @@ fn normalize_table(table: &mut crate::models::Table) {
     }
     for fk in table.foreign_keys.iter_mut().flatten() {
         if fk.name.is_empty() {
-            fk.name =
-                generated_name(&table.name, &fk.columns.join("_"), "fkey");
+            fk.name = crate::utils::make_object_name(
+                &table.name,
+                Some(&fk.columns.join("_")),
+                "fkey",
+            );
         }
     }
-}
-
-/// The constraint name PostgreSQL generates, `<table>_<columns>_<label>`
-/// cut to 63 bytes by `makeObjectName`: it takes a byte from the longer
-/// of the two names until the name fits, then cuts each name back to a
-/// character boundary. PostgreSQL adds a number when the name is in
-/// use; that case is not known here, so such a key needs its name in
-/// the project.
-pub(crate) fn generated_name(
-    table: &str,
-    columns: &str,
-    label: &str,
-) -> String {
-    const MAX: usize = 63;
-    let available = MAX - label.len() - 2;
-    let (mut table_len, mut columns_len) = (table.len(), columns.len());
-    while table_len + columns_len > available {
-        if table_len > columns_len {
-            table_len -= 1;
-        } else {
-            columns_len -= 1;
-        }
-    }
-    format!(
-        "{}_{}_{label}",
-        clip(table, table_len),
-        clip(columns, columns_len)
-    )
-}
-
-/// The longest start of `name` that is not more than `len` bytes and
-/// ends on a character boundary, as `pg_mbcliplen` gives
-fn clip(name: &str, mut len: usize) -> &str {
-    while !name.is_char_boundary(len) {
-        len -= 1;
-    }
-    &name[..len]
 }
 
 fn inject(defn: &mut Value, key: &str, value: &str) {
@@ -1818,32 +1784,6 @@ mod tests {
 
     /// M6: a second object with the same (desc, schema, name) is
     /// rejected as an error instead of silently duplicating the item
-    #[test]
-    fn generated_foreign_key_name_matches_postgres() {
-        assert_eq!(
-            generated_name("addresses", "user_id", "fkey"),
-            "addresses_user_id_fkey"
-        );
-        // cut to 63 bytes, a character at a time from the longer part:
-        // PostgreSQL 18 names the foreign key of a table of 40 `a` on a
-        // column of 40 `b` the same
-        let name = generated_name(&"a".repeat(40), &"b".repeat(40), "fkey");
-        assert_eq!(name.len(), 63);
-        assert_eq!(
-            name,
-            format!("{}_{}_fkey", "a".repeat(29), "b".repeat(28))
-        );
-        // PostgreSQL balances the byte lengths first, then cuts each
-        // name back to a character boundary: 29 bytes of the table
-        // give 14 two-byte characters
-        let name =
-            generated_name(&"\u{e9}".repeat(20), &"x".repeat(35), "fkey");
-        assert_eq!(
-            name,
-            format!("{}_{}_fkey", "\u{e9}".repeat(14), "x".repeat(28))
-        );
-    }
-
     #[test]
     fn normalizes_the_short_forms_of_a_table() {
         let mut table: crate::models::Table = serde_json::from_value(json!({
