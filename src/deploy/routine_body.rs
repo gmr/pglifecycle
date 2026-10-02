@@ -21,9 +21,11 @@ use crate::deploy::identity_type;
 /// deploy compares. Pull formats a SQL or PL/pgSQL body, and the
 /// formatter adds or removes space at the start and end of the body. A
 /// body that a person writes often has no such space. That space has no
-/// effect in these languages, so it is removed. The space in the body
-/// stays. A body in another language stays as it is: for example, the
-/// space at the start of a PL/Python body is its indent.
+/// effect in these languages, so it is removed. Only the space that the
+/// PostgreSQL scanner ignores (`[ \t\n\r\f\v]`) is removed; for
+/// example, U+00A0 stays. The space in the body stays. A body in
+/// another language stays as it is: for example, the space at the
+/// start of a PL/Python body is its indent.
 pub(crate) fn canonical_definition(
     body: &str,
     language: Option<&str>,
@@ -32,7 +34,14 @@ pub(crate) fn canonical_definition(
         language.eq_ignore_ascii_case("sql")
             || language.eq_ignore_ascii_case("plpgsql")
     });
-    if formatted { body.trim() } else { body }.to_string()
+    // `trim_ascii` keeps `\v`, so the set is given here
+    let space = |c| matches!(c, ' ' | '\t' | '\n' | '\r' | '\x0c' | '\x0b');
+    if formatted {
+        body.trim_matches(space)
+    } else {
+        body
+    }
+    .to_string()
 }
 
 /// The body without each `AS` name of an output column that is the

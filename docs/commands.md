@@ -186,8 +186,9 @@ reconciled in place where PostgreSQL can express it:
   database has it.
 - **Functions and views** — `CREATE OR REPLACE`. PostgreSQL does not
   let `CREATE OR REPLACE FUNCTION` change the return type, the `OUT`
-  or `INOUT` parameters, or `window`, rename an input parameter, or
-  remove a default, so such a change falls back. A function is
+  or `INOUT` parameters of a function that returns `record` or
+  `TABLE(...)`, or `window`, rename an input parameter, or remove a
+  default, so such a change falls back. A function is
   matched by its name and its input parameters. The space at the
   start and end of a SQL or PL/pgSQL `definition` is not a change; the
   space in it is. A type alias or a type modifier in a parameter, the

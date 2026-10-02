@@ -321,8 +321,9 @@ fn qualified(schema: &str, name: &str) -> String {
 /// PostgreSQL 18 (`ProcedureCreate` in src/backend/catalog/pg_proc.c)
 /// refuses to change the kind (a window function is a different kind),
 /// the return type or whether it returns a set, the output row of `OUT`
-/// and `INOUT` parameters, or the name of an input parameter that has a
-/// name, and to remove a default. It also refuses to change the type of
+/// and `INOUT` parameters when the function returns `record` (also
+/// `RETURNS TABLE`), or the name of an input parameter that has a name,
+/// and to remove a default. It also refuses to change the type of
 /// a default, which is the type of its parameter except for a
 /// polymorphic parameter; deploy does not compare that type.
 fn replaceable(repo: &Function, db: &Function) -> bool {
@@ -342,7 +343,8 @@ fn replaceable(repo: &Function, db: &Function) -> bool {
     };
     window(repo) == window(db)
         && returns_equal(repo, db)
-        && out_parameters(repo) == out_parameters(db)
+        && (!returns_record(repo)
+            || out_parameters(repo) == out_parameters(db))
         && repo_inputs.iter().zip(&db_inputs).all(|(r, d)| {
             d.0.as_deref().is_none_or(str::is_empty) || r.0 == d.0
         })
@@ -359,11 +361,24 @@ fn returns_equal(repo: &Function, db: &Function) -> bool {
     }
 }
 
+/// True when a function returns `record`, `SETOF record`, or
+/// `TABLE(...)`. PostgreSQL compares the output row only for these
+/// functions. A function with no return type in the project returns
+/// the type that its `OUT` parameters give, so it is compared too.
+fn returns_record(function: &Function) -> bool {
+    function.returns.as_deref().is_none_or(|returns| {
+        let returns = return_type(returns);
+        returns == "record"
+            || returns == "setof record"
+            || returns.starts_with("table(")
+    })
+}
+
 /// The `OUT`/`INOUT`/`TABLE`-mode parameters that make up a function's
 /// output signature, with types canonicalized so an alias does not
 /// spuriously diff. `CREATE OR REPLACE FUNCTION` cannot change this
-/// signature, so callers must fall back to a drop+recreate when it
-/// differs.
+/// signature of a function that returns `record`, so callers must fall
+/// back to a drop+recreate when it differs.
 fn out_parameters(function: &Function) -> Vec<(String, String, String)> {
     function
         .parameters
@@ -3134,6 +3149,21 @@ mod tests {
             )
         };
         assert!(replaces(&row("IN"), &row("INOUT")));
+        // PostgreSQL compares the output row only for a function that
+        // returns record, so an INOUT parameter that becomes IN, or a
+        // renamed OUT parameter, in a function that returns integer
+        // uses OR REPLACE
+        let single = |mode: &str| {
+            plain(serde_json::json!([param(mode, Some("a"), None)]))
+        };
+        assert!(!replaces(&single("IN"), &single("INOUT")));
+        let out = |name: &str| {
+            plain(serde_json::json!([
+                param("IN", Some("a"), None),
+                param("OUT", Some(name), None),
+            ]))
+        };
+        assert!(!replaces(&out("c"), &out("b")));
         // a function that becomes a window function, or a set
         let window =
             f(serde_json::json!([]), serde_json::json!({"window": true}));
