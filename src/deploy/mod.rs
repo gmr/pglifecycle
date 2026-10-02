@@ -68,8 +68,9 @@ pub fn deploy(args: &cli::Deploy) -> Result<(), String> {
         sequence_owner_conflicts(&project.inventory, &assembly.sequences);
     if !args.no_owner && !conflicts.is_empty() {
         log::warn!(
-            "A column owns each of these sequences, thus it has the owner \
-             of its table, not the owner that the project gives: {}",
+            "A column owns each of these sequences, and PostgreSQL needs \
+             the owner of its table for it. Give each sequence the owner \
+             of its table, or the plan can fail: {}",
             conflicts.join(", ")
         );
     }
