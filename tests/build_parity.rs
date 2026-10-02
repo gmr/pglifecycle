@@ -548,6 +548,55 @@ fn outside_items() -> Vec<Item> {
                 .unwrap(),
             ),
         ),
+        // deviation 46: routine names that have "(" or '"'
+        item(
+            13,
+            ObjectType::Function,
+            Definition::Function(
+                serde_json::from_value(serde_json::json!({
+                    "name": "f(x)",
+                    "schema": "test",
+                    "owner": "postgres",
+                    "parameters": [{"mode": "IN", "data_type": "integer"}],
+                    "returns": "integer",
+                    "language": "sql",
+                    "definition": "SELECT $1;",
+                    "comment": "Parentheses",
+                }))
+                .unwrap(),
+            ),
+        ),
+        item(
+            14,
+            ObjectType::Function,
+            Definition::Function(
+                serde_json::from_value(serde_json::json!({
+                    "name": "g\"(y",
+                    "schema": "test",
+                    "owner": "postgres",
+                    "parameters": [{"mode": "IN", "data_type": "text"}],
+                    "returns": "text",
+                    "language": "sql",
+                    "definition": "SELECT $1;",
+                    "comment": "A quote",
+                }))
+                .unwrap(),
+            ),
+        ),
+        item(
+            15,
+            ObjectType::Role,
+            Definition::Role(
+                serde_json::from_value(serde_json::json!({
+                    "name": "fn_caller",
+                    "grants": {"functions": {
+                        "test.f(x)(integer)": ["EXECUTE"],
+                        "test.g\"(y(text)": ["EXECUTE"],
+                    }},
+                }))
+                .unwrap(),
+            ),
+        ),
     ]
 }
 
@@ -683,6 +732,53 @@ const OUTSIDE_CORRECTED: &[(&str, &str, &str, &str, &str)] = &[
         "",
         "Fast Space",
         "COMMENT ON TABLESPACE \"Fast Space\" IS $$It's fast$$;\n;\n",
+        "",
+    ),
+    // deviation 46: a "(" in a routine name is part of the name. The
+    // Python split the name at the first "(", which named a function
+    // that does not exist
+    (
+        "FUNCTION",
+        "test",
+        "f(x)",
+        "CREATE FUNCTION test.\"f(x)\"(IN integer) RETURNS integer \
+         LANGUAGE sql AS $$\nSELECT $1;\n$$;\n",
+        "DROP FUNCTION test.\"f(x)\"(IN integer);\n",
+    ),
+    (
+        "COMMENT",
+        "test",
+        "f(x)",
+        "COMMENT ON FUNCTION test.\"f(x)\" IS $$Parentheses$$;\n;\n",
+        "",
+    ),
+    (
+        "ACL",
+        "test",
+        "FUNCTION f(x)(integer)",
+        "GRANT EXECUTE ON FUNCTION test.\"f(x)\"(integer) TO fn_caller;\n",
+        "",
+    ),
+    (
+        "FUNCTION",
+        "test",
+        "g\"(y",
+        "CREATE FUNCTION test.\"g\"\"(y\"(IN text) RETURNS text \
+         LANGUAGE sql AS $$\nSELECT $1;\n$$;\n",
+        "DROP FUNCTION test.\"g\"\"(y\"(IN text);\n",
+    ),
+    (
+        "COMMENT",
+        "test",
+        "g\"(y",
+        "COMMENT ON FUNCTION test.\"g\"\"(y\" IS $$A quote$$;\n;\n",
+        "",
+    ),
+    (
+        "ACL",
+        "test",
+        "FUNCTION g\"(y(text)",
+        "GRANT EXECUTE ON FUNCTION test.\"g\"\"(y\"(text) TO fn_caller;\n",
         "",
     ),
 ];
@@ -1287,4 +1383,90 @@ fn orders_roles_before_the_entries_that_name_them() {
         })
         .unwrap();
     assert_eq!(comment.dependencies, [table.dump_id]);
+}
+
+/// Deviation 47: a user mapping on several servers is one entry for
+/// each server. The first entry stands for the item, and each later
+/// entry comes after the one before. Thus each entry comes after the
+/// user, and deploy finds the item of each entry through its edges.
+/// Only the last entry stood for the item, so only it came after the
+/// user, and deploy made only it.
+#[test]
+fn orders_each_user_mapping_after_its_user() {
+    let item = |id, desc, definition| Item {
+        id,
+        desc,
+        definition,
+        dependencies: BTreeSet::new(),
+    };
+    let inventory = vec![
+        item(
+            0,
+            ObjectType::User,
+            Definition::User(
+                serde_json::from_value(
+                    serde_json::json!({"name": "app_user"}),
+                )
+                .unwrap(),
+            ),
+        ),
+        item(
+            1,
+            ObjectType::UserMapping,
+            Definition::UserMapping(
+                serde_json::from_value(serde_json::json!({
+                    "name": "app_user",
+                    "servers": [
+                        {"name": "remote_a"},
+                        {"name": "remote_b"},
+                        {"name": "remote_c"},
+                    ],
+                }))
+                .unwrap(),
+            ),
+        ),
+    ];
+    let project = project::Project {
+        name: "mappings".into(),
+        superuser: "postgres".into(),
+        default_schema: "public".into(),
+        path: std::path::PathBuf::new(),
+        inventory,
+    };
+    let output = build::assemble(&project).unwrap();
+    let mappings: Vec<&libpgdump::Entry> = output
+        .dump
+        .entries()
+        .iter()
+        .filter(|e| e.desc.as_str() == "USER MAPPING")
+        .collect();
+    assert_eq!(mappings.len(), 3);
+    assert_eq!(output.item_ids.get(&mappings[0].dump_id), Some(&1));
+    for pair in mappings.windows(2) {
+        assert_eq!(pair[1].dependencies, [pair[0].dump_id]);
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("build.dump");
+    build::build(&project, &path).unwrap();
+    let dump = libpgdump::load(&path).unwrap();
+    let order: Vec<String> = dump
+        .entries()
+        .iter()
+        .map(|e| {
+            let server = e
+                .defn
+                .as_deref()
+                .and_then(|d| d.split(" SERVER ").nth(1))
+                .unwrap_or_default();
+            format!("{} {server}", e.desc.as_str())
+        })
+        .collect();
+    let user = order.iter().position(|e| e == "USER ").unwrap();
+    for server in ["remote_a", "remote_b", "remote_c"] {
+        let mapping = order
+            .iter()
+            .position(|e| e == &format!("USER MAPPING {server};\n"))
+            .unwrap_or_else(|| panic!("missing mapping {server}: {order:?}"));
+        assert!(user < mapping, "{server} comes before the user: {order:?}");
+    }
 }

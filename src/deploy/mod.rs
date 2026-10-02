@@ -1004,7 +1004,7 @@ fn created_entries<'a>(
             // a function tag has its arguments
             let name = match desc {
                 libpgdump::ObjectType::Function => {
-                    tag.split('(').next().unwrap_or_default()
+                    crate::utils::split_signature(tag).map_or(tag, |(n, _)| n)
                 }
                 _ => tag,
             };
@@ -1375,7 +1375,8 @@ fn drop_sql(key: &ObjectKey, definition: Option<&Definition>) -> String {
                 .filter(|p| p.mode != "OUT" && p.mode != "TABLE")
                 .map(|p| p.data_type.as_str())
                 .collect();
-            let base = f.name.split('(').next().unwrap_or_default();
+            let base =
+                crate::project::routine_base_name(&f.name, &f.parameters);
             if f.parameters.is_none() && f.name.contains('(') {
                 crate::utils::quote_routine_name(&f.name)
             } else {
