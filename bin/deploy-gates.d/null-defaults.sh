@@ -93,7 +93,11 @@ expect_empty_plan "the NULL defaults converge"
 # varchar(10) column, `NULL::integer` on a domain over integer) or no
 # default. deploy compares the project's NULL in that form. The same
 # applies to the default of a domain, and to a default on an
-# inherited column, which has the type of the parent's column.
+# inherited column, which has the type of the parent's column. A cast
+# to another domain over the same type stays a cast on the NULL
+# (`(NULL::integer)::test.null_defaults_domain`). A type of an
+# extension (citext) is a base type: a NULL default of it is no
+# default, and on a domain over it is `NULL::public.citext`.
 typmods="${WORKDIR}/project/tables/test/null_typmods.yaml"
 parent="${WORKDIR}/project/tables/test/null_typmods_parent.yaml"
 child="${WORKDIR}/project/tables/test/null_typmods_child.yaml"
@@ -175,6 +179,21 @@ columns:
 - name: o
   data_type: test.point_pair
   default: 'NULL'
+- name: p
+  data_type: test.null_typmods_nested
+  default: NULL::test.null_defaults_domain
+- name: q
+  data_type: test.null_typmods_nested
+  default: NULL::test.null_defaults_domain::test.null_typmods_nested
+- name: r
+  data_type: public.citext
+  default: 'NULL'
+- name: s
+  data_type: public.citext
+  default: NULL::public.citext
+- name: t
+  data_type: test.email_address
+  default: 'NULL'
 YAML
 cat > "${parent}" <<'YAML'
 ---
@@ -213,7 +232,8 @@ expect_empty_plan "a NULL default is compared in the form PostgreSQL stores"
 psql -d "${TARGET_DB}" -q -v ON_ERROR_STOP=1 \
     -c "ALTER TABLE test.null_typmods ALTER COLUMN a SET DEFAULT 'x', \
         ALTER COLUMN h SET DEFAULT 5, \
-        ALTER COLUMN k SET DEFAULT 'verified';" \
+        ALTER COLUMN k SET DEFAULT 'verified', \
+        ALTER COLUMN p SET DEFAULT 5, ALTER COLUMN r SET DEFAULT 'x';" \
     -c "ALTER TABLE ONLY test.null_typmods_child \
         ALTER COLUMN v SET DEFAULT 'x', ALTER COLUMN i SET DEFAULT 1;" \
     -c "ALTER DOMAIN test.null_typmods_varchar SET DEFAULT 'x';" \
@@ -224,6 +244,8 @@ for pattern in \
     '^ALTER TABLE test\.null_typmods ALTER COLUMN a SET DEFAULT NULL::character varying;' \
     '^ALTER TABLE test\.null_typmods ALTER COLUMN h SET DEFAULT NULL::integer;' \
     '^ALTER TABLE test\.null_typmods ALTER COLUMN k DROP DEFAULT;' \
+    '^ALTER TABLE test\.null_typmods ALTER COLUMN p SET DEFAULT \(NULL::integer\)::test\.null_defaults_domain;' \
+    '^ALTER TABLE test\.null_typmods ALTER COLUMN r DROP DEFAULT;' \
     '^ALTER TABLE ONLY test\.null_typmods_child ALTER COLUMN v SET DEFAULT NULL::character varying;' \
     '^ALTER TABLE ONLY test\.null_typmods_child ALTER COLUMN i DROP DEFAULT;' \
     '^ALTER DOMAIN test\.null_typmods_varchar SET DEFAULT NULL::character varying;' \
