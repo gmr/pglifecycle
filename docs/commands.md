@@ -292,9 +292,10 @@ has no owner (for example publications, subscriptions and event
 triggers) keeps the connecting role as owner. So does most of what the
 project writes as raw `sql`: as pg_restore does, deploy sets no owner
 for an archive entry with no DROP statement. A new object gets the
-default privileges of the connecting role, not those of its owner; its
-grants come from the project. With `-O`, deploy does not set or compare
-owners (as `pg_restore --no-owner`).
+privileges that the project gives it (see the privileges below), not
+the default privileges of the connecting role or of its owner. With
+`-O`, deploy does not set or compare owners (as `pg_restore
+--no-owner`).
 
 Roles, users, groups, and tablespaces are skipped entirely — they are
 cluster-level objects a single-database dump cannot capture. deploy
@@ -463,8 +464,52 @@ its type, schema and name, and any overload of that name counts. A
 raw cast is the exception: it must have its source and target types,
 and it is matched by them.
 
-Privileges on created objects are emitted (unless `-x`); privilege
-changes on objects that already exist are not yet diffed.
+Privileges compare by the privileges that each object has, not by
+the statements as written. The project and pg_dump write the grants
+and revocations of an object relative to its built-in privileges
+(`acldefault`): the owner has all of them, and `PUBLIC` has `EXECUTE`
+on functions and procedures and `USAGE` on types, domains and
+languages. Thus a privilege is the same however it is written: `ALL`
+is the full list of the object type (for tables, the PostgreSQL 17
+list with `MAINTAIN`; for columns, `SELECT`, `INSERT`, `UPDATE` and
+`REFERENCES`), the order and the role file that holds a grant are not
+a difference, a grant of a built-in privilege and a revoke of a
+privilege that the object does not have change nothing, and a domain
+is a type. The grantor of a privilege is not compared. deploy compares
+the privileges of tables, views, materialized views, foreign tables,
+partitions, sequences (identity sequences too), columns, functions,
+procedures, types, domains, schemas, languages, foreign-data wrappers
+and servers that the database has and that the plan does not make
+again. deploy does not compare the privileges of aggregates (pg_dump
+writes them `ON FUNCTION`, and the project cannot hold them), of an
+object whose ACL has a statement other than GRANT and REVOKE (for
+example a grant by another grantor), with a warning, nor of an
+identity sequence or a partition that the project gives no grant.
+
+For the difference, deploy emits `GRANT` and `REVOKE` at the end of
+the script, after each change to an object and to its owner. An owner
+change gives the privileges of the old owner to the new one, as
+PostgreSQL does. The statements on the object come first, then those
+on each column, and for each role a `REVOKE` comes before a `GRANT`. A
+`REVOKE` on a table also takes the privilege away from each column, so
+the column statements give back what the project keeps there. A
+`GRANT` is not destructive. A `REVOKE` (or `REVOKE GRANT OPTION FOR`)
+takes access away now, so it is gated by `--allow-drop`; the database
+then allows access that the project does not, and the script header
+names each one with a `-- WARNING:` line.
+
+The connecting role makes each new object, so the default privileges
+of that role give the object its first privileges. Directly after the
+CREATE and the owner, deploy emits the `GRANT` and `REVOKE` that
+change these into the built-in privileges of the owner; then the
+grants of the project follow, as for pg_restore. deploy reads the
+connecting role with `SELECT current_user`, or uses `--role`. A
+`--dump` file does not say which role will run the script, so deploy
+then assumes that the role has the built-in default privileges. An
+identity sequence that a new table makes keeps the default privileges
+of the connecting role.
+
+With `-x`, deploy does not compare or emit privileges.
 
 ## pull
 

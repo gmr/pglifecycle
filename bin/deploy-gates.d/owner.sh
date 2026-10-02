@@ -76,9 +76,9 @@ expect_owner "SELECT
     "the new function does not have the owner of the project"
 # the ACL of each new object: the privileges of the owner, and the
 # grants of the project, which the owner gives. The connecting role
-# creates the objects, so its default privileges apply, as they do for
-# pg_restore: the project revokes EXECUTE on functions from PUBLIC for
-# postgres, thus the function has no PUBLIC grant
+# creates the objects, but its default privileges do not stay: the
+# project revokes EXECUTE on functions from PUBLIC for postgres, and
+# the function has the built-in PUBLIC grant of the project
 expect_owner "WITH owner(id) AS (
     SELECT oid FROM pg_roles WHERE rolname = 'Gate Owner'),
 acls(acl, expected) AS (
@@ -91,7 +91,7 @@ acls(acl, expected) AS (
       FROM pg_class, owner WHERE oid = 'gate_own.t'::regclass
     UNION ALL
     SELECT coalesce(proacl, acldefault('f', proowner)),
-           ARRAY[makeaclitem(id, id, 'EXECUTE', false)]
+           acldefault('f', id)
       FROM pg_proc, owner WHERE oid = 'gate_own.f(integer)'::regprocedure
 )
 SELECT count(*) = 3 AND bool_and(

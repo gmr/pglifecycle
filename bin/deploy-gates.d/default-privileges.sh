@@ -107,8 +107,10 @@ psql -d "${TARGET_DB}" -q -v ON_ERROR_STOP=1 -c "DROP TABLE public.dp_probe;"
 expect_empty_plan "default privileges changed before a new table"
 
 # a changed grant names a schema that the same deploy creates. ALTER
-# DEFAULT PRIVILEGES IN SCHEMA fails if the schema does not exist, and
-# the grant must come before the tables of that schema
+# DEFAULT PRIVILEGES IN SCHEMA fails if the schema does not exist. The
+# new table of that schema has the ACL of the project, which does not
+# grant to pg_monitor: deploy takes away what the default privileges
+# give it (bin/deploy-gates.d/privileges.sh)
 cp "${dp_file}" "${WORKDIR}/default-privileges.step.yaml"
 cat > "${dp_file}" <<'YAML'
 ---
@@ -147,10 +149,12 @@ YAML
 ./target/debug/pglifecycle deploy --apply -d "${TARGET_DB}" \
     "${WORKDIR}/project"
 monitor_select="SELECT has_table_privilege('pg_monitor', 'dp_new.dp_probe',
-    'SELECT')"
-if [ "$(psql -d "${TARGET_DB}" -tAc "${monitor_select}")" != t ]; then
-    echo "Convergence gate FAILED: a table made in a new schema did not" \
-        "get the default privileges of the project" >&2
+    'SELECT') OR NOT EXISTS (SELECT FROM pg_default_acl
+        WHERE defaclnamespace = 'dp_new'::regnamespace)"
+if [ "$(psql -d "${TARGET_DB}" -tAc "${monitor_select}")" != f ]; then
+    echo "Convergence gate FAILED: the default privileges in a new schema" \
+        "were not set, or a table made in it does not have the ACL of" \
+        "the project" >&2
     psql -d "${TARGET_DB}" -tAc "SELECT relacl FROM pg_class
         WHERE oid = 'dp_new.dp_probe'::regclass" >&2
     default_acls "${TARGET_DB}" >&2

@@ -44,6 +44,8 @@ pub(crate) fn grant(
         objects: object_names(&target, kind, src),
         roles: role_specs(node, src),
         with_grant_option: node.has("opt_grant_grant_option"),
+        grant_option_for: revoke && node.child_of_kind("kw_option").is_some(),
+        on: target.text(src).to_string(),
     }))
 }
 
