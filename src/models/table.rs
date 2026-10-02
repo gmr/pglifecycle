@@ -66,8 +66,15 @@ fn canonical_expression(expression: &mut Option<String>) {
 }
 
 /// A column default with the type of each cast in the form that
-/// PostgreSQL writes. A default that is not a string has no cast.
-fn canonical_default(default: &mut Option<Value>) {
+/// PostgreSQL writes. A default that is not a string has no cast. A
+/// NULL default that PostgreSQL does not store (see
+/// [`crate::deploy::null_default`]) is no default.
+fn canonical_default(data_type: &str, default: &mut Option<Value>) {
+    if let Some(Value::String(text)) = default
+        && crate::deploy::null_default(data_type, text)
+    {
+        *default = None;
+    }
     if let Some(Value::String(text)) = default {
         *text = crate::deploy::canonical_casts(text);
     }
@@ -230,7 +237,7 @@ impl Table {
         let mut table = self.with_canonical_not_nulls();
         for column in table.columns.iter_mut().flatten() {
             canonical_collation(&mut column.collation);
-            canonical_default(&mut column.default);
+            canonical_default(&column.data_type, &mut column.default);
             canonical_expression(&mut column.check_constraint);
             if let Some(options) = column
                 .generated

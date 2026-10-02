@@ -670,9 +670,16 @@ fn normalized(definition: &Definition) -> Value {
 
 /// The domain with the type of each cast in its default and its CHECK
 /// constraints in the form that PostgreSQL writes (see
-/// [`canonical_casts`])
+/// [`canonical_casts`]). A NULL default that PostgreSQL does not store
+/// (see [`null_default`]) is no default.
 pub(crate) fn canonical_domain(domain: &Domain) -> Domain {
     let mut domain = domain.clone();
+    if let (Some(data_type), Some(default)) =
+        (&domain.data_type, &domain.default)
+        && null_default(data_type, default)
+    {
+        domain.default = None;
+    }
     if let Some(default) = &mut domain.default {
         *default = canonical_casts(default);
     }
@@ -682,6 +689,57 @@ pub(crate) fn canonical_domain(domain: &Domain) -> Domain {
         }
     }
     domain
+}
+
+/// Whether PostgreSQL stores no default for the default on a column
+/// (or a domain) of the type: the default is a NULL with no cast, or
+/// with casts only to the type (`NULL`, `NULL::integer` and
+/// `CAST(NULL AS int)` on an integer column). The type must be a
+/// built-in type with no modifier. PostgreSQL stores a NULL of another
+/// type (`NULL::bigint` on an integer column) as a default, and also a
+/// NULL on a column of a domain or of a type with a modifier
+/// (`varchar(10)`), as it keeps a cast to the column type.
+pub(crate) fn null_default(data_type: &str, default: &str) -> bool {
+    let data_type = canonical_type(data_type);
+    let element = data_type.trim_end_matches("[]");
+    let built_in = BUILT_IN_TYPES.contains(&element)
+        || matches!(
+            element,
+            "integer"
+                | "smallint"
+                | "bigint"
+                | "real"
+                | "double precision"
+                | "boolean"
+                | "numeric"
+                | "character varying"
+                | "bit varying"
+                | "timestamp without time zone"
+                | "timestamp with time zone"
+                | "time without time zone"
+                | "time with time zone"
+                | "\"char\""
+                | "\"bit\""
+        );
+    if !built_in {
+        return false;
+    }
+    let cast = format!("::{data_type}");
+    let mut text = canonical_casts(default);
+    loop {
+        let trimmed = text.trim();
+        let operand = match trimmed
+            .strip_prefix('(')
+            .and_then(|inner| inner.strip_suffix(')'))
+        {
+            Some(inner) => inner,
+            None => match trimmed.strip_suffix(&cast) {
+                Some(operand) => operand,
+                None => return trimmed.eq_ignore_ascii_case("null"),
+            },
+        };
+        text = operand.to_string();
+    }
 }
 
 /// The database subscription without the password in its connection
@@ -2147,6 +2205,103 @@ mod tests {
         assert_ne!(
             normalized(&p("SELECT 'y'::text AS text")),
             normalized(&p("SELECT 'x'::text"))
+        );
+    }
+
+    /// PostgreSQL 18 stores no default for a NULL of the column type
+    /// (the cases are from a PostgreSQL 18 database)
+    #[test]
+    fn null_defaults_of_the_column_type_are_no_default() {
+        for (data_type, default) in [
+            ("integer", "NULL"),
+            ("integer", "null"),
+            ("integer", "(NULL)"),
+            ("int", "NULL::int"),
+            ("integer", "NULL::INT4"),
+            ("integer", "NULL::pg_catalog.int4"),
+            ("integer", "CAST(NULL AS int)"),
+            ("integer", "(NULL)::integer"),
+            ("integer", "((NULL)::integer)"),
+            ("integer", "NULL::integer::integer"),
+            ("integer", "CAST(NULL AS integer)::integer"),
+            ("bigint", "NULL::int8"),
+            ("numeric", "NULL::numeric"),
+            ("varchar", "NULL::character varying"),
+            ("text", "NULL::text"),
+            ("timestamptz", "NULL::timestamp with time zone"),
+            ("integer[]", "NULL::int[]"),
+            ("double precision", "NULL::float8"),
+            ("bpchar", "NULL"),
+            ("\"char\"", "NULL"),
+        ] {
+            assert!(null_default(data_type, default), "{data_type} {default}");
+        }
+        for (data_type, default) in [
+            ("integer", "NULL::bigint"),
+            ("integer", "NULL::int2"),
+            ("integer", "NULL::text::integer"),
+            ("integer", "-NULL::integer"),
+            ("integer", "0"),
+            ("integer", "'NULL'"),
+            ("varchar", "NULL::text"),
+            ("varchar(10)", "NULL"),
+            ("varchar(10)", "NULL::varchar(10)"),
+            ("numeric(5,2)", "NULL::numeric"),
+            ("char", "NULL"),
+            ("bit", "NULL"),
+            ("timestamp(3)", "NULL"),
+            ("test.dint", "NULL"),
+            ("test.dint", "NULL::test.dint"),
+            ("test.mood", "NULL"),
+        ] {
+            assert!(
+                !null_default(data_type, default),
+                "{data_type} {default}"
+            );
+        }
+    }
+
+    #[test]
+    fn null_defaults_compare_as_no_default() {
+        let table = |default: Option<&str>| {
+            let mut column = serde_json::json!({
+                "name": "a", "data_type": "integer",
+            });
+            if let Some(default) = default {
+                column["default"] = default.into();
+            }
+            Definition::Table(
+                serde_json::from_value(serde_json::json!({
+                    "name": "t", "schema": "test", "owner": "postgres",
+                    "columns": [column],
+                }))
+                .unwrap(),
+            )
+        };
+        assert_eq!(
+            normalized(&table(Some("CAST(NULL AS int)"))),
+            normalized(&table(None))
+        );
+        assert_ne!(
+            normalized(&table(Some("NULL::bigint"))),
+            normalized(&table(None))
+        );
+        let domain = |default: Option<&str>| {
+            Definition::Domain(
+                serde_json::from_value(serde_json::json!({
+                    "name": "d", "schema": "test", "owner": "postgres",
+                    "data_type": "integer", "default": default,
+                }))
+                .unwrap(),
+            )
+        };
+        assert_eq!(
+            normalized(&domain(Some("NULL::int4"))),
+            normalized(&domain(None))
+        );
+        assert_ne!(
+            normalized(&domain(Some("(NULL::text)::integer"))),
+            normalized(&domain(None))
         );
     }
 
