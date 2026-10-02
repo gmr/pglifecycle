@@ -400,9 +400,8 @@ fn take_raw(
         return None;
     }
     let bare = |name: &str| {
-        name.split('(')
-            .next()
-            .unwrap_or(name)
+        crate::utils::split_signature(name)
+            .map_or(name, |(name, _)| name)
             .trim_end()
             .to_string()
     };
@@ -703,14 +702,47 @@ pub(crate) enum UserType {
 }
 
 /// The [`UserType`]s of the project, by their qualified names in the
-/// form of `names::name`
-pub(crate) type UserTypes = BTreeMap<String, UserType>;
+/// form of `names::name`, and the schemas of the project's extensions
+#[derive(Default)]
+pub(crate) struct UserTypes {
+    types: BTreeMap<String, UserType>,
+    /// Each schema of an extension, in the form of `quote_ident`
+    extension_schemas: BTreeSet<String>,
+}
+
+impl UserTypes {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn insert(&mut self, name: String, user_type: UserType) {
+        self.types.insert(name, user_type);
+    }
+
+    fn get(&self, name: &str) -> Option<&UserType> {
+        self.types.get(name)
+    }
+
+    /// Whether the type (in the form of `names::name`) is in the
+    /// schema of an extension of the project
+    fn in_extension_schema(&self, name: &str) -> bool {
+        self.extension_schemas
+            .iter()
+            .any(|schema| name.starts_with(&format!("{schema}.")))
+    }
+}
 
 /// The user types of the project
 fn user_types(project: &Project) -> UserTypes {
     let mut types = UserTypes::new();
     for item in &project.inventory {
         let (schema, name, user_type) = match &item.definition {
+            Definition::Extension(extension) => {
+                if let Some(schema) = &extension.schema {
+                    types.extension_schemas.insert(quote_ident(schema));
+                }
+                continue;
+            }
             Definition::Domain(domain) => match &domain.data_type {
                 Some(data_type) => (
                     &domain.schema,
@@ -854,17 +886,19 @@ fn table_key(table: &crate::models::Table) -> String {
 /// What PostgreSQL stores for the default on a column (or a domain)
 /// of the type, when the default is a NULL with no cast, or with
 /// casts only to the type of the NULL that PostgreSQL makes for the
-/// column (see [`null_type`]), or to a domain that is the type of the
-/// column. PostgreSQL stores no default (`Some(None)`) when that NULL
-/// has the type of the column: on a column of a built-in type with no
-/// modifier (`NULL::integer` on an integer column), of an interval
-/// with a modifier, of an enum, a composite or a range type, or of an
-/// array of a domain. Otherwise it stores that NULL
-/// (`NULL::character varying` on a varchar(10) column,
-/// `NULL::integer` on a domain over integer), with a cast to the
-/// domain when the default has one (`(NULL::integer)::test.dint`).
+/// column (see [`null_type`]), or to a domain that has that NULL.
+/// PostgreSQL stores no default (`Some(None)`) when that NULL has the
+/// type of the column and no cast is to a domain: on a column of a
+/// built-in type with no modifier (`NULL::integer` on an integer
+/// column), of an interval with a modifier, of an enum, a composite or
+/// a range type, of an extension's type, or of an array of a domain.
+/// Otherwise it stores that NULL (`NULL::character varying` on a
+/// varchar(10) column, `NULL::integer` on a domain over integer), with
+/// each cast to a domain on it, and a cast that follows a cast to a
+/// domain (`(NULL::integer)::test.dint` on a column of a domain over
+/// `test.dint`). Two of the same cast in sequence are one cast.
 /// `None` is a default that is not such a NULL, or a type that is not
-/// built in and not in `types`.
+/// built in, not in `types` and not in the schema of an extension.
 pub(crate) fn stored_null_default(
     data_type: &str,
     default: &str,
@@ -872,13 +906,8 @@ pub(crate) fn stored_null_default(
 ) -> Option<Option<String>> {
     let data_type = canonical_type(data_type);
     let null = null_type(&data_type, types, 0)?;
-    let domain = matches!(
-        types.get(&super::alter::names::name(&data_type)),
-        Some(UserType::Domain(_))
-    );
-    let null_cast = format!("::{null}");
-    let domain_cast = format!("::{data_type}");
-    let mut cast_to_domain = false;
+    // the casts on the NULL, from the last to the first
+    let mut casts = Vec::new();
     let mut text = canonical_casts(default);
     loop {
         let trimmed = text.trim();
@@ -887,26 +916,44 @@ pub(crate) fn stored_null_default(
             .and_then(|inner| inner.strip_suffix(')'))
         {
             Some(inner) => inner,
-            None => match trimmed.strip_suffix(&null_cast) {
-                Some(operand) => operand,
-                None => match trimmed.strip_suffix(&domain_cast) {
-                    Some(operand) if domain => {
-                        cast_to_domain = true;
-                        operand
-                    }
-                    _ if trimmed.eq_ignore_ascii_case("null") => break,
-                    _ => return None,
-                },
-            },
+            None if trimmed.eq_ignore_ascii_case("null") => break,
+            None => {
+                let (operand, cast) = trimmed.rsplit_once("::")?;
+                // the text after the cast is one type name only, not
+                // an operator and an operand after it
+                let cast = cast.trim();
+                if cast_type_length(cast) != cast.len() {
+                    return None;
+                }
+                let cast = canonical_type(cast);
+                let domain = matches!(
+                    types.get(&super::alter::names::name(&cast)),
+                    Some(UserType::Domain(_))
+                ) && null_type(&cast, types, 0).as_ref()
+                    == Some(&null);
+                if cast != null && !domain {
+                    return None;
+                }
+                casts.push((cast, domain));
+                operand
+            }
         };
         text = operand.to_string();
     }
-    Some(if domain && cast_to_domain {
-        Some(format!("(NULL::{null})::{data_type}"))
-    } else if null == data_type {
-        None
+    // PostgreSQL makes the casts to the type of the NULL before the
+    // first cast to a domain into the NULL
+    let mut stored = format!("NULL::{null}");
+    let mut last = None;
+    for (cast, _) in casts.iter().rev().skip_while(|(_, domain)| !domain) {
+        if last != Some(cast) {
+            stored = format!("({stored})::{cast}");
+            last = Some(cast);
+        }
+    }
+    Some(if last.is_some() || null != data_type {
+        Some(stored)
     } else {
-        Some(format!("NULL::{null}"))
+        None
     })
 }
 
@@ -915,8 +962,9 @@ pub(crate) fn stored_null_default(
 /// it writes it: the type with no modifier, where `character(n)` is
 /// `bpchar` and `bit(n)` is `"bit"`. An interval keeps its modifier,
 /// other than in an array. The NULL of a domain is the NULL of its
-/// data type. `None` is a type that is not built in and not in
-/// `types`.
+/// data type, and the NULL of an extension's type has that type.
+/// `None` is a type that is not built in, not in `types` and not in
+/// the schema of an extension.
 fn null_type(
     data_type: &str,
     types: &UserTypes,
@@ -957,14 +1005,21 @@ fn null_type(
             format!("{base}{array}")
         });
     }
-    match types.get(&super::alter::names::name(element))? {
+    let name = super::alter::names::name(element);
+    match types.get(&name) {
         // a domain over a domain is limited, so that a loop of domains
         // in a project that is not valid ends
-        UserType::Domain(base) if array.is_empty() && depth < 16 => {
+        Some(UserType::Domain(base)) if array.is_empty() && depth < 16 => {
             null_type(&canonical_type(base), types, depth + 1)
         }
-        UserType::Domain(_) if array.is_empty() => None,
-        _ => Some(data_type.to_string()),
+        Some(UserType::Domain(_)) if array.is_empty() => None,
+        Some(_) => Some(data_type.to_string()),
+        // a type of an extension (citext) is a base type, unless the
+        // extension makes a domain, which deploy cannot know
+        None if types.in_extension_schema(&name) => {
+            Some(data_type.to_string())
+        }
+        None => None,
     }
 }
 
@@ -2451,6 +2506,11 @@ mod tests {
         ] {
             types.insert(name.into(), user_type);
         }
+        types.insert(
+            "test.dcit".into(),
+            UserType::Domain("public.citext".into()),
+        );
+        types.extension_schemas.insert("public".into());
         for (data_type, default, stored) in [
             ("integer", "NULL", None),
             ("integer", "null", None),
@@ -2549,6 +2609,57 @@ mod tests {
             ("test.mood", "NULL::test.mood", None),
             ("test.mood[]", "NULL", None),
             ("test.pair", "NULL", None),
+            // a cast to another domain over the same type
+            (
+                "test.ddint",
+                "NULL::test.dint",
+                Some("(NULL::integer)::test.dint"),
+            ),
+            (
+                "integer",
+                "NULL::test.dint",
+                Some("(NULL::integer)::test.dint"),
+            ),
+            (
+                "test.ddint",
+                "NULL::integer::test.dint",
+                Some("(NULL::integer)::test.dint"),
+            ),
+            (
+                "test.ddint",
+                "NULL::test.dint::test.dint",
+                Some("(NULL::integer)::test.dint"),
+            ),
+            (
+                "test.ddint",
+                "NULL::test.dint::test.ddint",
+                Some("((NULL::integer)::test.dint)::test.ddint"),
+            ),
+            (
+                "test.ddint",
+                "(NULL::test.dint)::test.ddint",
+                Some("((NULL::integer)::test.dint)::test.ddint"),
+            ),
+            (
+                "test.ddint",
+                "NULL::test.ddint::test.dint",
+                Some("((NULL::integer)::test.ddint)::test.dint"),
+            ),
+            (
+                "test.ddint",
+                "NULL::test.dint::integer",
+                Some("((NULL::integer)::test.dint)::integer"),
+            ),
+            // a type of an extension
+            ("public.citext", "NULL", None),
+            ("public.citext", "NULL::public.citext", None),
+            ("public.citext[]", "NULL", None),
+            ("test.dcit", "NULL", Some("NULL::public.citext")),
+            (
+                "test.dcit",
+                "NULL::test.dcit",
+                Some("(NULL::public.citext)::test.dcit"),
+            ),
         ] {
             assert_eq!(
                 stored_null_default(data_type, default, &types),
@@ -2570,10 +2681,17 @@ mod tests {
             ("char(3)", "NULL::char"),
             ("interval(2)", "NULL::interval"),
             ("test.dint", "NULL::bigint"),
-            ("test.ddint", "NULL::test.dint"),
+            ("test.dvc", "NULL::test.dint"),
+            ("test.dint", "NULL::test.mood"),
+            // an operator after a cast
+            ("integer[]", "NULL::integer[] || ARRAY[1]"),
+            ("text[]", "NULL::text[] || ARRAY['a']"),
+            ("integer[]", "NULL::integer[] || '{1}'::integer[]"),
+            ("integer", "NULL::integer + 1"),
             // a type that is not in the project
             ("test.other", "NULL"),
             ("test.other[]", "NULL"),
+            ("citext", "NULL"),
         ] {
             assert_eq!(
                 stored_null_default(data_type, default, &types),
@@ -2602,6 +2720,9 @@ mod tests {
                 ObjectType::Type => {
                     Definition::Type(serde_json::from_value(value).unwrap())
                 }
+                ObjectType::Extension => Definition::Extension(
+                    serde_json::from_value(value).unwrap(),
+                ),
                 _ => Definition::Table(serde_json::from_value(value).unwrap()),
             },
             dependencies: Default::default(),
@@ -2634,6 +2755,10 @@ mod tests {
                     }),
                 ),
                 definition(
+                    ObjectType::Extension,
+                    serde_json::json!({"name": "citext", "schema": "public"}),
+                ),
+                definition(
                     ObjectType::Table,
                     serde_json::json!({
                         "name": "parent", "schema": "test", "owner": "o",
@@ -2653,6 +2778,8 @@ mod tests {
                              "default": "NULL"},
                             {"name": "m", "data_type": "test.mood",
                              "default": "NULL::test.mood"},
+                            {"name": "c", "data_type": "public.citext",
+                             "default": "NULL"},
                         ],
                         "column_defaults": [
                             {"column": "v", "default": "NULL"},
@@ -2680,16 +2807,17 @@ mod tests {
             .unwrap()
         };
         assert_eq!(value(1)["default"], "NULL::integer");
-        let child = value(4);
+        let child = value(5);
         assert_eq!(child["columns"][0]["default"], "NULL::integer");
         assert_eq!(child["columns"][1].get("default"), None);
+        assert_eq!(child["columns"][2].get("default"), None);
         assert_eq!(
             child["column_defaults"],
             serde_json::json!([
                 {"column": "v", "default": "NULL::character varying"},
             ])
         );
-        assert_eq!(value(5).get("column_defaults"), None);
+        assert_eq!(value(6).get("column_defaults"), None);
     }
 
     #[test]

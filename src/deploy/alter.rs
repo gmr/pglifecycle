@@ -41,9 +41,10 @@ use crate::models::{
     ReplicaIdentity, Rule, Schema, Sequence, SequenceOptions, Server, Table,
     Trigger, Type, UserMapping, View, ViewColumn,
 };
-use crate::project::split_sql_name;
+use crate::project::{routine_base_name, split_sql_name};
 use crate::utils::{
-    dollar_quote, postgres_value, quote_ident, raw_value, user_mapping_subject,
+    dollar_quote, postgres_value, quote_ident, quote_routine_name, raw_value,
+    user_mapping_subject,
 };
 
 mod procedure;
@@ -232,10 +233,16 @@ pub(crate) fn resolve_with(
             if returns_equal(repo, db)
                 && out_parameters(repo) == out_parameters(db)
             {
-                // function names carry their full identity signature,
-                // so COMMENT ON FUNCTION takes the name verbatim
-                let target =
-                    format!("{}.{}", quote_ident(&repo.schema), repo.name);
+                // a name that carries its argument types keeps them,
+                // and a name with no argument types, such as `f(x)`
+                // with parameters, is one identifier
+                let bare = routine_base_name(&repo.name, &repo.parameters);
+                let name = if bare == repo.name {
+                    quote_ident(bare)
+                } else {
+                    quote_routine_name(&repo.name)
+                };
+                let target = format!("{}.{name}", quote_ident(&repo.schema));
                 Resolution::OrReplace {
                     comment: comment_delta(
                         "FUNCTION",
@@ -3083,6 +3090,34 @@ mod tests {
         assert_eq!(
             or_replace_comment(resolve(&f(Some("same")), &f(Some("same")))),
             None
+        );
+    }
+
+    /// A "(" in the name of a function with parameters is part of the
+    /// name, which is one identifier
+    #[test]
+    fn function_comment_names_a_name_with_parentheses() {
+        let f = |name: &str, comment: &str| -> Definition {
+            Definition::Function(
+                serde_json::from_value(serde_json::json!({
+                    "name": name, "schema": "test", "owner": "postgres",
+                    "parameters": [{"mode": "IN", "data_type": "integer"}],
+                    "returns": "integer", "language": "sql",
+                    "definition": "SELECT 1", "comment": comment,
+                }))
+                .unwrap(),
+            )
+        };
+        assert_eq!(
+            or_replace_comment(resolve(&f("f(x)", "new"), &f("f(x)", "old"))),
+            Some("COMMENT ON FUNCTION test.\"f(x)\" IS $$new$$;\n".into())
+        );
+        assert_eq!(
+            or_replace_comment(resolve(
+                &f("g\"(y", "new"),
+                &f("g\"(y", "old")
+            )),
+            Some("COMMENT ON FUNCTION test.\"g\"\"(y\" IS $$new$$;\n".into())
         );
     }
 
