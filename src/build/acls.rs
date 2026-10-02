@@ -15,7 +15,7 @@ use serde_json::{Map, Value};
 use crate::constants::ObjectType;
 use crate::models::{Acls, Definition, Item};
 use crate::project::Project;
-use crate::utils::quote_ident;
+use crate::utils::{quote_ident, split_signature};
 
 use super::Builder;
 
@@ -431,16 +431,13 @@ pub(crate) fn statement(
         // a function signature carries its argument list verbatim;
         // the schema and the name are quoted
         "functions" => {
-            let (name, arguments) =
-                object.split_once('(').unwrap_or((object, ""));
-            let paren = if arguments.is_empty() && !object.contains('(') {
-                ""
-            } else {
-                "("
+            let (name, arguments) = match split_signature(object) {
+                Some((name, arguments)) => (name, format!("({arguments}")),
+                None => (object, String::new()),
             };
             (
                 privileges.join(", "),
-                format!("{}{paren}{arguments}", quote_object(name)),
+                format!("{}{arguments}", quote_object(name)),
             )
         }
         // an object with no schema: the key is the whole name
@@ -643,7 +640,7 @@ fn find_function<'a>(
     {
         return Some(*item);
     }
-    let base = name.split('(').next().unwrap_or(name);
+    let base = split_signature(name).map_or(name, |(base, _)| base);
     let matches = index.functions_by_name.get(&(schema, base.to_string()))?;
     (matches.len() == 1).then(|| matches[0])
 }

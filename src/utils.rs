@@ -221,10 +221,38 @@ fn skip_quoted(
     bytes.len()
 }
 
+/// Split a routine name or tag at the `(` that opens its argument
+/// list, as `split_once('(')` splits it: `f(x)(integer)` is `f(x)`
+/// and `integer)`. The argument list is the parenthesized text at the
+/// end, so a name can contain `(`, and a `(` in a quoted type is not
+/// the split point. A name with no argument list at its end gives
+/// `None`.
+pub fn split_signature(value: &str) -> Option<(&str, &str)> {
+    let bytes = value.trim_end().as_bytes();
+    if bytes.last() != Some(&b')') {
+        return None;
+    }
+    let (mut depth, mut quoted) = (0usize, false);
+    for (i, b) in bytes.iter().enumerate().rev() {
+        match b {
+            b'"' => quoted = !quoted,
+            b')' if !quoted => depth += 1,
+            b'(' if !quoted => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some((&value[..i], &value[i + 1..]));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// A routine name, quoted, with the argument list that may follow it
 /// kept as written: `Quoted Fn(integer)` is `"Quoted Fn"(integer)`
 pub fn quote_routine_name(name: &str) -> String {
-    match name.split_once('(') {
+    match split_signature(name) {
         Some((base, arguments)) => {
             format!("{}({arguments}", quote_ident(base))
         }
@@ -406,6 +434,28 @@ mod tests {
         );
         assert_eq!(quote_routine_name("f()"), "f()");
         assert_eq!(quote_routine_name("Bare"), "\"Bare\"");
+        assert_eq!(quote_routine_name("f(x)(integer)"), "\"f(x)\"(integer)");
+    }
+
+    #[test]
+    fn splits_a_routine_at_its_argument_list() {
+        assert_eq!(split_signature("f(integer)"), Some(("f", "integer)")));
+        assert_eq!(
+            split_signature("f(x)(integer)"),
+            Some(("f(x)", "integer)"))
+        );
+        assert_eq!(split_signature("g\"(y(text)"), Some(("g\"(y", "text)")));
+        assert_eq!(
+            split_signature("\"g\"\"(y\"(text)"),
+            Some(("\"g\"\"(y\"", "text)"))
+        );
+        assert_eq!(
+            split_signature("f(numeric(10,2), \"a)b\")"),
+            Some(("f", "numeric(10,2), \"a)b\")"))
+        );
+        assert_eq!(split_signature("f(x)()"), Some(("f(x)", ")")));
+        assert_eq!(split_signature("f"), None);
+        assert_eq!(split_signature("f)"), None);
     }
 
     #[test]
