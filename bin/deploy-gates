@@ -41,6 +41,9 @@ cleanup() {
     # must not leave it so
     psql -d postgres -q -c \
         'ALTER ROLE "Gate Applier" NOSUPERUSER' >/dev/null 2>&1 || true
+    # the read-role step makes its role; it owns nothing
+    psql -d postgres -q -c \
+        'DROP ROLE IF EXISTS "Gate Reader"' >/dev/null 2>&1 || true
 }
 trap cleanup EXIT INT TERM
 

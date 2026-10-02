@@ -25,7 +25,7 @@ use std::io::IsTerminal;
 use crate::ddl::{self, NodeExt};
 use crate::deploy::alter::Resolution;
 use crate::deploy::diff::{Change, Diff, ObjectKey};
-use crate::models::Definition;
+use crate::models::{Definition, Item};
 use crate::utils::quote_ident;
 use crate::{
     build, cli, constants, diagnostics, pgdump, progress, project, pull,
@@ -94,6 +94,7 @@ pub fn deploy(args: &cli::Deploy) -> Result<(), String> {
     // a --dump file has no roles, thus only a live database is checked
     if args.dump.is_none() {
         check_roles(&plan, &args.connection)?;
+        check_reads(&project.inventory, &diff, &args.connection);
     }
     let script = render_script(
         &plan,
@@ -806,6 +807,77 @@ fn check_roles(plan: &Plan, conn: &cli::Connection) -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+/// Warn when the plan changes objects that the role that read the
+/// database cannot read. pg_dump does not dump them, or dumps them
+/// without their options, thus the plan can make again what the
+/// database has already
+fn check_reads(inventory: &[Item], diff: &Diff, conn: &cli::Connection) {
+    let limits = match pgdump::read_limits(conn) {
+        Ok(limits) => limits,
+        Err(error) => {
+            log::warn!(
+                "Cannot read what the role of the connection can read, \
+                 thus deploy does not check it: {error}"
+            );
+            return;
+        }
+    };
+    let objects = unreadable(inventory, diff, &limits);
+    if !objects.is_empty() {
+        log::warn!(
+            "Role {} cannot read all of the database, thus the plan can \
+             make again objects that the database has already: {}. Read \
+             the database as a role that can read them, for example a \
+             superuser",
+            quote_ident(&limits.role),
+            objects.join(", ")
+        );
+    }
+}
+
+/// The labels of the added and changed items that the role of
+/// `limits` cannot read: each subscription when the role is not a
+/// superuser, and each user mapping whose options it cannot read
+fn unreadable(
+    inventory: &[Item],
+    diff: &Diff,
+    limits: &pgdump::ReadLimits,
+) -> Vec<String> {
+    let mut labels = Vec::new();
+    for item in inventory {
+        if !matches!(
+            diff.items.get(&item.id),
+            Some(Change::Added | Change::Changed)
+        ) {
+            continue;
+        }
+        match &item.definition {
+            Definition::Subscription(s) if !limits.superuser => {
+                labels.push(format!("SUBSCRIPTION {}", s.name));
+            }
+            Definition::UserMapping(mapping) => {
+                // PostgreSQL reads public as PUBLIC
+                let user = if mapping.name.eq_ignore_ascii_case("public") {
+                    "PUBLIC"
+                } else {
+                    mapping.name.as_str()
+                };
+                for server in &mapping.servers {
+                    let pair = (user.to_string(), server.name.clone());
+                    if limits.hidden_user_mappings.contains(&pair) {
+                        labels.push(format!(
+                            "USER MAPPING {user} SERVER {}",
+                            server.name
+                        ));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    labels
 }
 
 /// Each role that `statements` name and `roles` does not have, with
@@ -2982,5 +3054,94 @@ mod tests {
             missing.keys().collect::<Vec<_>>(),
             vec!["PUBLIC", "current_user"]
         );
+    }
+
+    /// A role that is not a superuser cannot read the subscriptions or
+    /// the options of some user mappings. Only the added and changed
+    /// items that it cannot read are named
+    #[test]
+    fn unreadable_names_what_the_role_cannot_read() {
+        use constants::ObjectType as OT;
+        let item = |id, desc, value: serde_json::Value| Item {
+            id,
+            desc,
+            definition: match desc {
+                OT::Subscription => Definition::Subscription(
+                    serde_json::from_value(value).expect("subscription"),
+                ),
+                _ => Definition::UserMapping(
+                    serde_json::from_value(value).expect("user mapping"),
+                ),
+            },
+            dependencies: BTreeSet::new(),
+        };
+        let inventory = vec![
+            item(
+                0,
+                OT::Subscription,
+                serde_json::json!({
+                    "name": "sub",
+                    "connection": "dbname=x",
+                    "publications": ["pub"],
+                }),
+            ),
+            item(
+                1,
+                OT::UserMapping,
+                serde_json::json!({
+                    "name": "postgres",
+                    "servers": [{"name": "srv", "options": {"user": "x"}},
+                                {"name": "own", "options": {"user": "y"}}],
+                }),
+            ),
+            item(
+                2,
+                OT::UserMapping,
+                serde_json::json!({
+                    "name": "public",
+                    "servers": [{"name": "srv", "options": {"user": "z"}}],
+                }),
+            ),
+            item(
+                3,
+                OT::UserMapping,
+                serde_json::json!({
+                    "name": "app",
+                    "servers": [{"name": "srv", "options": {"user": "a"}}],
+                }),
+            ),
+        ];
+        let diff = Diff {
+            items: BTreeMap::from([
+                (0, Change::Added),
+                (1, Change::Changed),
+                (2, Change::Changed),
+                (3, Change::Unchanged),
+            ]),
+            changed: BTreeMap::new(),
+            removed: BTreeMap::new(),
+            owned: BTreeSet::new(),
+            owner_changed: BTreeSet::new(),
+        };
+        let mut limits = pgdump::ReadLimits {
+            role: "Gate Reader".into(),
+            superuser: false,
+            hidden_user_mappings: vec![
+                ("postgres".into(), "srv".into()),
+                ("PUBLIC".into(), "srv".into()),
+                ("app".into(), "srv".into()),
+            ],
+        };
+        assert_eq!(
+            unreadable(&inventory, &diff, &limits),
+            vec![
+                "SUBSCRIPTION sub",
+                "USER MAPPING postgres SERVER srv",
+                "USER MAPPING PUBLIC SERVER srv",
+            ]
+        );
+        limits.superuser = true;
+        limits.hidden_user_mappings.clear();
+        assert!(unreadable(&inventory, &diff, &limits).is_empty());
     }
 }

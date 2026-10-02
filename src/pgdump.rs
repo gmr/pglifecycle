@@ -5,6 +5,7 @@ use std::io::IsTerminal;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
+use crate::utils::quote_ident;
 use crate::{cli, progress};
 
 /// DDL suppression flags and object exclusions passed through to
@@ -264,6 +265,97 @@ pub fn current_user(conn: &cli::Connection) -> Result<String, String> {
         return Err(stderr_of(&output));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// What the role that pg_dump reads as (`--role`, or the user of the
+/// connection) cannot read
+#[derive(Debug, PartialEq)]
+pub struct ReadLimits {
+    pub role: String,
+    /// pg_dump does not dump the subscriptions for a role that is not
+    /// a superuser
+    pub superuser: bool,
+    /// The (user, server) pairs of the user mappings whose options the
+    /// role cannot read. The user of a PUBLIC mapping is `PUBLIC`
+    pub hidden_user_mappings: Vec<(String, String)>,
+}
+
+/// One JSON object: the role, whether it is a superuser (the check of
+/// pg_dump), and the user mappings whose options pg_user_mappings does
+/// not show to the role. The conditions are the inverse of the
+/// conditions of the view in PostgreSQL 18
+const READ_LIMITS_QUERY: &str = "SELECT json_build_object(
+    'role', current_user,
+    'superuser', current_setting('is_superuser')::bool,
+    'hidden_user_mappings', (
+        SELECT coalesce(json_agg(json_build_array(
+                   CASE WHEN m.umuser = 0 THEN 'PUBLIC' ELSE m.usename END,
+                   m.srvname) ORDER BY m.usename, m.srvname), '[]')
+          FROM pg_catalog.pg_user_mappings m
+          JOIN pg_catalog.pg_foreign_server s ON s.oid = m.srvid
+         WHERE NOT current_setting('is_superuser')::bool
+           AND NOT ((m.umuser <> 0 AND m.usename = current_user
+                     AND (pg_catalog.pg_has_role(s.srvowner, 'USAGE')
+                          OR pg_catalog.has_server_privilege(
+                                 s.oid, 'USAGE')))
+                    OR (m.umuser = 0
+                        AND pg_catalog.pg_has_role(s.srvowner, 'USAGE')))))";
+
+/// Read [`ReadLimits`] with psql, as the role of `--role` when it is
+/// given
+pub fn read_limits(conn: &cli::Connection) -> Result<ReadLimits, String> {
+    let output = run("psql", &read_limits_args(conn), &[], conn)?;
+    if !output.status.success() {
+        return Err(stderr_of(&output));
+    }
+    parse_read_limits(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// The psql arguments for [`read_limits`]. psql does not have
+/// `--role`, thus the first command sets the role, as pg_dump does
+fn read_limits_args(conn: &cli::Connection) -> Vec<OsString> {
+    let mut args = connection_args(conn);
+    if let Some(dbname) = &conn.dbname {
+        args.push("-d".into());
+        args.push(dbname.into());
+    }
+    for arg in ["-X", "-A", "-t", "-q", "-v", "ON_ERROR_STOP=1"] {
+        args.push(arg.into());
+    }
+    if let Some(role) = &conn.role {
+        args.push("-c".into());
+        args.push(format!("SET ROLE {}", quote_ident(role)).into());
+    }
+    args.push("-c".into());
+    args.push(READ_LIMITS_QUERY.into());
+    args
+}
+
+/// The [`ReadLimits`] of the JSON object of [`READ_LIMITS_QUERY`]
+fn parse_read_limits(text: &str) -> Result<ReadLimits, String> {
+    let value: serde_json::Value = serde_json::from_str(text.trim())
+        .map_err(|e| format!("cannot read the query result: {e}"))?;
+    let (Some(role), Some(superuser), Some(mappings)) = (
+        value["role"].as_str(),
+        value["superuser"].as_bool(),
+        value["hidden_user_mappings"].as_array(),
+    ) else {
+        return Err(format!("unexpected query result: {value}"));
+    };
+    let hidden_user_mappings = mappings
+        .iter()
+        .filter_map(|pair| {
+            Some((
+                pair[0].as_str()?.to_string(),
+                pair[1].as_str()?.to_string(),
+            ))
+        })
+        .collect();
+    Ok(ReadLimits {
+        role: role.to_string(),
+        superuser,
+        hidden_user_mappings,
+    })
 }
 
 /// The DDL-suppression and object-exclusion flags for a pg_dump
@@ -787,6 +879,53 @@ mod tests {
         conn.dbname = Some("host=db dbname=app".into());
         let args = dump_roles_args(&conn, path, false, &DumpDdl::default());
         assert!(has_pair(&args, "--role", "Gate Applier"), "{args:?}");
+    }
+
+    /// The read limits are those of the role that pg_dump reads as,
+    /// thus psql sets the role before the query
+    #[test]
+    fn reads_the_limits_as_the_role() {
+        let mut conn = connection(false);
+        let query = OsString::from(READ_LIMITS_QUERY);
+        let args = read_limits_args(&conn);
+        assert!(has_pair(&args, "-c", READ_LIMITS_QUERY), "{args:?}");
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg.to_string_lossy().contains("SET ROLE"))
+        );
+        conn.role = Some("Gate Reader".into());
+        let args = read_limits_args(&conn);
+        assert!(!args.contains(&OsString::from("--role")), "{args:?}");
+        let set = args
+            .iter()
+            .position(|arg| arg == "SET ROLE \"Gate Reader\"")
+            .expect("SET ROLE");
+        let read = args.iter().position(|arg| *arg == query).expect("query");
+        assert!(args[set - 1] == "-c" && set < read, "{args:?}");
+    }
+
+    #[test]
+    fn parses_the_read_limits() {
+        let limits = parse_read_limits(
+            "{\"role\" : \"Gate Reader\", \"superuser\" : false, \
+             \"hidden_user_mappings\" : [[\"postgres\", \"srv\"], \
+             [\"PUBLIC\", \"srv\"]]}\n",
+        )
+        .expect("limits");
+        assert_eq!(
+            limits,
+            ReadLimits {
+                role: "Gate Reader".into(),
+                superuser: false,
+                hidden_user_mappings: vec![
+                    ("postgres".into(), "srv".into()),
+                    ("PUBLIC".into(), "srv".into()),
+                ],
+            }
+        );
+        assert!(parse_read_limits("{\"role\" : \"x\"}").is_err());
+        assert!(parse_read_limits("").is_err());
     }
 
     #[test]

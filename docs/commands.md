@@ -91,6 +91,18 @@ the owners and privileges expects. psql does not have a `--role`
 option, so the script sets the role for `--apply` and for a script
 that you run by hand.
 
+deploy also reads the database as that role, as `pg_dump --role`
+does. Without `--role`, it reads as the user of the connection. A
+role that is not a superuser cannot read all of the database: pg_dump
+does not dump the subscriptions, and `pg_user_mappings` does not show
+the options of most user mappings (see the PostgreSQL documentation
+of that view). Then the plan can make again a subscription or the
+options of a user mapping that the database has already. deploy does
+not change the plan, but it writes a warning that names the role and
+those objects. Read the database as a role that can read them, for
+example a superuser. With `--dump`, deploy does not read a database,
+thus there is no warning.
+
 The script does not set the other settings that pg_restore sets.
 `statement_timeout`, `lock_timeout`, `idle_in_transaction_session_timeout`
 and `transaction_timeout` can stop the script, but they do not change
