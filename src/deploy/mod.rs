@@ -91,7 +91,12 @@ pub fn deploy(args: &cli::Deploy) -> Result<(), String> {
     if args.dump.is_none() {
         check_roles(&plan, &args.connection)?;
     }
-    let script = render_script(&plan, &project.name, &source);
+    let script = render_script(
+        &plan,
+        &project.name,
+        &source,
+        args.connection.role.as_deref(),
+    );
     if let Some(path) = &args.output {
         std::fs::write(path, &script)
             .map_err(|e| format!("failed to write {}: {e}", path.display()))?;
@@ -1021,6 +1026,10 @@ fn report(diff: &Diff, plan: &Plan, assembly: &pull::Assembly) {
 /// - `client_encoding` is UTF8, the encoding of the script.
 /// - `standard_conforming_strings` is on, so a backslash in a string
 ///   literal is not an escape.
+/// - `role` is `--role`, when it is given, so that role makes the new
+///   objects, as the plan of the privileges and owners expects. psql
+///   does not have `--role`, thus the script sets it, as pg_restore
+///   does; a script that runs by hand then also runs as the role.
 /// - `search_path` is empty, so a name resolves as it does in a
 ///   restore.
 /// - `check_function_bodies` is off, so a function can refer to an
@@ -1038,17 +1047,23 @@ fn report(diff: &Diff, plan: &Plan, assembly: &pull::Assembly) {
 /// them: a local setting has no effect on the statements that follow
 /// it when the script runs outside a transaction block. In a
 /// transaction block, a rollback also undoes the settings.
-fn render_script(plan: &Plan, project: &str, source: &str) -> String {
+fn render_script(
+    plan: &Plan,
+    project: &str,
+    source: &str,
+    role: Option<&str>,
+) -> String {
     let mut script = format!(
         "-- pglifecycle deploy\n-- project: {project}\n-- source: \
          {source}\n"
     );
     if !plan.included.is_empty() {
-        script.push_str(
+        script.push_str(&format!(
             "-- session settings, as pg_restore sets them: \
-             client_encoding, standard_conforming_strings, search_path, \
+             client_encoding, standard_conforming_strings, {}search_path, \
              check_function_bodies, xmloption\n",
-        );
+            if role.is_some() { "role, " } else { "" }
+        ));
     }
     if !plan.excluded.is_empty() {
         script.push_str(&format!(
@@ -1104,8 +1119,13 @@ fn render_script(plan: &Plan, project: &str, source: &str) -> String {
     if !plan.included.is_empty() {
         script.push_str(
             "\nSET client_encoding = 'UTF8';\n\
-             SET standard_conforming_strings = on;\n\
-             SELECT pg_catalog.set_config('search_path', '', false);\n\
+             SET standard_conforming_strings = on;\n",
+        );
+        if let Some(role) = role {
+            script.push_str(&format!("SET ROLE {};\n", quote_ident(role)));
+        }
+        script.push_str(
+            "SELECT pg_catalog.set_config('search_path', '', false);\n\
              SET check_function_bodies = false;\n\
              SET xmloption = content;\n",
         );
@@ -2139,7 +2159,7 @@ mod tests {
             included_destructive: 0,
             unowned: Vec::new(),
         };
-        let script = render_script(&plan, "test", "db");
+        let script = render_script(&plan, "test", "db", None);
         for line in script.lines() {
             assert!(line.starts_with("--"), "line runs as SQL: {line}");
         }
@@ -2162,7 +2182,7 @@ mod tests {
             included_destructive: 0,
             unowned: Vec::new(),
         };
-        let script = render_script(&plan, "test", "db");
+        let script = render_script(&plan, "test", "db", None);
         assert_eq!(
             script,
             "-- pglifecycle deploy\n-- project: test\n-- source: db\n\
@@ -2177,6 +2197,47 @@ mod tests {
              SET xmloption = content;\n\
              \n-- SCHEMA app\nCREATE SCHEMA app;\n"
         );
+    }
+
+    /// psql does not have `--role`, thus the script sets the role, at
+    /// the position where pg_restore --role sets it
+    #[test]
+    fn script_sets_the_role_as_pg_restore_does() {
+        let plan = Plan {
+            included: vec![Statement {
+                label: "SCHEMA app".to_string(),
+                sql: "CREATE SCHEMA app;\n".to_string(),
+                fails_open: false,
+            }],
+            excluded: Vec::new(),
+            kept: Vec::new(),
+            included_destructive: 0,
+            unowned: Vec::new(),
+        };
+        let script = render_script(&plan, "test", "db", Some("App Owner"));
+        assert!(
+            script.contains(
+                "-- session settings, as pg_restore sets them: \
+                 client_encoding, standard_conforming_strings, role, \
+                 search_path, check_function_bodies, xmloption\n"
+            ),
+            "{script}"
+        );
+        assert!(
+            script.contains(
+                "SET standard_conforming_strings = on;\n\
+                 SET ROLE \"App Owner\";\n\
+                 SELECT pg_catalog.set_config('search_path', '', false);\n"
+            ),
+            "{script}"
+        );
+        // a script with no statements does not set the role
+        let plan = Plan {
+            included: Vec::new(),
+            ..plan
+        };
+        let script = render_script(&plan, "test", "db", Some("App Owner"));
+        assert!(!script.contains("SET ROLE"), "{script}");
     }
 
     fn owner_entry(

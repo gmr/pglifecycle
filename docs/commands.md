@@ -84,6 +84,13 @@ by the settings of the session:
 - `xmloption`: an `xml` constant that is not a document, such as a
   default of `'text'::xml`, is valid.
 
+With `--role NAME`, the script also sets the role after
+`standard_conforming_strings`, as `pg_restore --role` does:
+`SET ROLE NAME;`. Then that role makes the new objects, as the plan of
+the owners and privileges expects. psql does not have a `--role`
+option, so the script sets the role for `--apply` and for a script
+that you run by hand.
+
 The script does not set the other settings that pg_restore sets.
 `statement_timeout`, `lock_timeout`, `idle_in_transaction_session_timeout`
 and `transaction_timeout` can stop the script, but they do not change
