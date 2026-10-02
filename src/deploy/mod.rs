@@ -327,6 +327,9 @@ fn plan(
         .filter_map(entry_key)
         .filter_map(|key| wanted.get(&key).copied())
         .collect();
+    let filtered = !(args.exclude_table.is_empty()
+        && args.exclude_schema.is_empty()
+        && args.exclude_extension.is_empty());
     for key in ordered {
         if emitted.insert(key) {
             let definition = diff.removed.get(key);
@@ -334,15 +337,23 @@ fn plan(
             // object that the project keeps. Without CASCADE the drop
             // fails, and PostgreSQL names the objects
             let kept = cascade_keeps(key, snapshot, &wanted);
-            let sql = if kept.is_empty() {
-                drop_sql(key, definition)
-            } else {
+            let sql = if !kept.is_empty() {
                 log::warn!(
                     "{key}: drop does not cascade, because these objects \
                      that the project keeps depend on it: {}",
                     kept.join(", ")
                 );
                 drop_sql(key, None)
+            } else if filtered && cascades(definition) {
+                // the snapshot does not have the excluded objects, thus
+                // CASCADE can drop an object that the plan cannot see
+                log::warn!(
+                    "{key}: drop does not cascade, because the snapshot \
+                     excludes objects that can depend on it"
+                );
+                drop_sql(key, None)
+            } else {
+                drop_sql(key, definition)
             };
             push(
                 true,
@@ -1321,12 +1332,7 @@ fn drop_sql(key: &ObjectKey, definition: Option<&Definition>) -> String {
         Some(Definition::Transform(t)) => return alter::transform::drop(t),
         _ => {}
     }
-    // a base type and its I/O functions depend on each other, thus the
-    // type drops with CASCADE, as pg_dump --clean writes it. The DROP
-    // FUNCTION of each I/O function then does nothing
-    if let Some(Definition::Type(user_type)) = definition
-        && user_type.type_kind.as_deref() == Some("base")
-    {
+    if cascades(definition) {
         return format!(
             "DROP TYPE IF EXISTS {}.{} CASCADE;\n",
             quote_ident(&key.schema),
@@ -1386,6 +1392,17 @@ fn drop_sql(key: &ObjectKey, definition: Option<&Definition>) -> String {
     format!("DROP {} IF EXISTS {qualified};\n", key.desc.as_str())
 }
 
+/// A base type and its I/O functions depend on each other, thus the
+/// type drops with CASCADE, as pg_dump --clean writes it. The DROP
+/// FUNCTION of each I/O function then does nothing
+fn cascades(definition: Option<&Definition>) -> bool {
+    matches!(
+        definition,
+        Some(Definition::Type(user_type))
+            if user_type.type_kind.as_deref() == Some("base")
+    )
+}
+
 /// The snapshot objects that depend on the database-only type `key`,
 /// directly or through other objects, and that the plan does not drop
 /// (`removed` holds the keys of the drops). DROP TYPE ... CASCADE drops
@@ -1424,7 +1441,25 @@ fn cascade_keeps(
         for entry in entries {
             if entry.dependencies.contains(&id) && seen.insert(entry.dump_id) {
                 pending.push(entry.dump_id);
-                if let Some(dependent) = entry_key(entry)
+                // an entry with no key of its own (an index or a
+                // constraint, for example) is a part of its relation
+                let dependent = entry_key(entry).or_else(|| {
+                    entry.dependencies.iter().find_map(|dep| {
+                        entries
+                            .iter()
+                            .find(|owner| owner.dump_id == *dep)
+                            .and_then(entry_key)
+                            .filter(|owner| {
+                                matches!(
+                                    owner.desc,
+                                    constants::ObjectType::Table
+                                        | constants::ObjectType::View
+                                        | constants::ObjectType::MaterializedView
+                                )
+                            })
+                    })
+                });
+                if let Some(dependent) = dependent
                     && dependent != *key
                     && !removed.contains_key(&dependent)
                 {
@@ -2001,23 +2036,38 @@ mod tests {
             add(OT::Function, "gate_shell_emit(test.gate_shell)", &[shell]);
         let type_id = add(OT::Type, "gate_shell", &[shell, read_id, emit_id]);
         add(OT::Table, "keeper", &[type_id]);
+        // a CHECK constraint and an index are entries of their own, and
+        // CASCADE drops them from the table that holds them
+        let checked = add(OT::Table, "checked", &[]);
+        add(
+            OT::CheckConstraint,
+            "checked shell_check",
+            &[checked, type_id],
+        );
+        let indexed = add(OT::Table, "indexed", &[]);
+        add(OT::Index, "indexed_shell_idx", &[indexed, type_id]);
 
-        let cli = cli::Cli::parse_from([
-            "pglifecycle",
-            "deploy",
-            "--allow-drop",
-            "proj",
-        ]);
-        let cli::Action::Deploy(args) = cli.action else {
-            unreachable!("parsed the deploy subcommand")
+        let parse = |options: &[&str]| {
+            let cli = cli::Cli::parse_from(
+                ["pglifecycle", "deploy", "--allow-drop"]
+                    .iter()
+                    .chain(options)
+                    .chain(&["proj"]),
+            );
+            let cli::Action::Deploy(args) = cli.action else {
+                unreachable!("parsed the deploy subcommand")
+            };
+            args
         };
+        let args = parse(&[]);
         let output = build::BuildOutput {
             dump: libpgdump::new("test", "UTF8", "18.0")
                 .expect("new output dump"),
             item_ids: std::collections::HashMap::new(),
         };
         let type_drop =
-            |removed: Vec<(constants::ObjectType, &Definition)>| {
+            |removed: Vec<(constants::ObjectType, &Definition)>,
+             args: &cli::Deploy| {
                 let diff = Diff {
                     items: BTreeMap::new(),
                     changed: BTreeMap::new(),
@@ -2039,7 +2089,7 @@ mod tests {
                     &output,
                     &snapshot,
                     &privileges::Privileges::default(),
-                    &args,
+                    args,
                 )
                 .expect("plan succeeds")
                 .included
@@ -2048,23 +2098,46 @@ mod tests {
                 .expect("the type drops")
                 .sql
             };
+        let relation = |name: &str| {
+            Definition::Table(
+                from_value(json!({"name": name, "schema": "test",
+                    "owner": "postgres"}))
+                .expect("table"),
+            )
+        };
+        let checked = relation("checked");
+        let indexed = relation("indexed");
         use constants::ObjectType as O;
         let all = vec![
             (O::Type, &base),
             (O::Function, &read),
             (O::Function, &emit),
             (O::Table, &table),
+            (O::Table, &checked),
+            (O::Table, &indexed),
         ];
         assert_eq!(
-            type_drop(all.clone()),
+            type_drop(all.clone(), &args),
             "DROP TYPE IF EXISTS test.gate_shell CASCADE;\n"
         );
-        // the project keeps the table, or an I/O function
+        // the project keeps a table, or an I/O function
         for kept in 1..all.len() {
             let mut removed = all.clone();
             removed.remove(kept);
             assert_eq!(
-                type_drop(removed),
+                type_drop(removed, &args),
+                "DROP TYPE IF EXISTS test.gate_shell;\n"
+            );
+        }
+        // the snapshot does not have the excluded objects, thus their
+        // dependency on the type is not known
+        for option in [
+            ["--exclude-table", "other"],
+            ["--exclude-schema", "other"],
+            ["--exclude-extension", "other"],
+        ] {
+            assert_eq!(
+                type_drop(all.clone(), &parse(&option)),
                 "DROP TYPE IF EXISTS test.gate_shell;\n"
             );
         }
