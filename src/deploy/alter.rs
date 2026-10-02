@@ -1712,10 +1712,12 @@ fn sequence(repo: &Sequence, db: &Sequence) -> Resolution {
     }
     let name = qualified(&repo.schema, &repo.name);
     let mut clauses: Vec<String> = Vec::new();
-    if repo.data_type != db.data_type
-        && let Some(data_type) = &repo.data_type
-    {
-        clauses.push(format!("AS {data_type}"));
+    // a sequence with no type is a bigint sequence
+    if repo.data_type != db.data_type {
+        clauses.push(format!(
+            "AS {}",
+            repo.data_type.as_deref().unwrap_or("bigint")
+        ));
     }
     if repo.increment_by != db.increment_by
         && let Some(increment) = repo.increment_by
@@ -3159,6 +3161,19 @@ mod tests {
             vec!["ALTER SEQUENCE test.s INCREMENT BY 2 MAXVALUE 100 CYCLE;\n"]
         );
         assert!(alters.iter().all(|a| !a.destructive));
+    }
+
+    /// A sequence with no type is a bigint sequence
+    #[test]
+    fn sequence_with_no_type_is_bigint() {
+        let repo = serde_json::json!({
+            "name": "s", "schema": "test", "owner": "postgres",
+        });
+        let mut db = repo.clone();
+        db["data_type"] = "integer".into();
+        let alters =
+            statements(sequence(&parse_sequence(repo), &parse_sequence(db)));
+        assert_eq!(sql(&alters), vec!["ALTER SEQUENCE test.s AS bigint;\n"]);
     }
 
     #[test]

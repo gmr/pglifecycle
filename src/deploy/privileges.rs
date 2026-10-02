@@ -20,7 +20,7 @@
 //! New in the Rust implementation: the Python implementation had no
 //! `deploy` command, so no Python file ports to this module.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::cli;
 use crate::constants;
@@ -392,9 +392,14 @@ enum Target {
 
 /// The GRANT and REVOKE statements of the plan, with --no-privileges
 /// none. `creator` is the role that runs the script, when it is
-/// known.
+/// known. `implied` are the items of the sequences that serial columns
+/// make (see `serial::expand`): the database privileges of such a
+/// sequence are compared only when the project grants privileges on
+/// it.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn plan(
     project: &Project,
+    implied: &BTreeSet<usize>,
     diff: &Diff,
     resolutions: &BTreeMap<usize, Resolution>,
     output: &crate::build::BuildOutput,
@@ -419,7 +424,9 @@ pub(crate) fn plan(
     let keys: BTreeMap<ObjectKey, usize> = project
         .inventory
         .iter()
-        .filter(|item| COMPARED.contains(&item.desc))
+        .filter(|item| {
+            COMPARED.contains(&item.desc) && !implied.contains(&item.id)
+        })
         .map(|item| {
             let key = ObjectKey::new(item.desc, &item.definition);
             (super::drop_match_key(&key, &item.definition), item.id)

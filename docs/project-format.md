@@ -339,11 +339,22 @@ revocations:
   that is not a built-in type keep their names: `_mood` and
   `public._text` are not changed.
 
-  `deploy` compares a `serial`, `bigserial` or `smallserial` column
-  type as it is written, so write a serial column as `pull` writes
-  it: an `integer` (or `bigint` or `smallint`) column with
-  `nullable: false` and the default `nextval('<schema>.<sequence>'::regclass)`,
-  and the sequence as its own file with `owned_by`.
+  A column type can be `serial`, `bigserial` or `smallserial` (or
+  `serial4`, `serial8`, `serial2`). PostgreSQL keeps no serial type:
+  it makes an `integer` (`bigint`, `smallint`) column with
+  `nullable: false`, the default
+  `nextval('<schema>.<sequence>'::regclass)` and a sequence that the
+  column owns. `pull` writes that form. `deploy` compares a serial
+  column in that form, with the sequence that the column owns in the
+  database, so a serial column is not a change. `deploy` finds the
+  sequence by its `OWNED BY`, thus a name that PostgreSQL changed
+  (`<table>_<column>_seq1` when the name is in use) is also found. A
+  new table or a new column is made with the serial type. A change
+  from `serial` to `bigserial` changes the column type and the type of
+  the sequence. `deploy` compares the privileges of the sequence only
+  when the project grants privileges on it. Do not write the sequence
+  of a serial column as its own file: write the column in one of the
+  two forms.
 
 - A storage parameter (`storage_parameters` of a table, a
   materialized view or an index) can be a YAML number or boolean:

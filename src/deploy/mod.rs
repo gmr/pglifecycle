@@ -13,6 +13,7 @@ mod alter;
 mod diff;
 mod privileges;
 mod routine_body;
+mod serial;
 
 pub(crate) use diff::{
     UserTypes, canonical_casts, canonical_collation, identity_type,
@@ -63,6 +64,9 @@ pub fn deploy(args: &cli::Deploy) -> Result<(), String> {
         None,
         libpgfmt::style::Style::PgDump,
     )?;
+    // a serial column in the form that PostgreSQL stores, with the
+    // sequence that the column owns in the database
+    let implied = serial::expand(&mut project, &assembly);
     let task = progress::spinner("Diffing project against database");
     let mut diff = diff::diff(&project, &assembly);
     // --no-privileges keeps the default privileges that a dump has
@@ -80,6 +84,7 @@ pub fn deploy(args: &cli::Deploy) -> Result<(), String> {
     output.dump.sort_entries();
     let privileges = privileges::plan(
         &project,
+        &implied,
         &diff,
         &resolutions,
         &output,
