@@ -2531,6 +2531,16 @@ mod tests {
                     normalized(&routine(language, "SELECT\n1;")),
                     normalized(&routine(language, "SELECT 1;"))
                 );
+                // only the space that the PostgreSQL scanner ignores
+                // ([ \t\n\r\f\v]) is not a change
+                assert_eq!(
+                    normalized(&routine(language, "SELECT 1;")),
+                    normalized(&routine(language, "\t\x0bSELECT 1;\x0c\r"))
+                );
+                assert_ne!(
+                    normalized(&routine(language, "SELECT 1;")),
+                    normalized(&routine(language, "SELECT 1;\u{a0}"))
+                );
             }
             assert_ne!(
                 normalized(&routine("plpython3u", " return 1")),
