@@ -491,7 +491,7 @@ fn outside_items() -> Vec<Item> {
                 ),
             )
         },
-        // deviations 42, 43 and 44
+        // deviations 42 and 43
         item(
             9,
             ObjectType::Role,
@@ -519,8 +519,8 @@ fn outside_items() -> Vec<Item> {
                 .unwrap(),
             ),
         ),
-        // deviation 44: the index of the primary key is in a
-        // tablespace of the project, and the table is not
+        // the index of the primary key is in a tablespace of the
+        // project, and the table is not
         item(
             11,
             ObjectType::Tablespace,
@@ -977,40 +977,6 @@ fn corrects_objects_outside_the_test_project() {
             .collect();
         assert_eq!(settings, *defns, "{desc} {tag} settings");
     }
-    // deviation 44: a tablespace comes after the role that owns it
-    let id_of = |desc: &str, tag: &str| {
-        output
-            .dump
-            .entries()
-            .iter()
-            .find(|e| e.desc.as_str() == desc && e.tag.as_deref() == Some(tag))
-            .map(|e| e.dump_id)
-            .unwrap_or_else(|| panic!("missing entry {desc} {tag}"))
-    };
-    let tablespace = id_of("TABLESPACE", "Fast Space");
-    let owner = id_of("ROLE", "Space Owner");
-    assert!(
-        output
-            .dump
-            .get_entry(tablespace)
-            .unwrap()
-            .dependencies
-            .contains(&owner),
-        "the tablespace does not depend on its owner"
-    );
-    // the CREATE TABLE makes the index of the primary key in the
-    // tablespace, so the table comes after the tablespace
-    let fastdisk = id_of("TABLESPACE", "fastdisk");
-    let ledger = id_of("TABLE", "ledger");
-    assert!(
-        output
-            .dump
-            .get_entry(ledger)
-            .unwrap()
-            .dependencies
-            .contains(&fastdisk),
-        "the table does not depend on its index tablespace"
-    );
     for (desc, tag) in OUTSIDE_OWNERLESS {
         let entry = output
             .dump
@@ -1026,6 +992,28 @@ fn corrects_objects_outside_the_test_project() {
             "{desc} {tag} has an owner"
         );
     }
+    // libpgdump sorts a tablespace after the roles and before the
+    // other entries (deviations 44 and 45 are retired)
+    let mut dump = output.dump;
+    dump.sort_entries();
+    let position = |desc: &str, tag: &str| {
+        dump.entries()
+            .iter()
+            .position(|e| {
+                e.desc.as_str() == desc && e.tag.as_deref() == Some(tag)
+            })
+            .unwrap_or_else(|| panic!("missing entry {desc} {tag}"))
+    };
+    assert!(
+        position("ROLE", "Space Owner") < position("TABLESPACE", "Fast Space"),
+        "the tablespace comes before its owner"
+    );
+    // the CREATE TABLE makes the index of the primary key in the
+    // tablespace
+    assert!(
+        position("TABLESPACE", "fastdisk") < position("TABLE", "ledger"),
+        "the table comes before its index tablespace"
+    );
 }
 
 #[test]
@@ -1069,8 +1057,7 @@ fn records_inventory_dependency_edges() {
         })
         .collect();
     edges.sort();
-    // the same 10 inventory edges the loader resolves, the edge from
-    // an object to its tablespace (deviation 44), plus the edge
+    // the same 10 inventory edges the loader resolves, plus the edge
     // from the FK CONSTRAINT entry to its own table (Python recorded
     // no dependency edges at all; libpgdump's weighted toposort uses
     // these to order the archive). A foreign key needs no edge to the
@@ -1101,9 +1088,8 @@ fn records_inventory_dependency_edges() {
             "FK CONSTRAINT:addresses addresses_user_id -> TABLE:addresses",
             "FUNCTION:utf8_to_latin1(integer, integer, cstring, internal, \
              integer) -> PROCEDURAL LANGUAGE:plpython3u",
-            // deviation 44: an object in a tablespace comes after it
             "MATERIALIZED VIEW:user_addresses -> \
-             TABLE:addresses, TABLE:users, TABLESPACE:temp",
+             TABLE:addresses, TABLE:users",
             "SERVER:localhost -> EXTENSION:postgres_fdw",
             "TABLE:addresses -> TYPE:address_type",
             "TABLE:users -> DOMAIN:bcp47_locale, DOMAIN:email_address, \
@@ -1121,13 +1107,15 @@ fn records_inventory_dependency_edges() {
     );
 }
 
-/// Deviation 45: each entry that names a role, a user or a group of
-/// the project comes after it in the archive. libpgdump sorts these
-/// types last, and pg_restore runs the entries in the order of the
-/// archive, so the owner statement of a schema failed with `role
-/// "app_owner" does not exist`, and so did a policy that named a role.
-/// Only the entry of an item gets an edge to a role: deploy finds the
-/// item of a child entry, such as a comment, through its edges.
+/// Each entry that names a role, a user or a group of the project
+/// comes after it in the archive, and each entry in a tablespace of
+/// the project comes after the tablespace. pg_restore runs the entries
+/// in the order of the archive, so the owner statement of a schema
+/// failed with `role "app_owner" does not exist` when the roles came
+/// last, and so did a policy that named a role. libpgdump 2.3.1 sorts
+/// the roles first and the tablespaces next, as pg_dumpall writes
+/// them, thus the build adds no edge to a role or a tablespace
+/// (deviations 44 and 45 are retired).
 #[test]
 fn orders_roles_before_the_entries_that_name_them() {
     let item = |id, desc, definition| Item {
@@ -1190,7 +1178,13 @@ fn orders_roles_before_the_entries_that_name_them() {
                     "schema": "app",
                     "owner": "app_owner",
                     "comment": "Things",
+                    "tablespace": "app_space",
                     "columns": [{"name": "id", "data_type": "integer"}],
+                    "indexes": [{
+                        "name": "things_id",
+                        "columns": [{"name": "id"}],
+                        "tablespace": "app_space",
+                    }],
                     "row_level_security": {"enabled": true},
                     "policies": [{
                         "name": "readers",
@@ -1223,7 +1217,19 @@ fn orders_roles_before_the_entries_that_name_them() {
             Definition::UserMapping(
                 serde_json::from_value(serde_json::json!({
                     "name": "app_user",
-                    "servers": [{"name": "remote"}],
+                    "servers": [{"name": "remote"}, {"name": "other"}],
+                }))
+                .unwrap(),
+            ),
+        ),
+        item(
+            7,
+            ObjectType::Tablespace,
+            Definition::Tablespace(
+                serde_json::from_value(serde_json::json!({
+                    "name": "app_space",
+                    "owner": "app_owner",
+                    "location": "/srv/app",
                 }))
                 .unwrap(),
             ),
@@ -1268,6 +1274,9 @@ fn orders_roles_before_the_entries_that_name_them() {
         ),
         ("DEFAULT ACL DEFAULT PRIVILEGES FOR TABLES", "USER app_user"),
         ("USER MAPPING app_user", "USER app_user"),
+        ("TABLESPACE app_space", "ROLE app_owner"),
+        ("TABLE things", "TABLESPACE app_space"),
+        ("INDEX things_id", "TABLESPACE app_space"),
     ] {
         assert!(
             position(role) < position(entry),
