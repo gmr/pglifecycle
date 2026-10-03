@@ -445,6 +445,9 @@ COMMENT ON AGGREGATE test.sum_ints(BIGINT) IS 'Adds bigints';
 
 CREATE AGGREGATE test.sum_sorted(INTEGER ORDER BY INTEGER) (
     SFUNC = test.add_ints, STYPE = INTEGER);
+-- an argument name that needs quotes
+CREATE AGGREGATE test.sum_named("Weird Arg" INTEGER) (
+    SFUNC = test.add_ints, STYPE = INTEGER);
 
 -- Casts: through a function in this schema, and an I/O conversion. A
 -- cast has no schema of its own.
@@ -1002,6 +1005,18 @@ CREATE FUNCTION "Quoted Schema"."g""(y"(t TEXT) RETURNS TEXT
 $$;
 COMMENT ON FUNCTION "Quoted Schema"."g""(y"(TEXT) IS 'A name with a quote';
 REVOKE EXECUTE ON FUNCTION "Quoted Schema"."g""(y"(TEXT) FROM PUBLIC;
+-- no arguments: pull writes the name z(x)(), so that the load does
+-- not read (x) as the argument list
+CREATE FUNCTION "Quoted Schema"."z(x)"() RETURNS INTEGER
+    LANGUAGE sql IMMUTABLE AS $$
+ SELECT 1;
+$$;
+COMMENT ON FUNCTION "Quoted Schema"."z(x)"() IS 'No arguments';
+REVOKE EXECUTE ON FUNCTION "Quoted Schema"."z(x)"() FROM PUBLIC;
+CREATE PROCEDURE "Quoted Schema"."p(y)"() LANGUAGE sql AS $$
+ SELECT 1;
+$$;
+COMMENT ON PROCEDURE "Quoted Schema"."p(y)"() IS 'No arguments';
 
 -- Transforms for the base type: one with both functions and a
 -- comment, and one with only its TO SQL function

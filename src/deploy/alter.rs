@@ -1739,12 +1739,28 @@ fn sequence_width(data_type: Option<&str>) -> u8 {
     }
 }
 
+/// The sequence in the form deploy compares: its type in the form of
+/// [`canonical_type`], and no type for `bigint`, because pg_dump writes
+/// no AS for a bigint sequence
+pub(crate) fn canonical_sequence(sequence: &Sequence) -> Sequence {
+    Sequence {
+        data_type: sequence
+            .data_type
+            .as_deref()
+            .map(canonical_type)
+            .filter(|data_type| data_type != "bigint"),
+        ..sequence.clone()
+    }
+}
+
 /// Sequence reconciliation: a single ALTER SEQUENCE of the changed
 /// options, plus a comment delta. Every sequence property is
 /// alterable in place, so this never falls back to a rebuild. A
 /// narrower type is a statement of its own, and it is destructive: the
 /// values of the sequence or of its column can be out of its range.
+/// The two sides compare in the form of [`canonical_sequence`].
 fn sequence(repo: &Sequence, db: &Sequence) -> Resolution {
+    let (repo, db) = (&canonical_sequence(repo), &canonical_sequence(db));
     if repo.sql != db.sql {
         return Resolution::Replace;
     }
@@ -3428,6 +3444,35 @@ mod tests {
         let alters =
             statements(sequence(&parse_sequence(repo), &parse_sequence(db)));
         assert_eq!(sql(&alters), vec!["ALTER SEQUENCE test.s AS bigint;\n"]);
+    }
+
+    /// pg_dump writes no AS for a bigint sequence, so a project that
+    /// writes `bigint`, or an alias of it, has the type of the database
+    #[test]
+    fn sequence_bigint_is_no_type() {
+        let typed = |data_type: Option<&str>| {
+            parse_sequence(serde_json::json!({
+                "name": "s", "schema": "test", "owner": "postgres",
+                "data_type": data_type,
+            }))
+        };
+        for data_type in ["bigint", "BIGINT", "int8"] {
+            for (repo, db) in
+                [(Some(data_type), None), (None, Some(data_type))]
+            {
+                let alters = statements(sequence(&typed(repo), &typed(db)));
+                assert!(
+                    alters.is_empty(),
+                    "{repo:?} {db:?}: {:?}",
+                    sql(&alters)
+                );
+            }
+        }
+        let alters = statements(sequence(
+            &typed(Some("int4")),
+            &typed(Some("integer")),
+        ));
+        assert!(alters.is_empty(), "{:?}", sql(&alters));
     }
 
     /// A sequence type that is narrower can make the sequence too

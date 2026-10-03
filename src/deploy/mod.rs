@@ -16,9 +16,11 @@ mod privileges;
 mod routine_body;
 mod serial;
 
+pub(crate) use serial::integer_type as serial_integer_type;
+
 pub(crate) use diff::{
     UserTypes, canonical_casts, canonical_collation, identity_type,
-    stored_null_default,
+    is_built_in, stored_null_default,
 };
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};

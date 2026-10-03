@@ -273,6 +273,17 @@
 //!     The entry has no drop statement, thus pg_restore does not set
 //!     its owner. The Python had no place for these settings. The
 //!     test-project has none, thus its archive does not change.
+//! 49. An aggregate argument name renders as an identifier, quoted
+//!     when it needs quotes. The Python wrote it bare, thus
+//!     `IN Weird Arg integer` did not parse. The test-project
+//!     aggregate has no argument name.
+//! 53. A grant on a routine with no parameters whose name ends in its
+//!     argument list, such as `z(x)()` or `f()`, comes after the
+//!     routine and has the owner of the routine. The grant found no
+//!     routine, because the key of the routine had a second `()`, so
+//!     the entry had no dependency and the owner of the superuser.
+//!     Pull now writes `z(x)()` for a routine `"z(x)"` with no
+//!     arguments. The test-project has no grant on a routine.
 
 mod acls;
 mod calls;
@@ -4549,8 +4560,9 @@ pub(crate) fn render_aggregate_signature(
         args.iter()
             .map(|a| {
                 let mut arg = vec![a.mode.clone().unwrap_or("IN".into())];
+                // an argument name is an identifier (deviation 49)
                 if let Some(name) = &a.name {
-                    arg.push(name.clone());
+                    arg.push(quote_ident(name));
                 }
                 arg.push(a.data_type.clone());
                 arg.join(" ")
