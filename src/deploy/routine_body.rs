@@ -34,23 +34,29 @@ pub(crate) fn canonical_definition(
         language.eq_ignore_ascii_case("sql")
             || language.eq_ignore_ascii_case("plpgsql")
     });
-    // `trim_ascii` keeps `\v`, so the set is given here
-    let space = |c| matches!(c, ' ' | '\t' | '\n' | '\r' | '\x0c' | '\x0b');
     if formatted {
-        body.trim_matches(space)
+        body.trim_matches(scanner_space)
     } else {
         body
     }
     .to_string()
 }
 
-/// The body without each `AS` name of an output column that is the
-/// name that PostgreSQL gives to the column when it has no `AS`, for a
-/// column that is a constant with a cast (`'x'::text AS text`), also
-/// in parentheses or with a COLLATE clause, and for a subquery that
-/// gives one of these columns. A body that the grammar cannot read
-/// stays as it is.
+/// The space that the PostgreSQL scanner ignores. `trim_ascii` keeps
+/// `\v`, so the set is given here.
+fn scanner_space(c: char) -> bool {
+    matches!(c, ' ' | '\t' | '\n' | '\r' | '\x0c' | '\x0b')
+}
+
+/// The body without the space that the PostgreSQL scanner ignores at
+/// its start and end, and without each `AS` name of an output column
+/// that is the name that PostgreSQL gives to the column when it has no
+/// `AS`, for a column that is a constant with a cast (`'x'::text AS
+/// text`), also in parentheses or with a COLLATE clause, and for a
+/// subquery that gives one of these columns. A body that the grammar
+/// cannot read keeps its `AS` names.
 pub(crate) fn canonical_sql_body(body: &str) -> String {
+    let body = body.trim_matches(scanner_space);
     // the grammar reads a body only in its statement
     let prefix = "CREATE FUNCTION f() RETURNS void LANGUAGE sql ";
     let source = format!("{prefix}{body};");

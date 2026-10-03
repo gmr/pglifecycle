@@ -2566,6 +2566,45 @@ mod tests {
         }
     }
 
+    /// The space that the PostgreSQL scanner ignores at the start and
+    /// end of a `sql_body` is not a change: a YAML block scalar adds a
+    /// newline at the end. U+00A0 and the space in the body stay a
+    /// change.
+    #[test]
+    fn sql_body_outer_space_is_not_a_change() {
+        let f = |sql_body: &str| {
+            function(serde_json::json!({
+                "name": "f", "schema": "test", "owner": "postgres",
+                "language": "sql", "returns": "integer",
+                "sql_body": sql_body,
+            }))
+        };
+        let p = |sql_body: &str| {
+            Definition::Procedure(
+                serde_json::from_value(serde_json::json!({
+                    "name": "p", "schema": "test", "owner": "postgres",
+                    "language": "sql", "sql_body": sql_body,
+                }))
+                .unwrap(),
+            )
+        };
+        let body = "BEGIN ATOMIC\n SELECT 1;\nEND";
+        for routine in [f, p] {
+            assert_eq!(
+                normalized(&routine(body)),
+                normalized(&routine(&format!("\t\x0b{body}\n\x0c\r ")))
+            );
+            assert_ne!(
+                normalized(&routine(body)),
+                normalized(&routine(&format!("{body}\u{a0}")))
+            );
+            assert_ne!(
+                normalized(&routine(body)),
+                normalized(&routine("BEGIN ATOMIC\n  SELECT 1;\nEND"))
+            );
+        }
+    }
+
     /// What PostgreSQL 18 stores for a NULL default (the cases are from
     /// a PostgreSQL 18 database)
     #[test]
