@@ -161,6 +161,51 @@ else
     exit 1
 fi
 
+# The settings of the database, and of a role in the database, are not
+# in a dump without --create, so the diff above does not see them.
+# pg_restore restores the DATABASE PROPERTIES entry only with --create,
+# as for an archive of pg_dump, and the entry names the database of
+# the project. The build has no DATABASE entry, thus with --create
+# pg_restore restores the entry into the database of -d. The step
+# removes the settings of the source database, and of postgres in it
+# (fixtures/schema.sql sets them), and restores the entry into it. The
+# settings that it restores must be the settings that pull read.
+echo "==> Database settings: build, restore with --create"
+db_settings() {
+    psql -d postgres -tA -v ON_ERROR_STOP=1 -c "
+        SELECT setrole::regrole::text, s
+          FROM pg_db_role_setting, unnest(setconfig) AS s
+         WHERE setdatabase = (SELECT oid FROM pg_database
+                               WHERE datname = '${SOURCE_DB}')
+         ORDER BY 1, 2"
+}
+db_settings > "${WORKDIR}/db-settings-source.txt"
+if [ ! -s "${WORKDIR}/db-settings-source.txt" ]; then
+    # fixtures/schema.sql has settings; another fixture can have none
+    if [ "${FIXTURE}" = fixtures/schema.sql ]; then
+        echo "Database settings gate FAILED: the source has no settings" >&2
+        exit 1
+    fi
+    echo "Database settings gate SKIPPED: ${FIXTURE} has no settings"
+else
+    pg_restore --create -l "${WORKDIR}/build.dump" \
+        | grep " DATABASE PROPERTIES " > "${WORKDIR}/db-settings.list" || true
+    psql -d postgres -q -v ON_ERROR_STOP=1 \
+        -c "ALTER DATABASE ${SOURCE_DB} RESET ALL" \
+        -c "ALTER ROLE postgres IN DATABASE ${SOURCE_DB} RESET ALL"
+    pg_restore --create -d "${SOURCE_DB}" --exit-on-error \
+        -L "${WORKDIR}/db-settings.list" "${WORKDIR}/build.dump"
+    db_settings > "${WORKDIR}/db-settings-restored.txt"
+    if diff -u "${WORKDIR}/db-settings-source.txt" \
+            "${WORKDIR}/db-settings-restored.txt"; then
+        echo "Database settings gate passed: the restored settings are" \
+            "the same"
+    else
+        echo "Database settings gate FAILED: database settings differ" >&2
+        exit 1
+    fi
+fi
+
 # Roles are cluster objects, so pull reads them with pg_dumpall only
 # when it connects to a database, and the steps above do not see them.
 # A role and a user get settings that need quotes, a list setting with

@@ -82,6 +82,7 @@ pub const MODELED_DESCS: &[libpgdump::ObjectType] = {
         OT::UserMapping,
         OT::Comment,
         OT::Acl,
+        OT::DatabaseProperties,
     ]
 };
 
@@ -699,6 +700,11 @@ pub struct Assembly {
     /// From the globals dump of pg_dumpall, as the roles
     pub tablespaces: Vec<models::Tablespace>,
     pub roles: BTreeMap<String, RoleState>,
+    /// The settings of the database (`ALTER DATABASE ... SET`)
+    pub settings: Map<String, Value>,
+    /// The settings of each role in the database (`ALTER ROLE ... IN
+    /// DATABASE ... SET`), by role name
+    pub role_settings: BTreeMap<String, Map<String, Value>>,
     pub remaining: Vec<Remaining>,
     /// The objects that each function and procedure depends on in the
     /// archive, parallel to `functions` and `procedures`
@@ -1416,7 +1422,9 @@ impl Assembly {
                 conversion.owner = owner;
                 self.conversions.push(conversion);
             }
-            Statement::CreateEventTrigger(trigger) => {
+            Statement::CreateEventTrigger(mut trigger) => {
+                // the owner is optional: an entry with none gives none
+                trigger.owner = entry.owner.clone().filter(|o| !o.is_empty());
                 self.event_triggers.push(trigger);
             }
             Statement::AlterEventTrigger { name, enabled } => {
@@ -1653,6 +1661,16 @@ impl Assembly {
                     statement,
                     entry.defn.as_deref().unwrap_or_default(),
                 );
+            }
+            Statement::DatabaseSetting { role, name, value } => {
+                match role {
+                    Some(role) => self
+                        .role_settings
+                        .entry(role)
+                        .or_default()
+                        .insert(name, value),
+                    None => self.settings.insert(name, value),
+                };
             }
             Statement::Unsupported(kind) => {
                 log::warn!("Cannot model {}: {kind}", entry_label(entry));
@@ -3323,6 +3341,10 @@ mod tests {
             assembly.event_triggers[0].enabled.as_deref(),
             Some("DISABLED")
         );
+        assert_eq!(
+            assembly.event_triggers[0].owner.as_deref(),
+            Some("postgres")
+        );
         let publication = &assembly.publications[0];
         assert_eq!(publication.tables.as_ref().unwrap()[0].name(), "s.t");
         assert_eq!(publication.schemas, Some(vec![String::from("s")]));
@@ -3332,6 +3354,27 @@ mod tests {
             configuration.mappings.as_ref().unwrap()["word"],
             vec![String::from("simple")]
         );
+    }
+
+    /// An event trigger entry with no owner gives no owner, thus
+    /// deploy does not set one
+    #[test]
+    fn event_trigger_without_entry_owner_has_no_owner() {
+        let mut dump = libpgdump::new("fixtures", "UTF8", "18.0").unwrap();
+        dump.add_entry(
+            OT::EventTrigger,
+            Some(""),
+            Some("et"),
+            None,
+            Some("CREATE EVENT TRIGGER et ON sql_drop EXECUTE FUNCTION f();"),
+            None,
+            None,
+            &[],
+        )
+        .expect("add_entry failed");
+        let mut assembly = Assembly::default();
+        assembly.ingest(&dump).unwrap();
+        assert_eq!(assembly.event_triggers[0].owner, None);
     }
 
     /// A comment the model has no place for keeps its entry, so the
@@ -4213,6 +4256,105 @@ mod tests {
                 "ALTER ROLE app SET work_mem TO '64MB';\n",
             ]
         );
+    }
+
+    /// The settings of the database, and of a role in the database,
+    /// survive pull → write → load → build: pg_dump writes them in the
+    /// DATABASE PROPERTIES entry, pull writes them in project.yaml, and
+    /// build writes the entry again for the database of the project.
+    /// Another property in the entry is not modeled, thus the entry
+    /// is also kept
+    #[test]
+    fn database_settings_round_trip_through_build() {
+        use clap::Parser;
+        let mut dump = libpgdump::new("app", "UTF8", "18.0").unwrap();
+        add(
+            &mut dump,
+            OT::DatabaseProperties,
+            "",
+            "app",
+            "ALTER DATABASE app SET work_mem TO '64MB';\n\
+             ALTER DATABASE app SET search_path TO '$user', 'my schema';\n\
+             ALTER DATABASE app SET \"TimeZone\" TO 'UTC';\n\
+             ALTER ROLE \"App User\" IN DATABASE app SET \
+             statement_timeout TO '5s';\n",
+        );
+        let mut assembly = Assembly::default();
+        assembly.ingest(&dump).unwrap();
+        assert!(assembly.remaining.is_empty());
+        assert_eq!(
+            Value::Object(assembly.settings.clone()),
+            serde_json::json!({
+                "work_mem": "64MB",
+                "search_path": ["$user", "my schema"],
+                "TimeZone": "UTC",
+            })
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("project");
+        let unused = dir.path().join("unused.dump");
+        let args = match cli::Cli::try_parse_from([
+            "pglifecycle",
+            "pull",
+            "--dump",
+            unused.to_str().unwrap(),
+            dest.to_str().unwrap(),
+        ])
+        .unwrap()
+        .action
+        {
+            cli::Action::Pull(args) => args,
+            _ => unreachable!(),
+        };
+        let files = writer::render(&assembly, &args).unwrap();
+        writer::write_bootstrap(&files, &args).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dest.join("project.yaml")).unwrap(),
+            "---\nname: app\nsettings:\n- TimeZone: UTC\n\
+             - search_path:\n  - $user\n  - my schema\n\
+             - work_mem: 64MB\nrole_settings:\n  App User:\n\
+             \x20 - statement_timeout: 5s\n"
+        );
+
+        // load validates project.yaml against its schema
+        let project = crate::project::load(&dest).unwrap();
+        let archive = dir.path().join("app.dump");
+        crate::build::build(&project, &archive).unwrap();
+        let built = libpgdump::load(&archive).unwrap();
+        let entry = built
+            .entries()
+            .iter()
+            .find(|e| e.desc == OT::DatabaseProperties)
+            .expect("DATABASE PROPERTIES entry");
+        assert_eq!(entry.tag.as_deref(), Some("app"));
+        assert_eq!(entry.drop_stmt, None);
+        assert_eq!(
+            entry.defn.as_deref(),
+            Some(
+                "ALTER DATABASE app SET TimeZone TO 'UTC';\n\
+                 ALTER DATABASE app SET search_path TO '$user', \
+                 'my schema';\n\
+                 ALTER DATABASE app SET work_mem TO '64MB';\n\
+                 ALTER ROLE \"App User\" IN DATABASE app SET \
+                 statement_timeout TO '5s';\n"
+            )
+        );
+
+        let mut dump = libpgdump::new("app", "UTF8", "18.0").unwrap();
+        add(
+            &mut dump,
+            OT::DatabaseProperties,
+            "",
+            "app",
+            "ALTER DATABASE app CONNECTION LIMIT = 5;\n\
+             ALTER DATABASE app SET work_mem TO '64MB';\n",
+        );
+        let mut assembly = Assembly::default();
+        assembly.ingest(&dump).unwrap();
+        assert_eq!(assembly.remaining.len(), 1);
+        assert_eq!(assembly.remaining[0].desc, "DATABASE PROPERTIES");
+        assert_eq!(assembly.settings.len(), 1);
     }
 
     /// Role membership grants survive the full pull → write → load →

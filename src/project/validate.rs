@@ -39,29 +39,30 @@ pub fn validate_object(obj_type: &str, name: &str, data: &Value) -> bool {
         );
         valid = false;
     }
-    // (path, name, value) of each setting of a routine, a role or a
-    // user
-    let settings: Vec<(String, &String, &Value)> =
-        match obj_type {
-            "function" | "procedure" => data["configuration"]
-                .as_object()
-                .into_iter()
-                .flatten()
-                .map(|(k, v)| (format!("/configuration/{k}"), k, v))
-                .collect(),
-            "role" | "user" => data["settings"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .enumerate()
-                .flat_map(|(i, object)| {
-                    object.as_object().into_iter().flatten().map(
-                        move |(k, v)| (format!("/settings/{i}/{k}"), k, v),
-                    )
-                })
-                .collect(),
-            _ => vec![],
-        };
+    // (path, name, value) of each setting of a routine, a role, a
+    // user or the database
+    let settings: Vec<(String, &String, &Value)> = match obj_type {
+        "function" | "procedure" => data["configuration"]
+            .as_object()
+            .into_iter()
+            .flatten()
+            .map(|(k, v)| (format!("/configuration/{k}"), k, v))
+            .collect(),
+        "role" | "user" => settings_list("/settings", &data["settings"]),
+        "project" => {
+            let mut settings = settings_list("/settings", &data["settings"]);
+            for (role, list) in
+                data["role_settings"].as_object().into_iter().flatten()
+            {
+                settings.extend(settings_list(
+                    &format!("/role_settings/{role}"),
+                    list,
+                ));
+            }
+            settings
+        }
+        _ => vec![],
+    };
     for (path, setting, value) in settings {
         if let Some(error) = setting_error(setting, value) {
             log::error!(
@@ -71,6 +72,26 @@ pub fn validate_object(obj_type: &str, name: &str, data: &Value) -> bool {
         }
     }
     valid
+}
+
+/// (path, name, value) of each setting of a `settings` list, which has
+/// one `{ name: value }` object for each setting
+fn settings_list<'a>(
+    path: &str,
+    list: &'a Value,
+) -> Vec<(String, &'a String, &'a Value)> {
+    list.as_array()
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .flat_map(|(i, object)| {
+            object
+                .as_object()
+                .into_iter()
+                .flatten()
+                .map(move |(k, v)| (format!("{path}/{i}/{k}"), k, v))
+        })
+        .collect()
 }
 
 /// The error for a setting that has a form PostgreSQL does not keep.
@@ -385,6 +406,37 @@ mod tests {
             assert!(role(kind, "enable_seqscan", json!(false)));
             assert!(!role(kind, "DateStyle", json!(["iso", "mdy"])));
         }
+    }
+
+    /// The settings of the database, and of a role in the database,
+    /// have the same forms as the settings of a role
+    #[test]
+    fn database_settings_are_lists_only_where_postgres_keeps_lists() {
+        let project = |name: &str, value: Value| {
+            let database = json!({
+                "name": "db",
+                "settings": [{"work_mem": "64MB"}, {name: value.clone()}],
+            });
+            let role = json!({
+                "name": "db",
+                "role_settings": {"app": [{name: value}]},
+            });
+            (
+                validate_object("project", "db", &database),
+                validate_object("project", "db", &role),
+            )
+        };
+        assert_eq!(
+            project("search_path", json!(["$user", "a"])),
+            (true, true)
+        );
+        assert_eq!(project("statement_timeout", json!(1000)), (true, true));
+        assert_eq!(project("enable_seqscan", json!(false)), (true, true));
+        assert_eq!(project("DateStyle", json!("iso, mdy")), (true, true));
+        assert_eq!(project("search_path", json!("a, b")), (false, false));
+        assert_eq!(project("search_path", json!([])), (false, false));
+        assert_eq!(project("DateStyle", json!(["iso"])), (false, false));
+        assert_eq!(project("bad-name", json!("x")), (false, false));
     }
 
     #[test]

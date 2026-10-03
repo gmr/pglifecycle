@@ -188,6 +188,10 @@ pub struct DomainConstraint {
 #[serde(deny_unknown_fields)]
 pub struct EventTrigger {
     pub name: String,
+    /// The role that owns the trigger. It must be a superuser. Absent,
+    /// deploy does not set or compare the owner
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sql: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

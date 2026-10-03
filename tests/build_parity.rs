@@ -781,7 +781,39 @@ const OUTSIDE_CORRECTED: &[(&str, &str, &str, &str, &str)] = &[
         "GRANT EXECUTE ON FUNCTION test.\"g\"\"(y\"(text) TO fn_caller;\n",
         "",
     ),
+    // deviation 48: the settings of the database and of a role in the
+    // database are one DATABASE PROPERTIES entry, as pg_dump writes
+    // it. The Python had no place for them
+    (
+        "DATABASE PROPERTIES",
+        "",
+        "outside",
+        "ALTER DATABASE outside SET search_path TO '$user', 'my schema';\n\
+         ALTER DATABASE outside SET work_mem TO '64MB';\n\
+         ALTER ROLE \"App User\" IN DATABASE outside SET enable_seqscan \
+         TO False;\n",
+        "",
+    ),
 ];
+
+/// The settings of the database for deviation 48
+fn outside_settings() -> project::DatabaseSettings {
+    let setting =
+        |value: serde_json::Value| serde_json::from_value(value).unwrap();
+    project::DatabaseSettings {
+        database: vec![
+            setting(
+                serde_json::json!({"search_path": ["$user", "my schema"]}),
+            ),
+            setting(serde_json::json!({"work_mem": "64MB"})),
+        ],
+        roles: [(
+            String::from("App User"),
+            vec![setting(serde_json::json!({"enable_seqscan": false}))],
+        )]
+        .into(),
+    }
+}
 
 /// Deviation 42: (desc, tag) of the entries that [`outside_items`]
 /// give that have no owner. pg_restore cannot set the owner of a
@@ -1017,6 +1049,7 @@ fn corrects_objects_outside_the_test_project() {
         superuser: "postgres".into(),
         default_schema: "public".into(),
         path: std::path::PathBuf::new(),
+        settings: outside_settings(),
         inventory: outside_items(),
     };
     let output = build::assemble(&project).unwrap();
@@ -1336,6 +1369,7 @@ fn orders_roles_before_the_entries_that_name_them() {
         superuser: "postgres".into(),
         default_schema: "public".into(),
         path: std::path::PathBuf::new(),
+        settings: Default::default(),
         inventory,
     };
     let dir = tempfile::tempdir().unwrap();
@@ -1440,6 +1474,7 @@ fn orders_each_user_mapping_after_its_user() {
         superuser: "postgres".into(),
         default_schema: "public".into(),
         path: std::path::PathBuf::new(),
+        settings: Default::default(),
         inventory,
     };
     let output = build::assemble(&project).unwrap();

@@ -205,6 +205,19 @@ impl Writer {
                 serialize(&assembly.foreign_data_wrappers)?,
             );
         }
+        if let Some(settings) = settings_list(&assembly.settings) {
+            project.insert(String::from("settings"), serialize(&settings)?);
+        }
+        if !assembly.role_settings.is_empty() {
+            let roles: BTreeMap<&String, Vec<Map<String, Value>>> = assembly
+                .role_settings
+                .iter()
+                .map(|(role, settings)| {
+                    (role, settings_list(settings).unwrap_or_default())
+                })
+                .collect();
+            project.insert(String::from("role_settings"), serialize(&roles)?);
+        }
         self.save_value(PathBuf::from("project.yaml"), &Value::Object(project))
     }
 
@@ -434,7 +447,7 @@ impl Writer {
                 Some(kind) => kind,
                 None => continue,
             };
-            let settings = role_settings(state);
+            let settings = settings_list(&state.settings);
             if kind == crate::pull::RoleKind::User {
                 let user = models::User {
                     name: name.clone(),
@@ -780,21 +793,24 @@ fn user_options(state: &RoleState) -> Option<models::RoleOptions> {
     (options != models::RoleOptions::default()).then_some(options)
 }
 
-/// Convert accumulated `ALTER ROLE ... SET` state (a `name → value`
-/// map) into the schema's `settings` array of single-key objects, one
-/// per parameter, ordered by name for a deterministic diff
-fn role_settings(state: &RoleState) -> Option<Vec<Map<String, Value>>> {
-    if state.settings.is_empty() {
+/// Convert accumulated `ALTER ROLE ... SET` or `ALTER DATABASE ...
+/// SET` state (a `name → value` map) into the schema's `settings` array
+/// of single-key objects, one per parameter, ordered by name for a
+/// deterministic diff
+fn settings_list(
+    settings: &Map<String, Value>,
+) -> Option<Vec<Map<String, Value>>> {
+    if settings.is_empty() {
         return None;
     }
-    let mut names: Vec<&String> = state.settings.keys().collect();
+    let mut names: Vec<&String> = settings.keys().collect();
     names.sort();
     Some(
         names
             .into_iter()
             .map(|name| {
                 let mut object = Map::new();
-                object.insert(name.clone(), state.settings[name].clone());
+                object.insert(name.clone(), settings[name].clone());
                 object
             })
             .collect(),

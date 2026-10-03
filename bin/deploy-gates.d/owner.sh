@@ -132,3 +132,54 @@ expect_owner "SELECT bool_and(owner = 'postgres') FROM (
         WHERE oid = 'test.overloaded(integer)'::regprocedure
 ) AS owners(owner)" "a changed owner was not set back"
 expect_empty_plan "changed owners are set back in place"
+
+# a sequence that a column owns, in a file of its own, sorts before
+# its table. PostgreSQL refuses to change the owner of the sequence on
+# its own: ALTER TABLE ... OWNER TO changes the owner of both, thus
+# the plan has no ALTER SEQUENCE ... OWNER TO. The table comes first,
+# as the project gives the sequence no dependency on it
+mkdir -p "${WORKDIR}/project/sequences/test"
+cat > "${WORKDIR}/project/tables/test/gate_linked_t.yaml" <<'YAML'
+---
+name: gate_linked_t
+schema: test
+owner: postgres
+columns:
+- name: id
+  data_type: integer
+YAML
+./target/debug/pglifecycle deploy --apply -d "${TARGET_DB}" \
+    "${WORKDIR}/project"
+cat > "${WORKDIR}/project/sequences/test/gate_linked_a.yaml" <<'YAML'
+---
+schema: test
+name: gate_linked_a
+owner: postgres
+data_type: integer
+owned_by: test.gate_linked_t.id
+YAML
+./target/debug/pglifecycle deploy --apply -d "${TARGET_DB}" \
+    "${WORKDIR}/project"
+expect_empty_plan "the table and the sequence that its column owns are made"
+psql -d "${TARGET_DB}" -q -v ON_ERROR_STOP=1 \
+    -c 'ALTER TABLE test.gate_linked_t OWNER TO "Gate Owner"'
+./target/debug/pglifecycle deploy --apply -d "${TARGET_DB}" \
+    "${WORKDIR}/project"
+expect_owner "SELECT bool_and(pg_get_userbyid(relowner) = 'postgres')
+    FROM pg_class WHERE oid IN ('test.gate_linked_t'::regclass,
+                                'test.gate_linked_a'::regclass)" \
+    "the owner of a table and its linked sequence was not set back"
+expect_empty_plan "a linked sequence gets its owner with its table"
+
+# a sequence that the database does not link, with another owner:
+# OWNED BY needs the owner of the table, thus the plan sets the owner
+# of the sequence first
+psql -d "${TARGET_DB}" -q -v ON_ERROR_STOP=1 \
+    -c 'ALTER SEQUENCE test.gate_linked_a OWNED BY NONE' \
+    -c 'ALTER SEQUENCE test.gate_linked_a OWNER TO "Gate Owner"'
+./target/debug/pglifecycle deploy --apply -d "${TARGET_DB}" \
+    "${WORKDIR}/project"
+expect_owner "SELECT pg_get_userbyid(relowner) = 'postgres'
+    FROM pg_class WHERE oid = 'test.gate_linked_a'::regclass" \
+    "the owner of a sequence to link was not set back"
+expect_empty_plan "a sequence gets its owner before OWNED BY"

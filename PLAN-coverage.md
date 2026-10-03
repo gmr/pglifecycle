@@ -901,6 +901,15 @@ no fixture can hold it (see item 7). The coverage gate accepts an
 empty list: then pull must succeed on the fixture and write no
 `remaining.yaml`, so a new gap still fails the gate.
 
+**Done since:** the settings of the database (`ALTER DATABASE ...
+SET`) and of a role in the database (`ALTER ROLE ... IN DATABASE ...
+SET`), in the `DATABASE PROPERTIES` entry. They are in `project.yaml`
+(`settings`, `role_settings`). pg_dump writes the other properties of
+the database (`CONNECTION LIMIT`, `IS_TEMPLATE`, `ALLOW_CONNECTIONS`)
+in the same entry, and pull does not model them: the entry goes to
+`remaining.yaml`. The coverage fixture has `CONNECTION LIMIT` for this
+gap.
+
 ## Effort
 
 Roughly three focused weeks end to end. Phase 0 is a day and

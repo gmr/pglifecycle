@@ -10,6 +10,7 @@
 //! in-place form — are excluded unless `--allow-drop` is given.
 
 mod alter;
+mod database;
 mod diff;
 mod privileges;
 mod routine_body;
@@ -64,6 +65,15 @@ pub fn deploy(args: &cli::Deploy) -> Result<(), String> {
         None,
         libpgfmt::style::Style::PgDump,
     )?;
+    let conflicts =
+        sequence_owner_conflicts(&project.inventory, &assembly.sequences);
+    if !args.no_owner && !conflicts.is_empty() {
+        log::warn!(
+            "A column owns each of these sequences, thus it has the owner \
+             of its table, not the owner that the project gives: {}",
+            conflicts.join(", ")
+        );
+    }
     // a serial column in the form that PostgreSQL stores, with the
     // sequence that the column owns in the database
     let implied = serial::expand(&mut project, &assembly);
@@ -93,8 +103,10 @@ pub fn deploy(args: &cli::Deploy) -> Result<(), String> {
         args,
         creator(args).as_deref(),
     )?;
-    let plan =
+    let mut plan =
         plan(&diff, &resolutions, &output, &snapshot, &privileges, args)?;
+    plan.included
+        .extend(database::statements(&project.settings, &assembly));
     task.finish();
     report(&diff, &plan, &assembly);
     // a --dump file has no roles, thus only a live database is checked
@@ -543,7 +555,7 @@ fn plan(
             .and_then(|_| owner_sql(entry));
         // an object that the database has with another owner gets the
         // owner in place; a rebuild sets it after its CREATE
-        let reown = direct
+        let mut reown = direct
             .filter(|id| diff.owner_changed.contains(id))
             .and(owner.clone())
             .map(|sql| Statement {
@@ -614,6 +626,17 @@ fn plan(
         if let Some(id) = direct {
             let rebuilt = match resolutions.get(id) {
                 Some(Resolution::Statements(alters)) => {
+                    // OWNED BY needs the owner of the table, thus a
+                    // sequence that the database does not link gets
+                    // its owner first
+                    if matches!(
+                        diff.changed.get(id),
+                        Some(Definition::Sequence(db))
+                            if db.owned_by.is_none()
+                    ) && let Some(statement) = reown.take()
+                    {
+                        push(false, statement);
+                    }
                     // a statement that calls a function that comes
                     // later waits for it, and so do the statements
                     // after it, so that they keep their order
@@ -847,6 +870,65 @@ fn check_roles(plan: &Plan, conn: &cli::Connection) -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+/// The sequences that a column of a project table owns, with another
+/// owner than the table. PostgreSQL gives such a sequence the owner of
+/// its table, and refuses an owner change of the sequence on its own.
+/// When the project has no table for the column, the database
+/// sequence that the same column owns gives the owner
+fn sequence_owner_conflicts(
+    inventory: &[Item],
+    database: &[crate::models::Sequence],
+) -> Vec<String> {
+    use alter::names::name;
+    let columns: HashMap<String, &str> = inventory
+        .iter()
+        .filter_map(|item| match &item.definition {
+            Definition::Table(table) => Some(table),
+            _ => None,
+        })
+        .flat_map(|table| {
+            table.columns.iter().flatten().map(move |column| {
+                let key = name(&format!(
+                    "{}.{}.{}",
+                    quote_ident(&table.schema),
+                    quote_ident(&table.name),
+                    quote_ident(&column.name)
+                ));
+                (key, table.owner.as_str())
+            })
+        })
+        .collect();
+    inventory
+        .iter()
+        .filter_map(|item| match &item.definition {
+            Definition::Sequence(sequence) => Some(sequence),
+            _ => None,
+        })
+        .filter(|sequence| {
+            let Some(column) = sequence.owned_by.as_deref() else {
+                return false;
+            };
+            if let Some(owner) = columns.get(&name(column)) {
+                return *owner != sequence.owner;
+            }
+            database.iter().any(|db| {
+                db.schema == sequence.schema
+                    && db.name == sequence.name
+                    && !db.owner.is_empty()
+                    && db.owner != sequence.owner
+                    && db.owned_by.as_deref().map(name) == Some(name(column))
+            })
+        })
+        .map(|sequence| {
+            format!(
+                "{}.{}",
+                quote_ident(&sequence.schema),
+                quote_ident(&sequence.name)
+            )
+        })
+        .collect()
 }
 
 /// Warn when the plan changes objects that the role that read the
@@ -1255,7 +1337,7 @@ fn render_script(
             script.push_str(&format!(
                 "-- WARNING: {} withheld; the database can allow access \
                  the project does not\n",
-                statement.label
+                one_line(&statement.label)
             ));
         }
     } else if plan.included_destructive > 0 {
@@ -1309,10 +1391,28 @@ fn render_script(
         );
     }
     for statement in &plan.included {
-        script
-            .push_str(&format!("\n-- {}\n{}", statement.label, statement.sql));
+        script.push_str(&format!(
+            "\n-- {}\n{}",
+            one_line(&statement.label),
+            statement.sql
+        ));
     }
     script
+}
+
+/// `label` with each control character as its escape, so that the
+/// label stays in its comment. A name, as of a role, can contain a line
+/// break, and the text after the break can run as SQL
+fn one_line(label: &str) -> String {
+    let mut line = String::new();
+    for c in label.chars() {
+        if c.is_control() {
+            line.extend(c.escape_default());
+        } else {
+            line.push(c);
+        }
+    }
+    line
 }
 
 /// `DROP <type> IF EXISTS <name>` for a database-only object. User
@@ -2638,6 +2738,35 @@ mod tests {
         assert!(script.contains("--   DROP TABLE t; --\";\n"));
     }
 
+    /// A label with a newline, as from a role name, must stay in its
+    /// comment, so no part of it can run
+    #[test]
+    fn label_with_newline_stays_in_its_comment() {
+        let statement = || Statement {
+            label: "ROLE x\nDROP TABLE t; -- IN DATABASE d\r\nDROP TABLE u;\t"
+                .to_string(),
+            sql: "ALTER ROLE \"a\" RESET work_mem;\n".to_string(),
+            fails_open: true,
+        };
+        let plan = Plan {
+            included: vec![statement()],
+            excluded: vec![statement()],
+            kept: Vec::new(),
+            included_destructive: 0,
+            unowned: Vec::new(),
+        };
+        let script = render_script(&plan, "test", "db", None);
+        assert!(!script.contains("\nDROP TABLE"), "{script}");
+        assert!(!script.contains(['\r', '\t']), "{script}");
+        let label = "ROLE x\\nDROP TABLE t; -- IN DATABASE d\\r\\n\
+                     DROP TABLE u;\\t";
+        assert!(script.contains(&format!("\n-- {label}\n")), "{script}");
+        assert!(
+            script.contains(&format!("-- WARNING: {label} withheld")),
+            "{script}"
+        );
+    }
+
     /// The statements run with the session settings of pg_restore that
     /// can change the result of DDL, so that they run as they do in a
     /// restore of the build. The header says which settings.
@@ -2861,6 +2990,80 @@ mod tests {
         let sql: Vec<&str> =
             unowned.included.iter().map(|s| s.sql.as_str()).collect();
         assert_eq!(sql, ["CREATE TABLE public.added ();\n"]);
+    }
+
+    /// OWNED BY needs a sequence with the owner of the table, thus a
+    /// sequence that the project links to a column gets its owner
+    /// first. A sequence that the database links keeps the owner of
+    /// its table until OWNED BY NONE, thus it gets its owner after
+    #[test]
+    fn sequence_owner_order_follows_its_link() {
+        let mut dump =
+            libpgdump::new("test", "UTF8", "18.0").expect("new output dump");
+        let id = dump
+            .add_entry(
+                libpgdump::ObjectType::Sequence,
+                Some("public"),
+                Some("s"),
+                Some("app"),
+                Some("CREATE SEQUENCE public.s;\n"),
+                Some("DROP SEQUENCE public.s;\n"),
+                None,
+                &[],
+            )
+            .expect("add sequence entry");
+        let output = build::BuildOutput {
+            dump,
+            item_ids: HashMap::from([(id, 0)]),
+        };
+        let snapshot =
+            libpgdump::new("test", "UTF8", "18.0").expect("new dump");
+        let args = match cli::Cli::parse_from(["pglifecycle", "deploy", "p"])
+            .action
+        {
+            cli::Action::Deploy(deploy) => deploy,
+            _ => unreachable!("parsed the deploy subcommand"),
+        };
+        let owner = "ALTER SEQUENCE public.s OWNER TO app;\n";
+        for (db_owned_by, link, owner_first) in [
+            (None, "OWNED BY public.t.id", true),
+            (Some("public.t.id"), "OWNED BY NONE", false),
+        ] {
+            let link = format!("ALTER SEQUENCE public.s {link};\n");
+            let db: crate::models::Sequence =
+                serde_json::from_value(serde_json::json!({
+                    "name": "s", "schema": "public", "owner": "other",
+                    "owned_by": db_owned_by,
+                }))
+                .unwrap();
+            let diff = Diff {
+                items: BTreeMap::from([(0, Change::Changed)]),
+                changed: BTreeMap::from([(0, Definition::Sequence(db))]),
+                removed: BTreeMap::new(),
+                owned: BTreeSet::from([0]),
+                owner_changed: BTreeSet::from([0]),
+            };
+            let resolutions = BTreeMap::from([(
+                0,
+                Resolution::Statements(vec![alter::Alter::new(link.clone())]),
+            )]);
+            let plan = plan(
+                &diff,
+                &resolutions,
+                &output,
+                &snapshot,
+                &privileges::Privileges::default(),
+                &args,
+            )
+            .expect("plan succeeds");
+            let sql: Vec<&str> =
+                plan.included.iter().map(|s| s.sql.as_str()).collect();
+            if owner_first {
+                assert_eq!(sql, [owner, link.as_str()]);
+            } else {
+                assert_eq!(sql, [link.as_str(), owner]);
+            }
+        }
     }
 
     /// A new base type gets its shell type before its I/O function,
@@ -3261,6 +3464,68 @@ mod tests {
         );
     }
 
+    /// A sequence that a column owns has the owner of its table in
+    /// PostgreSQL, thus another owner in the project is a conflict
+    #[test]
+    fn sequence_owners_that_differ_from_their_table() {
+        use constants::ObjectType as O;
+        let item = |id, desc, value: serde_json::Value| Item {
+            id,
+            desc,
+            definition: match desc {
+                O::Sequence => Definition::Sequence(
+                    serde_json::from_value(value).unwrap(),
+                ),
+                _ => Definition::Table(serde_json::from_value(value).unwrap()),
+            },
+            dependencies: BTreeSet::new(),
+        };
+        let sequence = |id, name: &str, owner: &str, owned_by: &str| {
+            item(
+                id,
+                O::Sequence,
+                serde_json::json!({
+                    "name": name, "schema": "t", "owner": owner,
+                    "owned_by": owned_by,
+                }),
+            )
+        };
+        let inventory = [
+            item(
+                0,
+                O::Table,
+                serde_json::json!({
+                    "name": "Yy", "schema": "t", "owner": "o",
+                    "columns": [{"name": "id", "data_type": "integer"}],
+                }),
+            ),
+            sequence(1, "same", "o", "t.\"Yy\".id"),
+            sequence(2, "other", "p", "t.\"Yy\".ID"),
+            sequence(3, "no table", "p", "t.zz.id"),
+            sequence(4, "db other", "p", "t.zz.id"),
+            sequence(5, "db unlinked", "p", "t.zz.id"),
+        ];
+        // with no project table, the database sequence gives the owner
+        let database: Vec<crate::models::Sequence> = [
+            ("no table", "p", Some("t.zz.id")),
+            ("db other", "q", Some("t.zz.ID")),
+            ("db unlinked", "q", None),
+        ]
+        .into_iter()
+        .map(|(name, owner, owned_by)| {
+            serde_json::from_value(serde_json::json!({
+                "name": name, "schema": "t", "owner": owner,
+                "owned_by": owned_by,
+            }))
+            .unwrap()
+        })
+        .collect();
+        assert_eq!(
+            sequence_owner_conflicts(&inventory, &database),
+            ["t.other", "t.\"db other\""]
+        );
+    }
+
     /// OWNED BY is found outside the double quotes of a name
     #[test]
     fn owned_by_skips_quoted_names() {
@@ -3561,6 +3826,7 @@ mod tests {
             superuser: "postgres".into(),
             default_schema: "public".into(),
             path: std::path::PathBuf::new(),
+            settings: Default::default(),
             inventory,
         };
         let diff = Diff {
