@@ -93,6 +93,7 @@ impl Loader {
         ] {
             self.read_object_files(ot)?;
         }
+        self.check_type_names();
         self.apply_cached_dependencies()?;
         self.apply_structural_dependencies();
         if self.errors > 0 {
@@ -101,6 +102,34 @@ impl Loader {
         }
         log::info!("Project loaded");
         Ok(self.project)
+    }
+
+    /// Refuse each type name with no schema that is not a built-in
+    /// type and not a type or a domain of the project in the schema of
+    /// the object that uses it: the restore and the deploy script run
+    /// with an empty search_path, and PostgreSQL does not find it. A
+    /// type of an extension, such as citext, is not in the project, so
+    /// a project with an extension gets a warning instead.
+    fn check_type_names(&mut self) {
+        let extensions = self
+            .project
+            .inventory
+            .iter()
+            .any(|item| item.desc == ObjectType::Extension);
+        for message in super::type_names::unresolved_type_names(
+            &self.project.inventory,
+            &self.paths,
+        ) {
+            if extensions {
+                log::warn!(
+                    "{message}. The project has extensions, and the type \
+                     can be a type of one of them, thus the load continues"
+                );
+            } else {
+                log::error!("{message}");
+                self.errors += 1;
+            }
+        }
     }
 
     fn read_project_file(&mut self) -> Result<(), String> {
@@ -184,7 +213,9 @@ impl Loader {
                     continue;
                 }
             };
-            if !validate::validate_object(&ot.schema_file(), &name, &defn) {
+            // the error names the file, as the author edits it
+            let label = format!("{name} in {}", path.display());
+            if !validate::validate_object(&ot.schema_file(), &label, &defn) {
                 self.errors += 1;
                 continue;
             }

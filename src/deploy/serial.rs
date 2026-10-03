@@ -27,7 +27,7 @@ use crate::utils::quote_ident;
 
 /// The integer type of a serial type, as PostgreSQL reads the name: in
 /// any case, or quoted in lowercase
-fn integer_type(data_type: &str) -> Option<&'static str> {
+pub(crate) fn integer_type(data_type: &str) -> Option<&'static str> {
     match names::name(data_type).as_str() {
         "serial" | "serial4" => Some("integer"),
         "bigserial" | "serial8" => Some("bigint"),
