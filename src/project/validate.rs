@@ -17,27 +17,43 @@ static CACHE: OnceLock<Mutex<HashMap<String, Value>>> = OnceLock::new();
 /// logging each validation error. `obj_type` is the schema file stem
 /// form (lowercase, underscores).
 pub fn validate_object(obj_type: &str, name: &str, data: &Value) -> bool {
+    let errors = validation_errors(obj_type, name, data);
+    for error in &errors {
+        log::error!("{error}");
+    }
+    errors.is_empty()
+}
+
+/// The validation errors of a data object, as [`validate_object`]
+/// logs them
+fn validation_errors(obj_type: &str, name: &str, data: &Value) -> Vec<String> {
     let schema = match load_schema(obj_type) {
         Ok(schema) => schema,
-        Err(error) => {
-            log::error!("{error}");
-            return false;
-        }
+        Err(error) => return vec![error],
     };
     let validator = match jsonschema::validator_for(&schema) {
         Ok(validator) => validator,
         Err(error) => {
-            log::error!("Invalid schema for {obj_type}: {error}");
-            return false;
+            return vec![format!("Invalid schema for {obj_type}: {error}")];
         }
     };
-    let mut valid = true;
+    let mut errors = Vec::new();
     for error in validator.iter_errors(data) {
-        log::error!(
-            "Validation error for {obj_type} {name}: {error} at {}",
-            error.instance_path()
-        );
-        valid = false;
+        let path = error.instance_path().to_string();
+        // YAML reads an unquoted NULL as null, not as the text NULL
+        let error = if error.instance().is_null() && path.ends_with("/default")
+        {
+            String::from(
+                "the default is null. YAML reads an unquoted NULL as no \
+                 value. For a NULL default, write 'NULL' (quoted). For no \
+                 default, remove the field",
+            )
+        } else {
+            error.to_string()
+        };
+        errors.push(format!(
+            "Validation error for {obj_type} {name}: {error} at {path}"
+        ));
     }
     // (path, name, value) of each setting of a routine, a role or a
     // user
@@ -64,13 +80,12 @@ pub fn validate_object(obj_type: &str, name: &str, data: &Value) -> bool {
         };
     for (path, setting, value) in settings {
         if let Some(error) = setting_error(setting, value) {
-            log::error!(
+            errors.push(format!(
                 "Validation error for {obj_type} {name}: {error} at {path}"
-            );
-            valid = false;
+            ));
         }
     }
-    valid
+    errors
 }
 
 /// The error for a setting that has a form PostgreSQL does not keep.
@@ -384,6 +399,30 @@ mod tests {
             assert!(role(kind, "statement_timeout", json!(1000)));
             assert!(role(kind, "enable_seqscan", json!(false)));
             assert!(!role(kind, "DateStyle", json!(["iso", "mdy"])));
+        }
+    }
+
+    /// YAML reads an unquoted `NULL` as no value, which no default
+    /// can be. The error tells the author to quote it.
+    #[test]
+    fn null_default_says_to_quote_null() {
+        let data = json!({
+            "name": "t", "schema": "test", "owner": "postgres",
+            "columns": [
+                {"name": "a", "data_type": "text", "default": "NULL"},
+                {"name": "b", "data_type": "text", "default": null},
+            ],
+            "column_defaults": [{"column": "c", "default": null}],
+        });
+        let errors = validation_errors("table", "test.t", &data);
+        assert_eq!(errors.len(), 2, "{errors:#?}");
+        for (error, path) in errors
+            .iter()
+            .zip(["/columns/1/default", "/column_defaults/0/default"])
+        {
+            assert!(error.contains(path), "{error}");
+            assert!(error.contains("'NULL'"), "{error}");
+            assert!(!error.contains("oneOf"), "{error}");
         }
     }
 

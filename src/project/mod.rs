@@ -5,6 +5,7 @@ pub(crate) use load::{
     aggregate_signature, generated_name, operator_signature,
     parameter_signature, routine_base_name, split_sql_name, tag_signature,
 };
+mod type_names;
 pub mod validate;
 
 use std::path::PathBuf;

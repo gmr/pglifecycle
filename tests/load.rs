@@ -169,3 +169,58 @@ fn loads_the_obsolete_session_fields_only_with_utf8_and_true() {
         );
     }
 }
+
+/// Load a project with `project.yaml` (with `extra` added to it) and
+/// one table in schema `test` with a column of type `data_type`
+fn load_table_project(
+    extra: &str,
+    data_type: &str,
+) -> Result<project::Project, String> {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("project.yaml"),
+        format!("---\nname: types\n{extra}"),
+    )
+    .unwrap();
+    for (directory, file, text) in [
+        ("schemata", "test.yaml", "---\nname: test\n".to_string()),
+        (
+            "types",
+            "test.yaml",
+            "---\nschema: test\ntypes:\n- name: mood\n  type: enum\n  \
+             enum: [happy]\n"
+                .to_string(),
+        ),
+        (
+            "tables/test",
+            "t.yaml",
+            format!(
+                "---\nname: t\ncolumns:\n- name: a\n  data_type: \
+                 {data_type}\n"
+            ),
+        ),
+    ] {
+        let directory = dir.path().join(directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join(file), text).unwrap();
+    }
+    project::load(dir.path())
+}
+
+/// The restore and the deploy script run with an empty search_path.
+/// A type name with no schema loads when it is a built-in type or a
+/// type of the project in the schema of the object. Any other such
+/// name fails the load, unless the project has an extension, which can
+/// make the type: then the load gives a warning.
+#[test]
+fn refuses_an_unqualified_type_that_the_project_does_not_have() {
+    let extension = "extensions:\n- name: citext\n  schema: public\n";
+    for data_type in ["text", "mood", "test.mood", "public.citext"] {
+        load_table_project("", data_type)
+            .unwrap_or_else(|e| panic!("{data_type} did not load: {e}"));
+    }
+    assert!(load_table_project("", "citext").is_err());
+    assert!(load_table_project("", "citext[]").is_err());
+    load_table_project(extension, "citext")
+        .unwrap_or_else(|e| panic!("citext with an extension: {e}"));
+}

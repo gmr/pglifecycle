@@ -592,7 +592,43 @@ fn outside_items() -> Vec<Item> {
                     "grants": {"functions": {
                         "test.f(x)(integer)": ["EXECUTE"],
                         "test.g\"(y(text)": ["EXECUTE"],
+                        "test.z(x)()": ["EXECUTE"],
                     }},
+                }))
+                .unwrap(),
+            ),
+        ),
+        // deviation 49: an aggregate argument name that needs quotes
+        item(
+            16,
+            ObjectType::Aggregate,
+            Definition::Aggregate(
+                serde_json::from_value(serde_json::json!({
+                    "name": "weird_agg",
+                    "schema": "test",
+                    "owner": "postgres",
+                    "arguments": [
+                        {"name": "Weird Arg", "data_type": "integer"},
+                        {"name": "plain", "data_type": "integer"},
+                    ],
+                    "sfunc": "pg_catalog.int4pl",
+                    "state_data_type": "integer",
+                }))
+                .unwrap(),
+            ),
+        ),
+        // deviation 53: no arguments, as pull writes the name
+        item(
+            17,
+            ObjectType::Function,
+            Definition::Function(
+                serde_json::from_value(serde_json::json!({
+                    "name": "z(x)()",
+                    "schema": "test",
+                    "owner": "fn_owner",
+                    "returns": "integer",
+                    "language": "sql",
+                    "definition": "SELECT 1;",
                 }))
                 .unwrap(),
             ),
@@ -780,6 +816,27 @@ const OUTSIDE_CORRECTED: &[(&str, &str, &str, &str, &str)] = &[
         "FUNCTION g\"(y(text)",
         "GRANT EXECUTE ON FUNCTION test.\"g\"\"(y\"(text) TO fn_caller;\n",
         "",
+    ),
+    // deviation 53: the routine that the grant comes after
+    (
+        "FUNCTION",
+        "test",
+        "z(x)()",
+        "CREATE FUNCTION test.\"z(x)\"() RETURNS integer LANGUAGE sql AS \
+         $$\nSELECT 1;\n$$;\n",
+        "DROP FUNCTION test.\"z(x)\"();\n",
+    ),
+    // deviation 49: an aggregate argument name is an identifier. The
+    // Python wrote it bare, which does not parse for a name that needs
+    // quotes
+    (
+        "AGGREGATE",
+        "test",
+        "weird_agg",
+        "CREATE AGGREGATE test.weird_agg (IN \"Weird Arg\" integer, IN plain \
+         integer) (SFUNC = pg_catalog.int4pl, STYPE = integer);\n",
+        "DROP AGGREGATE test.weird_agg (IN \"Weird Arg\" integer, IN plain \
+         integer);\n",
     ),
 ];
 
@@ -1052,6 +1109,21 @@ fn corrects_objects_outside_the_test_project() {
     let (table, _) = id("TABLE", "tickets");
     let (function, function_deps) = id("FUNCTION", "next_ticket");
     assert_eq!(function_deps, [table]);
+    // deviation 53: the grant on a routine with no parameters whose
+    // name ends in its argument list comes after the routine, and has
+    // the owner of the routine
+    let (routine, _) = id("FUNCTION", "z(x)()");
+    let acl = output
+        .dump
+        .entries()
+        .iter()
+        .find(|e| {
+            e.desc.as_str() == "ACL"
+                && e.tag.as_deref() == Some("FUNCTION z(x)()")
+        })
+        .expect("missing entry ACL FUNCTION z(x)()");
+    assert_eq!(acl.dependencies, [routine]);
+    assert_eq!(acl.owner.as_deref(), Some("fn_owner"));
     for (desc, tag) in [
         ("DEFAULT", "tickets n"),
         ("CHECK CONSTRAINT", "tickets tickets_n_check"),
