@@ -322,7 +322,8 @@ refuses `ALTER SEQUENCE ... OWNER TO` on such a sequence, and `ALTER
 TABLE ... OWNER TO` changes the owner of both. Thus give the sequence
 the owner of its table; deploy warns when the project gives it another
 owner. When the project links a sequence that the database does not
-link, deploy sets its owner before `OWNED BY`. An event trigger with no `owner` in its file keeps the owner
+link, deploy runs `OWNED BY` after each owner change, also that of
+the table. An event trigger with no `owner` in its file keeps the owner
 that it has, and a new one gets the connecting role. A type whose
 model has no owner (for example publications and subscriptions) keeps
 the connecting role as owner. So does most of what the project writes

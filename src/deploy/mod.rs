@@ -488,6 +488,8 @@ fn plan(
     // the statements that wait for a function or a sequence, by its
     // archive position
     let mut waiting: BTreeMap<usize, Vec<(bool, Statement)>> = BTreeMap::new();
+    // OWNED BY of a changed sequence, after each owner change
+    let mut links = Vec::new();
     for (position, entry) in output.dump.entries().iter().enumerate() {
         let later = waiting.split_off(&position);
         for (destructive, statement) in std::mem::replace(&mut waiting, later)
@@ -553,7 +555,7 @@ fn plan(
             .and_then(|_| owner_sql(entry));
         // an object that the database has with another owner gets the
         // owner in place; a rebuild sets it after its CREATE
-        let mut reown = direct
+        let reown = direct
             .filter(|id| diff.owner_changed.contains(id))
             .and(owner.clone())
             .map(|sql| Statement {
@@ -624,17 +626,6 @@ fn plan(
         if let Some(id) = direct {
             let rebuilt = match resolutions.get(id) {
                 Some(Resolution::Statements(alters)) => {
-                    // OWNED BY needs the owner of the table, thus a
-                    // sequence that the database does not link gets
-                    // its owner first
-                    if matches!(
-                        diff.changed.get(id),
-                        Some(Definition::Sequence(db))
-                            if db.owned_by.is_none()
-                    ) && let Some(statement) = reown.take()
-                    {
-                        push(false, statement);
-                    }
                     // a statement that calls a function that comes
                     // later waits for it, and so do the statements
                     // after it, so that they keep their order
@@ -653,6 +644,10 @@ fn plan(
                         // pending: --apply runs without it
                         if alter.index_removal && !args.allow_drop_indexes {
                             kept.push(statement);
+                            continue;
+                        }
+                        if alter.links {
+                            links.push(statement);
                             continue;
                         }
                         after = after.max(calls_later(
@@ -783,6 +778,9 @@ fn plan(
     }
     for (destructive, statement) in waiting.into_values().flatten() {
         push(destructive, statement);
+    }
+    for statement in links {
+        push(false, statement);
     }
     // the privileges of the objects that the database has, after each
     // statement that changes an object or its owner
@@ -2944,28 +2942,36 @@ mod tests {
     }
 
     /// OWNED BY needs a sequence with the owner of the table, thus a
-    /// sequence that the project links to a column gets its owner
-    /// first. A sequence that the database links keeps the owner of
+    /// sequence that the project links to a column is linked after
+    /// each owner change, also the owner change of a table that comes
+    /// later. A sequence that the database links keeps the owner of
     /// its table until OWNED BY NONE, thus it gets its owner after
     #[test]
     fn sequence_owner_order_follows_its_link() {
         let mut dump =
             libpgdump::new("test", "UTF8", "18.0").expect("new output dump");
-        let id = dump
-            .add_entry(
-                libpgdump::ObjectType::Sequence,
+        let mut add = |desc, name: &str| {
+            let kind = match desc {
+                libpgdump::ObjectType::Sequence => "SEQUENCE",
+                _ => "TABLE",
+            };
+            dump.add_entry(
+                desc,
                 Some("public"),
-                Some("s"),
+                Some(name),
                 Some("app"),
-                Some("CREATE SEQUENCE public.s;\n"),
-                Some("DROP SEQUENCE public.s;\n"),
+                Some(&format!("CREATE {kind} public.{name};\n")),
+                Some(&format!("DROP {kind} public.{name};\n")),
                 None,
                 &[],
             )
-            .expect("add sequence entry");
+            .expect("add entry")
+        };
+        let sequence = add(libpgdump::ObjectType::Sequence, "s");
+        let table = add(libpgdump::ObjectType::Table, "t");
         let output = build::BuildOutput {
             dump,
-            item_ids: HashMap::from([(id, 0)]),
+            item_ids: HashMap::from([(sequence, 0), (table, 1)]),
         };
         let snapshot =
             libpgdump::new("test", "UTF8", "18.0").expect("new dump");
@@ -2975,28 +2981,50 @@ mod tests {
             cli::Action::Deploy(deploy) => deploy,
             _ => unreachable!("parsed the deploy subcommand"),
         };
-        let owner = "ALTER SEQUENCE public.s OWNER TO app;\n";
-        for (db_owned_by, link, owner_first) in [
-            (None, "OWNED BY public.t.id", true),
-            (Some("public.t.id"), "OWNED BY NONE", false),
-        ] {
-            let link = format!("ALTER SEQUENCE public.s {link};\n");
-            let db: crate::models::Sequence =
+        let definition = |owned_by: Option<&str>| {
+            Definition::Sequence(
                 serde_json::from_value(serde_json::json!({
-                    "name": "s", "schema": "public", "owner": "other",
-                    "owned_by": db_owned_by,
+                    "name": "s", "schema": "public", "owner": "app",
+                    "owned_by": owned_by,
                 }))
-                .unwrap();
+                .unwrap(),
+            )
+        };
+        let owner = "ALTER SEQUENCE public.s OWNER TO app;\n";
+        let table_owner = "ALTER TABLE public.t OWNER TO app;\n";
+        for (repo, db, expected) in [
+            (
+                Some("public.t.id"),
+                None,
+                [
+                    owner,
+                    table_owner,
+                    "ALTER SEQUENCE public.s OWNED BY public.t.id;\n",
+                ],
+            ),
+            (
+                None,
+                Some("public.t.id"),
+                [
+                    "ALTER SEQUENCE public.s OWNED BY NONE;\n",
+                    owner,
+                    table_owner,
+                ],
+            ),
+        ] {
             let diff = Diff {
-                items: BTreeMap::from([(0, Change::Changed)]),
-                changed: BTreeMap::from([(0, Definition::Sequence(db))]),
+                items: BTreeMap::from([
+                    (0, Change::Changed),
+                    (1, Change::Unchanged),
+                ]),
+                changed: BTreeMap::from([(0, definition(db))]),
                 removed: BTreeMap::new(),
-                owned: BTreeSet::from([0]),
-                owner_changed: BTreeSet::from([0]),
+                owned: BTreeSet::from([0, 1]),
+                owner_changed: BTreeSet::from([0, 1]),
             };
             let resolutions = BTreeMap::from([(
                 0,
-                Resolution::Statements(vec![alter::Alter::new(link.clone())]),
+                alter::resolve(&definition(repo), &definition(db)),
             )]);
             let plan = plan(
                 &diff,
@@ -3009,11 +3037,7 @@ mod tests {
             .expect("plan succeeds");
             let sql: Vec<&str> =
                 plan.included.iter().map(|s| s.sql.as_str()).collect();
-            if owner_first {
-                assert_eq!(sql, [owner, link.as_str()]);
-            } else {
-                assert_eq!(sql, [link.as_str(), owner]);
-            }
+            assert_eq!(sql, expected);
         }
     }
 
@@ -3217,6 +3241,7 @@ mod tests {
                 fails_open: false,
                 index_removal: false,
                 schema: None,
+                links: false,
             })
             .collect();
         let resolutions =

@@ -73,6 +73,10 @@ pub(crate) struct Alter {
     /// The schema that the statement names and that must exist before
     /// it runs (ALTER DEFAULT PRIVILEGES IN SCHEMA)
     pub schema: Option<String>,
+    /// The statement links a sequence to a column (OWNED BY), which
+    /// needs the owner of the table; deploy runs it after each owner
+    /// change
+    pub links: bool,
 }
 
 impl Alter {
@@ -84,6 +88,7 @@ impl Alter {
             fails_open: false,
             index_removal: false,
             schema: None,
+            links: false,
         }
     }
 
@@ -1819,11 +1824,20 @@ fn sequence(repo: &Sequence, db: &Sequence) -> Resolution {
             "NO CYCLE".into()
         });
     }
+    // OWNED BY NONE comes before an owner change, and a link after it
+    let mut link = None;
     if repo.owned_by != db.owned_by {
-        clauses.push(match &repo.owned_by {
-            Some(owner) => format!("OWNED BY {owner}"),
-            None => "OWNED BY NONE".into(),
-        });
+        match &repo.owned_by {
+            Some(owner) => {
+                link = Some(Alter {
+                    links: true,
+                    ..Alter::new(format!(
+                        "ALTER SEQUENCE {name} OWNED BY {owner};\n"
+                    ))
+                })
+            }
+            None => clauses.push("OWNED BY NONE".into()),
+        }
     }
     if !clauses.is_empty() {
         alters.push(Alter::new(format!(
@@ -1831,6 +1845,7 @@ fn sequence(repo: &Sequence, db: &Sequence) -> Resolution {
             clauses.join(" ")
         )));
     }
+    alters.extend(link);
     push_comment(&mut alters, "SEQUENCE", &name, &repo.comment, &db.comment);
     Resolution::Statements(alters)
 }
