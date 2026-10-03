@@ -262,6 +262,17 @@
 //!     libpgdump sorts the user first, and the chain keeps each later
 //!     entry tied to the item. The test-project user mapping is on one
 //!     server.
+//! 48. The `settings` and `role_settings` of `project.yaml` render as
+//!     one `DATABASE PROPERTIES` entry, as pg_dump writes it: `ALTER
+//!     DATABASE name SET ...` for each setting of the database, then
+//!     `ALTER ROLE role IN DATABASE name SET ...` for each setting of
+//!     a role in the database. Each value renders as a role's setting
+//!     does (see 37). A statement must name the database, thus the
+//!     entry names the database of the project, and pg_restore
+//!     restores it only with `--create`, as for an archive of pg_dump.
+//!     The entry has no drop statement, thus pg_restore does not set
+//!     its owner. The Python had no place for these settings. The
+//!     test-project has none, thus its archive does not change.
 //! 49. An aggregate argument name renders as an identifier, quoted
 //!     when it needs quotes. The Python wrote it bare, thus
 //!     `IN Weird Arg integer` did not parse. The test-project
@@ -349,6 +360,7 @@ pub fn assemble(project: &Project) -> Result<BuildOutput, String> {
         task.inc();
     }
     task.finish();
+    builder.dump_database_settings(project)?;
     acls::dump_acls(&mut builder, project)?;
     // record inventory dependency edges on the entries so the weighted
     // pg_dump topological sort in libpgdump (run by save) can order
@@ -1909,6 +1921,56 @@ impl Builder {
         Ok(())
     }
 
+    /// Emit the settings of the database, and of each role in the
+    /// database, as one `DATABASE PROPERTIES` entry, as pg_dump writes
+    /// them (deviation 48). A statement must name the database, so it
+    /// names the database of the project, and pg_restore restores the
+    /// entry only with `--create`. The entry has no drop statement, thus
+    /// pg_restore does not set its owner
+    fn dump_database_settings(
+        &mut self,
+        project: &Project,
+    ) -> Result<(), String> {
+        let name = quote_ident(&project.name);
+        let mut defn = String::new();
+        for object in &project.settings.database {
+            for (setting, value) in object {
+                defn.push_str(&format!(
+                    "ALTER DATABASE {name} SET {setting} TO {};\n",
+                    setting_value(value)
+                ));
+            }
+        }
+        for (role, settings) in &project.settings.roles {
+            for object in settings {
+                for (setting, value) in object {
+                    defn.push_str(&format!(
+                        "ALTER ROLE {} IN DATABASE {name} SET {setting} TO \
+                         {};\n",
+                        quote_ident(role),
+                        setting_value(value)
+                    ));
+                }
+            }
+        }
+        if defn.is_empty() {
+            return Ok(());
+        }
+        self.dump
+            .add_entry(
+                libpgdump::ObjectType::DatabaseProperties,
+                Some(""),
+                Some(&project.name),
+                Some(&self.superuser),
+                Some(&defn),
+                None,
+                None,
+                &[],
+            )
+            .map_err(|e| format!("failed to add DATABASE PROPERTIES: {e}"))?;
+        Ok(())
+    }
+
     fn dump_schema(&mut self, item: &Item) -> Result<(), String> {
         let Definition::Schema(d) = &item.definition else {
             unreachable!()
@@ -2233,13 +2295,12 @@ impl Builder {
                 constraint_entries.insert(check.name.clone(), id);
             }
         }
+        let not_null_names = d.not_null_names();
         for not_null in d.not_null_constraints.as_deref().unwrap_or_default() {
             if not_null.not_valid == Some(true) {
                 // an unnamed one has the name PostgreSQL generates, and
                 // the entry's tag and DROP both need a name
-                let name = not_null.name.clone().unwrap_or_else(|| {
-                    format!("{}_{}_not_null", d.name, not_null.column)
-                });
+                let name = not_null_names[&not_null.column].clone();
                 let id = self.dump_separate_constraint(
                     "CONSTRAINT",
                     item,
@@ -5355,6 +5416,7 @@ mod tests {
             superuser: String::from("postgres"),
             default_schema: String::from("public"),
             path: std::path::PathBuf::new(),
+            settings: Default::default(),
             inventory: vec![table_item(1, table)],
         };
         let output = assemble(&project).unwrap();
@@ -5636,6 +5698,52 @@ mod tests {
             "CREATE SUBSCRIPTION s CONNECTION 'dbname=x' PUBLICATION p, \
              \"P Two\" WITH (connect = False, slot_name = NONE);\n"
         );
+    }
+
+    /// The entry of an event trigger has the owner of the project, as
+    /// pg_dump writes it, and pg_restore sets it with ALTER EVENT
+    /// TRIGGER ... OWNER TO. With no owner, the entry has the
+    /// superuser, as in the Python
+    #[test]
+    fn event_trigger_entry_has_its_owner() {
+        for (owner, expected) in
+            [(Some("Et Owner"), "Et Owner"), (None, "postgres")]
+        {
+            let mut value = serde_json::json!({
+                "name": "et", "event": "sql_drop", "function": "test.f()",
+            });
+            if let Some(owner) = owner {
+                value["owner"] = owner.into();
+            }
+            let item = Item {
+                id: 1,
+                desc: ObjectType::EventTrigger,
+                definition: Definition::EventTrigger(
+                    serde_json::from_value(value).unwrap(),
+                ),
+                dependencies: BTreeSet::new(),
+            };
+            let mut builder = Builder {
+                dump: libpgdump::new("t", "UTF-8", "18.0").unwrap(),
+                dump_id_map: HashMap::new(),
+                text_search_last: HashMap::new(),
+                pending_attaches: Vec::new(),
+                index_attaches: IndexAttaches::default(),
+                text_search_ids: HashMap::new(),
+                text_search_refs: Vec::new(),
+                partition_ids: HashMap::new(),
+                superuser: "postgres".into(),
+                calls: Rc::default(),
+            };
+            builder.dump_item(&item).unwrap();
+            let entry = builder
+                .dump
+                .entries()
+                .iter()
+                .find(|e| e.desc == libpgdump::ObjectType::EventTrigger)
+                .expect("an event trigger entry");
+            assert_eq!(entry.owner.as_deref(), Some(expected));
+        }
     }
 
     #[test]
@@ -6120,6 +6228,7 @@ mod tests {
             superuser: "postgres".into(),
             default_schema: "public".into(),
             path: PathBuf::new(),
+            settings: Default::default(),
             inventory: vec![table_item(1, table), seq_item],
         };
         let output = assemble(&project).unwrap();
@@ -6255,6 +6364,7 @@ mod tests {
             superuser: "postgres".into(),
             default_schema: "public".into(),
             path: std::path::PathBuf::new(),
+            settings: Default::default(),
             inventory,
         }
     }

@@ -95,3 +95,44 @@ expect_event_trigger "SELECT NOT EXISTS (SELECT FROM pg_event_trigger
     WHERE evtname = 'Stray Trigger')" \
     "the database-only event trigger was not dropped"
 expect_empty_plan "a database-only event trigger is dropped"
+
+# owner drift: an event trigger that names its owner gets it back in
+# place with ALTER EVENT TRIGGER ... OWNER TO, without --allow-drop. A
+# trigger whose file names no owner keeps the owner that it has. The
+# owner of an event trigger must be a superuser
+psql -d postgres -q -v ON_ERROR_STOP=1 <<'SQL'
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT FROM pg_roles
+                   WHERE rolname = 'Gate Event Owner') THEN
+        CREATE ROLE "Gate Event Owner" SUPERUSER;
+    END IF;
+END
+$$;
+SQL
+grep -q '^owner: postgres$' \
+    "${WORKDIR}/project/event_triggers/pglifecycle_drops.yaml"
+psql -d "${TARGET_DB}" -q -v ON_ERROR_STOP=1 <<'SQL'
+ALTER EVENT TRIGGER pglifecycle_drops OWNER TO "Gate Event Owner";
+ALTER EVENT TRIGGER pglifecycle_ddl_start OWNER TO "Gate Event Owner";
+SQL
+./target/debug/pglifecycle deploy --no-owner -o "${WORKDIR}/owner.sql" \
+    -d "${TARGET_DB}" "${WORKDIR}/project"
+if ! grep -q '^-- no changes' "${WORKDIR}/owner.sql"; then
+    echo "Convergence gate FAILED: --no-owner changes the owner of an" \
+        "event trigger" >&2
+    cat "${WORKDIR}/owner.sql" >&2
+    exit 1
+fi
+./target/debug/pglifecycle deploy --apply -d "${TARGET_DB}" \
+    "${WORKDIR}/project"
+expect_event_trigger "SELECT string_agg(evtname || '='
+        || pg_get_userbyid(evtowner), ',' ORDER BY evtname)
+    = 'pglifecycle_ddl_start=Gate Event Owner,pglifecycle_drops=postgres,'
+      'pglifecycle_replica=postgres'
+    FROM pg_event_trigger" \
+    "the owner of an event trigger was not set back"
+expect_empty_plan "a changed event trigger owner is set back in place"
+psql -d "${TARGET_DB}" -q -v ON_ERROR_STOP=1 \
+    -c 'ALTER EVENT TRIGGER pglifecycle_ddl_start OWNER TO postgres' \
+    -c 'DROP ROLE "Gate Event Owner"'

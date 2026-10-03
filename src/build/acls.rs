@@ -554,9 +554,9 @@ impl<'a> ObjectIndex<'a> {
                     },
                     None => (
                         table.schema.clone(),
-                        crate::project::generated_name(
+                        crate::utils::make_object_name(
                             &table.name,
-                            &column.name,
+                            Some(&column.name),
                             "seq",
                         ),
                     ),
@@ -723,6 +723,7 @@ mod tests {
             superuser: String::from("postgres"),
             default_schema: String::from("public"),
             path: std::path::PathBuf::new(),
+            settings: Default::default(),
             inventory: vec![
                 Item {
                     id: 0,
@@ -782,6 +783,7 @@ mod tests {
             superuser: String::from("postgres"),
             default_schema: String::from("public"),
             path: std::path::PathBuf::new(),
+            settings: Default::default(),
             inventory: vec![Item {
                 id: 0,
                 desc: ObjectType::Procedure,
@@ -863,6 +865,7 @@ mod tests {
             superuser: String::from("postgres"),
             default_schema: String::from("public"),
             path: std::path::PathBuf::new(),
+            settings: Default::default(),
             inventory: vec![
                 Item {
                     id: 0,
@@ -903,6 +906,7 @@ mod tests {
             superuser: String::from("postgres"),
             default_schema: String::from("public"),
             path: std::path::PathBuf::new(),
+            settings: Default::default(),
             inventory,
         }
     }

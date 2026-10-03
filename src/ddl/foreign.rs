@@ -164,6 +164,7 @@ pub(crate) fn create_foreign_table(
             table::apply_constraint(&mut table, name, parsed);
         }
     }
+    table::drop_generated_not_null_names(&mut table);
     Ok(Statement::CreateTable(Box::new(table)))
 }
 

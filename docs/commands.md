@@ -36,6 +36,23 @@ setting. pg_restore converts the text to the encoding of the database,
 thus the same archive restores into a UTF8 and into a LATIN1 database.
 Create the database with the encoding before the restore.
 
+The `settings` and `role_settings` of `project.yaml` go in one
+`DATABASE PROPERTIES` entry, as `pg_dump` writes them: `ALTER DATABASE
+name SET ...` and `ALTER ROLE role IN DATABASE name SET ...`, where
+`name` is the `name` of the project. PostgreSQL has no statement that
+sets a setting of the current database without its name, thus the
+archive cannot use the name of the database that you restore into.
+`pg_restore` restores this entry only with `--create`, as for an
+archive of `pg_dump`. The archive has no `DATABASE` entry, thus with
+`--create` `pg_restore` makes no database: it restores all entries into
+the database of `-d`. To restore the settings, create the database with
+the name of the project, then restore into it:
+
+```bash
+createdb app
+pg_restore --create -d app app.dump
+```
+
 ## deploy
 
 Compare a live database (or an existing dump) against the project and
@@ -184,12 +201,15 @@ reconciled in place where PostgreSQL can express it:
   `row_level_security` or `policies`, such as one pulled before
   pglifecycle modeled them, leaves the table's row security as the
   database has it.
-- **Functions and views** — `CREATE OR REPLACE` (a function whose
-  return type changed must be dropped first, so it falls back). A
-  function is matched by its name and its input parameters. A type
-  alias or a type modifier in a parameter, the return type or a
-  `TABLE(...)` column is not a change, as PostgreSQL keeps no typmod
-  there (see [Project format](project-format.md)). A
+- **Functions and views** — `CREATE OR REPLACE`. PostgreSQL does not
+  let `CREATE OR REPLACE FUNCTION` change the return type, the `OUT`
+  or `INOUT` parameters, or `window`, rename an input parameter, or
+  remove a default, so such a change falls back. A function is
+  matched by its name and its input parameters. The space at the
+  start and end of a SQL or PL/pgSQL `definition` is not a change; the
+  space in it is. A type alias or a type modifier in a parameter, the
+  return type or a `TABLE(...)` column is not a change, as PostgreSQL
+  keeps no typmod there (see [Project format](project-format.md)). A
   view's rules are reconciled after it. A `sql_body` is compared as
   text with the form PostgreSQL keeps, so write it as `pull` writes
   it. An `AS` name that PostgreSQL adds to a constant column when
@@ -224,6 +244,17 @@ reconciled in place where PostgreSQL can express it:
   never strips a live credential.
 - **Foreign tables** — `OPTIONS` changes and comments in place; a server
   or column change falls back to drop+recreate.
+- **Database settings** — the `settings` and `role_settings` of
+  `project.yaml`. A setting that is different, or that only the
+  project has, gets `ALTER DATABASE name SET` (or `ALTER ROLE role IN
+  DATABASE name SET`), and a setting that only the database has gets
+  `RESET`. `name` is the name of the database that deploy reads (with
+  `--dump`, the database of the dump). The names and the values compare
+  as for a routine's settings: a name has no case, and a number or a
+  boolean is its text. These statements come after all other
+  statements. A setting changes only the sessions that start after the
+  script. Deploy does not make roles, so a role in `role_settings` must
+  exist (deploy warns when it does not).
 - Everything else falls back to drop+recreate.
 
 ### Destructive statements and limits
@@ -236,6 +267,11 @@ any are pending. Trigger and constraint drops issued while
 reconciling a table are *not* gated: they lose no data and the project
 is authoritative. A changed index is also dropped and made again
 without a gate.
+
+A `RESET` of a database setting is not gated. It loses no data, and a
+changed value replaces the value of the database as a `RESET` does. A
+project that does not have a setting of the database thus resets it:
+pull the project again to record the settings.
 
 An index that the database has and the project does not is **kept**
 unless `--allow-drop-indexes` is given. Such an index is often made at
@@ -260,6 +296,23 @@ pglifecycle that did not model identity columns has none on any
 column, so deploying it asks for exactly this on each one; the gate is
 what stops that from stripping them. Pull the project again to record
 them.
+
+A constraint or an identity sequence that has no name in the project
+gets the name that PostgreSQL generates: `<table>_<columns>_<label>`,
+cut to 63 bytes. When two NOT NULL columns of a table cut to the same
+name, PostgreSQL adds a number to the name of the second column
+(`_not_null1`), and deploy does the same. PostgreSQL also adds a
+number when a constraint of another table in the schema has the
+name; deploy does not know that case, so give such a name in the
+project. PostgreSQL counts the bytes in the encoding of the database,
+and the project does not record that encoding. A name that is only
+ASCII has the same bytes in all encodings. For a name with other
+characters, deploy accepts the name that PostgreSQL gives in a UTF8
+database and in a database with one byte for each character (LATIN1
+and the like). In other encodings (EUC_JP and the like), it accepts
+only a name that PostgreSQL did not cut. A statement that deploy
+writes with the name of a constraint that has no name in the project
+(`RENAME`, `VALIDATE`) uses the UTF8 name.
 
 Row-security reconciliation is gated when it can give a role access to
 rows it could not see before: `DISABLE` and `NO FORCE ROW LEVEL
@@ -315,11 +368,18 @@ the owner: for example, CREATE TABLE in a new schema, and the indexes,
 comments and grants of a new table. To change the owner of an object
 that the database has, the connecting role must also have the
 privileges of its current owner. To change the owner of a schema, the
-connecting role must have CREATE on the database. A type whose model
-has no owner (for example publications, subscriptions and event
-triggers) keeps the connecting role as owner. So does most of what the
-project writes as raw `sql`: as pg_restore does, deploy sets no owner
-for an archive entry with no DROP statement. A new object gets the
+connecting role must have CREATE on the database. A sequence that a
+column owns (`owned_by`) gets its owner with its table: PostgreSQL
+refuses `ALTER SEQUENCE ... OWNER TO` on such a sequence, and `ALTER
+TABLE ... OWNER TO` changes the owner of both. Thus give the sequence
+the owner of its table; deploy warns when the project gives it another
+owner. When the project links a sequence that the database does not
+link, deploy sets its owner before `OWNED BY`. An event trigger with no `owner` in its file keeps the owner
+that it has, and a new one gets the connecting role. A type whose
+model has no owner (for example publications and subscriptions) keeps
+the connecting role as owner. So does most of what the project writes
+as raw `sql`: as pg_restore does, deploy sets no owner for an archive
+entry with no DROP statement. A new object gets the
 privileges that the project gives it (see the privileges below), not
 the default privileges of the connecting role or of its owner. With
 `-O`, deploy does not set or compare owners (as `pg_restore
@@ -600,7 +660,7 @@ pglifecycle pull [OPTIONS] DEST
 | Option | Description |
 | --- | --- |
 | `-D, --dump FILE` | Use an existing `pg_dump -Fc` file instead of connecting |
-| `--no-roles` | Skip cluster role/user and tablespace extraction (this extraction is enabled by default for live connections; always skipped with `--dump`) |
+| `--no-roles` | Skip cluster role/user and tablespace extraction (this extraction is enabled by default for live connections; always skipped with `--dump`). The settings of a role in the database come from `pg_dump`, thus pull still reads them |
 | `--include-password-hashes` | Include role password hashes in users (omitted by default via `pg_dumpall --no-role-passwords`), and the passwords of user mappings and subscription connections |
 | `--include-mode-headers` | Prefix each generated file with editor mode headers (see below) |
 | `-i, --ignore FILE` | File listing project paths to skip writing |
@@ -636,6 +696,10 @@ The entry was preserved in ./project/remaining.yaml; re-run with
 
 A `COMMENT` entry counts as unmodeled when the model has no place for
 it, such as a comment on an object type that `pull` does not model.
+A `DATABASE PROPERTIES` entry counts as unmodeled when it has a
+property of the database other than a setting (`CONNECTION LIMIT`,
+`IS_TEMPLATE` or `ALLOW_CONNECTIONS`). `pull` keeps the settings in the
+entry, and the entry also goes to `remaining.yaml`.
 
 The project directory is written either way, so `remaining.yaml` is
 there to inspect. `--allow-unsupported` downgrades the failure to a

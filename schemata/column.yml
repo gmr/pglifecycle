@@ -24,9 +24,11 @@ properties:
       The parts of the column's NOT NULL constraint that `nullable` cannot
       express (PostgreSQL 18 and later, where NOT NULL is a named
       constraint). Present only when the name is not the one PostgreSQL
-      generates, `<table>_<column>_not_null`, or when the constraint is
-      NO INHERIT. `nullable` stays authoritative for whether the constraint
-      exists at all.
+      generates, `<table>_<column>_not_null` cut to 63 bytes, or when the
+      constraint is NO INHERIT. When two columns of the table cut to the
+      same name, PostgreSQL adds a number to the name of the second
+      column (`_not_null1`), and that name is generated too. `nullable` stays authoritative for whether
+      the constraint exists at all.
     type: object
     properties:
       name:
