@@ -2249,6 +2249,7 @@ mod tests {
             superuser: String::from("postgres"),
             default_schema: String::from("public"),
             path: std::path::PathBuf::new(),
+            settings: Default::default(),
             inventory: [
                 sequence("aa", "o", Some("t.yy.id")),
                 sequence("bb", "o", Some("t.yy.id")),
