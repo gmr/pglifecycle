@@ -598,6 +598,12 @@ fn normalized(definition: &Definition) -> Value {
             canonical = Definition::Domain(canonical_domain(domain));
             &canonical
         }
+        Definition::Sequence(sequence) => {
+            canonical = Definition::Sequence(
+                super::alter::canonical_sequence(sequence),
+            );
+            &canonical
+        }
         Definition::Publication(publication) => {
             canonical = Definition::Publication(publication.canonical());
             &canonical
@@ -1003,26 +1009,7 @@ fn null_type(
         "bit" => String::from("\"bit\""),
         base => base.to_string(),
     };
-    let built_in = BUILT_IN_TYPES.contains(&base.as_str())
-        || matches!(
-            base.as_str(),
-            "integer"
-                | "smallint"
-                | "bigint"
-                | "real"
-                | "double precision"
-                | "boolean"
-                | "numeric"
-                | "character varying"
-                | "bit varying"
-                | "timestamp without time zone"
-                | "timestamp with time zone"
-                | "time without time zone"
-                | "time with time zone"
-                | "\"char\""
-                | "\"bit\""
-        );
-    if built_in {
+    if is_built_in(&base) {
         return Some(if array.is_empty() && base == "interval" {
             element.to_string()
         } else {
@@ -1045,6 +1032,32 @@ fn null_type(
         }
         None => None,
     }
+}
+
+/// Whether a type with no modifier and no array suffix, in the form
+/// of [`identity_type`], is a built-in type
+pub(crate) fn is_built_in(base: &str) -> bool {
+    BUILT_IN_TYPES.contains(&base)
+        || matches!(
+            base,
+            "integer"
+                | "smallint"
+                | "bigint"
+                | "real"
+                | "double precision"
+                | "boolean"
+                | "numeric"
+                | "character"
+                | "character varying"
+                | "bit varying"
+                | "timestamp without time zone"
+                | "timestamp with time zone"
+                | "time without time zone"
+                | "time with time zone"
+                | "\"any\""
+                | "\"char\""
+                | "\"bit\""
+        )
 }
 
 /// The database subscription without the password in its connection
@@ -2472,6 +2485,31 @@ mod tests {
         assert_ne!(
             normalized(&domain("\"C\"")),
             normalized(&domain("\"POSIX\""))
+        );
+    }
+
+    /// pg_dump writes no AS for a bigint sequence
+    #[test]
+    fn bigint_sequence_is_not_a_change() {
+        let sequence = |data_type: Option<&str>| {
+            Definition::Sequence(
+                serde_json::from_value(serde_json::json!({
+                    "name": "s", "schema": "test", "owner": "postgres",
+                    "data_type": data_type,
+                }))
+                .unwrap(),
+            )
+        };
+        for data_type in ["bigint", "BIGINT", "int8"] {
+            assert_eq!(
+                normalized(&sequence(Some(data_type))),
+                normalized(&sequence(None)),
+                "{data_type}"
+            );
+        }
+        assert_ne!(
+            normalized(&sequence(Some("integer"))),
+            normalized(&sequence(None))
         );
     }
 

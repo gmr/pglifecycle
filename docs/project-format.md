@@ -339,6 +339,16 @@ revocations:
   that is not a built-in type keep their names: `_mood` and
   `public._text` are not changed.
 
+  The restore and the deploy script run with an empty `search_path`,
+  so give each type that is not a built-in type its schema, as `pull`
+  writes it: `public.citext`, not `citext`. The load accepts a name
+  with no schema when it is a built-in type, or a type or a domain of
+  the project in the schema of the object that uses it. For any other
+  name with no schema, the load fails with an error that names the
+  file, the field and the type. When the project has extensions, the
+  type can be a type of an extension, which the project does not
+  have, so the load gives a warning and continues.
+
   A column type can be `serial`, `bigserial` or `smallserial` (or
   `serial4`, `serial8`, `serial2`). PostgreSQL keeps no serial type:
   it makes an `integer` (`bigint`, `smallint`) column with
@@ -385,6 +395,13 @@ revocations:
   `pull` writes it, with the casts PostgreSQL adds: `lower('X' ||
   a::text)` is `lower(('X'::text || (a)::text))`. A different text is
   set again with `SET EXPRESSION` on each deploy.
+
+- A function or procedure with no `parameters` can give its argument
+  types at the end of its `name`: `name: f(integer)` is `f` with one
+  `integer` argument. Thus a name that has `(` needs its argument list
+  when the routine has no arguments: `name: z(x)()` is the routine
+  `"z(x)"` with no arguments, and `name: z(x)` is `z` with an argument
+  of type `x`. `pull` writes `z(x)()`.
 
 - A function's or procedure's `sql_body` (a `RETURN` expression or a
   `BEGIN ATOMIC` block) is not kept as it is written. PostgreSQL
@@ -494,6 +511,8 @@ role_settings:
 - A primary key or unique constraint on one column can be the column
   name alone (`primary_key: id`), and an integer default can be a
   number (`default: 0`). Each is the same as the form `pull` writes.
+  For a NULL default, write `default: 'NULL'` with quotes: YAML reads
+  an unquoted `NULL` as no value, and the load fails.
 
 - An index of a partitioned table has `recurse: false` when it is made
   `ON ONLY` the partitioned table, as `pg_dump` writes it. Each
