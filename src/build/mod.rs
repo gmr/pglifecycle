@@ -2284,17 +2284,12 @@ impl Builder {
                 constraint_entries.insert(check.name.clone(), id);
             }
         }
+        let not_null_names = d.not_null_names();
         for not_null in d.not_null_constraints.as_deref().unwrap_or_default() {
             if not_null.not_valid == Some(true) {
                 // an unnamed one has the name PostgreSQL generates, and
                 // the entry's tag and DROP both need a name
-                let name = not_null.name.clone().unwrap_or_else(|| {
-                    crate::utils::make_object_name(
-                        &d.name,
-                        Some(&not_null.column),
-                        "not_null",
-                    )
-                });
+                let name = not_null_names[&not_null.column].clone();
                 let id = self.dump_separate_constraint(
                     "CONSTRAINT",
                     item,

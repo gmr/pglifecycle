@@ -667,28 +667,7 @@ fn constraint_names(table: &Table) -> std::collections::BTreeSet<String> {
             .map(|c| c.name.clone()),
     );
     names.extend(table.foreign_keys.iter().flatten().map(|f| f.name.clone()));
-    for not_null in table.not_null_constraints.iter().flatten() {
-        names.insert(not_null.name.clone().unwrap_or_else(|| {
-            make_object_name(&table.name, Some(&not_null.column), "not_null")
-        }));
-    }
-    for column in table.columns.iter().flatten() {
-        if column.nullable == Some(false) {
-            names.insert(
-                column
-                    .not_null_constraint
-                    .as_ref()
-                    .and_then(|n| n.name.clone())
-                    .unwrap_or_else(|| {
-                        make_object_name(
-                            &table.name,
-                            Some(&column.name),
-                            "not_null",
-                        )
-                    }),
-            );
-        }
-    }
+    names.extend(table.not_null_names().into_values());
     names
 }
 
@@ -881,6 +860,7 @@ fn validate_local_not_nulls(
     alters: &mut Vec<Alter>,
 ) -> Table {
     let wanted = repo.canonical();
+    let db_names = db.not_null_names();
     let mut db = db.clone();
     for not_null in db.not_null_constraints.iter_mut().flatten() {
         if not_null.not_valid != Some(true) {
@@ -902,9 +882,7 @@ fn validate_local_not_nulls(
                     && constraint.no_inherit == not_null.no_inherit
             });
         if matches {
-            let name = not_null.name.clone().unwrap_or_else(|| {
-                make_object_name(&db.name, Some(&not_null.column), "not_null")
-            });
+            let name = db_names[&not_null.column].clone();
             alters.push(Alter::new(format!(
                 "ALTER TABLE {table} VALIDATE CONSTRAINT {};\n",
                 quote_ident(&name)
@@ -940,6 +918,8 @@ fn columns(
     if in_db != in_repo {
         return false;
     }
+    let repo_names = repo.not_null_names();
+    let db_names = db.not_null_names();
     for column in repo_columns {
         match db_columns.iter().find(|c| c.name == column.name) {
             None => alters.push(Alter::new(format!(
@@ -947,7 +927,8 @@ fn columns(
                 build::render_table_column(column)
             ))),
             Some(existing) => {
-                if !alter_column(table, &repo.name, column, existing, alters) {
+                let names = (&repo_names, &db_names);
+                if !alter_column(table, names, column, existing, alters) {
                     return false;
                 }
             }
@@ -969,23 +950,16 @@ fn no_inherit(not_null: &Option<ColumnNotNull>) -> bool {
     not_null.as_ref().and_then(|c| c.no_inherit) == Some(true)
 }
 
-/// The NOT NULL constraint's name on `relation`, falling back to the
-/// name PostgreSQL generates when the model records none (the model
-/// carries a name only where it differs from the generated one)
-fn not_null_name(relation: &str, column: &Column) -> String {
-    match column
-        .not_null_constraint
-        .as_ref()
-        .and_then(|c| c.name.as_ref())
-    {
-        Some(name) => name.clone(),
-        None => make_object_name(relation, Some(&column.name), "not_null"),
-    }
-}
+/// The NOT NULL names of the repository table and of the database
+/// table, as [`Table::not_null_names`] gives them
+type NotNullNames<'a> = (
+    &'a std::collections::BTreeMap<String, String>,
+    &'a std::collections::BTreeMap<String, String>,
+);
 
 fn alter_column(
     table: &str,
-    relation: &str,
+    not_null_names: NotNullNames,
     repo: &Column,
     db: &Column,
     alters: &mut Vec<Alter>,
@@ -1109,20 +1083,22 @@ fn alter_column(
         // inheritance differs. Reconcile it in place: DROP NOT NULL is
         // rejected outright on a primary-key column, and pg_dump does
         // write a named NOT NULL there
-        let repo_name = not_null_name(relation, repo);
-        let db_name = not_null_name(relation, db);
+        // the model carries a name only where it differs from the one
+        // PostgreSQL generates
+        let repo_name = &not_null_names.0[&repo.name];
+        let db_name = &not_null_names.1[&db.name];
         if repo_name != db_name {
             alters.push(Alter::new(format!(
                 "ALTER TABLE {table} RENAME CONSTRAINT {} TO {};\n",
-                quote_ident(&db_name),
-                quote_ident(&repo_name)
+                quote_ident(db_name),
+                quote_ident(repo_name)
             )));
         }
         let repo_no_inherit = no_inherit(&repo.not_null_constraint);
         if repo_no_inherit != no_inherit(&db.not_null_constraint) {
             alters.push(Alter::new(format!(
                 "ALTER TABLE {table} ALTER CONSTRAINT {} {}INHERIT;\n",
-                quote_ident(&repo_name),
+                quote_ident(repo_name),
                 if repo_no_inherit { "NO " } else { "" }
             )));
         }
@@ -1389,6 +1365,7 @@ fn constraints(
     // goes through ALTER COLUMN for the same reason — it needs no name
     let repo_not_null =
         repo.not_null_constraints.as_deref().unwrap_or_default();
+    let db_not_null_names = db.not_null_names();
     let db_not_null = validations(
         table,
         db.not_null_constraints.as_deref().unwrap_or_default(),
@@ -1400,15 +1377,7 @@ fn constraints(
             ..not_null.clone()
         },
         // an unnamed one carries the name PostgreSQL generates
-        |not_null| {
-            not_null.name.clone().unwrap_or_else(|| {
-                make_object_name(
-                    &repo.name,
-                    Some(&not_null.column),
-                    "not_null",
-                )
-            })
-        },
+        |not_null| db_not_null_names[&not_null.column].clone(),
         alters,
     );
     named_pairs(
@@ -2672,6 +2641,74 @@ mod tests {
                 "c".repeat(48)
             )]
         );
+    }
+
+    /// Two long columns cut to the same name, and PostgreSQL adds a
+    /// number to the second. Unnamed in the repository, each compares
+    /// with the name that PostgreSQL gave it.
+    #[test]
+    fn column_not_null_names_with_a_number() {
+        let (c1, c2) = (
+            format!("{}_1", "c".repeat(60)),
+            format!("{}_2", "c".repeat(60)),
+        );
+        let mut repo = base_table();
+        repo["columns"] = serde_json::json!([
+            {"name": c1, "data_type": "text", "nullable": false},
+            {"name": c2, "data_type": "text", "nullable": false},
+        ]);
+        let mut db = base_table();
+        db["columns"] = serde_json::json!([
+            {"name": c1, "data_type": "text", "nullable": false},
+            {"name": c2, "data_type": "text", "nullable": false,
+             "not_null_constraint": {
+                 "name": format!("users_{}_not_null1", "c".repeat(47))}},
+        ]);
+        let alters = statements(table(&parse_table(repo), &parse_table(db)));
+        assert_eq!(sql(&alters), Vec::<String>::new());
+    }
+
+    /// In a LATIN1 database, PostgreSQL does not cut the primary key
+    /// name of a table of 31 `é` (36 bytes there, 67 in UTF-8). The
+    /// database side goes through the statements that pg_dump writes,
+    /// as in deploy, and compares equal to the unnamed primary key.
+    #[test]
+    fn latin1_primary_key_name_is_no_change() {
+        let e31 = "\u{e9}".repeat(31);
+        let mut parser = crate::ddl::Parser::new().unwrap();
+        let mut parsed = parser
+            .parse(&format!(
+                "CREATE TABLE test.\"{e31}\" (\n    \
+                 id integer NOT NULL\n);\n\
+                 ALTER TABLE ONLY test.\"{e31}\"\n    \
+                 ADD CONSTRAINT \"{e31}_pkey\" PRIMARY KEY (id);"
+            ))
+            .unwrap()
+            .into_iter();
+        let Some(crate::ddl::Statement::CreateTable(mut db)) = parsed.next()
+        else {
+            panic!("expected CreateTable")
+        };
+        let Some(crate::ddl::Statement::AddConstraint {
+            name,
+            constraint,
+            ..
+        }) = parsed.next()
+        else {
+            panic!("expected AddConstraint")
+        };
+        crate::ddl::apply_constraint(&mut db, name, constraint);
+        db.owner = "postgres".into();
+        let repo = parse_table(serde_json::json!({
+            "name": e31,
+            "schema": "test",
+            "owner": "postgres",
+            "columns": [
+                {"name": "id", "data_type": "integer", "nullable": false},
+            ],
+            "primary_key": ["id"],
+        }));
+        assert_eq!(sql(&statements(table(&repo, &db))), Vec::<&str>::new());
     }
 
     /// A NO INHERIT change alone reconciles through ALTER CONSTRAINT,
