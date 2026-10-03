@@ -1416,7 +1416,9 @@ impl Assembly {
                 conversion.owner = owner;
                 self.conversions.push(conversion);
             }
-            Statement::CreateEventTrigger(trigger) => {
+            Statement::CreateEventTrigger(mut trigger) => {
+                // the owner is optional: an entry with none gives none
+                trigger.owner = entry.owner.clone().filter(|o| !o.is_empty());
                 self.event_triggers.push(trigger);
             }
             Statement::AlterEventTrigger { name, enabled } => {
@@ -3323,6 +3325,10 @@ mod tests {
             assembly.event_triggers[0].enabled.as_deref(),
             Some("DISABLED")
         );
+        assert_eq!(
+            assembly.event_triggers[0].owner.as_deref(),
+            Some("postgres")
+        );
         let publication = &assembly.publications[0];
         assert_eq!(publication.tables.as_ref().unwrap()[0].name(), "s.t");
         assert_eq!(publication.schemas, Some(vec![String::from("s")]));
@@ -3332,6 +3338,27 @@ mod tests {
             configuration.mappings.as_ref().unwrap()["word"],
             vec![String::from("simple")]
         );
+    }
+
+    /// An event trigger entry with no owner gives no owner, thus
+    /// deploy does not set one
+    #[test]
+    fn event_trigger_without_entry_owner_has_no_owner() {
+        let mut dump = libpgdump::new("fixtures", "UTF8", "18.0").unwrap();
+        dump.add_entry(
+            OT::EventTrigger,
+            Some(""),
+            Some("et"),
+            None,
+            Some("CREATE EVENT TRIGGER et ON sql_drop EXECUTE FUNCTION f();"),
+            None,
+            None,
+            &[],
+        )
+        .expect("add_entry failed");
+        let mut assembly = Assembly::default();
+        assembly.ingest(&dump).unwrap();
+        assert_eq!(assembly.event_triggers[0].owner, None);
     }
 
     /// A comment the model has no place for keeps its entry, so the

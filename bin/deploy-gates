@@ -44,6 +44,10 @@ cleanup() {
     # the read-role step makes its role; it owns nothing
     psql -d postgres -q -c \
         'DROP ROLE IF EXISTS "Gate Reader"' >/dev/null 2>&1 || true
+    # the event trigger step makes a superuser role; a failed step
+    # must not leave it
+    psql -d postgres -q -c \
+        'DROP ROLE IF EXISTS "Gate Event Owner"' >/dev/null 2>&1 || true
 }
 trap cleanup EXIT INT TERM
 

@@ -487,6 +487,11 @@ settings:
   `casts/<schema>.yaml` of the first schema its function or types name,
   or `public` when they are all built-in.
 
+- An event trigger has no schema. Its `owner` is optional, and it
+  must be a superuser, as PostgreSQL requires. `pull` writes it. When
+  the file has no `owner`, `build` gives the entry the superuser of
+  the project, and `deploy` does not set or compare the owner.
+
 - A transform has no schema and no owner. `pull` files it in the
   `transforms/<schema>.yaml` of its type, or of the first schema its
   functions name when the type is built-in, or `public`.
