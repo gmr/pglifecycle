@@ -116,6 +116,49 @@ properties:
           type: string
       required:
         - name
+  settings:
+    title: Settings
+    description: >
+      Configuration parameters to be set to the specified value when a
+      session connects to the database (`ALTER DATABASE ... SET`), one
+      object for each parameter. A value is a string, a number or a
+      boolean. A setting that PostgreSQL keeps as a list of names, such as
+      search_path, is a list of strings, one name for each item. For such a
+      setting, one string with a comma is an error, because PostgreSQL
+      reads it as one name. A list has at least one item.
+    type: array
+    items:
+      type: object
+      propertyNames:
+        pattern: ^[A-Za-z_][A-Za-z0-9_\.]*$
+      additionalProperties:
+        oneOf:
+          - type: [string, number, boolean]
+          - type: array
+            minItems: 1
+            items:
+              type: string
+  role_settings:
+    title: Role Settings
+    description: >
+      Configuration parameters to be set when a role connects to the
+      database (`ALTER ROLE ... IN DATABASE ... SET`), keyed by role name.
+      Each value has the form of `settings`. The role does not have to be
+      in the project.
+    type: object
+    additionalProperties:
+      type: array
+      items:
+        type: object
+        propertyNames:
+          pattern: ^[A-Za-z_][A-Za-z0-9_\.]*$
+        additionalProperties:
+          oneOf:
+            - type: [string, number, boolean]
+            - type: array
+              minItems: 1
+              items:
+                type: string
 required:
   - name
 additionalProperties: false

@@ -1,0 +1,1 @@
+DATABASE PROPERTIES	coverage_source

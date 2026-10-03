@@ -226,6 +226,15 @@ pub enum Statement {
         name: String,
         value: serde_json::Value,
     },
+    /// ALTER DATABASE db SET `name` TO `value`, or, when `role` is
+    /// set, ALTER ROLE `role` IN DATABASE db SET `name` TO `value`.
+    /// pg_dump writes them for the dumped database only, thus the
+    /// database name is not kept
+    DatabaseSetting {
+        role: Option<String>,
+        name: String,
+        value: serde_json::Value,
+    },
     /// Parsed successfully but not (yet) a supported statement type
     Unsupported(String),
 }
@@ -452,6 +461,7 @@ fn dispatch(node: &Node, src: &str) -> Result<Vec<Statement>, String> {
         "RevokeRoleStmt" => Ok(vec![acl::grant_role(node, src, true)?]),
         "CreateRoleStmt" | "AlterRoleStmt" => Ok(vec![acl::role(node, src)?]),
         "AlterRoleSetStmt" => Ok(vec![acl::role_setting(node, src)?]),
+        "AlterDatabaseSetStmt" => Ok(vec![acl::database_setting(node, src)?]),
         other => Ok(vec![Statement::Unsupported(other.to_string())]),
     }
 }

@@ -216,19 +216,36 @@ pub(crate) fn role_setting(
         .find("RoleSpec")
         .map(|n| unquote(n.text(src)))
         .ok_or_else(|| String::from("ALTER ROLE SET without a role name"))?;
-    if node.has("opt_in_database") {
-        // database-scoped settings have no place in the project model
-        return Ok(Statement::Unsupported(
-            "AlterRoleSetStmt: IN DATABASE".into(),
-        ));
-    }
     let (name, value) = setting(node, src).ok_or_else(|| {
         format!(
             "unsupported ALTER ROLE SET: {}",
             truncate(node.text(src), 80)
         )
     })?;
+    if node.has("opt_in_database") {
+        return Ok(Statement::DatabaseSetting {
+            role: Some(role),
+            name,
+            value,
+        });
+    }
     Ok(Statement::AlterRoleSetting { role, name, value })
+}
+
+/// ALTER DATABASE db SET setting. A RESET has no value, and pg_dump
+/// does not write one, thus it is not supported
+pub(crate) fn database_setting(
+    node: &Node,
+    src: &str,
+) -> Result<Statement, String> {
+    Ok(match setting(node, src) {
+        Some((name, value)) => Statement::DatabaseSetting {
+            role: None,
+            name,
+            value,
+        },
+        None => Statement::Unsupported("AlterDatabaseSetStmt: RESET".into()),
+    })
 }
 
 /// Map a privilege_target's keywords onto the ACL target kind;
@@ -814,13 +831,49 @@ mod tests {
         assert_eq!(value, serde_json::json!("UTC"));
     }
 
+    /// pg_dump writes the settings of the database, and of a role in
+    /// the database, in the DATABASE PROPERTIES entry
     #[test]
-    fn database_scoped_setting_is_unsupported() {
-        let statement = parse_one(
+    fn parses_database_settings() {
+        let Statement::DatabaseSetting { role, name, value } = parse_one(
             "ALTER ROLE app_user IN DATABASE fixtures SET work_mem \
              TO '64MB';",
-        );
-        assert!(matches!(statement, Statement::Unsupported(_)));
+        ) else {
+            panic!("expected DatabaseSetting")
+        };
+        assert_eq!(role.as_deref(), Some("app_user"));
+        assert_eq!(name, "work_mem");
+        assert_eq!(value, serde_json::json!("64MB"));
+        let Statement::DatabaseSetting { role, name, value } = parse_one(
+            "ALTER DATABASE fixtures SET search_path TO '$user', 'a,b';",
+        ) else {
+            panic!("expected DatabaseSetting")
+        };
+        assert_eq!(role, None);
+        assert_eq!(name, "search_path");
+        assert_eq!(value, serde_json::json!(["$user", "a,b"]));
+        let Statement::DatabaseSetting { name, .. } =
+            parse_one("ALTER DATABASE fixtures SET \"TimeZone\" TO 'UTC';")
+        else {
+            panic!("expected DatabaseSetting")
+        };
+        assert_eq!(name, "TimeZone");
+    }
+
+    /// The other properties that pg_dump writes in the entry are not
+    /// modeled, thus the entry is kept
+    #[test]
+    fn other_database_properties_are_unsupported() {
+        for sql in [
+            "ALTER DATABASE fixtures CONNECTION LIMIT = 5;",
+            "ALTER DATABASE fixtures IS_TEMPLATE = true;",
+            "ALTER DATABASE fixtures RESET work_mem;",
+        ] {
+            assert!(
+                matches!(parse_one(sql), Statement::Unsupported(_)),
+                "{sql}"
+            );
+        }
     }
 
     #[test]

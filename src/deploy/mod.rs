@@ -10,6 +10,7 @@
 //! in-place form — are excluded unless `--allow-drop` is given.
 
 mod alter;
+mod database;
 mod diff;
 mod privileges;
 mod routine_body;
@@ -102,8 +103,10 @@ pub fn deploy(args: &cli::Deploy) -> Result<(), String> {
         args,
         creator(args).as_deref(),
     )?;
-    let plan =
+    let mut plan =
         plan(&diff, &resolutions, &output, &snapshot, &privileges, args)?;
+    plan.included
+        .extend(database::statements(&project.settings, &assembly));
     task.finish();
     report(&diff, &plan, &assembly);
     // a --dump file has no roles, thus only a live database is checked
@@ -1334,7 +1337,7 @@ fn render_script(
             script.push_str(&format!(
                 "-- WARNING: {} withheld; the database can allow access \
                  the project does not\n",
-                statement.label
+                one_line(&statement.label)
             ));
         }
     } else if plan.included_destructive > 0 {
@@ -1388,10 +1391,28 @@ fn render_script(
         );
     }
     for statement in &plan.included {
-        script
-            .push_str(&format!("\n-- {}\n{}", statement.label, statement.sql));
+        script.push_str(&format!(
+            "\n-- {}\n{}",
+            one_line(&statement.label),
+            statement.sql
+        ));
     }
     script
+}
+
+/// `label` with each control character as its escape, so that the
+/// label stays in its comment. A name, as of a role, can contain a line
+/// break, and the text after the break can run as SQL
+fn one_line(label: &str) -> String {
+    let mut line = String::new();
+    for c in label.chars() {
+        if c.is_control() {
+            line.extend(c.escape_default());
+        } else {
+            line.push(c);
+        }
+    }
+    line
 }
 
 /// `DROP <type> IF EXISTS <name>` for a database-only object. User
@@ -2717,6 +2738,35 @@ mod tests {
         assert!(script.contains("--   DROP TABLE t; --\";\n"));
     }
 
+    /// A label with a newline, as from a role name, must stay in its
+    /// comment, so no part of it can run
+    #[test]
+    fn label_with_newline_stays_in_its_comment() {
+        let statement = || Statement {
+            label: "ROLE x\nDROP TABLE t; -- IN DATABASE d\r\nDROP TABLE u;\t"
+                .to_string(),
+            sql: "ALTER ROLE \"a\" RESET work_mem;\n".to_string(),
+            fails_open: true,
+        };
+        let plan = Plan {
+            included: vec![statement()],
+            excluded: vec![statement()],
+            kept: Vec::new(),
+            included_destructive: 0,
+            unowned: Vec::new(),
+        };
+        let script = render_script(&plan, "test", "db", None);
+        assert!(!script.contains("\nDROP TABLE"), "{script}");
+        assert!(!script.contains(['\r', '\t']), "{script}");
+        let label = "ROLE x\\nDROP TABLE t; -- IN DATABASE d\\r\\n\
+                     DROP TABLE u;\\t";
+        assert!(script.contains(&format!("\n-- {label}\n")), "{script}");
+        assert!(
+            script.contains(&format!("-- WARNING: {label} withheld")),
+            "{script}"
+        );
+    }
+
     /// The statements run with the session settings of pg_restore that
     /// can change the result of DDL, so that they run as they do in a
     /// restore of the build. The header says which settings.
@@ -3776,6 +3826,7 @@ mod tests {
             superuser: "postgres".into(),
             default_schema: "public".into(),
             path: std::path::PathBuf::new(),
+            settings: Default::default(),
             inventory,
         };
         let diff = Diff {
