@@ -1,5 +1,7 @@
 //! Misc utilities (ports utils.py)
 
+use std::collections::BTreeSet;
+
 use serde_json::Value;
 
 /// PostgreSQL keywords that pg_dump's `fmtId` quotes even when they
@@ -366,22 +368,41 @@ pub fn raw_value(value: &Value) -> String {
 
 /// The name PostgreSQL gives an object that has no name of its own,
 /// `<name1>_<name2>_<label>` or `<name1>_<label>` (ports `makeObjectName`
-/// in `src/backend/commands/indexcmds.c`). The name is cut to 63 bytes:
-/// it takes a byte from the longer of the two names until the name
-/// fits, then cuts each name back to a character boundary, as
-/// `pg_mbcliplen` does. PostgreSQL adds a number to the label when the
-/// name is in use in the schema; that case is not known here.
+/// in `src/backend/commands/indexcmds.c`), in a UTF8 database. The name
+/// is cut to 63 bytes: it takes a byte from the longer of the two names
+/// until the name fits, then cuts each name back to a character
+/// boundary, as `pg_mbcliplen` does. PostgreSQL adds a number to the
+/// label when the name is in use (see [`choose_constraint_name`]).
+///
+/// PostgreSQL counts the bytes in the encoding of the database, and
+/// the project does not record that encoding. A name that is only
+/// ASCII has the same bytes in each server encoding. For a name with
+/// other characters in a database that is not UTF8, a name that
+/// deploy or build writes in SQL can be different from the name in
+/// the database; [`is_generated_name`] accepts each of them.
 pub(crate) fn make_object_name(
+    name1: &str,
+    name2: Option<&str>,
+    label: &str,
+) -> String {
+    make_object_name_in(char::len_utf8, name1, name2, label)
+}
+
+/// [`make_object_name`] with `width` the number of bytes of a
+/// character in the encoding of the database
+fn make_object_name_in(
+    width: fn(char) -> usize,
     name1: &str,
     name2: Option<&str>,
     label: &str,
 ) -> String {
     // NAMEDATALEN - 1
     const MAX: usize = 63;
+    let encoded = |name: &str| name.chars().map(width).sum::<usize>();
     let overhead = label.len() + 1 + usize::from(name2.is_some());
     let available = MAX - overhead;
-    let mut name1_len = name1.len();
-    let mut name2_len = name2.map_or(0, str::len);
+    let mut name1_len = encoded(name1);
+    let mut name2_len = name2.map_or(0, encoded);
     while name1_len + name2_len > available {
         if name1_len > name2_len {
             name1_len -= 1;
@@ -389,10 +410,10 @@ pub(crate) fn make_object_name(
             name2_len -= 1;
         }
     }
-    let mut name = clip(name1, name1_len).to_string();
+    let mut name = clip(width, name1, name1_len).to_string();
     if let Some(name2) = name2 {
         name.push('_');
-        name.push_str(clip(name2, name2_len));
+        name.push_str(clip(width, name2, name2_len));
     }
     name.push('_');
     name.push_str(label);
@@ -401,11 +422,70 @@ pub(crate) fn make_object_name(
 
 /// The longest start of `name` that is not more than `len` bytes and
 /// ends on a character boundary, as `pg_mbcliplen` gives
-fn clip(name: &str, mut len: usize) -> &str {
-    while !name.is_char_boundary(len) {
-        len -= 1;
+fn clip(width: fn(char) -> usize, name: &str, len: usize) -> &str {
+    let mut bytes = 0;
+    for (index, c) in name.char_indices() {
+        bytes += width(c);
+        if bytes > len {
+            return &name[..index];
+        }
     }
-    &name[..len]
+    name
+}
+
+/// The name PostgreSQL gives a constraint that has no name of its own
+/// (ports `ChooseConstraintName` in `src/backend/catalog/pg_constraint.c`):
+/// the first of `label`, `label1`, `label2` and so on whose name is not
+/// in `used`. PostgreSQL also looks at the names of the other
+/// constraints in the schema; the names in `used` are only the ones
+/// that the caller knows.
+pub(crate) fn choose_constraint_name(
+    name1: &str,
+    name2: Option<&str>,
+    label: &str,
+    used: &BTreeSet<String>,
+) -> String {
+    choose_constraint_name_in(char::len_utf8, name1, name2, label, used)
+}
+
+fn choose_constraint_name_in(
+    width: fn(char) -> usize,
+    name1: &str,
+    name2: Option<&str>,
+    label: &str,
+    used: &BTreeSet<String>,
+) -> String {
+    let mut name = make_object_name_in(width, name1, name2, label);
+    let mut pass = 0;
+    while used.contains(&name) {
+        pass += 1;
+        name = make_object_name_in(
+            width,
+            name1,
+            name2,
+            &format!("{label}{pass}"),
+        );
+    }
+    name
+}
+
+/// Whether `name` is the name that [`choose_constraint_name`] gives,
+/// in a database of any encoding where the count of bytes is known:
+/// UTF8, or an encoding with one byte for each character (LATIN1 and
+/// the other single-byte encodings). For the other multibyte
+/// encodings (EUC_JP and the like), a name that has more than ASCII
+/// is accepted only when PostgreSQL did not cut it: a width of zero
+/// bytes gives the name that is not cut.
+pub(crate) fn is_generated_name(
+    name: &str,
+    name1: &str,
+    name2: Option<&str>,
+    label: &str,
+    used: &BTreeSet<String>,
+) -> bool {
+    [char::len_utf8, |_| 1, |_| 0].into_iter().any(|width| {
+        choose_constraint_name_in(width, name1, name2, label, used) == name
+    })
 }
 
 #[cfg(test)]
@@ -510,6 +590,95 @@ mod tests {
             ),
             format!("{}_{}_fkey", "\u{e9}".repeat(14), "x".repeat(28))
         );
+    }
+
+    /// PostgreSQL adds a number to a name in use, and cuts the name
+    /// again for the longer label. Each expected name is the one
+    /// PostgreSQL 18 gave the object.
+    #[test]
+    fn chooses_constraint_names_as_postgres() {
+        let (a40, c40) = ("a".repeat(40), "c".repeat(40));
+        let first = format!("{}_{}_not_null", "a".repeat(27), "c".repeat(26));
+        let mut used = BTreeSet::new();
+        assert_eq!(
+            choose_constraint_name(&a40, Some(&c40), "not_null", &used),
+            first
+        );
+        used.insert(first);
+        assert_eq!(
+            choose_constraint_name(&a40, Some(&c40), "not_null", &used),
+            format!("{}_{}_not_null1", "a".repeat(26), "c".repeat(26))
+        );
+    }
+
+    /// Each name is the one that PostgreSQL 18 gave the object in a
+    /// UTF8 database or in a LATIN1 database, and both are generated
+    #[test]
+    fn generated_names_in_utf8_and_latin1() {
+        let none = BTreeSet::new();
+        let (e31, e40) = ("\u{e9}".repeat(31), "\u{e9}".repeat(40));
+        let u40 = "\u{fc}".repeat(40);
+        // UTF8: 62 bytes, cut; LATIN1: 31 bytes, not cut
+        for name in [
+            format!("{}_pkey", "\u{e9}".repeat(29)),
+            format!("{e31}_pkey"),
+        ] {
+            assert!(is_generated_name(&name, &e31, None, "pkey", &none));
+        }
+        let latin1 = format!(
+            "{}_{}_not_null",
+            "\u{e9}".repeat(27),
+            "\u{fc}".repeat(26)
+        );
+        assert!(is_generated_name(
+            &latin1,
+            &e40,
+            Some(&u40),
+            "not_null",
+            &none
+        ));
+        let used = BTreeSet::from([latin1]);
+        assert!(is_generated_name(
+            &format!(
+                "{}_{}_not_null1",
+                "\u{e9}".repeat(26),
+                "\u{fc}".repeat(26)
+            ),
+            &e40,
+            Some(&u40),
+            "not_null",
+            &used
+        ));
+        assert!(is_generated_name(
+            &format!(
+                "{}_{}_not_null",
+                "\u{e9}".repeat(13),
+                "\u{fc}".repeat(13)
+            ),
+            &e40,
+            Some(&u40),
+            "not_null",
+            &none
+        ));
+        // a name that PostgreSQL does not give in either encoding
+        assert!(!is_generated_name(
+            &format!("{}_pkey", "\u{e9}".repeat(30)),
+            &e31,
+            None,
+            "pkey",
+            &none
+        ));
+        assert!(!is_generated_name("users_pk", "users", None, "pkey", &none));
+        // a name in use is not the one that PostgreSQL gives, also when
+        // PostgreSQL does not cut it
+        let used = BTreeSet::from([String::from("users_id_not_null")]);
+        assert!(!is_generated_name(
+            "users_id_not_null",
+            "users",
+            Some("id"),
+            "not_null",
+            &used
+        ));
     }
 
     #[test]

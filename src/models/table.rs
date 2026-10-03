@@ -1,6 +1,8 @@
 //! Tables and their child objects (columns, constraints, indexes,
 //! triggers, partitioning)
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -166,6 +168,53 @@ pub struct Table {
 }
 
 impl Table {
+    /// The name of each NOT NULL constraint of the table, by column:
+    /// the name that the model records, else the name that PostgreSQL
+    /// gives it. PostgreSQL first keeps the names that were given, then
+    /// names the others in the order of the columns, and adds a number
+    /// to a name that is in use (`AddRelationNotNullConstraints`). Thus
+    /// two long columns can get `<cut>_not_null` and `<cut>_not_null1`.
+    /// PostgreSQL also adds a number for a name that a constraint of
+    /// another table in the schema has; that case is not known here.
+    pub fn not_null_names(&self) -> BTreeMap<String, String> {
+        let columns = self
+            .columns
+            .iter()
+            .flatten()
+            .filter(|c| c.nullable == Some(false))
+            .map(|c| {
+                let name = c.not_null_constraint.as_ref();
+                (&c.name, name.and_then(|n| n.name.as_ref()))
+            });
+        let table_level = self
+            .not_null_constraints
+            .iter()
+            .flatten()
+            .map(|c| (&c.column, c.name.as_ref()));
+        let mut names = BTreeMap::new();
+        let mut unnamed = Vec::new();
+        for (column, name) in columns.chain(table_level) {
+            match name {
+                Some(name) => {
+                    names.insert(column.clone(), name.clone());
+                }
+                None => unnamed.push(column),
+            }
+        }
+        let mut used: BTreeSet<String> = names.values().cloned().collect();
+        for column in unnamed {
+            let name = crate::utils::choose_constraint_name(
+                &self.name,
+                Some(column),
+                "not_null",
+                &used,
+            );
+            used.insert(name.clone());
+            names.insert(column.clone(), name);
+        }
+        names
+    }
+
     /// The same table with each *valid* table-level NOT NULL on one of
     /// its own columns moved onto that column.
     ///
@@ -382,8 +431,10 @@ pub struct ColumnDefault {
 
 /// The parts of a column's NOT NULL constraint that `nullable: false`
 /// cannot express. PostgreSQL 18 made NOT NULL a named constraint, and
-/// pg_dump writes the name only when it is not the one PostgreSQL
-/// generates, `<table>_<column>_not_null`.
+/// pg_dump writes the name only when it is not
+/// `<table>_<column>_not_null`. The model also records no name when
+/// PostgreSQL generated it: cut to 63 bytes, or with a number that
+/// PostgreSQL added (see [`Table::not_null_names`]).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ColumnNotNull {
@@ -433,8 +484,8 @@ pub struct ColumnGenerated {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SequenceOptions {
-    /// Kept only when it is not the `<table>_<column>_seq` PostgreSQL
-    /// generates in the table's schema
+    /// Kept only when it is not the `<table>_<column>_seq`, cut to 63
+    /// bytes, that PostgreSQL generates in the table's schema
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -494,8 +545,9 @@ pub struct CheckConstraint {
 #[serde(deny_unknown_fields)]
 pub struct NotNullConstraint {
     /// Omitted when the constraint carries the name PostgreSQL
-    /// generates by default (`<table>_<column>_not_null`), which is
-    /// also when pg_dump omits it
+    /// generates by default (`<table>_<column>_not_null`, cut to 63
+    /// bytes, or with a number that PostgreSQL added; see
+    /// [`Table::not_null_names`])
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     pub column: String,
