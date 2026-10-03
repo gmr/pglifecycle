@@ -1830,6 +1830,23 @@ pub(crate) fn return_type(returns: &str) -> String {
     }
 }
 
+/// The type that a function returns as PostgreSQL keeps it in
+/// `prorettype` and `proretset`: [`return_type`], but a `TABLE(...)`
+/// return type with one column is `SETOF` the type of that column.
+/// Only a `TABLE(...)` with more columns returns `record`.
+pub(crate) fn result_type(returns: &str) -> String {
+    let returns = return_type(returns);
+    match returns
+        .strip_prefix("table(")
+        .and_then(|columns| columns.strip_suffix(')'))
+    {
+        Some(column) if split_columns(column).len() == 1 => {
+            format!("setof {}", column[name_length(column)..].trim_start())
+        }
+        _ => returns,
+    }
+}
+
 /// The columns of a `TABLE(...)` return type, split at each comma that
 /// is not in parentheses or quotes
 fn split_columns(columns: &str) -> Vec<&str> {

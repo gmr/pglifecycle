@@ -32,7 +32,7 @@ use serde_json::{Map, Value};
 use crate::build;
 use crate::deploy::diff::{
     canonical_collation, canonical_domain, canonical_type, identity_type,
-    return_type,
+    result_type,
 };
 use crate::models::{
     CheckConstraint, Column, ColumnDefault, ColumnGenerated, ColumnNotNull,
@@ -322,7 +322,7 @@ fn qualified(schema: &str, name: &str) -> String {
 /// refuses to change the kind (a window function is a different kind),
 /// the return type or whether it returns a set, the output row of `OUT`
 /// and `INOUT` parameters when the function returns `record` (also
-/// `RETURNS TABLE`), or the name of an input parameter that has a name,
+/// `RETURNS TABLE` with more than one column), or the name of an input parameter that has a name,
 /// and to remove a default. It also refuses to change the type of
 /// a default, which is the type of its parameter except for a
 /// polymorphic parameter; deploy does not compare that type.
@@ -353,21 +353,23 @@ fn replaceable(repo: &Function, db: &Function) -> bool {
 
 /// True when two functions' return types are the same modulo type
 /// aliasing (`int4` vs `integer`) and typmods, which PostgreSQL does
-/// not keep in a return type
+/// not keep in a return type. The name of the column of a
+/// `TABLE(...)` with one column is not in the return type.
 fn returns_equal(repo: &Function, db: &Function) -> bool {
     match (&repo.returns, &db.returns) {
-        (Some(r), Some(d)) => return_type(r) == return_type(d),
+        (Some(r), Some(d)) => result_type(r) == result_type(d),
         (r, d) => r == d,
     }
 }
 
 /// True when a function returns `record`, `SETOF record`, or
-/// `TABLE(...)`. PostgreSQL compares the output row only for these
-/// functions. A function with no return type in the project returns
-/// the type that its `OUT` parameters give, so it is compared too.
+/// `TABLE(...)` with more than one column. PostgreSQL compares the
+/// output row only for these functions. A function with no return type
+/// in the project returns the type that its `OUT` parameters give, so
+/// it is compared too.
 fn returns_record(function: &Function) -> bool {
     function.returns.as_deref().is_none_or(|returns| {
-        let returns = return_type(returns);
+        let returns = result_type(returns);
         returns == "record"
             || returns == "setof record"
             || returns.starts_with("table(")
@@ -3095,6 +3097,33 @@ mod tests {
         assert!(matches!(
             resolve(&f("bigint"), &f("integer")),
             Resolution::Replace
+        ));
+    }
+
+    /// A `TABLE(...)` return type with one column is `SETOF` the type
+    /// of that column in PostgreSQL, and OR REPLACE can rename that
+    /// column. It cannot rename a column when there are more.
+    #[test]
+    fn function_table_column_rename_replaces_only_for_a_row() {
+        let f = |returns: &str| -> Definition {
+            Definition::Function(
+                serde_json::from_value(serde_json::json!({
+                    "name": "f", "schema": "test", "owner": "postgres",
+                    "returns": returns, "language": "sql",
+                    "definition": "SELECT 1",
+                }))
+                .unwrap(),
+            )
+        };
+        let replaces = |repo: &str, db: &str| {
+            matches!(resolve(&f(repo), &f(db)), Resolution::Replace)
+        };
+        assert!(!replaces("TABLE(b integer)", "TABLE(a integer)"));
+        assert!(!replaces("SETOF integer", "TABLE(a int4)"));
+        assert!(replaces("TABLE(a bigint)", "TABLE(a integer)"));
+        assert!(replaces(
+            "TABLE(a integer, c text)",
+            "TABLE(a integer, b text)"
         ));
     }
 
