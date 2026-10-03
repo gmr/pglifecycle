@@ -262,6 +262,17 @@
 //!     libpgdump sorts the user first, and the chain keeps each later
 //!     entry tied to the item. The test-project user mapping is on one
 //!     server.
+//! 48. The `settings` and `role_settings` of `project.yaml` render as
+//!     one `DATABASE PROPERTIES` entry, as pg_dump writes it: `ALTER
+//!     DATABASE name SET ...` for each setting of the database, then
+//!     `ALTER ROLE role IN DATABASE name SET ...` for each setting of
+//!     a role in the database. Each value renders as a role's setting
+//!     does (see 37). A statement must name the database, thus the
+//!     entry names the database of the project, and pg_restore
+//!     restores it only with `--create`, as for an archive of pg_dump.
+//!     The entry has no drop statement, thus pg_restore does not set
+//!     its owner. The Python had no place for these settings. The
+//!     test-project has none, thus its archive does not change.
 
 mod acls;
 mod calls;
@@ -338,6 +349,7 @@ pub fn assemble(project: &Project) -> Result<BuildOutput, String> {
         task.inc();
     }
     task.finish();
+    builder.dump_database_settings(project)?;
     acls::dump_acls(&mut builder, project)?;
     // record inventory dependency edges on the entries so the weighted
     // pg_dump topological sort in libpgdump (run by save) can order
@@ -1895,6 +1907,56 @@ impl Builder {
                 )?;
             }
         }
+        Ok(())
+    }
+
+    /// Emit the settings of the database, and of each role in the
+    /// database, as one `DATABASE PROPERTIES` entry, as pg_dump writes
+    /// them (deviation 48). A statement must name the database, so it
+    /// names the database of the project, and pg_restore restores the
+    /// entry only with `--create`. The entry has no drop statement, thus
+    /// pg_restore does not set its owner
+    fn dump_database_settings(
+        &mut self,
+        project: &Project,
+    ) -> Result<(), String> {
+        let name = quote_ident(&project.name);
+        let mut defn = String::new();
+        for object in &project.settings.database {
+            for (setting, value) in object {
+                defn.push_str(&format!(
+                    "ALTER DATABASE {name} SET {setting} TO {};\n",
+                    setting_value(value)
+                ));
+            }
+        }
+        for (role, settings) in &project.settings.roles {
+            for object in settings {
+                for (setting, value) in object {
+                    defn.push_str(&format!(
+                        "ALTER ROLE {} IN DATABASE {name} SET {setting} TO \
+                         {};\n",
+                        quote_ident(role),
+                        setting_value(value)
+                    ));
+                }
+            }
+        }
+        if defn.is_empty() {
+            return Ok(());
+        }
+        self.dump
+            .add_entry(
+                libpgdump::ObjectType::DatabaseProperties,
+                Some(""),
+                Some(&project.name),
+                Some(&self.superuser),
+                Some(&defn),
+                None,
+                None,
+                &[],
+            )
+            .map_err(|e| format!("failed to add DATABASE PROPERTIES: {e}"))?;
         Ok(())
     }
 
@@ -5347,6 +5409,7 @@ mod tests {
             superuser: String::from("postgres"),
             default_schema: String::from("public"),
             path: std::path::PathBuf::new(),
+            settings: Default::default(),
             inventory: vec![table_item(1, table)],
         };
         let output = assemble(&project).unwrap();
@@ -6158,6 +6221,7 @@ mod tests {
             superuser: "postgres".into(),
             default_schema: "public".into(),
             path: PathBuf::new(),
+            settings: Default::default(),
             inventory: vec![table_item(1, table), seq_item],
         };
         let output = assemble(&project).unwrap();
@@ -6293,6 +6357,7 @@ mod tests {
             superuser: "postgres".into(),
             default_schema: "public".into(),
             path: std::path::PathBuf::new(),
+            settings: Default::default(),
             inventory,
         }
     }
