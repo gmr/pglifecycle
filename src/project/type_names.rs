@@ -9,8 +9,8 @@ use std::path::PathBuf;
 
 use crate::constants::ObjectType;
 use crate::deploy::{identity_type, is_built_in, serial_integer_type};
-use crate::models::{Definition, Item};
-use crate::project::split_sql_name;
+use crate::models::{Definition, FunctionParameter, Item};
+use crate::project::{split_sql_name, tag_signature};
 
 /// A message for each type name with no schema that is not a built-in
 /// type and not a type or a domain of the project in the schema of
@@ -118,8 +118,8 @@ fn type_fields(definition: &Definition) -> Vec<(String, String)> {
             push(String::from("data_type"), s.data_type.as_ref());
         }
         Definition::Function(f) => {
-            for (index, p) in f.parameters.iter().flatten().enumerate() {
-                push(parameter(index, &p.name), Some(&p.data_type));
+            for (field, data_type) in arguments(&f.name, &f.parameters) {
+                push(field, Some(&data_type));
             }
             for data_type in returns(f.returns.as_deref()) {
                 push(String::from("returns"), Some(&data_type));
@@ -129,8 +129,8 @@ fn type_fields(definition: &Definition) -> Vec<(String, String)> {
             }
         }
         Definition::Procedure(p) => {
-            for (index, p) in p.parameters.iter().flatten().enumerate() {
-                push(parameter(index, &p.name), Some(&p.data_type));
+            for (field, data_type) in arguments(&p.name, &p.parameters) {
+                push(field, Some(&data_type));
             }
             for data_type in p.transform_types.iter().flatten() {
                 push(String::from("transform_types"), Some(data_type));
@@ -208,6 +208,29 @@ fn type_fields(definition: &Definition) -> Vec<(String, String)> {
         _ => {}
     }
     fields
+}
+
+/// The label and the type of each argument of a routine. A routine
+/// with no parameters can give its argument types in its name, as
+/// test-project/functions writes it.
+fn arguments(
+    name: &str,
+    parameters: &Option<Vec<FunctionParameter>>,
+) -> Vec<(String, String)> {
+    match parameters {
+        Some(parameters) => parameters
+            .iter()
+            .enumerate()
+            .map(|(index, p)| (parameter(index, &p.name), p.data_type.clone()))
+            .collect(),
+        None => tag_signature(name)
+            .map(|(_, types)| types)
+            .unwrap_or_default()
+            .into_iter()
+            .enumerate()
+            .map(|(index, data_type)| (parameter(index, &None), data_type))
+            .collect(),
+    }
 }
 
 /// The label of a parameter: its name, or its position from 1

@@ -176,6 +176,23 @@ fn load_table_project(
     extra: &str,
     data_type: &str,
 ) -> Result<project::Project, String> {
+    load_types_project(
+        extra,
+        "tables/test",
+        format!(
+            "---\nname: t\ncolumns:\n- name: a\n  data_type: \
+             {data_type}\n"
+        ),
+    )
+}
+
+/// Load a project with `project.yaml` (with `extra` added to it), the
+/// type `test.mood` and the file `t.yaml` in `directory` with `text`
+fn load_types_project(
+    extra: &str,
+    directory: &str,
+    text: String,
+) -> Result<project::Project, String> {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
         dir.path().join("project.yaml"),
@@ -191,14 +208,7 @@ fn load_table_project(
              enum: [happy]\n"
                 .to_string(),
         ),
-        (
-            "tables/test",
-            "t.yaml",
-            format!(
-                "---\nname: t\ncolumns:\n- name: a\n  data_type: \
-                 {data_type}\n"
-            ),
-        ),
+        (directory, "t.yaml", text),
     ] {
         let directory = dir.path().join(directory);
         std::fs::create_dir_all(&directory).unwrap();
@@ -223,4 +233,39 @@ fn refuses_an_unqualified_type_that_the_project_does_not_have() {
     assert!(load_table_project("", "citext[]").is_err());
     load_table_project(extension, "citext")
         .unwrap_or_else(|e| panic!("citext with an extension: {e}"));
+}
+
+/// A function or procedure with no `parameters` gives its argument
+/// types in its name. The load checks those types as it checks the
+/// types of the parameters.
+#[test]
+fn refuses_an_unqualified_type_in_a_routine_name() {
+    for (directory, kind) in [
+        ("functions/test", "function"),
+        ("procedures/test", "procedure"),
+    ] {
+        let routine = |name: &str| {
+            let returns = if kind == "function" {
+                "returns: void\n"
+            } else {
+                ""
+            };
+            load_types_project(
+                "",
+                directory,
+                format!(
+                    "---\nschema: test\nname: {name}\nlanguage: sql\n\
+                     {returns}definition: SELECT\n"
+                ),
+            )
+        };
+        for name in ["f(integer)", "f(mood)", "f(public.citext)"] {
+            routine(name)
+                .unwrap_or_else(|e| panic!("{kind} {name} did not load: {e}"));
+        }
+        assert!(
+            routine("f(integer, citext)").is_err(),
+            "{kind} f(integer, citext) loaded"
+        );
+    }
 }
