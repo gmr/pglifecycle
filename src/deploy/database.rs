@@ -20,18 +20,21 @@ use crate::pull::Assembly;
 use crate::utils::{quote_ident, setting_value};
 
 /// The statements that make the settings of the database `assembly`
-/// the settings of the project
+/// the settings of the project, and each setting that they reset, as
+/// `name of label`
 pub(super) fn statements(
     project: &DatabaseSettings,
     assembly: &Assembly,
-) -> Vec<Statement> {
+) -> (Vec<Statement>, Vec<String>) {
     let database = quote_ident(&assembly.dbname);
     let label = format!("DATABASE {}", assembly.dbname);
+    let mut resets = Vec::new();
     let mut statements = changes(
         &label,
         &format!("ALTER DATABASE {database}"),
         &flatten(&project.database),
         &assembly.settings,
+        &mut resets,
     );
     let empty = Map::new();
     let mut roles: Vec<&String> = project
@@ -51,9 +54,10 @@ pub(super) fn statements(
             ),
             wanted.as_ref().unwrap_or(&empty),
             assembly.role_settings.get(role).unwrap_or(&empty),
+            &mut resets,
         ));
     }
-    statements
+    (statements, resets)
 }
 
 /// The `{ name: value }` objects of a `settings` list as one map. For
@@ -69,12 +73,14 @@ fn flatten(list: &[Map<String, Value>]) -> Map<String, Value> {
 /// SET for each setting of `wanted` that `existing` does not have in
 /// the same form, and RESET for each setting that only `existing` has.
 /// The names and the values compare as [`canonical_settings`] gives
-/// them
+/// them. Each name is quoted as pg_dump quotes it. Each reset goes in
+/// `resets`
 fn changes(
     label: &str,
     prefix: &str,
     wanted: &Map<String, Value>,
     existing: &Map<String, Value>,
+    resets: &mut Vec<String>,
 ) -> Vec<Statement> {
     let canonical_wanted = canonical_settings(wanted);
     let canonical_existing = canonical_settings(existing);
@@ -88,14 +94,19 @@ fn changes(
         let key = name.to_lowercase();
         if canonical_existing.get(&key) != canonical_wanted.get(&key) {
             statements.push(statement(format!(
-                "{prefix} SET {name} TO {};\n",
+                "{prefix} SET {} TO {};\n",
+                quote_ident(name),
                 setting_value(value)
             )));
         }
     }
     for name in existing.keys() {
         if !canonical_wanted.contains_key(&name.to_lowercase()) {
-            statements.push(statement(format!("{prefix} RESET {name};\n")));
+            statements.push(statement(format!(
+                "{prefix} RESET {};\n",
+                quote_ident(name)
+            )));
+            resets.push(format!("{name} of {label}"));
         }
     }
     statements
@@ -145,17 +156,18 @@ mod tests {
             "statement_timeout": "1000",
             "gate.stray": "x",
         }));
-        let statements = statements(&project, &assembly);
+        let (statements, resets) = statements(&project, &assembly);
         assert_eq!(
             sql(&statements),
             [
                 "ALTER DATABASE \"App DB\" SET work_mem TO '64MB';\n",
                 "ALTER DATABASE \"App DB\" SET search_path TO '$user', \
                  'public';\n",
-                "ALTER DATABASE \"App DB\" RESET gate.stray;\n",
+                "ALTER DATABASE \"App DB\" RESET \"gate.stray\";\n",
             ]
         );
         assert!(statements.iter().all(|s| s.label == "DATABASE App DB"));
+        assert_eq!(resets, ["gate.stray of DATABASE App DB"]);
     }
 
     /// The settings of a role in the database compare for each role
@@ -171,7 +183,7 @@ mod tests {
         assembly
             .role_settings
             .insert(String::from("old"), settings(json!({"work_mem": "1MB"})));
-        let statements = statements(&project, &assembly);
+        let (statements, resets) = statements(&project, &assembly);
         assert_eq!(
             sql(&statements),
             [
@@ -181,6 +193,7 @@ mod tests {
             ]
         );
         assert_eq!(statements[0].label, "ROLE App User IN DATABASE app");
+        assert_eq!(resets, ["work_mem of ROLE old IN DATABASE app"]);
     }
 
     #[test]
@@ -197,6 +210,43 @@ mod tests {
         assembly
             .role_settings
             .insert(String::from("app"), settings(json!({"x.y": "1"})));
-        assert!(statements(&project, &assembly).is_empty());
+        let (statements, resets) = statements(&project, &assembly);
+        assert!(statements.is_empty());
+        assert!(resets.is_empty());
+    }
+
+    /// A setting name is quoted as pg_dump quotes it: a name with a
+    /// part that is a keyword, as `app.user`, does not parse bare
+    #[test]
+    fn setting_names_are_quoted() {
+        let mut project = DatabaseSettings {
+            database: vec![
+                settings(json!({"app.user": "a"})),
+                settings(json!({"app.\"q": "b"})),
+            ],
+            ..Default::default()
+        };
+        project
+            .roles
+            .insert(String::from("app"), vec![settings(json!({"x.y": "1"}))]);
+        let mut assembly = assembly("app");
+        assembly.settings =
+            settings(json!({"DateStyle": "ISO, MDY", "x.\"r": "1"}));
+        assembly
+            .role_settings
+            .insert(String::from("app"), settings(json!({"app.order": "1"})));
+        let (statements, _) = statements(&project, &assembly);
+        assert_eq!(
+            sql(&statements),
+            [
+                "ALTER DATABASE app SET \"app.user\" TO 'a';\n",
+                // a double quote in the name is doubled
+                "ALTER DATABASE app SET \"app.\"\"q\" TO 'b';\n",
+                "ALTER DATABASE app RESET \"DateStyle\";\n",
+                "ALTER DATABASE app RESET \"x.\"\"r\";\n",
+                "ALTER ROLE app IN DATABASE app SET \"x.y\" TO '1';\n",
+                "ALTER ROLE app IN DATABASE app RESET \"app.order\";\n",
+            ]
+        );
     }
 }
