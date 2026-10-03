@@ -494,8 +494,19 @@ impl<'a> ObjectIndex<'a> {
             objects
                 .entry((item.desc, key_schema, item.definition.name()))
                 .or_insert(item);
-            // procedures share the functions ACL section
+            // procedures share the functions ACL section. A routine with
+            // no parameters whose name ends in its argument list, such
+            // as `z(x)()`, has that list in its ACL key (deviation 53)
+            let listed = |name: &str, parameters: &Option<Vec<_>>| {
+                parameters.is_none() && split_signature(name).is_some()
+            };
             let identity = match &item.definition {
+                Definition::Function(f) if listed(&f.name, &f.parameters) => {
+                    Some(f.name.clone())
+                }
+                Definition::Procedure(p) if listed(&p.name, &p.parameters) => {
+                    Some(p.name.clone())
+                }
                 Definition::Function(f) => Some(f.identity()),
                 Definition::Procedure(p) => Some(p.identity()),
                 _ => None,

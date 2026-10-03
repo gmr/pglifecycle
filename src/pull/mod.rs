@@ -982,6 +982,7 @@ impl Assembly {
         self.apply_deferred_defaults();
         self.apply_attached_partitions();
         self.apply_default_row_security();
+        self.apply_empty_argument_lists();
         task.finish();
         Ok(())
     }
@@ -1093,6 +1094,29 @@ impl Assembly {
             if table.server.is_none() {
                 table.row_level_security.get_or_insert_default();
             }
+        }
+    }
+
+    /// Write `()` at the end of the name of each routine with no
+    /// arguments whose name has `(`, such as `z(x)`. A routine with no
+    /// parameters can give its argument types in its name, so the
+    /// load reads the list at the end of `z(x)` as the argument `x`.
+    /// The load reads the `()` of `z(x)()` as no arguments, and the
+    /// name stays `z(x)`. The comments are already attached.
+    fn apply_empty_argument_lists(&mut self) {
+        let names = self
+            .functions
+            .iter_mut()
+            .filter(|f| f.parameters.is_none())
+            .map(|f| &mut f.name)
+            .chain(
+                self.procedures
+                    .iter_mut()
+                    .filter(|p| p.parameters.is_none())
+                    .map(|p| &mut p.name),
+            );
+        for name in names.filter(|name| name.contains('(')) {
+            name.push_str("()");
         }
     }
 
@@ -3120,6 +3144,60 @@ mod tests {
             assembly.procedures[0].comment.as_deref(),
             Some("archives rows")
         );
+    }
+
+    /// A routine with no arguments whose name has `(` gets `()` at the
+    /// end of its name, so that the load reads `()` as its argument
+    /// list and not the end of the name. A routine with arguments, and
+    /// a name with no `(`, keep their names.
+    #[test]
+    fn empty_argument_list_follows_a_name_with_parentheses() {
+        let mut dump = libpgdump::new("fixtures", "UTF8", "18.0").unwrap();
+        add(&mut dump, OT::Schema, "", "test", "CREATE SCHEMA test;");
+        let routines = [
+            (
+                OT::Function,
+                "z(x)()",
+                "FUNCTION test.\"z(x)\"() RETURNS integer",
+            ),
+            (
+                OT::Function,
+                "y(x)(integer)",
+                "FUNCTION test.\"y(x)\"(integer) RETURNS integer",
+            ),
+            (OT::Function, "w()", "FUNCTION test.w() RETURNS integer"),
+            (OT::Procedure, "p(y)()", "PROCEDURE test.\"p(y)\"()"),
+        ];
+        for (desc, tag, create) in routines {
+            add(
+                &mut dump,
+                desc,
+                "test",
+                tag,
+                &format!("CREATE {create} LANGUAGE sql AS $$ SELECT 1 $$;"),
+            );
+        }
+        add(
+            &mut dump,
+            OT::Comment,
+            "test",
+            "FUNCTION \"z(x)\"()",
+            "COMMENT ON FUNCTION test.\"z(x)\"() IS 'zero';",
+        );
+        let mut assembly = Assembly::default();
+        assembly.ingest(&dump).unwrap();
+        let names: Vec<&str> =
+            assembly.functions.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["z(x)()", "y(x)", "w"]);
+        assert_eq!(assembly.functions[0].comment.as_deref(), Some("zero"));
+        assert_eq!(assembly.procedures[0].name, "p(y)()");
+        for function in &assembly.functions {
+            let base = crate::project::routine_base_name(
+                &function.name,
+                &function.parameters,
+            );
+            assert_eq!(base, function.name.trim_end_matches("()"));
+        }
     }
 
     #[test]

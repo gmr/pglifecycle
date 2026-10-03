@@ -226,6 +226,8 @@ reconciled in place where PostgreSQL can express it:
   setting value written as a number are not changes. The body is
   compared as text in the form that `pull` writes.
 - **Sequences** — a single `ALTER SEQUENCE` of the changed options.
+  `data_type: bigint` (or an alias, such as `int8`) is the same as no
+  type, as pg_dump writes no `AS` for a bigint sequence.
 - **Domains** — set/drop default; a base-type or constraint change
   falls back.
 - **Enum types** — `ALTER TYPE ... ADD VALUE` for appended values;
@@ -549,6 +551,42 @@ A raw statement has no structured input types, so it is matched by
 its type, schema and name, and any overload of that name counts. A
 raw cast is the exception: it must have its source and target types,
 and it is matched by them.
+
+An expression (a default, a `CHECK` constraint, an index or policy
+expression, a generated column) is compared as text after deploy
+makes each cast the same form (see [Project format](project-format.md)).
+Some changes that PostgreSQL makes to an expression depend on the
+types of its parts. deploy does not know these types, so it cannot
+make these changes itself:
+
+- PostgreSQL evaluates a cast of a constant: `'1'::integer` is `1`.
+- PostgreSQL removes a cast to the type that the value already has:
+  `(label)::text <> ''` on a `text` column is `label <> ''::text`.
+- PostgreSQL adds an implicit cast: `price > 0` on a `numeric` column
+  is `price > (0)::numeric`.
+
+An expression in the written form is a change on each deploy, so the
+plan is never empty. For example, with a `numeric` column `price`,
+this constraint:
+
+```yaml
+check_constraints:
+- name: c_price_check
+  expression: price > 0
+```
+
+gets a `DROP CONSTRAINT` and an `ADD CONSTRAINT` on each deploy,
+because PostgreSQL keeps it as `(price > (0)::numeric)`. Write each
+expression in the form that PostgreSQL keeps, as `pull` writes it:
+
+```yaml
+check_constraints:
+- name: c_price_check
+  expression: (price > (0)::numeric)
+```
+
+To find that form, apply the change once, then pull the database and
+copy the expression from the file that `pull` writes.
 
 The privileges that the project gives an object are the built-in
 privileges of its owner (`acldefault`) and the grants and revocations
