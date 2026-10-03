@@ -77,6 +77,10 @@ pub(crate) struct Alter {
     /// needs the owner of the table; deploy runs it after each owner
     /// change
     pub links: bool,
+    /// The statement unlinks a sequence from a column (OWNED BY NONE).
+    /// A drop of the column or of its table drops the sequence, thus
+    /// deploy runs it before all other statements
+    pub unlinks: bool,
 }
 
 impl Alter {
@@ -89,6 +93,7 @@ impl Alter {
             index_removal: false,
             schema: None,
             links: false,
+            unlinks: false,
         }
     }
 
@@ -1824,19 +1829,23 @@ fn sequence(repo: &Sequence, db: &Sequence) -> Resolution {
             "NO CYCLE".into()
         });
     }
-    // OWNED BY NONE comes before an owner change, and a link after it
+    // OWNED BY NONE comes before the drop of the old column and before
+    // an owner change, and a link after each owner change
     let mut link = None;
     if repo.owned_by != db.owned_by {
-        match &repo.owned_by {
-            Some(owner) => {
-                link = Some(Alter {
-                    links: true,
-                    ..Alter::new(format!(
-                        "ALTER SEQUENCE {name} OWNED BY {owner};\n"
-                    ))
-                })
-            }
-            None => clauses.push("OWNED BY NONE".into()),
+        if db.owned_by.is_some() {
+            alters.push(Alter {
+                unlinks: true,
+                ..Alter::new(format!("ALTER SEQUENCE {name} OWNED BY NONE;\n"))
+            });
+        }
+        if let Some(owner) = &repo.owned_by {
+            link = Some(Alter {
+                links: true,
+                ..Alter::new(format!(
+                    "ALTER SEQUENCE {name} OWNED BY {owner};\n"
+                ))
+            });
         }
     }
     if !clauses.is_empty() {

@@ -297,12 +297,12 @@ struct Plan {
     unowned: Vec<String>,
 }
 
-/// Assemble the ordered plan: DROPs for database-only objects first
-/// (reverse snapshot order), then changed default privileges (those in
-/// a new schema directly after its CREATE SCHEMA), then the repo
-/// archive's entries in topological order — plain CREATEs for added
-/// objects, in-place ALTERs where a renderer exists, gated
-/// drop+recreate otherwise
+/// Assemble the ordered plan: OWNED BY NONE of changed sequences first,
+/// then DROPs for database-only objects (reverse snapshot order), then
+/// changed default privileges (those in a new schema directly after
+/// its CREATE SCHEMA), then the repo archive's entries in topological
+/// order — plain CREATEs for added objects, in-place ALTERs where a
+/// renderer exists, gated drop+recreate otherwise
 fn plan(
     diff: &Diff,
     resolutions: &BTreeMap<usize, Resolution>,
@@ -326,6 +326,28 @@ fn plan(
             included.push(statement);
         }
     };
+    // a drop of a column or of a table drops each sequence that it
+    // owns, thus a changed sequence is unlinked before all drops
+    for entry in output.dump.entries() {
+        let Some(Resolution::Statements(alters)) = output
+            .item_ids
+            .get(&entry.dump_id)
+            .filter(|id| diff.items.get(id) == Some(&Change::Changed))
+            .and_then(|id| resolutions.get(id))
+        else {
+            continue;
+        };
+        for alter in alters.iter().filter(|alter| alter.unlinks) {
+            push(
+                false,
+                Statement {
+                    label: entry_label(entry),
+                    sql: alter.sql.clone(),
+                    fails_open: false,
+                },
+            );
+        }
+    }
     // pg_dump archives are stored in dependency order, so dropping in
     // reverse entry order removes dependents before dependencies.
     // `entry_key` derives a function's name from the archive tag
@@ -647,6 +669,9 @@ fn plan(
                         // pending: --apply runs without it
                         if alter.index_removal && !args.allow_drop_indexes {
                             kept.push(statement);
+                            continue;
+                        }
+                        if alter.unlinks {
                             continue;
                         }
                         if alter.links {
@@ -2993,9 +3018,11 @@ mod tests {
 
     /// OWNED BY needs a sequence with the owner of the table, thus a
     /// sequence that the project links to a column is linked after
-    /// each owner change, also the owner change of a table that comes
-    /// later. A sequence that the database links keeps the owner of
-    /// its table until OWNED BY NONE, thus it gets its owner after
+    /// each owner change. A sequence that the database links is
+    /// unlinked before all other statements, also before the statements
+    /// of a table that comes first: a drop of its old column drops it.
+    /// It keeps the owner of its table until OWNED BY NONE, thus it
+    /// gets its owner after
     #[test]
     fn sequence_owner_order_follows_its_link() {
         let mut dump =
@@ -3017,8 +3044,8 @@ mod tests {
             )
             .expect("add entry")
         };
-        let sequence = add(libpgdump::ObjectType::Sequence, "s");
         let table = add(libpgdump::ObjectType::Table, "t");
+        let sequence = add(libpgdump::ObjectType::Sequence, "s");
         let output = build::BuildOutput {
             dump,
             item_ids: HashMap::from([(sequence, 0), (table, 1)]),
@@ -3042,24 +3069,15 @@ mod tests {
         };
         let owner = "ALTER SEQUENCE public.s OWNER TO app;\n";
         let table_owner = "ALTER TABLE public.t OWNER TO app;\n";
+        let unlink = "ALTER SEQUENCE public.s OWNED BY NONE;\n";
+        let link = "ALTER SEQUENCE public.s OWNED BY public.t.id;\n";
         for (repo, db, expected) in [
+            (Some("public.t.id"), None, vec![table_owner, owner, link]),
+            (None, Some("public.t.id"), vec![unlink, table_owner, owner]),
             (
                 Some("public.t.id"),
-                None,
-                [
-                    owner,
-                    table_owner,
-                    "ALTER SEQUENCE public.s OWNED BY public.t.id;\n",
-                ],
-            ),
-            (
-                None,
-                Some("public.t.id"),
-                [
-                    "ALTER SEQUENCE public.s OWNED BY NONE;\n",
-                    owner,
-                    table_owner,
-                ],
+                Some("public.t.old"),
+                vec![unlink, table_owner, owner, link],
             ),
         ] {
             let diff = Diff {
@@ -3292,6 +3310,7 @@ mod tests {
                 index_removal: false,
                 schema: None,
                 links: false,
+                unlinks: false,
             })
             .collect();
         let resolutions =
