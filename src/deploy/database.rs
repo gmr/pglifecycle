@@ -230,7 +230,8 @@ mod tests {
             .roles
             .insert(String::from("app"), vec![settings(json!({"x.y": "1"}))]);
         let mut assembly = assembly("app");
-        assembly.settings = settings(json!({"DateStyle": "ISO, MDY"}));
+        assembly.settings =
+            settings(json!({"DateStyle": "ISO, MDY", "x.\"r": "1"}));
         assembly
             .role_settings
             .insert(String::from("app"), settings(json!({"app.order": "1"})));
@@ -242,6 +243,7 @@ mod tests {
                 // a double quote in the name is doubled
                 "ALTER DATABASE app SET \"app.\"\"q\" TO 'b';\n",
                 "ALTER DATABASE app RESET \"DateStyle\";\n",
+                "ALTER DATABASE app RESET \"x.\"\"r\";\n",
                 "ALTER ROLE app IN DATABASE app SET \"x.y\" TO '1';\n",
                 "ALTER ROLE app IN DATABASE app RESET \"app.order\";\n",
             ]
