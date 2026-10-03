@@ -1,5 +1,7 @@
 //! CreateStmt / IndexStmt / AlterTableStmt → table models
 
+use std::collections::BTreeSet;
+
 use serde_json::Value;
 use tree_sitter::Node;
 
@@ -15,7 +17,7 @@ use crate::models::{
     NotNullConstraint, ReplicaIdentity, Sequence, SequenceOptions, Table,
     TablePartition, TablePartitionBehavior, TablePartitionColumn,
 };
-use crate::utils::{make_object_name, quote_ident};
+use crate::utils::{is_generated_name, quote_ident};
 
 /// CREATE TABLE → Table (columns + inline constraints), or a
 /// `PARTITION OF` child, returned as [`Statement::CreateTablePartition`]
@@ -185,19 +187,37 @@ pub(crate) fn create_table(
 /// Drop each column's NOT NULL name when it is the one PostgreSQL
 /// generates. pg_dump compares the name with `<table>_<column>_not_null`
 /// before it cuts the name to 63 bytes, thus it writes a generated name
-/// that PostgreSQL cut.
+/// that PostgreSQL cut. A name with a number that PostgreSQL added,
+/// because a column before it has the same cut name, is generated too
+/// (see [`Table::not_null_names`]).
 pub(crate) fn drop_generated_not_null_names(table: &mut Table) {
+    let mut used = BTreeSet::new();
     for column in table.columns.iter_mut().flatten() {
-        let generated =
-            make_object_name(&table.name, Some(&column.name), "not_null");
+        if column.nullable != Some(false) {
+            continue;
+        }
+        let name = match column.not_null_constraint.as_ref() {
+            Some(ColumnNotNull {
+                name: Some(name), ..
+            }) => name.clone(),
+            _ => format!("{}_{}_not_null", table.name, column.name),
+        };
         if let Some(not_null) = &mut column.not_null_constraint
-            && not_null.name.as_deref() == Some(generated.as_str())
+            && not_null.name.is_some()
+            && is_generated_name(
+                &name,
+                &table.name,
+                Some(&column.name),
+                "not_null",
+                &used,
+            )
         {
             not_null.name = None;
             if not_null.no_inherit.is_none() {
                 column.not_null_constraint = None;
             }
         }
+        used.insert(name);
     }
 }
 
@@ -719,11 +739,16 @@ fn is_generated_sequence_name(
     let Some(table) = table else {
         return false;
     };
-    name.name == make_object_name(&table.name, Some(column), "seq")
-        && name
-            .schema
-            .as_ref()
-            .is_none_or(|schema| Some(schema) == table.schema.as_ref())
+    is_generated_name(
+        &name.name,
+        &table.name,
+        Some(column),
+        "seq",
+        &BTreeSet::new(),
+    ) && name
+        .schema
+        .as_ref()
+        .is_none_or(|schema| Some(schema) == table.schema.as_ref())
 }
 
 /// Parse a TableConstraint node into (name, constraint)
@@ -1063,12 +1088,11 @@ fn drop_generated_name(
     else {
         return;
     };
-    let generated = if suffix == "pkey" {
-        make_object_name(table, None, suffix)
-    } else {
-        make_object_name(table, Some(&cols.join("_")), suffix)
-    };
-    if name.as_deref() == Some(generated.as_str()) {
+    let columns_name = cols.join("_");
+    let name2 = (suffix != "pkey").then_some(columns_name.as_str());
+    if name.as_deref().is_some_and(|name| {
+        is_generated_name(name, table, name2, suffix, &BTreeSet::new())
+    }) {
         *name = None;
     }
     // with nothing left that the plain list cannot say, collapse back
@@ -1122,13 +1146,18 @@ pub(crate) fn apply_constraint(
         TableConstraint::NotNull(mut not_null) => {
             // pg_dump names a NOT VALID one it adds with ALTER TABLE
             // even when the name is the generated one, which the model
-            // records as none, as it does inline in CREATE TABLE
-            let generated = make_object_name(
-                &table.name,
-                Some(&not_null.column),
-                "not_null",
-            );
-            if not_null.name.as_deref() == Some(generated.as_str()) {
+            // records as none, as it does inline in CREATE TABLE. The
+            // names that the table has are in use for it.
+            let used = table.not_null_names().into_values().collect();
+            if not_null.name.as_deref().is_some_and(|name| {
+                is_generated_name(
+                    name,
+                    &table.name,
+                    Some(&not_null.column),
+                    "not_null",
+                    &used,
+                )
+            }) {
                 not_null.name = None;
             }
             table
@@ -1782,6 +1811,83 @@ mod tests {
             g29 = "g".repeat(29),
         ));
         assert_eq!(generated.sequence_options, None);
+    }
+
+    /// PostgreSQL adds a number to a cut name that a column before it
+    /// has, and counts the bytes in the encoding of the database. The
+    /// statements are the ones pg_dump 18 writes for a UTF8 database
+    /// and for a LATIN1 database.
+    #[test]
+    fn drops_generated_names_with_a_number_or_in_latin1() {
+        let (a26, a27, c26) = ("a".repeat(26), "a".repeat(27), "c".repeat(26));
+        let c40 = "c".repeat(40);
+        let Statement::CreateTable(mut table) = parse_one(&format!(
+            "CREATE TABLE t.{a40} (\n    \
+             {c40}_1 integer CONSTRAINT {a27}_{c26}_not_null NOT NULL,\n    \
+             {c40}_2 integer CONSTRAINT {a26}_{c26}_not_null1 NOT NULL,\n    \
+             dddd integer CONSTRAINT {a26}_{c26}_not_null2 NOT NULL,\n    \
+             {c40}_3 integer CONSTRAINT {a26}_{c26}_not_null3 NOT NULL,\n    \
+             e integer NOT NULL\n);",
+            a40 = "a".repeat(40),
+        )) else {
+            panic!("expected CreateTable")
+        };
+        let not_nulls: Vec<_> = table
+            .columns
+            .iter()
+            .flatten()
+            .map(|c| c.not_null_constraint.as_ref().map(|n| n.name.clone()))
+            .collect();
+        let dddd = format!("{a26}_{c26}_not_null2");
+        assert_eq!(
+            not_nulls,
+            vec![None, None, Some(Some(dddd.clone())), None, None]
+        );
+        // the model gives the same names to the columns as PostgreSQL
+        let names = table.not_null_names();
+        assert_eq!(
+            names[&format!("{c40}_2")],
+            format!("{a26}_{c26}_not_null1")
+        );
+        assert_eq!(names["dddd"], dddd);
+        assert_eq!(
+            names[&format!("{c40}_3")],
+            format!("{a26}_{c26}_not_null3")
+        );
+        // a table-level NOT NULL that pg_dump adds with ALTER TABLE
+        apply_constraint(
+            &mut table,
+            None,
+            TableConstraint::NotNull(NotNullConstraint {
+                name: Some(format!("{a26}_{c26}_not_null4")),
+                column: format!("{c40}_4"),
+                no_inherit: None,
+                not_valid: Some(true),
+            }),
+        );
+        assert_eq!(table.not_null_constraints.unwrap()[0].name, None);
+
+        let e31 = "\u{e9}".repeat(31);
+        let Statement::CreateTable(mut table) =
+            parse_one(&format!("CREATE TABLE t.\"{e31}\" (id integer);"))
+        else {
+            panic!("expected CreateTable")
+        };
+        apply_constraint(
+            &mut table,
+            None,
+            TableConstraint::PrimaryKey(ConstraintColumns::Detailed {
+                name: Some(format!("{e31}_pkey")),
+                columns: vec!["id".into()],
+                include: None,
+                nulls_not_distinct: None,
+                without_overlaps: None,
+            }),
+        );
+        assert_eq!(
+            table.primary_key,
+            Some(ConstraintColumns::Columns(vec!["id".into()]))
+        );
     }
 
     #[test]

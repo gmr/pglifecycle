@@ -295,6 +295,23 @@ column, so deploying it asks for exactly this on each one; the gate is
 what stops that from stripping them. Pull the project again to record
 them.
 
+A constraint or an identity sequence that has no name in the project
+gets the name that PostgreSQL generates: `<table>_<columns>_<label>`,
+cut to 63 bytes. When two NOT NULL columns of a table cut to the same
+name, PostgreSQL adds a number to the name of the second column
+(`_not_null1`), and deploy does the same. PostgreSQL also adds a
+number when a constraint of another table in the schema has the
+name; deploy does not know that case, so give such a name in the
+project. PostgreSQL counts the bytes in the encoding of the database,
+and the project does not record that encoding. A name that is only
+ASCII has the same bytes in all encodings. For a name with other
+characters, deploy accepts the name that PostgreSQL gives in a UTF8
+database and in a database with one byte for each character (LATIN1
+and the like). In other encodings (EUC_JP and the like), it accepts
+only a name that PostgreSQL did not cut. A statement that deploy
+writes with the name of a constraint that has no name in the project
+(`RENAME`, `VALIDATE`) uses the UTF8 name.
+
 Row-security reconciliation is gated when it can give a role access to
 rows it could not see before: `DISABLE` and `NO FORCE ROW LEVEL
 SECURITY`, the drop of a restrictive policy, and every policy change

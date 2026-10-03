@@ -2,14 +2,17 @@
 # that has no name of its own the name `<table>_<columns>_<label>`
 # (`makeObjectName`), and cuts the name to 63 bytes. The project gives
 # no name to these constraints and sequences, and the table and column
-# names are long, so that PostgreSQL cuts each name. deploy compares each name with the name that PostgreSQL cut,
-# so the plan stays empty.
+# names are long, so that PostgreSQL cuts each name. deploy compares
+# each name with the name that PostgreSQL cut, so the plan stays empty.
+# Two columns that cut to the same NOT NULL name get a number on the
+# second name, and deploy compares with that name too.
 
 tables="${WORKDIR}/project/tables/test"
 t63="gate_names_tttttttttttttttttttttttttttttttttttttttttttttttttttt"
 long="gate_names_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 multibyte="gate_names_éééééééééééééééééééééééééé"
 child="gate_names_child_cccccccccccccccccccccccccccccccccccccccccccc"
+twins="gate_names_dddddddddddddddddddddddddddddd"
 
 cat > "${tables}/${t63}.yaml" <<YAML
 ---
@@ -72,6 +75,21 @@ columns:
 primary_key:
 - id
 YAML
+# the two NOT NULL names cut to the same name, and PostgreSQL adds a
+# number to the second
+cat > "${tables}/${twins}.yaml" <<YAML
+---
+name: ${twins}
+schema: test
+owner: postgres
+columns:
+- name: cccccccccccccccccccccccccccccccccccccccc_1
+  data_type: integer
+  nullable: false
+- name: cccccccccccccccccccccccccccccccccccccccc_2
+  data_type: integer
+  nullable: false
+YAML
 # a partition takes the NOT NULL names of its parent, and has its own
 # primary key name
 cat > "${tables}/gate_names_parent.yaml" <<YAML
@@ -132,7 +150,10 @@ if [ "$(psql -d "${TARGET_DB}" -tAc "SELECT count(*) FROM pg_constraint
             'gate_names_aaaaaaaaaaaaaaaaaa_cccccccccccccccccccccccccccc_fkey',
             'gate_names_ééééééééééééééééééééééé_pkey',
             'gate_names_éééééééé_ŝŝŝŝŝŝŝŝŝŝŝŝŝ_not_null',
-            'gate_names_child_ccccccccccccccccccccccccccccccccccccccccc_pkey')")" != 8 ]; then
+            'gate_names_child_ccccccccccccccccccccccccccccccccccccccccc_pkey',
+            'gate_names_dddddddddddddddd_cccccccccccccccccccccccccc_not_null',
+            'gate_names_ddddddddddddddd_cccccccccccccccccccccccccc_not_null1'
+        )")" != 10 ]; then
     echo "Convergence gate FAILED: the generated names are not cut" >&2
     psql -d "${TARGET_DB}" -tAc "SELECT conname FROM pg_constraint
         WHERE conname LIKE 'gate_names%'" >&2
@@ -142,8 +163,8 @@ expect_empty_plan "generated names compare cut to 63 bytes"
 
 rm "${tables}/${t63}.yaml" "${tables}/${long}.yaml" \
     "${tables}/${multibyte}.yaml" "${tables}/gate_names_parent.yaml" \
-    "${tables}/${child}.yaml"
+    "${tables}/${child}.yaml" "${tables}/${twins}.yaml"
 psql -d "${TARGET_DB}" -q -v ON_ERROR_STOP=1 \
     -c "DROP TABLE test.${long}, test.${t63}, test.\"${multibyte}\",
-        test.gate_names_parent;"
+        test.gate_names_parent, test.${twins};"
 expect_empty_plan "the constraint-names step leaves the database unchanged"
