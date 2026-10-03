@@ -816,6 +816,7 @@ pub(crate) fn create_event_trigger(
         .map(|n| format!("{}()", n.text(src)));
     Ok(Statement::CreateEventTrigger(EventTrigger {
         name,
+        owner: None,
         sql: None,
         event,
         filter: (!tags.is_empty()).then_some(EventTriggerFilter { tags }),

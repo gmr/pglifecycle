@@ -117,6 +117,7 @@ impl Definition {
             Definition::Collation(d) => Some(&d.owner),
             Definition::Conversion(d) => Some(&d.owner),
             Definition::Domain(d) => Some(&d.owner),
+            Definition::EventTrigger(d) => d.owner.as_deref(),
             Definition::ForeignDataWrapper(d) => Some(&d.owner),
             Definition::Function(d) => Some(&d.owner),
             Definition::MaterializedView(d) => Some(&d.owner),

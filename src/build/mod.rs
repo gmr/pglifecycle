@@ -5700,6 +5700,52 @@ mod tests {
         );
     }
 
+    /// The entry of an event trigger has the owner of the project, as
+    /// pg_dump writes it, and pg_restore sets it with ALTER EVENT
+    /// TRIGGER ... OWNER TO. With no owner, the entry has the
+    /// superuser, as in the Python
+    #[test]
+    fn event_trigger_entry_has_its_owner() {
+        for (owner, expected) in
+            [(Some("Et Owner"), "Et Owner"), (None, "postgres")]
+        {
+            let mut value = serde_json::json!({
+                "name": "et", "event": "sql_drop", "function": "test.f()",
+            });
+            if let Some(owner) = owner {
+                value["owner"] = owner.into();
+            }
+            let item = Item {
+                id: 1,
+                desc: ObjectType::EventTrigger,
+                definition: Definition::EventTrigger(
+                    serde_json::from_value(value).unwrap(),
+                ),
+                dependencies: BTreeSet::new(),
+            };
+            let mut builder = Builder {
+                dump: libpgdump::new("t", "UTF-8", "18.0").unwrap(),
+                dump_id_map: HashMap::new(),
+                text_search_last: HashMap::new(),
+                pending_attaches: Vec::new(),
+                index_attaches: IndexAttaches::default(),
+                text_search_ids: HashMap::new(),
+                text_search_refs: Vec::new(),
+                partition_ids: HashMap::new(),
+                superuser: "postgres".into(),
+                calls: Rc::default(),
+            };
+            builder.dump_item(&item).unwrap();
+            let entry = builder
+                .dump
+                .entries()
+                .iter()
+                .find(|e| e.desc == libpgdump::ObjectType::EventTrigger)
+                .expect("an event trigger entry");
+            assert_eq!(entry.owner.as_deref(), Some(expected));
+        }
+    }
+
     #[test]
     fn renders_base_type_after_its_shell_type() {
         let item = Item {
