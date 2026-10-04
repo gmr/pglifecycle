@@ -682,8 +682,11 @@ fn plan(
                         if alter.unlinks {
                             continue;
                         }
-                        if alter.links {
-                            links.push(statement);
+                        if let Some(column) = &alter.links {
+                            links.push((
+                                rebuild_adds(column, diff, resolutions),
+                                statement,
+                            ));
                             continue;
                         }
                         after = after.max(calls_later(
@@ -815,8 +818,10 @@ fn plan(
     for (destructive, statement) in waiting.into_values().flatten() {
         push(destructive, statement);
     }
-    for statement in links {
-        push(false, statement);
+    // a link to a column that only the rebuild of its table adds is
+    // withheld with the rebuild
+    for (rebuilt, statement) in links {
+        push(rebuilt && !args.allow_drop, statement);
     }
     // the privileges of the objects that the database has, after each
     // statement that changes an object or its owner
@@ -1074,6 +1079,35 @@ fn missing_roles<'a>(
         }
     }
     Ok(missing)
+}
+
+/// The column is in a table that the plan rebuilds, and the database
+/// table does not have it: only the rebuild adds it
+fn rebuild_adds(
+    column: &str,
+    diff: &Diff,
+    resolutions: &BTreeMap<usize, Resolution>,
+) -> bool {
+    use alter::names::name;
+    let column = name(column);
+    diff.changed.iter().any(|(id, definition)| {
+        let Definition::Table(table) = definition else {
+            return false;
+        };
+        let prefix = format!(
+            "{}.{}.",
+            quote_ident(&table.schema),
+            quote_ident(&table.name)
+        );
+        column.starts_with(&prefix)
+            && matches!(
+                resolutions.get(id),
+                Some(Resolution::Replace | Resolution::Rebuild { .. })
+            )
+            && !table.columns.iter().flatten().any(|c| {
+                name(&format!("{prefix}{}", quote_ident(&c.name))) == column
+            })
+    })
 }
 
 /// The CREATE SEQUENCE of a sequence entry without its OWNED BY
@@ -3261,6 +3295,112 @@ mod tests {
         }
     }
 
+    /// A link to a column that only the rebuild of its table adds is
+    /// withheld with the rebuild. A link to a column that the database
+    /// has is not
+    #[test]
+    fn sequence_link_waits_for_the_rebuild_of_its_table() {
+        let mut dump =
+            libpgdump::new("test", "UTF8", "18.0").expect("new output dump");
+        let mut add = |desc, name: &str| {
+            let kind = match desc {
+                libpgdump::ObjectType::Sequence => "SEQUENCE",
+                _ => "TABLE",
+            };
+            dump.add_entry(
+                desc,
+                Some("public"),
+                Some(name),
+                Some("app"),
+                Some(&format!("CREATE {kind} public.{name};\n")),
+                Some(&format!("DROP {kind} public.{name};\n")),
+                None,
+                &[],
+            )
+            .expect("add entry")
+        };
+        let table = add(libpgdump::ObjectType::Table, "t");
+        let sequence = add(libpgdump::ObjectType::Sequence, "s");
+        let output = build::BuildOutput {
+            dump,
+            item_ids: HashMap::from([(sequence, 0), (table, 1)]),
+        };
+        let snapshot =
+            libpgdump::new("test", "UTF8", "18.0").expect("new dump");
+        let sequence = |owned_by: Option<&str>| {
+            Definition::Sequence(
+                serde_json::from_value(serde_json::json!({
+                    "name": "s", "schema": "public", "owner": "app",
+                    "owned_by": owned_by,
+                }))
+                .unwrap(),
+            )
+        };
+        let table = Definition::Table(
+            serde_json::from_value(serde_json::json!({
+                "name": "t", "schema": "public", "owner": "app",
+                "columns": [{"name": "id", "data_type": "integer"}],
+            }))
+            .unwrap(),
+        );
+        let rebuild = "DROP TABLE public.t;\nCREATE TABLE public.t;\n";
+        for (column, allow_drop, included, excluded) in [
+            ("public.t.new", false, vec![], vec![rebuild, "new"]),
+            ("public.t.new", true, vec![rebuild, "new"], vec![]),
+            ("public.t.id", false, vec!["id"], vec![rebuild]),
+        ] {
+            let link = |sql: Vec<&str>| -> Vec<String> {
+                sql.into_iter()
+                    .map(|s| match s {
+                        "new" | "id" => format!(
+                            "ALTER SEQUENCE public.s OWNED BY public.t.{s};\n"
+                        ),
+                        _ => s.to_string(),
+                    })
+                    .collect()
+            };
+            let mut argv = vec!["pglifecycle", "deploy", "p"];
+            if allow_drop {
+                argv.push("--allow-drop");
+            }
+            let args = match cli::Cli::parse_from(argv).action {
+                cli::Action::Deploy(deploy) => deploy,
+                _ => unreachable!("parsed the deploy subcommand"),
+            };
+            let diff = Diff {
+                items: BTreeMap::from([
+                    (0, Change::Changed),
+                    (1, Change::Changed),
+                ]),
+                changed: BTreeMap::from([
+                    (0, sequence(None)),
+                    (1, table.clone()),
+                ]),
+                removed: BTreeMap::new(),
+                owned: BTreeSet::new(),
+                owner_changed: BTreeSet::new(),
+            };
+            let resolutions = BTreeMap::from([
+                (0, alter::resolve(&sequence(Some(column)), &sequence(None))),
+                (1, Resolution::Replace),
+            ]);
+            let plan = plan(
+                &diff,
+                &resolutions,
+                &output,
+                &snapshot,
+                &privileges::Privileges::default(),
+                &args,
+            )
+            .expect("plan succeeds");
+            let sql = |statements: &[Statement]| -> Vec<String> {
+                statements.iter().map(|s| s.sql.clone()).collect()
+            };
+            assert_eq!(sql(&plan.included), link(included), "{column}");
+            assert_eq!(sql(&plan.excluded), link(excluded), "{column}");
+        }
+    }
+
     /// A new base type gets its shell type before its I/O function,
     /// which takes the type. A base type that the database has gets
     /// no shell type, also for a new function that takes it
@@ -3461,7 +3601,7 @@ mod tests {
                 fails_open: false,
                 index_removal: false,
                 schema: None,
-                links: false,
+                links: None,
                 unlinks: false,
             })
             .collect();

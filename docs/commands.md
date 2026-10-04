@@ -378,7 +378,10 @@ the owner of its table; deploy warns when the project gives it another
 owner. When the project changes the link of a sequence, deploy runs
 `OWNED BY NONE` before all other statements, because a drop of the
 old column or of its table drops the sequence. It runs the new
-`OWNED BY` after each owner change, also that of the table. An event trigger with no `owner` in its file keeps the owner
+`OWNED BY` after each owner change, also that of the table. When
+only the rebuild of the table adds the new column, the new `OWNED
+BY` is withheld with the rebuild, unless `--allow-drop`. An event
+trigger with no `owner` in its file keeps the owner
 that it has, and a new one gets the connecting role. A type whose
 model has no owner (for example publications and subscriptions) keeps
 the connecting role as owner. So does most of what the project writes

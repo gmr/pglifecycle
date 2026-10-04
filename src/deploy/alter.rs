@@ -73,10 +73,10 @@ pub(crate) struct Alter {
     /// The schema that the statement names and that must exist before
     /// it runs (ALTER DEFAULT PRIVILEGES IN SCHEMA)
     pub schema: Option<String>,
-    /// The statement links a sequence to a column (OWNED BY), which
-    /// needs the owner of the table; deploy runs it after each owner
-    /// change
-    pub links: bool,
+    /// The column that the statement links a sequence to (OWNED BY),
+    /// which needs the owner of the table; deploy runs it after each
+    /// owner change
+    pub links: Option<String>,
     /// The statement unlinks a sequence from a column (OWNED BY NONE).
     /// A drop of the column or of its table drops the sequence, thus
     /// deploy runs it before all other statements
@@ -92,7 +92,7 @@ impl Alter {
             fails_open: false,
             index_removal: false,
             schema: None,
-            links: false,
+            links: None,
             unlinks: false,
         }
     }
@@ -1826,7 +1826,7 @@ fn sequence(repo: &Sequence, db: &Sequence) -> Resolution {
         }
         if let Some(owner) = &repo.owned_by {
             link = Some(Alter {
-                links: true,
+                links: Some(owner.clone()),
                 ..Alter::new(format!(
                     "ALTER SEQUENCE {name} OWNED BY {owner};\n"
                 ))
