@@ -1815,9 +1815,12 @@ fn sequence(repo: &Sequence, db: &Sequence) -> Resolution {
         });
     }
     // OWNED BY NONE comes before the drop of the old column and before
-    // an owner change, and a link after each owner change
+    // an owner change, and a link after each owner change. The same
+    // column with other quotes is no change
     let mut link = None;
-    if repo.owned_by != db.owned_by {
+    if repo.owned_by.as_deref().map(names::name)
+        != db.owned_by.as_deref().map(names::name)
+    {
         if db.owned_by.is_some() {
             alters.push(Alter {
                 unlinks: true,
@@ -3471,6 +3474,24 @@ mod tests {
         let alters = statements(sequence(
             &typed(Some("int4")),
             &typed(Some("integer")),
+        ));
+        assert!(alters.is_empty(), "{:?}", sql(&alters));
+    }
+
+    /// A link to the same column with other quotes is no change: an
+    /// unlink would detach the sequence from the owner change of its
+    /// table
+    #[test]
+    fn sequence_link_with_other_quotes_is_no_change() {
+        let linked = |owned_by: &str| {
+            parse_sequence(serde_json::json!({
+                "name": "s", "schema": "test", "owner": "postgres",
+                "owned_by": owned_by,
+            }))
+        };
+        let alters = statements(sequence(
+            &linked("test.\"t\".id"),
+            &linked("test.t.id"),
         ));
         assert!(alters.is_empty(), "{:?}", sql(&alters));
     }
