@@ -275,7 +275,9 @@ without a gate.
 A `RESET` of a database setting is not gated. It loses no data, and a
 changed value replaces the value of the database as a `RESET` does. A
 project that does not have a setting of the database thus resets it:
-pull the project again to record the settings.
+pull the project again to record the settings. Each such `RESET` is
+reported on stderr and listed in the script header (`-- settings
+reset:`).
 
 An index that the database has and the project does not is **kept**
 unless `--allow-drop-indexes` is given. Such an index is often made at
