@@ -73,6 +73,14 @@ pub(crate) struct Alter {
     /// The schema that the statement names and that must exist before
     /// it runs (ALTER DEFAULT PRIVILEGES IN SCHEMA)
     pub schema: Option<String>,
+    /// The column that the statement links a sequence to (OWNED BY),
+    /// which needs the owner of the table; deploy runs it after each
+    /// owner change
+    pub links: Option<String>,
+    /// The statement unlinks a sequence from a column (OWNED BY NONE).
+    /// A drop of the column or of its table drops the sequence, thus
+    /// deploy runs it before all other statements
+    pub unlinks: bool,
 }
 
 impl Alter {
@@ -84,6 +92,8 @@ impl Alter {
             fails_open: false,
             index_removal: false,
             schema: None,
+            links: None,
+            unlinks: false,
         }
     }
 
@@ -1821,11 +1831,27 @@ fn sequence(repo: &Sequence, db: &Sequence) -> Resolution {
             "NO CYCLE".into()
         });
     }
-    if repo.owned_by != db.owned_by {
-        clauses.push(match &repo.owned_by {
-            Some(owner) => format!("OWNED BY {owner}"),
-            None => "OWNED BY NONE".into(),
-        });
+    // OWNED BY NONE comes before the drop of the old column and before
+    // an owner change, and a link after each owner change. The same
+    // column with other quotes is no change
+    let mut link = None;
+    if repo.owned_by.as_deref().map(names::name)
+        != db.owned_by.as_deref().map(names::name)
+    {
+        if db.owned_by.is_some() {
+            alters.push(Alter {
+                unlinks: true,
+                ..Alter::new(format!("ALTER SEQUENCE {name} OWNED BY NONE;\n"))
+            });
+        }
+        if let Some(owner) = &repo.owned_by {
+            link = Some(Alter {
+                links: Some(owner.clone()),
+                ..Alter::new(format!(
+                    "ALTER SEQUENCE {name} OWNED BY {owner};\n"
+                ))
+            });
+        }
     }
     if !clauses.is_empty() {
         alters.push(Alter::new(format!(
@@ -1833,6 +1859,7 @@ fn sequence(repo: &Sequence, db: &Sequence) -> Resolution {
             clauses.join(" ")
         )));
     }
+    alters.extend(link);
     push_comment(&mut alters, "SEQUENCE", &name, &repo.comment, &db.comment);
     Resolution::Statements(alters)
 }
@@ -3506,6 +3533,24 @@ mod tests {
         let alters = statements(sequence(
             &typed(Some("int4")),
             &typed(Some("integer")),
+        ));
+        assert!(alters.is_empty(), "{:?}", sql(&alters));
+    }
+
+    /// A link to the same column with other quotes is no change: an
+    /// unlink would detach the sequence from the owner change of its
+    /// table
+    #[test]
+    fn sequence_link_with_other_quotes_is_no_change() {
+        let linked = |owned_by: &str| {
+            parse_sequence(serde_json::json!({
+                "name": "s", "schema": "test", "owner": "postgres",
+                "owned_by": owned_by,
+            }))
+        };
+        let alters = statements(sequence(
+            &linked("test.\"t\".id"),
+            &linked("test.t.id"),
         ));
         assert!(alters.is_empty(), "{:?}", sql(&alters));
     }
