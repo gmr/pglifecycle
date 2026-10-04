@@ -272,7 +272,12 @@
 //!     restores it only with `--create`, as for an archive of pg_dump.
 //!     The entry has no drop statement, thus pg_restore does not set
 //!     its owner. The Python had no place for these settings. The
-//!     test-project has none, thus its archive does not change.
+//!     test-project has none, thus its archive does not change. Each
+//!     setting name is quoted as pg_dump and pg_dumpall quote it, also
+//!     for the settings of a role or a user (see 37): `SET "app.user"`.
+//!     The Python wrote the name bare, which does not parse for a name
+//!     with a part that is a keyword. No test-project role or user has
+//!     a setting.
 //! 49. An aggregate argument name renders as an identifier, quoted
 //!     when it needs quotes. The Python wrote it bare, thus
 //!     `IN Weird Arg integer` did not parse. The test-project
@@ -1902,8 +1907,9 @@ impl Builder {
         for object in settings {
             for (setting, value) in object {
                 let defn = vec![format!(
-                    "ALTER {keyword} {} SET {setting} TO {}",
+                    "ALTER {keyword} {} SET {} TO {}",
                     quote_ident(name),
+                    quote_ident(setting),
                     setting_value(value)
                 )];
                 self.add_entry(
@@ -1936,7 +1942,8 @@ impl Builder {
         for object in &project.settings.database {
             for (setting, value) in object {
                 defn.push_str(&format!(
-                    "ALTER DATABASE {name} SET {setting} TO {};\n",
+                    "ALTER DATABASE {name} SET {} TO {};\n",
+                    quote_ident(setting),
                     setting_value(value)
                 ));
             }
@@ -1945,9 +1952,9 @@ impl Builder {
             for object in settings {
                 for (setting, value) in object {
                     defn.push_str(&format!(
-                        "ALTER ROLE {} IN DATABASE {name} SET {setting} TO \
-                         {};\n",
+                        "ALTER ROLE {} IN DATABASE {name} SET {} TO {};\n",
                         quote_ident(role),
+                        quote_ident(setting),
                         setting_value(value)
                     ));
                 }
