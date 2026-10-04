@@ -1861,6 +1861,23 @@ pub(crate) fn return_type(returns: &str) -> String {
     }
 }
 
+/// The type that a function returns as PostgreSQL keeps it in
+/// `prorettype` and `proretset`: [`return_type`], but a `TABLE(...)`
+/// return type with one column is `SETOF` the type of that column.
+/// Only a `TABLE(...)` with more columns returns `record`.
+pub(crate) fn result_type(returns: &str) -> String {
+    let returns = return_type(returns);
+    match returns
+        .strip_prefix("table(")
+        .and_then(|columns| columns.strip_suffix(')'))
+    {
+        Some(column) if split_columns(column).len() == 1 => {
+            format!("setof {}", column[name_length(column)..].trim_start())
+        }
+        _ => returns,
+    }
+}
+
 /// The columns of a `TABLE(...)` return type, split at each comma that
 /// is not in parentheses or quotes
 fn split_columns(columns: &str) -> Vec<&str> {
@@ -2641,10 +2658,59 @@ mod tests {
                     normalized(&routine(language, "SELECT\n1;")),
                     normalized(&routine(language, "SELECT 1;"))
                 );
+                // only the space that the PostgreSQL scanner ignores
+                // ([ \t\n\r\f\v]) is not a change
+                assert_eq!(
+                    normalized(&routine(language, "SELECT 1;")),
+                    normalized(&routine(language, "\t\x0bSELECT 1;\x0c\r"))
+                );
+                assert_ne!(
+                    normalized(&routine(language, "SELECT 1;")),
+                    normalized(&routine(language, "SELECT 1;\u{a0}"))
+                );
             }
             assert_ne!(
                 normalized(&routine("plpython3u", " return 1")),
                 normalized(&routine("plpython3u", "return 1"))
+            );
+        }
+    }
+
+    /// The space that the PostgreSQL scanner ignores at the start and
+    /// end of a `sql_body` is not a change: a YAML block scalar adds a
+    /// newline at the end. U+00A0 and the space in the body stay a
+    /// change.
+    #[test]
+    fn sql_body_outer_space_is_not_a_change() {
+        let f = |sql_body: &str| {
+            function(serde_json::json!({
+                "name": "f", "schema": "test", "owner": "postgres",
+                "language": "sql", "returns": "integer",
+                "sql_body": sql_body,
+            }))
+        };
+        let p = |sql_body: &str| {
+            Definition::Procedure(
+                serde_json::from_value(serde_json::json!({
+                    "name": "p", "schema": "test", "owner": "postgres",
+                    "language": "sql", "sql_body": sql_body,
+                }))
+                .unwrap(),
+            )
+        };
+        let body = "BEGIN ATOMIC\n SELECT 1;\nEND";
+        for routine in [f, p] {
+            assert_eq!(
+                normalized(&routine(body)),
+                normalized(&routine(&format!("\t\x0b{body}\n\x0c\r ")))
+            );
+            assert_ne!(
+                normalized(&routine(body)),
+                normalized(&routine(&format!("{body}\u{a0}")))
+            );
+            assert_ne!(
+                normalized(&routine(body)),
+                normalized(&routine("BEGIN ATOMIC\n  SELECT 1;\nEND"))
             );
         }
     }
