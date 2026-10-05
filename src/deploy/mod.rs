@@ -104,11 +104,11 @@ pub fn deploy(args: &cli::Deploy) -> Result<(), String> {
     task.finish();
     if !dependents.refused.is_empty() {
         let message = format!(
-            "The plan drops a function, but these objects depend on it, \
-             and deploy cannot drop and make them again: {}",
+            "The plan drops objects that other objects depend on, and \
+             deploy cannot drop and make these dependents again: {}",
             dependents.refused.join("; ")
         );
-        // without --allow-drop the drop is withheld, thus the plan
+        // without --allow-drop the drops are withheld, thus the plan
         // stays usable
         if args.allow_drop {
             return Err(message);
@@ -334,13 +334,14 @@ struct Plan {
     /// it can remove a setting that a DBA made
     resets: Vec<String>,
     /// The objects that the plan drops and makes again, because they
-    /// depend on a function that it drops (see [`dependents`])
+    /// depend on an object that it drops (see [`dependents`])
     dependents: Vec<String>,
 }
 
 /// Assemble the ordered plan: OWNED BY NONE of changed sequences first,
-/// then DROPs for database-only objects and for the dependents of a
-/// function that the plan drops (reverse snapshot order), then
+/// then DROPs for database-only objects, for the replaced objects that
+/// have dependents, and for these dependents (reverse snapshot order),
+/// then
 /// changed default privileges (those in a new schema directly after
 /// its CREATE SCHEMA), then the repo archive's entries in topological
 /// order — plain CREATEs for added objects, in-place ALTERs where a
@@ -408,8 +409,9 @@ fn plan(
         && args.exclude_schema.is_empty()
         && args.exclude_extension.is_empty());
     for entry in snapshot.entries().iter().rev() {
-        // a dependent of a function that the plan drops: the plan makes
-        // it again, or the project does not have it
+        // a replaced object with dependents, or a dependent of an
+        // object that the plan drops: the plan makes it again, or the
+        // project does not have it
         for alter in dependents.drops.get(&entry.dump_id).into_iter().flatten()
         {
             let statement = Statement {
@@ -1390,7 +1392,7 @@ fn report(diff: &Diff, plan: &Plan, assembly: &pull::Assembly) {
     }
     if !plan.dependents.is_empty() {
         log::warn!(
-            "These objects depend on a function that the plan drops, \
+            "These objects depend on an object that the plan drops, \
              thus the plan drops them and makes them again: {}",
             plan.dependents.join(", ")
         );
@@ -1533,7 +1535,7 @@ fn render_script(
     }
     if !plan.dependents.is_empty() {
         script.push_str(&format!(
-            "-- dependents rebuilt with a replaced function: {} ({})\n",
+            "-- dependents rebuilt with a replaced object: {} ({})\n",
             plan.dependents.len(),
             one_line(&plan.dependents.join(", "))
         ));
@@ -3009,7 +3011,7 @@ mod tests {
     }
 
     /// The header names each object that the plan drops and makes
-    /// again because it depends on a function that the plan drops
+    /// again because it depends on an object that the plan drops
     #[test]
     fn script_names_the_rebuilt_dependents() {
         let statement = |label: &str| Statement {
@@ -3034,7 +3036,7 @@ mod tests {
             script.contains(
                 "-- destructive statements: 2 excluded (re-run with \
                  --allow-drop)\n\
-                 -- dependents rebuilt with a replaced function: 2 (VIEW \
+                 -- dependents rebuilt with a replaced object: 2 (VIEW \
                  test.v, VIEW a\\nb)\n"
             ),
             "{script}"

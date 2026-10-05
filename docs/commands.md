@@ -218,8 +218,14 @@ reconciled in place where PostgreSQL can express it:
   a `sql_body` is not a change; the space in it is. A type alias or a
   type modifier in a parameter, the return type or a `TABLE(...)`
   column is not a change, as PostgreSQL keeps no typmod there (see
-  [Project format](project-format.md)). A view's rules are
-  reconciled after it. A `sql_body` is compared as
+  [Project format](project-format.md)). PostgreSQL does not let
+  `CREATE OR REPLACE VIEW` rename, remove or reorder a column, so such
+  a change falls back. Deploy finds the names of the columns in the
+  column list of the view, else in its query: the name after `AS`, or
+  the last name of a column reference, as `pull` writes it. When a
+  name is not known this way (`*`, an expression with no `AS`), deploy
+  uses `CREATE OR REPLACE`. Deploy does not find a change to the type
+  of a view column. A view's rules are reconciled after it. A `sql_body` is compared as
   text with the form PostgreSQL keeps, so write it as `pull` writes
   it. An `AS` name that PostgreSQL adds to a constant column when
   deploy makes the routine (`SELECT 'a'::text AS text`) is not a
@@ -293,24 +299,37 @@ reconciling a table are *not* gated: they lose no data and the project
 is authoritative. A changed index is also dropped and made again
 without a gate.
 
-When deploy drops a function — a change that `CREATE OR REPLACE
-FUNCTION` cannot do, or a function that only the database has —
-PostgreSQL refuses the drop while another object depends on it. Deploy
-finds these objects in the dependencies of the database's dump, also
-the objects that depend on them, and drops them before the function:
+When deploy drops an object and makes it again, PostgreSQL refuses
+the drop while another object depends on it. This applies to a
+function (a change that `CREATE OR REPLACE FUNCTION` cannot do, or a
+function that only the database has), a view whose columns change, a
+materialized view, an aggregate, an operator, a type, a domain, and a
+table that deploy cannot change in place. Deploy finds the dependent
+objects in the dependencies of the database's dump, also the objects
+that depend on them, and drops them before the object:
 
 - A view, a materialized view, a function, a procedure, an aggregate,
-  an operator or a cast is dropped and made again from the project,
-  with its comment, indexes, triggers, owner and privileges.
+  an operator, a cast or an extended statistics object is dropped and
+  made again from the project, with its comment, indexes, triggers,
+  owner and privileges.
 - A column default, a check, an index, a trigger or a policy of a
-  table, and the default or a check of a domain, is dropped, and
-  the table or domain makes it again in place. The table and its data
-  stay. A column default is dropped and set with `ALTER TABLE ONLY`,
-  thus the default of an inheritance child or a partition stays.
+  table, and the default or a check of a domain, that calls a
+  function that deploy drops, is dropped, and the table or domain
+  makes it again in place. The table and its data stay. A column
+  default is dropped and set with `ALTER TABLE ONLY`, thus the default
+  of an inheritance child or a partition stays.
+- The indexes, constraints, triggers, rules and policies of a table,
+  view or materialized view that deploy drops come back with it.
+  PostgreSQL drops the partitions of a table, and the sequences that
+  its columns own, with the table. A partition that is not an item of
+  its own (no `attached`), and the sequence of an identity column,
+  come back with their table.
 
+A replaced object that has dependents is dropped after them, before
+the objects that deploy makes, and is made again at its position.
 These statements are destructive: without `--allow-drop` all of them
-are withheld with the drop of the function. The script header lists
-the objects (`-- dependents rebuilt with a replaced function:`).
+are withheld with the drop of the object. The script header lists
+the dependents (`-- dependents rebuilt with a replaced object:`).
 A default, check, index, trigger or policy that calls the function and
 that the project does not have is only dropped, before the function,
 with the gate that its drop has without the function: an index only
@@ -319,12 +338,20 @@ keeps such an index, the drop of the function would fail, thus deploy
 stops with an error, as for a dependent that it cannot make again.
 Deploy does not use `DROP ... CASCADE`, which drops each dependent
 with no list, also one that the project does not have. When an object
-depends on the function and deploy cannot make it again — the project
+depends on the object and deploy cannot make it again — the project
 does not have it, a generated column calls the function, a trigger
-or an index has a statement after its `CREATE` that the project does
-not keep (`ALTER TABLE ... DISABLE TRIGGER` or `ENABLE REPLICA
+or an index (also one of a table or materialized view that deploy
+drops) has a statement after its `CREATE` that the project does not
+keep (`ALTER TABLE ... DISABLE TRIGGER` or `ENABLE REPLICA
 TRIGGER`, `CLUSTER ON`, an index column's `SET STATISTICS`), or it is
-of another type, such as an operator class — deploy stops with an error
+of another type, such as an operator class, a table column of a type
+or domain that deploy drops, an inheritance child or a partition with
+`attached` of a table that deploy drops, the attachment of a partition
+that deploy drops without its table, the membership of a table that
+deploy drops in a publication, a sequence that a column of a table
+that deploy drops owns (`serial` or `OWNED BY`), or a foreign key of another table that
+references it —
+deploy stops with an error
 that names it when `--allow-drop` is given, and gives a warning when
 it is not. An object that `--exclude-table` or `--exclude-schema`
 hides from the dump is not found: then the drop fails, and deploy
@@ -609,9 +636,12 @@ PostgreSQL has almost no ALTER for these types:
   class again in its new family.
 
 A drop and a create is destructive, so it needs `--allow-drop`. The
-drop does not cascade: when an object depends on the object, for
-example an index on an operator class or a view that uses a cast, the
-drop fails and the transaction rolls back. The comment of each of
+drop does not cascade. Deploy drops the objects that depend on an
+aggregate or an operator first and makes them again (see
+[Destructive statements and limits](#destructive-statements-and-limits)).
+When an object depends on a cast, a class or a family, for example an
+index on an operator class or a view that uses a cast, the drop fails
+and the transaction rolls back. The comment of each of
 these types changes in place. An aggregate, an operator, a class
 and a family have an owner; a cast and a transform do not.
 
