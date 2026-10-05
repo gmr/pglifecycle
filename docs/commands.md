@@ -300,7 +300,8 @@ the objects that depend on them, and drops them before the function:
 - A column default, a check, an index, a trigger or a policy of a
   table, and the default or a named check of a domain, is dropped, and
   the table or domain makes it again in place. The table and its data
-  stay.
+  stay. A column default is dropped and set with `ALTER TABLE ONLY`,
+  thus the default of an inheritance child or a partition stays.
 
 These statements are destructive: without `--allow-drop` all of them
 are withheld with the drop of the function. The script header lists

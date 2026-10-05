@@ -232,3 +232,41 @@ fi
 ./target/debug/pglifecycle deploy --apply --allow-drop --allow-drop-indexes \
     -d "${TARGET_DB}" "${WORKDIR}/project"
 expect_dependents "a removed index that calls the function is dropped"
+
+# an inheritance child with a default of its own. PostgreSQL changes
+# the default of each child too, unless ALTER TABLE ONLY: deploy must
+# not drop the child's default or give it the parent's
+cat > "${WORKDIR}/project/tables/test/gate_dep_child.yaml" <<'YAML'
+---
+name: gate_dep_child
+schema: test
+owner: postgres
+parents:
+- test.gate_dep_table
+columns:
+- name: n
+  data_type: integer
+  default: '7'
+dependencies:
+  tables:
+  - test.gate_dep_table
+YAML
+./target/debug/pglifecycle deploy --apply -d "${TARGET_DB}" \
+    "${WORKDIR}/project"
+expect_empty_plan "an inheritance child with its own default is made"
+mutate_dependents 'CREATE FUNCTION test.gate_dep(a integer,
+    b integer DEFAULT 0) RETURNS integer LANGUAGE sql
+    AS $$SELECT a + b;$$'
+# the parent's DROP DEFAULT and SET DEFAULT changed it
+psql -d "${TARGET_DB}" -q -v ON_ERROR_STOP=1 \
+    -c 'ALTER TABLE test.gate_dep_child ALTER COLUMN n SET DEFAULT 7'
+./target/debug/pglifecycle deploy --apply --allow-drop \
+    -d "${TARGET_DB}" "${WORKDIR}/project"
+if [ "$(psql -d "${TARGET_DB}" -tAc "SELECT pg_get_expr(adbin, adrelid)
+        FROM pg_attrdef
+        WHERE adrelid = 'test.gate_dep_child'::regclass")" != 7 ]; then
+    echo "Convergence gate FAILED: the default of the inheritance child" \
+        "changed" >&2
+    exit 1
+fi
+expect_dependents "the default of an inheritance child stays"

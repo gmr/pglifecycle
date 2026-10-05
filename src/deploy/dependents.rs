@@ -388,6 +388,15 @@ fn rebuild_parts(
                     if !old.contains(&alter.sql) {
                         alter.destructive = true;
                     }
+                    // a column default is set again with ALTER TABLE
+                    // ONLY, as it is dropped: without ONLY, PostgreSQL
+                    // sets it on each inheritance child and partition
+                    for (_, drop, _) in &drops {
+                        if let Some(set) = only_default(&drop.sql, &alter.sql)
+                        {
+                            alter.sql = set;
+                        }
+                    }
                 }
                 Resolution::Statements(alters)
             }
@@ -478,7 +487,8 @@ fn inline_table<'a>(
                 part_drop(
                     format!("DEFAULT {tag} {}", column.name),
                     format!(
-                        "ALTER TABLE {name} ALTER COLUMN {} DROP DEFAULT;\n",
+                        "ALTER TABLE ONLY {name} ALTER COLUMN {} DROP \
+                         DEFAULT;\n",
                         quote_ident(&column.name)
                     ),
                     default_again(&column.name),
@@ -695,6 +705,7 @@ fn entry_part<'a>(
         ));
     }
     let mut restrictive = false;
+    let mut own_drop = None;
     let removed = match (&entry.desc, definition, name) {
         (OT::Index, Definition::Table(table), Some(name)) => {
             remove(&mut table.indexes, |index| index.name == name)
@@ -719,6 +730,14 @@ fn entry_part<'a>(
             })
         }
         (OT::Default, Definition::Table(table), Some(name)) => {
+            // pg_dump drops the default without ONLY, which drops the
+            // default of each inheritance child and partition too
+            own_drop = Some(format!(
+                "ALTER TABLE ONLY {}.{} ALTER COLUMN {} DROP DEFAULT;\n",
+                quote_ident(&table.schema),
+                quote_ident(&table.name),
+                quote_ident(name)
+            ));
             let column = table.columns.iter_mut().flatten().find(|column| {
                 column.name == name && column.default.is_some()
             });
@@ -735,7 +754,7 @@ fn entry_part<'a>(
         _ => false,
     };
     let drop = match (&entry.drop_stmt, removed) {
-        (Some(drop), true) => drop.clone(),
+        (Some(drop), true) => own_drop.unwrap_or_else(|| drop.clone()),
         _ => return Err(format!("deploy cannot drop and make again {label}")),
     };
     let drop = match entry.desc {
@@ -751,6 +770,21 @@ fn entry_part<'a>(
     };
     drops.push((Some(entry), drop, again));
     Ok(())
+}
+
+/// `set` with ALTER TABLE ONLY, when it sets the column default that
+/// `drop` (an ALTER TABLE ONLY ... DROP DEFAULT) drops
+fn only_default(drop: &str, set: &str) -> Option<String> {
+    let target = drop
+        .strip_prefix("ALTER TABLE ONLY ")?
+        .strip_suffix(" DROP DEFAULT;\n")?;
+    let expression = set
+        .strip_prefix("ALTER TABLE ")?
+        .strip_prefix(target)?
+        .strip_prefix(" SET DEFAULT ")?;
+    Some(format!(
+        "ALTER TABLE ONLY {target} SET DEFAULT {expression}"
+    ))
 }
 
 /// True when `list` has an item that `matches` finds
@@ -984,7 +1018,9 @@ mod tests {
 
     /// A view, a view on that view, a column default and an index
     /// expression that call the function are dropped and made again;
-    /// the comment of the view comes with the view
+    /// the comment of the view comes with the view. The default is
+    /// dropped and set with ALTER TABLE ONLY, which does not change the
+    /// default of an inheritance child or a partition
     #[test]
     fn dependents_are_dropped_and_made_again() {
         let project = project(vec![
@@ -1051,7 +1087,7 @@ mod tests {
         assert_eq!(drop(i), vec!["DROP INDEX test.i;\n"]);
         assert_eq!(
             drop(t),
-            vec!["ALTER TABLE test.t ALTER COLUMN id DROP DEFAULT;\n"]
+            vec!["ALTER TABLE ONLY test.t ALTER COLUMN id DROP DEFAULT;\n"]
         );
         for id in [1, 2] {
             assert_eq!(diff.items[&id], Change::Changed);
@@ -1074,7 +1110,7 @@ mod tests {
             statements,
             vec![
                 (
-                    "ALTER TABLE test.t ALTER COLUMN id SET DEFAULT \
+                    "ALTER TABLE ONLY test.t ALTER COLUMN id SET DEFAULT \
                      test.f(2);\n",
                     true
                 ),
