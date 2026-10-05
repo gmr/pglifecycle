@@ -334,8 +334,9 @@ Deploy does not use `DROP ... CASCADE`, which drops each dependent
 with no list, also one that the project does not have. When an object
 depends on the object and deploy cannot make it again — the project
 does not have it, a generated column calls the function, a trigger
-or an index has a statement after its `CREATE` that the project does
-not keep (`ALTER TABLE ... DISABLE TRIGGER` or `ENABLE REPLICA
+or an index (also one of a table or materialized view that deploy
+drops) has a statement after its `CREATE` that the project does not
+keep (`ALTER TABLE ... DISABLE TRIGGER` or `ENABLE REPLICA
 TRIGGER`, `CLUSTER ON`, an index column's `SET STATISTICS`), or it is
 of another type, such as an operator class, a table column of a type
 or domain that deploy drops, an inheritance child or a partition with

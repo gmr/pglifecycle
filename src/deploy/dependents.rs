@@ -422,6 +422,20 @@ pub(crate) fn rebuild(
             );
         }
     }
+    // the rebuild of a relation makes its parts again from the project
+    let mut lost: Vec<(i32, i32)> = covered
+        .iter()
+        .map(|(&id, &owner)| (id, owner))
+        .filter(|(id, _)| more_statements(by_id[id]))
+        .collect();
+    lost.sort();
+    for (id, owner) in lost {
+        dependents.refused.push(format!(
+            "{}: {}",
+            entry_label(by_id[&owner]),
+            more_statements_reason(&entry_label(by_id[&id]))
+        ));
+    }
     // a relation that the plan drops is not changed in place
     parts.retain(|id, _| !closure.contains(id));
     let mut parser = tree_sitter::Parser::new();
@@ -919,20 +933,8 @@ fn entry_part<'a>(
             }
             _ => false,
         };
-    // the project does not keep a statement after the CREATE: the
-    // enabled state of a trigger (ALTER TABLE ... DISABLE TRIGGER), or
-    // ALTER TABLE ... CLUSTER ON and SET STATISTICS of an index
-    if again
-        && entry
-            .defn
-            .as_deref()
-            .is_some_and(|defn| crate::ddl::split_statements(defn).len() > 1)
-    {
-        return Err(format!(
-            "{label} has statements after its CREATE that the project \
-             does not keep (for example, ALTER TABLE ... DISABLE \
-             TRIGGER), and deploy would lose them"
-        ));
+    if again && more_statements(entry) {
+        return Err(more_statements_reason(&label));
     }
     // a part that the project does not have is dropped as the table
     // would drop it. Deploy keeps an index that only the database has
@@ -1009,6 +1011,33 @@ fn entry_part<'a>(
     };
     drops.push((Some(entry), drop, again));
     Ok(())
+}
+
+/// True when `entry` has statements after its CREATE that the project
+/// does not keep: the enabled state of a trigger (ALTER TABLE ...
+/// DISABLE TRIGGER), or ALTER TABLE ... CLUSTER ON and SET STATISTICS
+/// of an index. The project keeps the enabled state of a rule and the
+/// replica identity of a table
+fn more_statements(entry: &libpgdump::Entry) -> bool {
+    entry.desc != OT::Rule
+        && entry.defn.as_deref().is_some_and(|defn| {
+            crate::ddl::split_statements(defn)
+                .iter()
+                .skip(1)
+                .any(|statement| {
+                    !statement.contains(" REPLICA IDENTITY USING INDEX ")
+                })
+        })
+}
+
+/// The reason that deploy refuses to drop and make again the part
+/// `label`, which has statements after its CREATE
+fn more_statements_reason(label: &str) -> String {
+    format!(
+        "{label} has statements after its CREATE that the project does \
+         not keep (for example, ALTER TABLE ... DISABLE TRIGGER), and \
+         deploy would lose them"
+    )
 }
 
 /// `set` with ALTER TABLE ONLY, when it sets the column default that
@@ -1842,6 +1871,69 @@ mod tests {
                  from the publication and not add it again"
             ]
         );
+    }
+
+    /// A disabled trigger of a table, and a clustered index of a
+    /// materialized view, that the plan makes again: the project does
+    /// not keep the statements after the CREATE, thus the rebuild would
+    /// lose them
+    #[test]
+    fn a_rebuild_refuses_a_part_with_more_statements() {
+        for (desc, json, part, defn, label) in [
+            (
+                ObjectType::Table,
+                table("0"),
+                OT::Trigger,
+                "CREATE TRIGGER tg BEFORE UPDATE ON test.t FOR EACH ROW \
+                 EXECUTE FUNCTION test.tf();\n\n\
+                 ALTER TABLE test.t DISABLE TRIGGER tg;\n",
+                "TABLE test.t: TRIGGER test.t tg",
+            ),
+            (
+                ObjectType::MaterializedView,
+                view("t", " SELECT 1 AS id"),
+                OT::Index,
+                "CREATE INDEX i ON test.t USING btree (id);\n\n\
+                 ALTER TABLE test.t CLUSTER ON i;\n",
+                "MATERIALIZED VIEW test.t: INDEX test.i",
+            ),
+        ] {
+            let project = project(vec![item(0, desc, json)]);
+            let mut snapshot =
+                libpgdump::new("test", "UTF8", "18.0").expect("new dump");
+            let relation = match desc {
+                ObjectType::Table => OT::Table,
+                _ => OT::MaterializedView,
+            };
+            let t = entry(&mut snapshot, relation, "t", Some("DROP;\n"), &[]);
+            let tag = if part == OT::Index { "i" } else { "t tg" };
+            entry_with(&mut snapshot, part, tag, defn, Some("DROP;\n"), &[t]);
+            let (dependents, _, _) = replace(&project, &snapshot, &[0]);
+            assert_eq!(
+                dependents.refused,
+                vec![format!(
+                    "{label} has statements after its CREATE that the \
+                     project does not keep (for example, ALTER TABLE ... \
+                     DISABLE TRIGGER), and deploy would lose them"
+                )]
+            );
+        }
+        // the project keeps the replica identity of the table
+        let project = project(vec![item(0, ObjectType::Table, table("0"))]);
+        let mut snapshot =
+            libpgdump::new("test", "UTF8", "18.0").expect("new dump");
+        let t = entry(&mut snapshot, OT::Table, "t", Some("DROP;\n"), &[]);
+        entry_with(
+            &mut snapshot,
+            OT::Index,
+            "i",
+            "CREATE UNIQUE INDEX i ON test.t USING btree (id);\n\n\
+             ALTER TABLE ONLY test.t REPLICA IDENTITY USING INDEX i;\n",
+            Some("DROP;\n"),
+            &[t],
+        );
+        let (dependents, _, _) = replace(&project, &snapshot, &[0]);
+        assert!(dependents.refused.is_empty(), "{:?}", dependents.refused);
     }
 
     /// A replaced object with no dependents is dropped and made again

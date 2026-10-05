@@ -214,3 +214,50 @@ expect_kept "a table in a publication" \
 psql -d "${TARGET_DB}" -q -v ON_ERROR_STOP=1 \
     -c 'ALTER TABLE test.gate_rd_pub RESET (fillfactor)'
 expect_empty_plan "a table in a publication is restored"
+
+# a disabled trigger: the project does not keep the enabled state of a
+# trigger, thus the rebuild would enable it again
+cat > "${WORKDIR}/project/functions/test/gate_rd_tf.yaml" <<'YAML'
+---
+name: gate_rd_tf
+schema: test
+owner: postgres
+returns: trigger
+language: plpgsql
+definition: |-
+  BEGIN
+    RETURN NEW;
+  END;
+YAML
+cat > "${WORKDIR}/project/tables/test/gate_rd_trig.yaml" <<'YAML'
+---
+name: gate_rd_trig
+schema: test
+owner: postgres
+columns:
+- name: n
+  data_type: integer
+triggers:
+- name: gate_rd_tg
+  when: BEFORE
+  events:
+  - UPDATE
+  for_each: ROW
+  function: test.gate_rd_tf()
+YAML
+./target/debug/pglifecycle deploy --apply -d "${TARGET_DB}" \
+    "${WORKDIR}/project"
+expect_empty_plan "a table with a trigger is made"
+psql -d "${TARGET_DB}" -q -v ON_ERROR_STOP=1 <<'SQL'
+ALTER TABLE test.gate_rd_trig DISABLE TRIGGER gate_rd_tg;
+ALTER TABLE test.gate_rd_trig SET (fillfactor = 50);
+SQL
+expect_refused "a table with a disabled trigger" \
+    'TRIGGER test.gate_rd_trig gate_rd_tg has statements after its CREATE'
+expect_kept "a table with a disabled trigger" \
+    "(SELECT tgenabled FROM pg_trigger WHERE tgname = 'gate_rd_tg') = 'D'"
+psql -d "${TARGET_DB}" -q -v ON_ERROR_STOP=1 <<'SQL'
+ALTER TABLE test.gate_rd_trig ENABLE TRIGGER gate_rd_tg;
+ALTER TABLE test.gate_rd_trig RESET (fillfactor);
+SQL
+expect_empty_plan "a table with a disabled trigger is restored"
