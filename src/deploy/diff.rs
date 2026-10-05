@@ -289,6 +289,8 @@ pub fn diff(project: &Project, assembly: &Assembly) -> Diff {
     let mut database = database_index(assembly);
     super::alter::operator::align(project, &mut database);
     super::alter::operator_class::align(project, &mut database);
+    fold_implied_partitions(project, &mut database);
+    let partition_parents = partition_parents(project);
     let mut items = BTreeMap::new();
     let mut changed = BTreeMap::new();
     let mut owned = BTreeSet::new();
@@ -326,9 +328,18 @@ pub fn diff(project: &Project, assembly: &Assembly) -> Diff {
                             (
                                 Definition::Table(repo),
                                 Definition::Table(db),
-                            ) => Definition::Table(
-                                db.without_unmanaged_security(repo),
-                            ),
+                            ) => {
+                                let db = db.without_unmanaged_security(repo);
+                                Definition::Table(
+                                    match partition_parents.get(&key) {
+                                        Some(parent) => db
+                                            .with_parent_not_null_names(
+                                                repo, parent,
+                                            ),
+                                        None => db,
+                                    },
+                                )
+                            }
                             (_, db) => db,
                         };
                         // a dump made without owners gives none to
@@ -379,6 +390,133 @@ pub fn diff(project: &Project, assembly: &Assembly) -> Diff {
         removed: database,
         owned,
         owner_changed,
+    }
+}
+
+/// The key of a table
+fn table_object_key(schema: &str, name: &str) -> ObjectKey {
+    ObjectKey {
+        desc: ObjectType::Table,
+        schema: schema.to_string(),
+        name: name.to_string(),
+    }
+}
+
+/// The parent in the project of each partition that the project gives
+/// as a table of its own (`attached: true`), by the key of the
+/// partition
+fn partition_parents(
+    project: &Project,
+) -> BTreeMap<ObjectKey, &crate::models::Table> {
+    let mut parents = BTreeMap::new();
+    for item in &project.inventory {
+        let Definition::Table(table) = &item.definition else {
+            continue;
+        };
+        for partition in table.partitions.iter().flatten() {
+            if partition.attached == Some(true) {
+                let key = table_object_key(&partition.schema, &partition.name);
+                parents.insert(key, table);
+            }
+        }
+    }
+    parents
+}
+
+/// Fold into its parent, on the database side, each partition that the
+/// project gives by its bounds only, where the database has it as a
+/// table of its own with only what PostgreSQL makes from the parent
+/// (see [`crate::models::Table::without_parent_parts`]). Pull keeps
+/// such a partition a table of its own, because pg_dump writes the
+/// indexes and constraints that PostgreSQL makes in it. Without the
+/// fold, a partition of a table that has a primary key is never equal
+/// to the project, and deploy drops and makes again the table and its
+/// partitions.
+///
+/// pg_dump writes each index of a partitioned table with ON ONLY
+/// (`recurse: false`) and attaches the index of each partition to it.
+/// When each partition folds and has an index attached to such an
+/// index, the index is the one that CREATE INDEX makes on the
+/// partitioned table and its partitions.
+fn fold_implied_partitions(
+    project: &Project,
+    database: &mut BTreeMap<ObjectKey, Definition>,
+) {
+    let tables: BTreeSet<ObjectKey> = project
+        .inventory
+        .iter()
+        .filter(|item| item.desc == ObjectType::Table)
+        .map(|item| ObjectKey::new(item.desc, &item.definition))
+        .collect();
+    for item in &project.inventory {
+        let Definition::Table(repo) = &item.definition else {
+            continue;
+        };
+        let parent_key = ObjectKey::new(item.desc, &item.definition);
+        // the parent indexes of the indexes of each folded partition
+        let mut folded = Vec::new();
+        for partition in repo.partitions.iter().flatten() {
+            let key = table_object_key(&partition.schema, &partition.name);
+            if partition.attached == Some(true) || tables.contains(&key) {
+                continue;
+            }
+            let is_partition = |p: &crate::models::TablePartition| {
+                p.schema == partition.schema && p.name == partition.name
+            };
+            let (
+                Some(Definition::Table(parent)),
+                Some(Definition::Table(child)),
+            ) = (database.get(&parent_key), database.get(&key))
+            else {
+                continue;
+            };
+            let attached = parent
+                .partitions
+                .iter()
+                .flatten()
+                .any(|p| is_partition(p) && p.attached == Some(true));
+            if !attached
+                || child
+                    .without_parent_parts(parent)
+                    .has_own_partition_properties()
+            {
+                continue;
+            }
+            let comment = child.comment.clone();
+            let indexes = child.indexes.iter().flatten();
+            let indexes: BTreeSet<String> =
+                indexes.filter_map(|i| i.parent.clone()).collect();
+            folded.push(indexes);
+            database.remove(&key);
+            if let Some(Definition::Table(parent)) =
+                database.get_mut(&parent_key)
+            {
+                let partitions = parent.partitions.iter_mut().flatten();
+                for partition in partitions.filter(|p| is_partition(p)) {
+                    partition.attached = None;
+                    if partition.comment.is_none() {
+                        partition.comment.clone_from(&comment);
+                    }
+                }
+            }
+        }
+        let Some(Definition::Table(parent)) = database.get_mut(&parent_key)
+        else {
+            continue;
+        };
+        let count = parent.partitions.as_ref().map_or(0, Vec::len);
+        if folded.is_empty() || folded.len() != count {
+            continue;
+        }
+        let schema = quote_ident(&parent.schema);
+        for index in parent.indexes.iter_mut().flatten() {
+            let name = format!("{schema}.{}", quote_ident(&index.name));
+            if index.recurse == Some(false)
+                && folded.iter().all(|parents| parents.contains(&name))
+            {
+                index.recurse = None;
+            }
+        }
     }
 }
 
@@ -3650,5 +3788,182 @@ mod tests {
         ] {
             assert_eq!(compare(desc), Compare::Skip);
         }
+    }
+
+    fn tables_project(tables: Vec<models::Table>) -> Project {
+        Project {
+            name: String::from("test"),
+            superuser: String::from("postgres"),
+            default_schema: String::from("public"),
+            path: std::path::PathBuf::new(),
+            settings: Default::default(),
+            inventory: tables
+                .into_iter()
+                .enumerate()
+                .map(|(id, table)| models::Item {
+                    id,
+                    desc: ObjectType::Table,
+                    definition: Definition::Table(table),
+                    dependencies: BTreeSet::new(),
+                })
+                .collect(),
+        }
+    }
+
+    fn json_table(value: serde_json::Value) -> models::Table {
+        serde_json::from_value(value).expect("table deserializes")
+    }
+
+    /// A partitioned table with a primary key, a unique and an
+    /// exclusion constraint, a CHECK, a column default and an index,
+    /// as pull writes it, and the partition that PARTITION OF made,
+    /// which pull keeps as a table of its own
+    fn pulled_partitions() -> (models::Table, models::Table) {
+        let parent = json_table(serde_json::json!({
+            "name": "parted", "schema": "test", "owner": "postgres",
+            "columns": [
+                {"name": "id", "data_type": "integer", "nullable": false},
+                {"name": "k", "data_type": "integer", "nullable": false},
+                {"name": "v", "data_type": "text",
+                 "default": "'x'::text"},
+            ],
+            "indexes": [{"name": "parted_v", "recurse": false,
+                         "method": "btree", "columns": [{"name": "v"}]}],
+            "primary_key": ["id", "k"],
+            "check_constraints": [
+                {"name": "parted_k_check", "expression": "(k >= 0)"},
+            ],
+            "unique_constraints": [{"name": "parted_uq",
+                                    "columns": ["v", "k"]}],
+            "exclude_constraints": [{"name": "parted_excl",
+                                     "method": "gist",
+                                     "elements": [{"name": "k",
+                                                   "operator": "="}]}],
+            "row_level_security": {"enabled": false},
+            "partition": {"type": "RANGE", "columns": ["k"]},
+            "partitions": [{"name": "parted_1", "schema": "test",
+                            "for_values_from": 0, "for_values_to": 10,
+                            "attached": true}],
+        }));
+        let child = json_table(serde_json::json!({
+            "name": "parted_1", "schema": "test", "owner": "postgres",
+            "columns": [
+                {"name": "id", "data_type": "integer", "nullable": false,
+                 "not_null_constraint": {"name": "parted_id_not_null"}},
+                {"name": "k", "data_type": "integer", "nullable": false,
+                 "not_null_constraint": {"name": "parted_k_not_null"}},
+                {"name": "v", "data_type": "text",
+                 "default": "'x'::text"},
+            ],
+            "indexes": [{"name": "parted_1_v_idx",
+                         "parent": "test.parted_v", "method": "btree",
+                         "columns": [{"name": "v"}]}],
+            "primary_key": ["id", "k"],
+            "check_constraints": [
+                {"name": "parted_k_check", "expression": "(k >= 0)"},
+            ],
+            "unique_constraints": [["v", "k"]],
+            "exclude_constraints": [{"name": "parted_1_k_excl",
+                                     "method": "gist",
+                                     "elements": [{"name": "k",
+                                                   "operator": "="}]}],
+            "row_level_security": {"enabled": false},
+            "comment": "the first partition",
+        }));
+        (parent, child)
+    }
+
+    /// The parent in the project, with its partition given by its
+    /// bounds only
+    fn bounds_only(parent: &models::Table) -> models::Table {
+        let mut repo = parent.clone();
+        for index in repo.indexes.iter_mut().flatten() {
+            index.recurse = None;
+        }
+        for partition in repo.partitions.iter_mut().flatten() {
+            partition.attached = None;
+            partition.comment = Some(String::from("the first partition"));
+        }
+        repo
+    }
+
+    /// pg_dump writes the indexes and constraints that PARTITION OF
+    /// makes in a partition, thus pull keeps the partition a table of
+    /// its own. A project that gives the partition by its bounds only
+    /// is equal to it, and deploy drops and makes nothing again
+    #[test]
+    fn partition_of_parent_parts_is_given_by_bounds() {
+        let (parent, child) = pulled_partitions();
+        let project = tables_project(vec![bounds_only(&parent)]);
+        let mut assembly = Assembly::default();
+        assembly.tables = vec![parent.clone(), child.clone()];
+        let result = diff(&project, &assembly);
+        assert_eq!(result.items[&0], Change::Unchanged);
+        assert!(result.removed.is_empty(), "{:?}", result.removed);
+
+        // an index of the partition's own is a change
+        let mut own = child.clone();
+        own.indexes.get_or_insert_default().push(
+            serde_json::from_value(serde_json::json!({
+                "name": "parted_1_own", "columns": [{"name": "k"}],
+            }))
+            .unwrap(),
+        );
+        assembly.tables = vec![parent.clone(), own];
+        let result = diff(&project, &assembly);
+        assert_eq!(result.items[&0], Change::Changed);
+        assert!(result.removed.keys().any(|key| key.name == "parted_1"));
+
+        // a CHECK that the parent does not have is a change
+        let mut own = child.clone();
+        own.check_constraints.get_or_insert_default()[0].name =
+            String::from("parted_1_own");
+        assembly.tables = vec![parent.clone(), own];
+        assert_eq!(diff(&project, &assembly).items[&0], Change::Changed);
+
+        // a partition that the project gives as a table of its own is
+        // not folded
+        let mut attached = bounds_only(&parent);
+        attached.partitions.as_mut().unwrap()[0].attached = Some(true);
+        attached.partitions.as_mut().unwrap()[0].comment = None;
+        let project = tables_project(vec![attached]);
+        assembly.tables = vec![parent, child];
+        let result = diff(&project, &assembly);
+        assert!(result.removed.keys().any(|key| key.name == "parted_1"));
+    }
+
+    /// A partition that PARTITION OF made has the NOT NULL names of
+    /// its parent, which PostgreSQL cannot rename. A project that
+    /// gives the partition as a table of its own, with no NOT NULL
+    /// names, is equal to it
+    #[test]
+    fn partition_takes_not_null_names_of_its_parent() {
+        let (parent, child) = pulled_partitions();
+        let mut repo_parent = parent.clone();
+        for column in repo_parent.columns.iter_mut().flatten() {
+            column.nullable = None;
+        }
+        let mut repo_child = child.clone();
+        for column in repo_child.columns.iter_mut().flatten() {
+            column.nullable = None;
+            column.not_null_constraint = None;
+        }
+        repo_child.row_level_security = None;
+        let project =
+            tables_project(vec![repo_parent.clone(), repo_child.clone()]);
+        let mut assembly = Assembly::default();
+        assembly.tables = vec![parent.clone(), child.clone()];
+        let result = diff(&project, &assembly);
+        assert_eq!(result.items[&1], Change::Unchanged);
+
+        // a name that the project gives is compared
+        repo_child.columns.as_mut().unwrap()[0].not_null_constraint =
+            Some(models::ColumnNotNull {
+                name: Some(String::from("parted_1_id_not_null")),
+                no_inherit: None,
+            });
+        let project = tables_project(vec![repo_parent, repo_child]);
+        let result = diff(&project, &assembly);
+        assert_eq!(result.items[&1], Change::Changed);
     }
 }

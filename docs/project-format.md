@@ -291,6 +291,19 @@ revocations:
   `build` creates it as an ordinary table and attaches it with `ALTER
   TABLE ... ATTACH PARTITION`, as `pg_dump` writes it.
 
+  `CREATE TABLE ... PARTITION OF` makes in a partition what its
+  parent has: the column defaults, the CHECK and NOT NULL
+  constraints, and a primary key, unique and exclusion constraint and
+  index for each one of the parent. `pull` writes these for the
+  partition, thus a partition of a table with a primary key is a
+  table file of its own. `deploy` compares a partition that the
+  project gives by its bounds only without these, so the plan stays
+  empty. It does not compare the names that PostgreSQL gives to them
+  in the partition. A partition that `PARTITION OF` made has the NOT
+  NULL names of its parent, and a partition that `deploy` makes and
+  attaches has names of its own; PostgreSQL cannot rename either. A
+  partition table file that gives no NOT NULL name accepts both.
+
 - An index with no `method` is a btree index, as `pull` writes it
   (`method: btree`). `deploy` compares an index without the values
   that `pg_dump` does not write: `unique: false`, `recurse: true`,
