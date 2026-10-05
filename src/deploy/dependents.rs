@@ -271,6 +271,10 @@ pub(crate) fn rebuild(
                         "deploy would not attach the partition again",
                     ))
                 }
+                OT::PublicationTable => Some(String::from(
+                    "deploy would remove the table from the publication and \
+                     not add it again",
+                )),
                 _ => None,
             };
             if let Some(reason) = reason {
@@ -1805,6 +1809,38 @@ mod tests {
             dependents.refused,
             vec!["TABLE ATTACH test.p: deploy would not attach the partition \
                   again"]
+        );
+    }
+
+    /// PostgreSQL drops the table from each publication, and the plan
+    /// does not add it again
+    #[test]
+    fn a_table_rebuild_refuses_its_publications() {
+        let project = project(vec![item(0, ObjectType::Table, table("0"))]);
+        let mut snapshot =
+            libpgdump::new("test", "UTF8", "18.0").expect("new dump");
+        let t = entry(
+            &mut snapshot,
+            OT::Table,
+            "t",
+            Some("DROP TABLE test.t;\n"),
+            &[],
+        );
+        let publication = entry(&mut snapshot, OT::Publication, "pub", None, &[]);
+        entry(
+            &mut snapshot,
+            OT::PublicationTable,
+            "pub t",
+            Some("ALTER PUBLICATION pub DROP TABLE ONLY test.t;\n"),
+            &[t, publication],
+        );
+        let (dependents, _, _) = replace(&project, &snapshot, &[0]);
+        assert_eq!(
+            dependents.refused,
+            vec![
+                "PUBLICATION TABLE test.pub t: deploy would remove the table \
+                 from the publication and not add it again"
+            ]
         );
     }
 

@@ -340,8 +340,9 @@ TRIGGER`, `CLUSTER ON`, an index column's `SET STATISTICS`), or it is
 of another type, such as an operator class, a table column of a type
 or domain that deploy drops, an inheritance child or a partition with
 `attached` of a table that deploy drops, the attachment of a partition
-that deploy drops without its table, or a foreign key of another table
-that references it —
+that deploy drops without its table, the membership of a table that
+deploy drops in a publication, or a foreign key of another table that
+references it —
 deploy stops with an error
 that names it when `--allow-drop` is given, and gives a warning when
 it is not. An object that `--exclude-table` or `--exclude-schema`

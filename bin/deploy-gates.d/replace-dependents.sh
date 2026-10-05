@@ -182,3 +182,35 @@ ALTER TABLE test.gate_rd_parted ATTACH PARTITION test.gate_rd_part
     FOR VALUES FROM (0) TO (10);
 SQL
 expect_empty_plan "a table with a partition of its own is restored"
+
+# a table in a publication: PostgreSQL drops it from the publication,
+# and the plan does not add it again
+mkdir -p "${WORKDIR}/project/publications"
+cat > "${WORKDIR}/project/tables/test/gate_rd_pub.yaml" <<'YAML'
+---
+name: gate_rd_pub
+schema: test
+owner: postgres
+columns:
+- name: n
+  data_type: integer
+YAML
+cat > "${WORKDIR}/project/publications/gate_rd_pub.yaml" <<'YAML'
+---
+name: gate_rd_pub
+tables:
+- test.gate_rd_pub
+YAML
+./target/debug/pglifecycle deploy --apply -d "${TARGET_DB}" \
+    "${WORKDIR}/project"
+expect_empty_plan "a table in a publication is made"
+psql -d "${TARGET_DB}" -q -v ON_ERROR_STOP=1 \
+    -c 'ALTER TABLE test.gate_rd_pub SET (fillfactor = 50)'
+expect_refused "a table in a publication" \
+    'gate_rd_pub: deploy would remove the table from the publication'
+expect_kept "a table in a publication" \
+    "EXISTS (SELECT FROM pg_publication_tables
+        WHERE pubname = 'gate_rd_pub' AND tablename = 'gate_rd_pub')"
+psql -d "${TARGET_DB}" -q -v ON_ERROR_STOP=1 \
+    -c 'ALTER TABLE test.gate_rd_pub RESET (fillfactor)'
+expect_empty_plan "a table in a publication is restored"
