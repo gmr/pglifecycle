@@ -105,7 +105,7 @@ mutate_dependents 'CREATE FUNCTION test.gate_dep(a integer,
     -d "${TARGET_DB}" "${WORKDIR}/project"
 if ! grep -q '^-- destructive statements: [0-9]* excluded' \
         "${WORKDIR}/dependents.sql" \
-    || ! grep -q '^-- dependents rebuilt with a replaced function: 3 ' \
+    || ! grep -q '^-- dependents rebuilt with a replaced object: 3 ' \
         "${WORKDIR}/dependents.sql" \
     || grep -v '^--' "${WORKDIR}/dependents.sql" | grep -q gate_dep
 then
@@ -219,7 +219,7 @@ fi
 ./target/debug/pglifecycle deploy -o "${WORKDIR}/dependents.sql" \
     --allow-drop --allow-drop-indexes -d "${TARGET_DB}" \
     "${WORKDIR}/project"
-if ! grep -q '^-- dependents rebuilt with a replaced function: 3 ' \
+if ! grep -q '^-- dependents rebuilt with a replaced object: 3 ' \
         "${WORKDIR}/dependents.sql" \
     || ! grep -q '^DROP INDEX test.gate_dep_index;' \
         "${WORKDIR}/dependents.sql"

@@ -448,20 +448,124 @@ fn view_column_name(column: &ViewColumn) -> &str {
 
 /// True when `repo`'s columns are the `db` columns optionally followed
 /// by additional columns (the only mutation CREATE OR REPLACE VIEW
-/// permits). Absent column metadata on either side is treated as
-/// unknown, so the caller keeps the existing OR REPLACE behavior
-/// rather than forcing an unnecessary drop.
+/// permits). The names come from the column list of each view, else
+/// from its query (see [`query_column_names`]). Unknown names on either
+/// side are treated as compatible, so the caller keeps the existing OR
+/// REPLACE behavior rather than forcing an unnecessary drop.
 fn view_columns_compatible(repo: &View, db: &View) -> bool {
-    let (Some(repo_cols), Some(db_cols)) = (&repo.columns, &db.columns) else {
+    let (Some(repo_cols), Some(db_cols)) =
+        (view_column_names(repo), view_column_names(db))
+    else {
         return true;
     };
     if repo_cols.len() < db_cols.len() {
         return false;
     }
-    repo_cols
+    repo_cols.iter().zip(db_cols.iter()).all(|(r, d)| r == d)
+}
+
+/// The names of the output columns of a view: its column list, then
+/// the names that its query gives to the columns after the list. With
+/// a column list and a query whose names are not known, only the list
+fn view_column_names(view: &View) -> Option<Vec<String>> {
+    let listed: Option<Vec<String>> = view.columns.as_ref().map(|columns| {
+        columns
+            .iter()
+            .map(|column| view_column_name(column).to_string())
+            .collect()
+    });
+    let queried = view.query.as_deref().and_then(query_column_names);
+    match (listed, queried) {
+        (Some(mut listed), Some(queried)) => {
+            listed.extend(queried.into_iter().skip(listed.len()));
+            Some(listed)
+        }
+        (Some(listed), None) => Some(listed),
+        (None, queried) => queried,
+    }
+}
+
+/// The names of the output columns of a query, as PostgreSQL gives
+/// them: the name after `AS` (or a label with no `AS`), or the last
+/// name of a column reference. `pg_get_viewdef` writes `AS` for each
+/// other expression. None when a name is not known this way (`*`, an
+/// expression with no label, a query in parentheses, VALUES): then the
+/// caller cannot compare the columns
+fn query_column_names(query: &str) -> Option<Vec<String>> {
+    use super::routine_body::identifier;
+    use crate::ddl::NodeExt;
+    let sql = format!("{};", query.trim().trim_end_matches(';'));
+    let mut parser = tree_sitter::Parser::new();
+    parser
+        .set_language(&tree_sitter_postgres::LANGUAGE.into())
+        .ok()?;
+    let tree = parser.parse(&sql, None)?;
+    let root = tree.root_node();
+    if root.has_error() {
+        return None;
+    }
+    let statement = root.find("SelectStmt")?;
+    let mut select = statement
+        .child_of_kind("select_no_parens")?
+        .child_of_kind("simple_select")?;
+    // a set operation has the names of its first query
+    while let Some(first) = select.child_of_kind("select_clause") {
+        select = first.child_of_kind("simple_select")?;
+    }
+    select.child_of_kind("kw_select")?;
+    let list = select
+        .child_of_kind("opt_target_list")
+        .and_then(|list| list.child_of_kind("target_list"))
+        .or_else(|| select.child_of_kind("target_list"))?;
+    let mut targets = Vec::new();
+    target_elements(list, &mut targets);
+    targets
         .iter()
-        .zip(db_cols.iter())
-        .all(|(r, d)| view_column_name(r) == view_column_name(d))
+        .map(|target| {
+            if let Some(label) = target
+                .child_of_kind("ColLabel")
+                .or_else(|| target.child_of_kind("BareColLabel"))
+            {
+                return Some(identifier(label.text(&sql)));
+            }
+            // a column reference in its expression, with no operator
+            let mut node = target.child_of_kind("a_expr")?;
+            while matches!(node.kind(), "a_expr" | "c_expr")
+                && node.child_count() == 1
+            {
+                node = node.child(0)?;
+            }
+            if node.kind() != "columnref" {
+                return None;
+            }
+            let name = match node.child_of_kind("indirection") {
+                Some(indirection) => {
+                    // the last element must be a name, not a subscript
+                    // or `*`
+                    let last = indirection
+                        .child(indirection.child_count().checked_sub(1)?)?;
+                    last.child_of_kind("attr_name")?.text(&sql)
+                }
+                None => node.child_of_kind("ColId")?.text(&sql),
+            };
+            Some(identifier(name))
+        })
+        .collect()
+}
+
+/// The `target_el` nodes of a `target_list`, which the grammar nests
+fn target_elements<'tree>(
+    list: tree_sitter::Node<'tree>,
+    targets: &mut Vec<tree_sitter::Node<'tree>>,
+) {
+    let mut cursor = list.walk();
+    for child in list.children(&mut cursor) {
+        match child.kind() {
+            "target_list" => target_elements(child, targets),
+            "target_el" => targets.push(child),
+            _ => {}
+        }
+    }
 }
 
 #[cfg(test)]
@@ -3576,6 +3680,61 @@ mod tests {
             ),
             Resolution::Replace
         ));
+    }
+
+    fn view_query(query: &str) -> Definition {
+        Definition::View(
+            serde_json::from_value(serde_json::json!({
+                "name": "v", "schema": "test", "owner": "postgres",
+                "query": query,
+            }))
+            .unwrap(),
+        )
+    }
+
+    /// With no column list, the names come from the query, as
+    /// pg_get_viewdef writes it: a renamed, removed or reordered column
+    /// drops the view, a column added at the end does not
+    #[test]
+    fn view_query_column_names_resolve_the_change() {
+        let replaces = |repo: &str, db: &str| {
+            matches!(
+                resolve(&view_query(repo), &view_query(db)),
+                Resolution::Replace
+            )
+        };
+        assert!(replaces(
+            " SELECT 1 AS a,\n    2 AS b",
+            " SELECT 1 AS x, 2 AS b"
+        ));
+        assert!(replaces(" SELECT n FROM t", " SELECT n, m FROM t"));
+        assert!(replaces(" SELECT t.m, n FROM t", " SELECT n, m FROM t"));
+        assert!(replaces(
+            " SELECT 1 AS a UNION SELECT 2 AS b",
+            " SELECT 1 AS b"
+        ));
+        assert!(replaces(" SELECT \"N\" FROM t", " SELECT n FROM t"));
+        assert!(!replaces(
+            " SELECT n, now() AS m FROM t",
+            " SELECT t.n FROM t"
+        ));
+        assert!(!replaces(" SELECT N FROM t;", " SELECT n FROM t"));
+        assert!(!replaces(
+            " SELECT DISTINCT n x FROM t",
+            " SELECT n AS x FROM t"
+        ));
+        // a name that is not known keeps CREATE OR REPLACE
+        for unknown in [
+            " SELECT * FROM t",
+            " SELECT n + 1 FROM t",
+            " SELECT a[1] FROM t",
+            " (SELECT n FROM t)",
+            " VALUES (1)",
+            " SELECT (",
+        ] {
+            assert!(!replaces(unknown, " SELECT x FROM t"), "{unknown}");
+            assert!(!replaces(" SELECT x FROM t", unknown), "{unknown}");
+        }
     }
 
     fn parse_sequence(value: serde_json::Value) -> Sequence {

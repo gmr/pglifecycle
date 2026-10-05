@@ -196,7 +196,7 @@ fn type_name(data_type: &str) -> String {
 
 /// A name as PostgreSQL keeps it: a quoted name with no quotes, and a
 /// name with no quotes in lowercase
-fn identifier(name: &str) -> String {
+pub(crate) fn identifier(name: &str) -> String {
     match name.strip_prefix('"').and_then(|n| n.strip_suffix('"')) {
         Some(quoted) => quoted.replace("\"\"", "\""),
         None => name.to_lowercase(),

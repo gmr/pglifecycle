@@ -1,17 +1,25 @@
-//! The objects that depend on a function that the plan drops: a
-//! function that the plan drops and makes again (a change that CREATE
-//! OR REPLACE FUNCTION cannot do), or one that only the database has.
-//! PostgreSQL refuses to drop a function while an object depends on
-//! it, thus the plan drops each dependent first and makes it again
-//! from the project after the function.
+//! The objects that depend on an object that the plan drops: an object
+//! that the plan drops and makes again (a function change that CREATE
+//! OR REPLACE FUNCTION cannot do, a view whose columns change, a
+//! materialized view, an aggregate, an operator, a type, a domain or a
+//! table that deploy cannot change in place), or a function that only
+//! the database has. PostgreSQL refuses to drop an object while another
+//! object depends on it, thus the plan drops each dependent first and
+//! makes it again from the project after the object. A replaced object
+//! with dependents is dropped with them, before the objects that the
+//! plan makes, and made again at its position.
 //!
 //! The snapshot's dependency edges give the dependents, transitively.
 //! A whole object (a view, for example) is dropped and made again, and
 //! the objects that depend on it are dependents too. A part of a table
 //! or domain (a column default, a check, an index, a trigger, a
 //! policy) is dropped, and the table or domain makes it again in
-//! place. Each of these statements is destructive, thus without
-//! `--allow-drop` all of them are withheld with the function's drop.
+//! place. The parts of a relation that the plan drops (its indexes and
+//! constraints, for example) come back with the relation. PostgreSQL
+//! drops the partitions of a table, and the sequences that its columns
+//! own, with the table. Each of these statements is destructive,
+//! thus without `--allow-drop` all of them are withheld with the drop
+//! of the object.
 //!
 //! The plan does not use DROP ... CASCADE: CASCADE drops each
 //! dependent without a list, also one that the project does not have
@@ -44,8 +52,21 @@ pub(crate) struct Dependents {
     pub refused: Vec<String>,
 }
 
+/// The types of the objects that the plan drops and makes again (a
+/// `Resolution::Replace`) and that other objects can depend on
+const ROOTS: [OT; 8] = [
+    OT::Function,
+    OT::View,
+    OT::MaterializedView,
+    OT::Aggregate,
+    OT::Operator,
+    OT::Type,
+    OT::Domain,
+    OT::Table,
+];
+
 /// The types that are dropped and made again from the project
-const WHOLE: [OT; 7] = [
+const WHOLE: [OT; 8] = [
     OT::View,
     OT::MaterializedView,
     OT::Function,
@@ -53,16 +74,34 @@ const WHOLE: [OT; 7] = [
     OT::Aggregate,
     OT::Operator,
     OT::Cast,
+    OT::Statistics,
 ];
 
 /// The entries that are a part of a relation, with an entry of their
-/// own
+/// own, that the relation makes again in place
 const PARTS: [OT; 5] = [
     OT::Index,
     OT::Trigger,
     OT::Policy,
     OT::CheckConstraint,
     OT::Default,
+];
+
+/// The entries that are a part of a relation, with an entry of their
+/// own. The rebuild of the relation makes them again, or PostgreSQL
+/// drops them with the relation
+const CHILDREN: [OT; 11] = [
+    OT::Index,
+    OT::Trigger,
+    OT::Policy,
+    OT::CheckConstraint,
+    OT::Default,
+    OT::Constraint,
+    OT::FkConstraint,
+    OT::Rule,
+    OT::IndexAttach,
+    OT::TableAttach,
+    OT::PublicationTable,
 ];
 
 /// A part of a table or domain to drop
@@ -74,9 +113,10 @@ enum Part<'a> {
     Entry(&'a libpgdump::Entry),
 }
 
-/// Find the dependents of each function that the plan drops, and
-/// change `diff` and `resolutions` so that the plan drops them and
-/// makes them again
+/// Find the dependents of each object that the plan drops, and change
+/// `diff` and `resolutions` so that the plan drops them and makes them
+/// again. A replaced object with dependents is dropped with them,
+/// before all creates, and made again at its position
 pub(crate) fn rebuild(
     project: &crate::project::Project,
     diff: &mut Diff,
@@ -90,6 +130,11 @@ pub(crate) fn rebuild(
     let entries = snapshot.entries();
     let by_id: HashMap<i32, &libpgdump::Entry> =
         entries.iter().map(|entry| (entry.dump_id, entry)).collect();
+    let position: HashMap<i32, usize> = entries
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| (entry.dump_id, index))
+        .collect();
     let keys: BTreeMap<ObjectKey, usize> = project
         .inventory
         .iter()
@@ -109,15 +154,15 @@ pub(crate) fn rebuild(
     let is_removed = |entry: &libpgdump::Entry| {
         entry_key(entry).is_some_and(|key| removed.contains(&key))
     };
-    // the functions that the plan drops: a replaced one, or one that
-    // only the database has
-    let mut closure: BTreeSet<i32> = entries
+    // the objects that the plan drops: a replaced one, or a function
+    // that only the database has
+    let roots: BTreeSet<i32> = entries
         .iter()
-        .filter(|entry| entry.desc == OT::Function)
+        .filter(|entry| ROOTS.contains(&entry.desc))
         .filter(|entry| {
             // the key of a removed function can be the key of a new one
             // with other argument names
-            is_removed(entry)
+            (entry.desc == OT::Function && is_removed(entry))
                 || item(entry).is_some_and(|id| {
                     diff.items.get(&id) == Some(&Change::Changed)
                         && matches!(
@@ -128,6 +173,19 @@ pub(crate) fn rebuild(
         })
         .map(|entry| entry.dump_id)
         .collect();
+    let mut closure = roots.clone();
+    // the root that each entry of the closure comes from
+    let mut origin: HashMap<i32, i32> =
+        roots.iter().map(|id| (*id, *id)).collect();
+    // the object of the closure that each entry of the closure is
+    // dropped with: itself, or the relation of a part, or the table of
+    // a partition or of a sequence that a column owns
+    let mut group: HashMap<i32, i32> =
+        roots.iter().map(|id| (*id, *id)).collect();
+    // the roots that have dependents, thus are dropped with them
+    let mut early: BTreeSet<i32> = BTreeSet::new();
+    // each part of a relation of the closure, with the relation
+    let mut covered: HashMap<i32, i32> = HashMap::new();
     let mut pending: Vec<i32> = closure.iter().copied().collect();
     let mut whole: Vec<(&libpgdump::Entry, usize)> = Vec::new();
     let mut parts: BTreeMap<i32, Vec<Part>> = BTreeMap::new();
@@ -135,18 +193,56 @@ pub(crate) fn rebuild(
     let mut seen: BTreeSet<i32> = BTreeSet::new();
     while let Some(id) = pending.pop() {
         let source = by_id[&id];
+        let root = origin[&id];
         for entry in entries {
             // the plan drops a removed object with the other removed
             // objects, in reverse snapshot order
-            if !entry.dependencies.contains(&id)
-                || closure.contains(&entry.dump_id)
-                || is_removed(entry)
-            {
+            if !entry.dependencies.contains(&id) || is_removed(entry) {
+                continue;
+            }
+            // their object makes them again
+            if matches!(
+                entry.desc,
+                OT::Comment
+                    | OT::Acl
+                    | OT::SecurityLabel
+                    | OT::SequenceOwnedBy
+                    | OT::SequenceSet
+                    | OT::StatisticsData
+            ) {
+                continue;
+            }
+            let owner = relation(entry, &by_id);
+            // a part of a relation that the source is dropped with, or
+            // an object that PostgreSQL drops with the source table: a
+            // partition, or a sequence that a column of the table owns
+            let own = (CHILDREN.contains(&entry.desc)
+                && owner.is_some_and(|owner| {
+                    group.contains_key(&owner.dump_id)
+                        && group.get(&owner.dump_id) == group.get(&id)
+                }))
+                || (source.desc == OT::Table
+                    && (entry.desc == OT::Sequence
+                        || partition(entry, source, entries)));
+            if !own {
+                early.insert(root);
+            }
+            if closure.contains(&entry.dump_id) {
+                // an object that depends on two roots, or a root that
+                // depends on another root
+                if !own {
+                    early.insert(origin[&entry.dump_id]);
+                }
+                continue;
+            }
+            if own && !CHILDREN.contains(&entry.desc) {
+                closure.insert(entry.dump_id);
+                origin.insert(entry.dump_id, root);
+                group.insert(entry.dump_id, group[&id]);
+                pending.push(entry.dump_id);
                 continue;
             }
             match entry.desc {
-                // their object makes them again
-                OT::Comment | OT::Acl | OT::SecurityLabel => {}
                 _ if WHOLE.contains(&entry.desc) => {
                     if !seen.insert(entry.dump_id) {
                         continue;
@@ -159,6 +255,8 @@ pub(crate) fn rebuild(
                     }) {
                         Some(id) => {
                             closure.insert(entry.dump_id);
+                            origin.insert(entry.dump_id, root);
+                            group.insert(entry.dump_id, entry.dump_id);
                             pending.push(entry.dump_id);
                             whole.push((entry, id));
                         }
@@ -192,32 +290,51 @@ pub(crate) fn rebuild(
                         None => list.push(Part::Inline(vec![called])),
                     }
                 }
-                _ if PARTS.contains(&entry.desc) => {
-                    if !seen.insert(entry.dump_id) {
-                        continue;
+                _ if CHILDREN.contains(&entry.desc) => match owner {
+                    // the rebuild of its relation makes it again; what
+                    // depends on it depends on the relation
+                    Some(owner) if closure.contains(&owner.dump_id) => {
+                        if origin[&owner.dump_id] != root {
+                            early.insert(origin[&owner.dump_id]);
+                        }
+                        closure.insert(entry.dump_id);
+                        origin.insert(entry.dump_id, origin[&owner.dump_id]);
+                        group.insert(entry.dump_id, group[&owner.dump_id]);
+                        covered.insert(entry.dump_id, owner.dump_id);
+                        pending.push(entry.dump_id);
                     }
-                    match relation(entry, &by_id) {
-                        // the rebuild of its relation makes it again
-                        Some(owner) if closure.contains(&owner.dump_id) => {}
-                        Some(owner)
-                            if matches!(
+                    Some(owner)
+                        if PARTS.contains(&entry.desc)
+                            && matches!(
                                 owner.desc,
                                 OT::Table | OT::Domain
                             ) =>
-                        {
+                    {
+                        if seen.insert(entry.dump_id) {
                             parts
                                 .entry(owner.dump_id)
                                 .or_default()
                                 .push(Part::Entry(entry));
                         }
-                        // the traversal can add its relation later
-                        Some(owner) => later.push((entry, owner.dump_id)),
-                        None => dependents.refused.push(format!(
-                            "{}: deploy cannot drop and make it again",
-                            entry_label(entry)
-                        )),
                     }
-                }
+                    // the traversal can add its relation later
+                    Some(owner)
+                        if matches!(
+                            owner.desc,
+                            OT::View | OT::MaterializedView
+                        ) =>
+                    {
+                        later.push((entry, owner.dump_id));
+                    }
+                    _ => {
+                        if seen.insert(entry.dump_id) {
+                            dependents.refused.push(format!(
+                                "{}: deploy cannot drop and make it again",
+                                entry_label(entry)
+                            ));
+                        }
+                    }
+                },
                 _ => {
                     if seen.insert(entry.dump_id) {
                         dependents.refused.push(format!(
@@ -229,16 +346,40 @@ pub(crate) fn rebuild(
             }
         }
     }
+    let mut refused_later = BTreeSet::new();
     for (entry, owner) in later {
         if !closure.contains(&owner) {
-            dependents.refused.push(format!(
-                "{}: deploy cannot drop and make it again",
-                entry_label(entry)
-            ));
+            if refused_later.insert(entry.dump_id) {
+                dependents.refused.push(format!(
+                    "{}: deploy cannot drop and make it again",
+                    entry_label(entry)
+                ));
+            }
+        } else if !closure.contains(&entry.dump_id) {
+            covered.insert(entry.dump_id, owner);
+            group.insert(entry.dump_id, group[&owner]);
         }
     }
-    // a relation that the rebuild of a whole object drops is not
-    // changed in place
+    // a part of a relation that depends on an object of the closure
+    // that the plan drops before the relation is dropped on its own
+    // first; the relation makes it again
+    for (&id, &owner) in &covered {
+        let entry = by_id[&id];
+        let before = entry.dependencies.iter().any(|dependency| {
+            *dependency != owner
+                && closure.contains(dependency)
+                && group.get(dependency) != group.get(&owner)
+                && position.get(dependency) > position.get(&owner)
+        });
+        if let Some(drop) = entry.drop_stmt.clone().filter(|_| before)
+            && !drop.is_empty()
+        {
+            dependents.drops.entry(id).or_default().push(
+                alter::Alter::destructive(drop).labeled(&entry_label(entry)),
+            );
+        }
+    }
+    // a relation that the plan drops is not changed in place
     parts.retain(|id, _| !closure.contains(id));
     let mut parser = tree_sitter::Parser::new();
     parser
@@ -266,6 +407,31 @@ pub(crate) fn rebuild(
             (groups, families),
             allow_drop_indexes,
             &mut dependents,
+        );
+    }
+    // a replaced object with dependents is dropped after them, before
+    // the objects that the plan makes, and made again at its position.
+    // A function that only the database has is dropped as a removed
+    // object
+    for &root in &early {
+        let entry = by_id[&root];
+        let Some(id) = item(entry).filter(|id| {
+            matches!(resolutions.get(id), Some(Resolution::Replace))
+        }) else {
+            continue;
+        };
+        let Some(drop) = entry.drop_stmt.clone() else {
+            continue;
+        };
+        resolutions.insert(
+            id,
+            Resolution::Rebuild {
+                before: Vec::new(),
+                drop: String::new(),
+            },
+        );
+        dependents.drops.entry(root).or_default().push(
+            alter::Alter::destructive(drop).labeled(&entry_label(entry)),
         );
     }
     for (entry, id) in whole {
@@ -301,6 +467,21 @@ pub(crate) fn rebuild(
     }
     dependents.labels.sort();
     dependents
+}
+
+/// True when `entry` is a partition of the table `parent`: PostgreSQL
+/// drops it with the parent
+fn partition(
+    entry: &libpgdump::Entry,
+    parent: &libpgdump::Entry,
+    entries: &[libpgdump::Entry],
+) -> bool {
+    entry.desc == OT::Table
+        && entries.iter().any(|attach| {
+            attach.desc == OT::TableAttach
+                && attach.dependencies.contains(&entry.dump_id)
+                && attach.dependencies.contains(&parent.dump_id)
+        })
 }
 
 /// Drop the parts in `list` of a table or domain, and resolve the
@@ -374,11 +555,6 @@ fn rebuild_parts(
         }
         _ => BTreeSet::new(),
     };
-    // the rebuild of the table or domain makes the parts again
-    let rebuilt = matches!(
-        resolutions.get(&id),
-        Some(Resolution::Replace | Resolution::Rebuild { .. })
-    );
     let resolution =
         match alter::resolve_with(repo, &database, groups, families) {
             // each statement that makes a part again is gated with the
@@ -400,7 +576,6 @@ fn rebuild_parts(
                 }
                 Resolution::Statements(alters)
             }
-            resolution if rebuilt => resolution,
             _ => {
                 dependents.refused.push(format!(
                     "{label}: deploy cannot make its parts again in place"
@@ -831,16 +1006,18 @@ fn function_name(entry: &libpgdump::Entry) -> Option<(String, String)> {
 }
 
 /// The table, view, materialized view or domain entry that `entry` is
-/// a part of
+/// a part of: the one whose name starts the tag of `entry` (an FK
+/// constraint depends on its table and on the table that it
+/// references), else the first
 fn relation<'a>(
     entry: &libpgdump::Entry,
     by_id: &HashMap<i32, &'a libpgdump::Entry>,
 ) -> Option<&'a libpgdump::Entry> {
-    entry
+    let relations: Vec<&libpgdump::Entry> = entry
         .dependencies
         .iter()
         .filter_map(|id| by_id.get(id).copied())
-        .find(|owner| {
+        .filter(|owner| {
             matches!(
                 owner.desc,
                 OT::Table
@@ -850,6 +1027,19 @@ fn relation<'a>(
                     | OT::Domain
             )
         })
+        .collect();
+    let tag = entry.tag.as_deref().unwrap_or_default();
+    relations
+        .iter()
+        .find(|owner| {
+            owner.namespace == entry.namespace
+                && owner
+                    .tag
+                    .as_deref()
+                    .is_some_and(|name| tag.starts_with(&format!("{name} ")))
+        })
+        .or(relations.first())
+        .copied()
 }
 
 #[cfg(test)]
@@ -873,6 +1063,9 @@ mod tests {
             ),
             ObjectType::Table => {
                 Definition::Table(serde_json::from_value(json).unwrap())
+            }
+            ObjectType::Type => {
+                Definition::Type(serde_json::from_value(json).unwrap())
             }
             _ => unreachable!("not used by the tests"),
         };
@@ -1344,5 +1537,365 @@ mod tests {
             panic!("the table changes in place");
         };
         assert!(alters.iter().all(|alter| !alter.sql.contains("INDEX")));
+    }
+
+    /// The plan replaces the items `roots`; each other item of the
+    /// project is unchanged
+    fn replace(
+        project: &crate::project::Project,
+        snapshot: &libpgdump::Dump,
+        roots: &[usize],
+    ) -> (Dependents, BTreeMap<usize, Resolution>, Diff) {
+        let mut diff = Diff {
+            items: BTreeMap::new(),
+            changed: BTreeMap::new(),
+            removed: BTreeMap::new(),
+            owned: BTreeSet::new(),
+            owner_changed: BTreeSet::new(),
+        };
+        let mut resolutions = BTreeMap::new();
+        for item in &project.inventory {
+            let change = if roots.contains(&item.id) {
+                diff.changed.insert(item.id, item.definition.clone());
+                resolutions.insert(item.id, Resolution::Replace);
+                Change::Changed
+            } else {
+                Change::Unchanged
+            };
+            diff.items.insert(item.id, change);
+        }
+        let dependents = rebuild(
+            project,
+            &mut diff,
+            &mut resolutions,
+            snapshot,
+            &alter::IndexGroups::new(),
+            &alter::operator_class::Families::new(),
+            false,
+        );
+        (dependents, resolutions, diff)
+    }
+
+    /// The SQL of the drops of the entry `id`
+    fn drops(dependents: &Dependents, id: i32) -> Vec<&str> {
+        dependents.drops[&id]
+            .iter()
+            .map(|alter| {
+                assert!(alter.destructive);
+                alter.sql.as_str()
+            })
+            .collect()
+    }
+
+    fn rebuilt(resolution: &Resolution) -> bool {
+        matches!(
+            resolution,
+            Resolution::Rebuild { before, drop }
+                if before.is_empty() && drop.is_empty()
+        )
+    }
+
+    /// A table that the plan makes again: a view on it and a function
+    /// on its row type are dropped first and made again. The table is
+    /// dropped after them, before the objects that the plan makes. Its
+    /// own constraint and index, its partition and the sequence that
+    /// it owns go with it, with no statement of their own
+    #[test]
+    fn a_table_rebuild_drops_its_dependents_first() {
+        let project = project(vec![
+            item(0, ObjectType::Table, table("0")),
+            item(1, ObjectType::View, view("v", " SELECT id FROM test.t")),
+            item(2, ObjectType::Function, function("integer")),
+        ]);
+        let mut snapshot =
+            libpgdump::new("test", "UTF8", "18.0").expect("new dump");
+        let t = entry(
+            &mut snapshot,
+            OT::Table,
+            "t",
+            Some("DROP TABLE test.t;\n"),
+            &[],
+        );
+        let sequence = entry(
+            &mut snapshot,
+            OT::Sequence,
+            "t_id_seq",
+            Some("DROP SEQUENCE test.t_id_seq;\n"),
+            &[t],
+        );
+        entry(
+            &mut snapshot,
+            OT::SequenceOwnedBy,
+            "t_id_seq",
+            None,
+            &[sequence],
+        );
+        let p = entry(
+            &mut snapshot,
+            OT::Table,
+            "p",
+            Some("DROP TABLE test.p;\n"),
+            &[t],
+        );
+        entry(&mut snapshot, OT::TableAttach, "p", None, &[p, t]);
+        let f = entry(
+            &mut snapshot,
+            OT::Function,
+            "f(integer)",
+            Some("DROP FUNCTION test.f(integer);\n"),
+            &[t],
+        );
+        let v = entry(
+            &mut snapshot,
+            OT::View,
+            "v",
+            Some("DROP VIEW test.v;\n"),
+            &[t],
+        );
+        entry(&mut snapshot, OT::Comment, "VIEW v", None, &[v]);
+        let pk = entry(
+            &mut snapshot,
+            OT::Constraint,
+            "t t_pkey",
+            Some("ALTER TABLE ONLY test.t DROP CONSTRAINT t_pkey;\n"),
+            &[t],
+        );
+        let i = entry(
+            &mut snapshot,
+            OT::Index,
+            "i",
+            Some("DROP INDEX test.i;\n"),
+            &[t],
+        );
+        let (dependents, resolutions, _) = replace(&project, &snapshot, &[0]);
+        assert!(dependents.refused.is_empty(), "{:?}", dependents.refused);
+        assert_eq!(
+            dependents.labels,
+            vec!["FUNCTION test.f(integer)", "VIEW test.v"]
+        );
+        assert_eq!(drops(&dependents, t), vec!["DROP TABLE test.t;\n"]);
+        assert_eq!(
+            drops(&dependents, f),
+            vec!["DROP FUNCTION test.f(integer);\n"]
+        );
+        assert_eq!(drops(&dependents, v), vec!["DROP VIEW test.v;\n"]);
+        for id in [sequence, p, pk, i] {
+            assert!(!dependents.drops.contains_key(&id));
+        }
+        for id in [0, 1, 2] {
+            assert!(rebuilt(&resolutions[&id]), "{id}");
+        }
+    }
+
+    /// A replaced object with no dependents is dropped and made again
+    /// at its position, as before
+    #[test]
+    fn a_replaced_object_with_no_dependents_stays() {
+        let project = project(vec![item(0, ObjectType::Table, table("0"))]);
+        let mut snapshot =
+            libpgdump::new("test", "UTF8", "18.0").expect("new dump");
+        let t = entry(
+            &mut snapshot,
+            OT::Table,
+            "t",
+            Some("DROP TABLE test.t;\n"),
+            &[],
+        );
+        entry(
+            &mut snapshot,
+            OT::Index,
+            "i",
+            Some("DROP INDEX test.i;\n"),
+            &[t],
+        );
+        let (dependents, resolutions, _) = replace(&project, &snapshot, &[0]);
+        assert!(dependents.refused.is_empty());
+        assert!(dependents.drops.is_empty());
+        assert!(matches!(resolutions[&0], Resolution::Replace));
+    }
+
+    /// An FK constraint of another table that references the table, and
+    /// an inheritance child of the table, cannot be dropped and made
+    /// again with the table
+    #[test]
+    fn a_table_rebuild_refuses_what_it_cannot_make_again() {
+        let project = project(vec![item(0, ObjectType::Table, table("0"))]);
+        let mut snapshot =
+            libpgdump::new("test", "UTF8", "18.0").expect("new dump");
+        let t = entry(
+            &mut snapshot,
+            OT::Table,
+            "t",
+            Some("DROP TABLE test.t;\n"),
+            &[],
+        );
+        let b = entry(&mut snapshot, OT::Table, "b", None, &[]);
+        entry(&mut snapshot, OT::Table, "c", None, &[t]);
+        let pk = entry(
+            &mut snapshot,
+            OT::Constraint,
+            "t t_pkey",
+            Some("ALTER TABLE ONLY test.t DROP CONSTRAINT t_pkey;\n"),
+            &[t],
+        );
+        // an FK of the table itself, on another column, is a part of it
+        entry(
+            &mut snapshot,
+            OT::FkConstraint,
+            "t t_fkey",
+            Some("ALTER TABLE ONLY test.t DROP CONSTRAINT t_fkey;\n"),
+            &[pk, t, t],
+        );
+        entry(
+            &mut snapshot,
+            OT::FkConstraint,
+            "b b_fkey",
+            Some("ALTER TABLE ONLY test.b DROP CONSTRAINT b_fkey;\n"),
+            &[pk, b, t],
+        );
+        let (mut dependents, resolutions, _) =
+            replace(&project, &snapshot, &[0]);
+        dependents.refused.sort();
+        assert_eq!(
+            dependents.refused,
+            vec![
+                "FK CONSTRAINT test.b b_fkey: deploy cannot drop and make \
+                 it again",
+                "TABLE test.c: it depends on TABLE test.t, and deploy can \
+                 drop and make again only its defaults and checks",
+            ]
+        );
+        assert!(dependents.labels.is_empty());
+        assert!(rebuilt(&resolutions[&0]));
+    }
+
+    /// A replaced view that depends on another replaced view: both are
+    /// dropped before the objects that the plan makes, in reverse
+    /// snapshot order. Each is made again at its position
+    #[test]
+    fn a_root_that_depends_on_another_root_is_dropped_first() {
+        let project = project(vec![
+            item(1, ObjectType::View, view("v", " SELECT 1 AS n")),
+            item(2, ObjectType::View, view("v2", " SELECT n FROM test.v")),
+        ]);
+        let mut snapshot =
+            libpgdump::new("test", "UTF8", "18.0").expect("new dump");
+        let v = entry(
+            &mut snapshot,
+            OT::View,
+            "v",
+            Some("DROP VIEW test.v;\n"),
+            &[],
+        );
+        let v2 = entry(
+            &mut snapshot,
+            OT::View,
+            "v2",
+            Some("DROP VIEW test.v2;\n"),
+            &[v],
+        );
+        let (dependents, resolutions, _) =
+            replace(&project, &snapshot, &[1, 2]);
+        assert!(dependents.refused.is_empty(), "{:?}", dependents.refused);
+        // a replaced object is not a dependent in the header
+        assert!(dependents.labels.is_empty());
+        assert_eq!(drops(&dependents, v), vec!["DROP VIEW test.v;\n"]);
+        assert_eq!(drops(&dependents, v2), vec!["DROP VIEW test.v2;\n"]);
+        assert!(rebuilt(&resolutions[&1]) && rebuilt(&resolutions[&2]));
+    }
+
+    /// An index of a replaced table calls a replaced function that
+    /// comes after the table in the snapshot. In reverse snapshot order
+    /// the function is dropped before the table, thus the index is
+    /// dropped on its own first; the rebuild of the table makes it
+    /// again
+    #[test]
+    fn a_part_that_depends_on_a_later_root_is_dropped_first() {
+        let project = project(vec![
+            item(0, ObjectType::Function, function("integer")),
+            item(3, ObjectType::Table, table("0")),
+        ]);
+        let mut snapshot =
+            libpgdump::new("test", "UTF8", "18.0").expect("new dump");
+        let t = entry(
+            &mut snapshot,
+            OT::Table,
+            "t",
+            Some("DROP TABLE test.t;\n"),
+            &[],
+        );
+        let f = entry(
+            &mut snapshot,
+            OT::Function,
+            "f(integer)",
+            Some("DROP FUNCTION test.f(integer);\n"),
+            &[],
+        );
+        let i = entry(
+            &mut snapshot,
+            OT::Index,
+            "i",
+            Some("DROP INDEX test.i;\n"),
+            &[t, f],
+        );
+        let (dependents, resolutions, _) =
+            replace(&project, &snapshot, &[0, 3]);
+        assert!(dependents.refused.is_empty(), "{:?}", dependents.refused);
+        assert!(dependents.labels.is_empty());
+        assert_eq!(drops(&dependents, i), vec!["DROP INDEX test.i;\n"]);
+        assert_eq!(drops(&dependents, t), vec!["DROP TABLE test.t;\n"]);
+        assert_eq!(
+            drops(&dependents, f),
+            vec!["DROP FUNCTION test.f(integer);\n"]
+        );
+        assert!(rebuilt(&resolutions[&0]) && rebuilt(&resolutions[&3]));
+    }
+
+    /// A replaced type: a view whose column has the type is made again,
+    /// and a table whose column has the type is refused
+    #[test]
+    fn a_type_rebuild_refuses_a_table_column() {
+        let project = project(vec![
+            item(
+                0,
+                ObjectType::Type,
+                serde_json::json!({
+                    "name": "mood", "schema": "test", "owner": "postgres",
+                    "type": "enum", "enum": ["a", "b"],
+                }),
+            ),
+            item(
+                1,
+                ObjectType::View,
+                view("v", " SELECT 'a'::test.mood AS m"),
+            ),
+        ]);
+        let mut snapshot =
+            libpgdump::new("test", "UTF8", "18.0").expect("new dump");
+        let mood = entry(
+            &mut snapshot,
+            OT::Type,
+            "mood",
+            Some("DROP TYPE test.mood;\n"),
+            &[],
+        );
+        let v = entry(
+            &mut snapshot,
+            OT::View,
+            "v",
+            Some("DROP VIEW test.v;\n"),
+            &[mood],
+        );
+        entry(&mut snapshot, OT::Table, "t", None, &[mood]);
+        let (dependents, _, _) = replace(&project, &snapshot, &[0]);
+        assert_eq!(
+            dependents.refused,
+            vec![
+                "TABLE test.t: it depends on TYPE test.mood, and deploy can \
+                 drop and make again only its defaults and checks"
+            ]
+        );
+        assert_eq!(dependents.labels, vec!["VIEW test.v"]);
+        assert_eq!(drops(&dependents, v), vec!["DROP VIEW test.v;\n"]);
     }
 }
