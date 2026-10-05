@@ -31,8 +31,8 @@ use serde_json::{Map, Value};
 
 use crate::build;
 use crate::deploy::diff::{
-    canonical_collation, canonical_domain, canonical_type,
-    domain_not_null_name, identity_type, is_domain_not_null, result_type,
+    canonical_collation, canonical_domain, canonical_type, identity_type,
+    result_type,
 };
 use crate::models::{
     CheckConstraint, Column, ColumnDefault, ColumnGenerated, ColumnNotNull,
@@ -448,20 +448,124 @@ fn view_column_name(column: &ViewColumn) -> &str {
 
 /// True when `repo`'s columns are the `db` columns optionally followed
 /// by additional columns (the only mutation CREATE OR REPLACE VIEW
-/// permits). Absent column metadata on either side is treated as
-/// unknown, so the caller keeps the existing OR REPLACE behavior
-/// rather than forcing an unnecessary drop.
+/// permits). The names come from the column list of each view, else
+/// from its query (see [`query_column_names`]). Unknown names on either
+/// side are treated as compatible, so the caller keeps the existing OR
+/// REPLACE behavior rather than forcing an unnecessary drop.
 fn view_columns_compatible(repo: &View, db: &View) -> bool {
-    let (Some(repo_cols), Some(db_cols)) = (&repo.columns, &db.columns) else {
+    let (Some(repo_cols), Some(db_cols)) =
+        (view_column_names(repo), view_column_names(db))
+    else {
         return true;
     };
     if repo_cols.len() < db_cols.len() {
         return false;
     }
-    repo_cols
+    repo_cols.iter().zip(db_cols.iter()).all(|(r, d)| r == d)
+}
+
+/// The names of the output columns of a view: its column list, then
+/// the names that its query gives to the columns after the list. With
+/// a column list and a query whose names are not known, only the list
+fn view_column_names(view: &View) -> Option<Vec<String>> {
+    let listed: Option<Vec<String>> = view.columns.as_ref().map(|columns| {
+        columns
+            .iter()
+            .map(|column| view_column_name(column).to_string())
+            .collect()
+    });
+    let queried = view.query.as_deref().and_then(query_column_names);
+    match (listed, queried) {
+        (Some(mut listed), Some(queried)) => {
+            listed.extend(queried.into_iter().skip(listed.len()));
+            Some(listed)
+        }
+        (Some(listed), None) => Some(listed),
+        (None, queried) => queried,
+    }
+}
+
+/// The names of the output columns of a query, as PostgreSQL gives
+/// them: the name after `AS` (or a label with no `AS`), or the last
+/// name of a column reference. `pg_get_viewdef` writes `AS` for each
+/// other expression. None when a name is not known this way (`*`, an
+/// expression with no label, a query in parentheses, VALUES): then the
+/// caller cannot compare the columns
+fn query_column_names(query: &str) -> Option<Vec<String>> {
+    use super::routine_body::identifier;
+    use crate::ddl::NodeExt;
+    let sql = format!("{};", query.trim().trim_end_matches(';'));
+    let mut parser = tree_sitter::Parser::new();
+    parser
+        .set_language(&tree_sitter_postgres::LANGUAGE.into())
+        .ok()?;
+    let tree = parser.parse(&sql, None)?;
+    let root = tree.root_node();
+    if root.has_error() {
+        return None;
+    }
+    let statement = root.find("SelectStmt")?;
+    let mut select = statement
+        .child_of_kind("select_no_parens")?
+        .child_of_kind("simple_select")?;
+    // a set operation has the names of its first query
+    while let Some(first) = select.child_of_kind("select_clause") {
+        select = first.child_of_kind("simple_select")?;
+    }
+    select.child_of_kind("kw_select")?;
+    let list = select
+        .child_of_kind("opt_target_list")
+        .and_then(|list| list.child_of_kind("target_list"))
+        .or_else(|| select.child_of_kind("target_list"))?;
+    let mut targets = Vec::new();
+    target_elements(list, &mut targets);
+    targets
         .iter()
-        .zip(db_cols.iter())
-        .all(|(r, d)| view_column_name(r) == view_column_name(d))
+        .map(|target| {
+            if let Some(label) = target
+                .child_of_kind("ColLabel")
+                .or_else(|| target.child_of_kind("BareColLabel"))
+            {
+                return Some(identifier(label.text(&sql)));
+            }
+            // a column reference in its expression, with no operator
+            let mut node = target.child_of_kind("a_expr")?;
+            while matches!(node.kind(), "a_expr" | "c_expr")
+                && node.child_count() == 1
+            {
+                node = node.child(0)?;
+            }
+            if node.kind() != "columnref" {
+                return None;
+            }
+            let name = match node.child_of_kind("indirection") {
+                Some(indirection) => {
+                    // the last element must be a name, not a subscript
+                    // or `*`
+                    let last = indirection
+                        .child(indirection.child_count().checked_sub(1)?)?;
+                    last.child_of_kind("attr_name")?.text(&sql)
+                }
+                None => node.child_of_kind("ColId")?.text(&sql),
+            };
+            Some(identifier(name))
+        })
+        .collect()
+}
+
+/// The `target_el` nodes of a `target_list`, which the grammar nests
+fn target_elements<'tree>(
+    list: tree_sitter::Node<'tree>,
+    targets: &mut Vec<tree_sitter::Node<'tree>>,
+) {
+    let mut cursor = list.walk();
+    for child in list.children(&mut cursor) {
+        match child.kind() {
+            "target_list" => target_elements(child, targets),
+            "target_el" => targets.push(child),
+            _ => {}
+        }
+    }
 }
 
 #[cfg(test)]
@@ -953,6 +1057,7 @@ fn columns(
     }
     let repo_names = repo.not_null_names();
     let db_names = db.not_null_names();
+    let partitioned = repo.partition.is_some();
     for column in repo_columns {
         match db_columns.iter().find(|c| c.name == column.name) {
             None => alters.push(Alter::new(format!(
@@ -961,7 +1066,14 @@ fn columns(
             ))),
             Some(existing) => {
                 let names = (&repo_names, &db_names);
-                if !alter_column(table, names, column, existing, alters) {
+                if !alter_column(
+                    table,
+                    names,
+                    partitioned,
+                    column,
+                    existing,
+                    alters,
+                ) {
                     return false;
                 }
             }
@@ -983,6 +1095,12 @@ fn no_inherit(not_null: &Option<ColumnNotNull>) -> bool {
     not_null.as_ref().and_then(|c| c.no_inherit) == Some(true)
 }
 
+/// `ONLY ` when `partitioned`, for a statement that must not change the
+/// partitions, which the project models with all of their columns
+fn only_if(partitioned: bool) -> &'static str {
+    if partitioned { "ONLY " } else { "" }
+}
+
 /// The NOT NULL names of the repository table and of the database
 /// table, as [`Table::not_null_names`] gives them
 type NotNullNames<'a> = (
@@ -990,9 +1108,16 @@ type NotNullNames<'a> = (
     &'a std::collections::BTreeMap<String, String>,
 );
 
+/// Reconcile one column in place; returns false where only a rebuild
+/// works. A partition models each of its columns, thus on a
+/// `partitioned` table SET EXPRESSION and DROP NOT NULL use ONLY: else
+/// PostgreSQL also changes each partition (checked on PostgreSQL 18).
+/// On an inheritance child, the project models neither of them, so
+/// they recurse there.
 fn alter_column(
     table: &str,
     not_null_names: NotNullNames,
+    partitioned: bool,
     repo: &Column,
     db: &Column,
     alters: &mut Vec<Alter>,
@@ -1024,10 +1149,11 @@ fn alter_column(
         return false;
     }
     let column = quote_ident(&repo.name);
+    let only = only_if(partitioned);
     if let Some(expression) = expression {
         alters.push(Alter::new(format!(
-            "ALTER TABLE {table} ALTER COLUMN {column} SET EXPRESSION AS \
-             ({expression});\n"
+            "ALTER TABLE {only}{table} ALTER COLUMN {column} SET EXPRESSION \
+             AS ({expression});\n"
         )));
     }
     // DROP IDENTITY goes first: PostgreSQL rejects SET DEFAULT and DROP
@@ -1062,15 +1188,19 @@ fn alter_column(
             repo.data_type
         )));
     }
+    // ONLY, as pg_dump writes it: each inheritance child and partition
+    // has a default of its own in the project, which PostgreSQL also
+    // changes without ONLY
     if repo.default != db.default {
         alters.push(dependent(match &repo.default {
             Some(default) => format!(
-                "ALTER TABLE {table} ALTER COLUMN {column} SET DEFAULT \
+                "ALTER TABLE ONLY {table} ALTER COLUMN {column} SET DEFAULT \
                  {};\n",
                 build::render_default(default)
             ),
             None => format!(
-                "ALTER TABLE {table} ALTER COLUMN {column} DROP DEFAULT;\n"
+                "ALTER TABLE ONLY {table} ALTER COLUMN {column} DROP \
+                 DEFAULT;\n"
             ),
         }));
     }
@@ -1084,7 +1214,7 @@ fn alter_column(
     if repo_not_null != db_not_null {
         if db_not_null {
             alters.push(dependent(format!(
-                "ALTER TABLE {table} ALTER COLUMN {column} DROP NOT \
+                "ALTER TABLE {only}{table} ALTER COLUMN {column} DROP NOT \
                  NULL;\n"
             )));
         }
@@ -1160,7 +1290,10 @@ fn alter_column(
 /// place. None of them rewrites existing rows: a new compression or
 /// storage applies to values written later. An attribute the repo no
 /// longer states goes back to its default (DEFAULT, or -1 for the
-/// statistics target, and RESET for an option).
+/// statistics target, and RESET for an option). ALTER TABLE ONLY, as
+/// pg_dump writes them: without ONLY, PostgreSQL also sets STATISTICS
+/// and STORAGE on each inheritance child and partition, which have
+/// values of their own.
 fn column_attributes(
     table: &str,
     column: &str,
@@ -1168,7 +1301,7 @@ fn column_attributes(
     db: &Column,
     alters: &mut Vec<Alter>,
 ) {
-    let prefix = format!("ALTER TABLE {table} ALTER COLUMN {column}");
+    let prefix = format!("ALTER TABLE ONLY {table} ALTER COLUMN {column}");
     if repo.statistics != db.statistics {
         alters.push(Alter::new(format!(
             "{prefix} SET STATISTICS {};\n",
@@ -1399,6 +1532,7 @@ fn constraints(
     let repo_not_null =
         repo.not_null_constraints.as_deref().unwrap_or_default();
     let db_not_null_names = db.not_null_names();
+    let only = only_if(repo.partition.is_some());
     let db_not_null = validations(
         table,
         db.not_null_constraints.as_deref().unwrap_or_default(),
@@ -1420,7 +1554,7 @@ fn constraints(
         |not_null: &NotNullConstraint| not_null.column.clone(),
         |not_null| {
             format!(
-                "ALTER TABLE {table} ALTER COLUMN {} DROP NOT NULL;\n",
+                "ALTER TABLE {only}{table} ALTER COLUMN {} DROP NOT NULL;\n",
                 quote_ident(&not_null.column)
             )
         },
@@ -1871,10 +2005,10 @@ fn sequence(repo: &Sequence, db: &Sequence) -> Resolution {
 }
 
 /// Domain reconciliation: SET/DROP DEFAULT, ADD CONSTRAINT of a new
-/// named check (see [`added_domain_checks`]), the NOT NULL and a
+/// check (see [`added_domain_checks`]), the NOT NULL and a
 /// comment delta in place. A base-type, collation, or other constraint
-/// change rebuilds (the domain's constraints are not all individually
-/// named). The two sides compare in the form of [`canonical_domain`].
+/// change rebuilds. The two sides compare in the form of
+/// [`canonical_domain`].
 fn domain(repo: &Domain, db: &Domain) -> Resolution {
     let (repo, db) = (&canonical_domain(repo), &canonical_domain(db));
     // the name of the NOT NULL, if the domain has one
@@ -1883,7 +2017,7 @@ fn domain(repo: &Domain, db: &Domain) -> Resolution {
             .check_constraints
             .iter()
             .flatten()
-            .find(|c| is_domain_not_null(c))
+            .find(|c| c.is_not_null())
             .map(|c| c.name.clone())
     };
     let data_type_changed = match (&repo.data_type, &db.data_type) {
@@ -1924,7 +2058,7 @@ fn domain(repo: &Domain, db: &Domain) -> Resolution {
     // a NOT NULL with no name has the name that PostgreSQL makes. The
     // other constraints are the same on the two sides
     let constraint = |c: Option<String>| {
-        quote_ident(&c.unwrap_or_else(|| domain_not_null_name(repo)))
+        quote_ident(&c.unwrap_or_else(|| repo.not_null_name()))
     };
     match (not_null(repo), not_null(db)) {
         (Some(None), None) => alters
@@ -1947,10 +2081,12 @@ fn domain(repo: &Domain, db: &Domain) -> Resolution {
 }
 
 /// The checks of `repo` that `db` does not have, when the other checks
-/// are the same and in the same order, and each added one is a named
-/// CHECK: ALTER DOMAIN ... ADD CONSTRAINT adds them in place. Any other
-/// change of the checks gives None, which rebuilds the domain. The NOT
-/// NULL is not a check here; [`domain`] changes it in place
+/// are the same, and each added one is a CHECK with a name (in the form
+/// of [`canonical_domain`], each CHECK has a name, and the checks are
+/// in the order of their names): ALTER DOMAIN ... ADD CONSTRAINT adds
+/// them in place. Any other change of the checks gives None, which
+/// rebuilds the domain. The NOT NULL is not a check here; [`domain`]
+/// changes it in place
 fn added_domain_checks<'a>(
     repo: &'a Domain,
     db: &Domain,
@@ -1960,7 +2096,7 @@ fn added_domain_checks<'a>(
             .check_constraints
             .iter()
             .flatten()
-            .filter(|c| !is_domain_not_null(c))
+            .filter(|c| !c.is_not_null())
             .collect()
     }
     let (wanted, existing) = (checks(repo), checks(db));
@@ -2424,6 +2560,10 @@ mod tests {
         assert!(alters.is_empty(), "alias must not diff: {:?}", sql(&alters));
     }
 
+    /// A default is set with ALTER TABLE ONLY, which does not change the
+    /// default of an inheritance child or a partition. On a table that
+    /// is not partitioned, DROP NOT NULL recurses: an inheritance child
+    /// models no NOT NULL that it inherits
     #[test]
     fn default_and_nullability_toggle() {
         let mut repo = base_table();
@@ -2434,12 +2574,55 @@ mod tests {
         assert_eq!(
             sql(&alters),
             vec![
-                "ALTER TABLE test.users ALTER COLUMN email SET DEFAULT \
+                "ALTER TABLE ONLY test.users ALTER COLUMN email SET DEFAULT \
                  'unknown'::text;\n",
                 "ALTER TABLE test.users ALTER COLUMN email DROP NOT NULL;\n",
             ]
         );
         assert!(alters.iter().all(|a| !a.destructive));
+    }
+
+    /// A partition models each of its columns, so on a partitioned
+    /// table DROP DEFAULT, DROP NOT NULL, SET EXPRESSION and SET
+    /// STATISTICS use ONLY. SET NOT NULL must change each partition
+    /// too, which PostgreSQL requires
+    #[test]
+    fn partitioned_table_keeps_its_partitions() {
+        let partitioned = |mut table: serde_json::Value| {
+            table["partition"] =
+                serde_json::json!({"type": "RANGE", "columns": ["id"]});
+            table["columns"]
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!({
+                    "name": "doubled",
+                    "data_type": "integer",
+                    "generated": {"expression": "(id * 2)"},
+                }));
+            table
+        };
+        let mut repo = partitioned(base_table());
+        repo["columns"][0]["nullable"] = true.into();
+        repo["columns"][1]["nullable"] = false.into();
+        repo["columns"][1]["statistics"] = 50.into();
+        repo["columns"][2]["generated"]["expression"] = "(id * 3)".into();
+        let mut db = partitioned(base_table());
+        db["columns"][1]["default"] = "'unknown'::text".into();
+        db["columns"][1]["nullable"] = true.into();
+        let alters = statements(table(&parse_table(repo), &parse_table(db)));
+        assert_eq!(
+            sql(&alters),
+            vec![
+                "ALTER TABLE ONLY test.users ALTER COLUMN id DROP NOT NULL;\n",
+                "ALTER TABLE ONLY test.users ALTER COLUMN email DROP \
+                 DEFAULT;\n",
+                "ALTER TABLE test.users ALTER COLUMN email SET NOT NULL;\n",
+                "ALTER TABLE ONLY test.users ALTER COLUMN email SET \
+                 STATISTICS 50;\n",
+                "ALTER TABLE ONLY test.users ALTER COLUMN doubled SET \
+                 EXPRESSION AS (id * 3);\n",
+            ]
+        );
     }
 
     #[test]
@@ -2710,7 +2893,7 @@ mod tests {
             sql(&alters),
             vec![
                 "ALTER TABLE test.users ALTER COLUMN id DROP IDENTITY;\n",
-                "ALTER TABLE test.users ALTER COLUMN id SET DEFAULT \
+                "ALTER TABLE ONLY test.users ALTER COLUMN id SET DEFAULT \
                  nextval('test.users_id'::regclass);\n",
                 "ALTER TABLE test.users ALTER COLUMN id DROP NOT NULL;\n",
             ]
@@ -3578,6 +3761,63 @@ mod tests {
         ));
     }
 
+    fn view_query(query: &str) -> Definition {
+        Definition::View(
+            serde_json::from_value(serde_json::json!({
+                "name": "v", "schema": "test", "owner": "postgres",
+                "query": query,
+            }))
+            .unwrap(),
+        )
+    }
+
+    /// With no column list, the names come from the query, as
+    /// pg_get_viewdef writes it: a renamed, removed or reordered column
+    /// drops the view, a column added at the end does not
+    #[test]
+    fn view_query_column_names_resolve_the_change() {
+        let replaces = |repo: &str, db: &str| {
+            matches!(
+                resolve(&view_query(repo), &view_query(db)),
+                Resolution::Replace
+            )
+        };
+        assert!(replaces(
+            " SELECT 1 AS a,\n    2 AS b",
+            " SELECT 1 AS x, 2 AS b"
+        ));
+        assert!(replaces(" SELECT n FROM t", " SELECT n, m FROM t"));
+        assert!(replaces(" SELECT t.m, n FROM t", " SELECT n, m FROM t"));
+        assert!(replaces(
+            " SELECT 1 AS a UNION SELECT 2 AS b",
+            " SELECT 1 AS b"
+        ));
+        assert!(replaces(" SELECT \"N\" FROM t", " SELECT n FROM t"));
+        assert!(!replaces(
+            " SELECT n, now() AS m FROM t",
+            " SELECT t.n FROM t"
+        ));
+        assert!(!replaces(" SELECT N FROM t;", " SELECT n FROM t"));
+        // PostgreSQL folds only the ASCII letters to lowercase
+        assert!(!replaces(" SELECT 1 AS GRÖßE", " SELECT 1 AS \"grÖße\""));
+        assert!(!replaces(
+            " SELECT DISTINCT n x FROM t",
+            " SELECT n AS x FROM t"
+        ));
+        // a name that is not known keeps CREATE OR REPLACE
+        for unknown in [
+            " SELECT * FROM t",
+            " SELECT n + 1 FROM t",
+            " SELECT a[1] FROM t",
+            " (SELECT n FROM t)",
+            " VALUES (1)",
+            " SELECT (",
+        ] {
+            assert!(!replaces(unknown, " SELECT x FROM t"), "{unknown}");
+            assert!(!replaces(" SELECT x FROM t", unknown), "{unknown}");
+        }
+    }
+
     fn parse_sequence(value: serde_json::Value) -> Sequence {
         serde_json::from_value(value).expect("sequence deserializes")
     }
@@ -3780,10 +4020,11 @@ mod tests {
         assert!(matches!(domain(&retyped, &db), Resolution::Replace));
     }
 
-    /// A named check that only the project has is added in place; a
-    /// changed, removed or unnamed check rebuilds the domain
+    /// A check that only the project has is added in place, with the
+    /// name that PostgreSQL gives it when it has no name; a changed or
+    /// removed check rebuilds the domain
     #[test]
-    fn domain_new_named_check_is_added_in_place() {
+    fn domain_new_check_is_added_in_place() {
         let check = |name: Option<&str>, expression: &str| DomainConstraint {
             name: name.map(String::from),
             nullable: None,
@@ -3814,12 +4055,86 @@ mod tests {
             .as_mut()
             .unwrap()
             .push(check(None, "(VALUE < 9)"));
-        assert!(matches!(domain(&unnamed, &db), Resolution::Replace));
+        assert_eq!(
+            sql(&statements(domain(&unnamed, &db))),
+            vec![
+                "ALTER DOMAIN test.d ADD CONSTRAINT d_check CHECK ((VALUE < 9));\n"
+            ]
+        );
         let mut changed = db.clone();
         changed.check_constraints =
             Some(vec![check(Some("d_a"), "(VALUE > 1)")]);
         assert!(matches!(domain(&changed, &db), Resolution::Replace));
         assert!(matches!(domain(&db, &repo), Resolution::Replace));
+    }
+
+    /// A CHECK with no name compares with the name that PostgreSQL
+    /// gives it: `<domain>_check`, with a number when the name is in use,
+    /// cut to 63 bytes. The checks compare in the order of their names,
+    /// as pg_dump writes them
+    #[test]
+    fn domain_checks_compare_by_name() {
+        let with = |name: &str, constraints: serde_json::Value| -> Domain {
+            serde_json::from_value(serde_json::json!({
+                "name": name, "schema": "test", "owner": "postgres",
+                "data_type": "integer", "check_constraints": constraints,
+            }))
+            .unwrap()
+        };
+        // the names and the order that PostgreSQL 18 and pg_dump gave
+        let long =
+            "a_long_gate_domain_name_that_cuts_the_generated_check_name_xx";
+        let repo = with(
+            long,
+            serde_json::json!([
+                {"name": "zz", "expression": "VALUE < 1000"},
+                {"expression": "VALUE > 0"},
+                {"expression": "VALUE <> 5"},
+            ]),
+        );
+        let db = with(
+            long,
+            serde_json::json!([
+                {
+                    "name": "a_long_gate_domain_name_that_cuts_the_generated_check_na_check1",
+                    "expression": "(VALUE <> 5)",
+                },
+                {
+                    "name": "a_long_gate_domain_name_that_cuts_the_generated_check_nam_check",
+                    "expression": "(VALUE > 0)",
+                },
+                {"name": "zz", "expression": "(VALUE < 1000)"},
+            ]),
+        );
+        assert!(matches!(
+            domain(&repo, &db),
+            Resolution::Statements(ref alters) if alters.is_empty()
+        ));
+        // a named check takes `d_check`, thus the check with no name
+        // gets `d_check1`
+        let repo = with(
+            "d",
+            serde_json::json!([
+                {"expression": "VALUE > 0"},
+                {"name": "d_check", "expression": "VALUE < 10"},
+            ]),
+        );
+        let db = with(
+            "d",
+            serde_json::json!([
+                {"name": "d_check", "expression": "(VALUE < 10)"},
+                {"name": "d_check1", "expression": "(VALUE > 0)"},
+            ]),
+        );
+        assert!(matches!(
+            domain(&repo, &db),
+            Resolution::Statements(ref alters) if alters.is_empty()
+        ));
+        // a changed check with no name is still a change
+        let mut changed = repo.clone();
+        changed.check_constraints.as_mut().unwrap()[0].expression =
+            Some("VALUE > 1".into());
+        assert!(matches!(domain(&changed, &db), Resolution::Replace));
     }
 
     /// The type of a cast in a domain default or CHECK constraint
@@ -4671,12 +4986,16 @@ mod tests {
         assert_eq!(
             sql(&alters),
             vec![
-                "ALTER TABLE test.users ALTER COLUMN email SET STATISTICS -1;\n",
-                "ALTER TABLE test.users ALTER COLUMN email SET STORAGE EXTERNAL;\n",
-                "ALTER TABLE test.users ALTER COLUMN email SET COMPRESSION lz4;\n",
-                "ALTER TABLE test.users ALTER COLUMN email RESET \
+                "ALTER TABLE ONLY test.users ALTER COLUMN email SET \
+                 STATISTICS -1;\n",
+                "ALTER TABLE ONLY test.users ALTER COLUMN email SET STORAGE \
+                 EXTERNAL;\n",
+                "ALTER TABLE ONLY test.users ALTER COLUMN email SET \
+                 COMPRESSION lz4;\n",
+                "ALTER TABLE ONLY test.users ALTER COLUMN email RESET \
                  (n_distinct_inherited);\n",
-                "ALTER TABLE test.users ALTER COLUMN email SET (n_distinct=100);\n",
+                "ALTER TABLE ONLY test.users ALTER COLUMN email SET \
+                 (n_distinct=100);\n",
             ]
         );
         assert!(alters.iter().all(|a| !a.destructive));

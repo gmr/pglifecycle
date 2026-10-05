@@ -13,12 +13,11 @@ use super::routine_body::{canonical_definition, canonical_sql_body};
 use crate::constants::ObjectType;
 use crate::ddl::NodeExt;
 use crate::models::{
-    Definition, Domain, DomainConstraint, Function, Subscription,
-    canonical_settings,
+    Definition, Domain, Function, Subscription, canonical_settings,
 };
 use crate::project::Project;
 use crate::pull::{Assembly, without_password};
-use crate::utils::{make_object_name, quote_ident};
+use crate::utils::quote_ident;
 
 /// Identity of a database object on either side of the diff
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -843,14 +842,19 @@ fn normalized(definition: &Definition) -> Value {
 /// in the form that PostgreSQL stores (see [`stored_null_default`]).
 /// A NOT NULL comes first, as pg_dump writes it, and it has no name
 /// when its name is the one that PostgreSQL makes (see
-/// [`domain_not_null_name`]). pg_dump writes that name when
-/// PostgreSQL cuts it or adds a number to it.
+/// [`Domain::not_null_name`]). pg_dump writes that name when
+/// PostgreSQL cuts it or adds a number to it. A CHECK with no name has
+/// the name that PostgreSQL gives it (see [`Domain::with_check_names`]),
+/// because pg_dump writes the name of each CHECK, and the CHECKs come
+/// in the order of their names, as pg_dump writes them.
 pub(crate) fn canonical_domain(domain: &Domain) -> Domain {
-    let mut domain = domain.clone();
-    let generated = domain_not_null_name(&domain);
+    let generated = domain.not_null_name();
+    let mut domain = domain.with_check_names();
     if let Some(constraints) = &mut domain.check_constraints {
-        constraints.sort_by_key(|c| !is_domain_not_null(c));
-        for c in constraints.iter_mut().filter(|c| is_domain_not_null(c)) {
+        constraints.sort_by(|a, b| {
+            (!a.is_not_null(), &a.name).cmp(&(!b.is_not_null(), &b.name))
+        });
+        for c in constraints.iter_mut().filter(|c| c.is_not_null()) {
             if c.name.as_deref() == Some(generated.as_str()) {
                 c.name = None;
             }
@@ -872,34 +876,6 @@ pub(crate) fn canonical_domain(domain: &Domain) -> Domain {
         }
     }
     domain
-}
-
-/// The name that PostgreSQL makes for a NOT NULL of the domain with no
-/// name: `<domain>_not_null`, or `<domain>_not_null1`, `2` and so on
-/// when another constraint of the domain has that name
-pub(crate) fn domain_not_null_name(domain: &Domain) -> String {
-    let taken: Vec<&str> = domain
-        .check_constraints
-        .iter()
-        .flatten()
-        .filter(|c| !is_domain_not_null(c))
-        .filter_map(|c| c.name.as_deref())
-        .collect();
-    (0..)
-        .map(|pass: usize| {
-            let label = match pass {
-                0 => String::from("not_null"),
-                pass => format!("not_null{pass}"),
-            };
-            make_object_name(&domain.name, None, &label)
-        })
-        .find(|name| !taken.contains(&name.as_str()))
-        .expect("a name that no constraint has")
-}
-
-/// Whether a domain constraint is a NOT NULL
-pub(crate) fn is_domain_not_null(constraint: &DomainConstraint) -> bool {
-    constraint.nullable == Some(false) && constraint.expression.is_none()
 }
 
 /// A type of the project that is not built in, as

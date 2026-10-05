@@ -195,11 +195,11 @@ fn type_name(data_type: &str) -> String {
 }
 
 /// A name as PostgreSQL keeps it: a quoted name with no quotes, and a
-/// name with no quotes in lowercase
-fn identifier(name: &str) -> String {
+/// name with no quotes with its ASCII letters in lowercase
+pub(crate) fn identifier(name: &str) -> String {
     match name.strip_prefix('"').and_then(|n| n.strip_suffix('"')) {
         Some(quoted) => quoted.replace("\"\"", "\""),
-        None => name.to_lowercase(),
+        None => name.to_ascii_lowercase(),
     }
 }
 
@@ -209,6 +209,15 @@ mod tests {
 
     fn atomic(statements: &str) -> String {
         format!("BEGIN ATOMIC\n {statements}\nEND")
+    }
+
+    /// PostgreSQL folds only the ASCII letters of a name with no quotes
+    /// to lowercase
+    #[test]
+    fn an_identifier_folds_only_ascii_letters() {
+        assert_eq!(identifier("Größe"), "größe");
+        assert_eq!(identifier("GRÖßE"), "grÖße");
+        assert_eq!(identifier("\"GRÖßE\""), "GRÖßE");
     }
 
     /// The body that pull writes against the body of the routine that
