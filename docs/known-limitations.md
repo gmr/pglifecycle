@@ -38,14 +38,12 @@ the project without these entries. See
   ALTER COLUMN c SET STATISTICS` (or `SET STORAGE`) on a column that
   the child inherits puts the table entry in `remaining.yaml`. Set the
   value by hand after the restore or the deploy.
-- **A domain CHECK that pg_dump writes apart from its domain.**
-  When a domain CHECK calls a function that uses the domain type,
-  `pg_dump` writes the CHECK as a `CHECK CONSTRAINT` entry of its own,
-  after the function. `pull` does not model this entry, and it stops
-  with `1 dump entry could not be modeled (CHECK CONSTRAINT)`. Use
-  `--allow-unsupported`: the entry goes to `remaining.yaml`. Then add
-  the CHECK by hand after the restore. `deploy` gives a warning for
-  this CHECK and does not change it.
+- **A NOT VALID domain CHECK.** `pg_dump` writes a `NOT VALID`
+  domain CHECK as an `ALTER DOMAIN` entry of its own. The model has no
+  place for `NOT VALID`, so `pull` stops with `1 dump entry could not
+  be modeled (CHECK CONSTRAINT)`. Use `--allow-unsupported`: the entry
+  goes to `remaining.yaml`. Then add the CHECK by hand after the
+  restore.
 
 ## Build
 
