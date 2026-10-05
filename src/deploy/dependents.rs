@@ -1035,12 +1035,11 @@ fn entry_part<'a>(
 fn more_statements(entry: &libpgdump::Entry) -> bool {
     entry.desc != OT::Rule
         && entry.defn.as_deref().is_some_and(|defn| {
-            crate::ddl::split_statements(defn)
-                .iter()
-                .skip(1)
-                .any(|statement| {
+            crate::ddl::split_statements(defn).iter().skip(1).any(
+                |statement| {
                     !statement.contains(" REPLICA IDENTITY USING INDEX ")
-                })
+                },
+            )
         })
 }
 
@@ -1848,8 +1847,10 @@ mod tests {
         let (dependents, _, _) = replace(&project, &snapshot, &[0]);
         assert_eq!(
             dependents.refused,
-            vec!["TABLE ATTACH test.p: deploy would not attach the partition \
-                  again"]
+            vec![
+                "TABLE ATTACH test.p: deploy would not attach the partition \
+                  again"
+            ]
         );
     }
 
@@ -1867,7 +1868,8 @@ mod tests {
             Some("DROP TABLE test.t;\n"),
             &[],
         );
-        let publication = entry(&mut snapshot, OT::Publication, "pub", None, &[]);
+        let publication =
+            entry(&mut snapshot, OT::Publication, "pub", None, &[]);
         entry(
             &mut snapshot,
             OT::PublicationTable,
