@@ -544,7 +544,9 @@ fn inline_table<'a>(
     all_found(functions, &found)
 }
 
-/// [`inline_table`] for the default and the named checks of a domain
+/// [`inline_table`] for the default and the checks of a domain. A
+/// check with no name has the name that PostgreSQL gives it (see
+/// [`Domain::with_check_names`])
 fn inline_domain<'a>(
     parser: &mut tree_sitter::Parser,
     domain: &mut Domain,
@@ -552,6 +554,8 @@ fn inline_domain<'a>(
     functions: &[(i32, String, String)],
     drops: &mut Vec<Drop<'a>>,
 ) -> Result<(), String> {
+    *domain = domain.with_check_names();
+    let wanted = &wanted.with_check_names();
     let name = format!(
         "{}.{}",
         quote_ident(&domain.schema),
@@ -577,14 +581,12 @@ fn inline_domain<'a>(
             again,
         ));
     }
-    let mut unnamed = false;
     if let Some(checks) = &mut domain.check_constraints {
         checks.retain(|check| {
             if !check.expression.as_deref().is_some_and(&mut calls) {
                 return true;
             }
             let Some(check_name) = &check.name else {
-                unnamed = true;
                 return true;
             };
             let again = has(&wanted.check_constraints, |wanted| {
@@ -604,12 +606,6 @@ fn inline_domain<'a>(
             ));
             false
         });
-    }
-    if unnamed {
-        return Err(String::from(
-            "a check with no name calls the function, and deploy cannot \
-             drop it",
-        ));
     }
     all_found(functions, &found)
 }
@@ -873,6 +869,9 @@ mod tests {
             ),
             ObjectType::Table => {
                 Definition::Table(serde_json::from_value(json).unwrap())
+            }
+            ObjectType::Domain => {
+                Definition::Domain(serde_json::from_value(json).unwrap())
             }
             _ => unreachable!("not used by the tests"),
         };
@@ -1344,5 +1343,55 @@ mod tests {
             panic!("the table changes in place");
         };
         assert!(alters.iter().all(|alter| !alter.sql.contains("INDEX")));
+    }
+
+    /// A domain CHECK with no name that calls the function has the
+    /// name that PostgreSQL gave it: the check is dropped and added
+    /// again with that name, also when the domain is not changed
+    #[test]
+    fn an_unnamed_domain_check_is_made_again() {
+        let project = project(vec![
+            item(0, ObjectType::Function, function("integer")),
+            item(
+                4,
+                ObjectType::Domain,
+                serde_json::json!({
+                    "name": "d",
+                    "schema": "test",
+                    "owner": "postgres",
+                    "data_type": "integer",
+                    "check_constraints": [
+                        {"expression": "test.f(VALUE) > 0"},
+                    ],
+                }),
+            ),
+        ]);
+        let mut diff = diff(&project);
+        let mut snapshot =
+            libpgdump::new("test", "UTF8", "18.0").expect("new dump");
+        let f = entry(&mut snapshot, OT::Function, "f(integer)", None, &[]);
+        let d = entry(&mut snapshot, OT::Domain, "d", None, &[f]);
+        let (dependents, resolutions) = run(&project, &mut diff, &snapshot);
+        assert!(dependents.refused.is_empty(), "{:?}", dependents.refused);
+        let drops: Vec<&str> = dependents.drops[&d]
+            .iter()
+            .map(|alter| alter.sql.as_str())
+            .collect();
+        assert_eq!(
+            drops,
+            vec!["ALTER DOMAIN test.d DROP CONSTRAINT d_check;\n"]
+        );
+        let Resolution::Statements(alters) = &resolutions[&4] else {
+            panic!("the domain changes in place");
+        };
+        let alters: Vec<&str> =
+            alters.iter().map(|alter| alter.sql.as_str()).collect();
+        assert_eq!(
+            alters,
+            vec![
+                "ALTER DOMAIN test.d ADD CONSTRAINT d_check CHECK \
+                 ((test.f(VALUE) > 0));\n"
+            ]
+        );
     }
 }
