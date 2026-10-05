@@ -383,6 +383,13 @@ revocations:
   write the sequence of a serial column as its own file: write the
   column in one of the two forms.
 
+- PostgreSQL makes each column of the primary key and each identity
+  column NOT NULL, with a NOT NULL constraint of the name
+  `<table>_<column>_not_null`. `pull` writes `nullable: false` for
+  these columns. A project can leave it out: `deploy` compares the
+  column as NOT NULL. `nullable: true` on one of these columns is a
+  load error, because the database cannot have it.
+
 - A storage parameter (`storage_parameters` of a table, a
   materialized view or an index) can be a YAML number or boolean:
   `fillfactor: 90` and `autovacuum_enabled: false`. PostgreSQL keeps
