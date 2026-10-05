@@ -689,6 +689,47 @@ fn outside_items() -> Vec<Item> {
                 .unwrap(),
             ),
         ),
+        // deviation 61: a NOT NULL with no name after a CHECK with the
+        // name that PostgreSQL makes for the NOT NULL
+        item(
+            20,
+            ObjectType::Domain,
+            Definition::Domain(
+                serde_json::from_value(serde_json::json!({
+                    "name": "nn_taken",
+                    "schema": "test",
+                    "owner": "postgres",
+                    "data_type": "integer",
+                    "check_constraints": [
+                        {"nullable": false},
+                        {"name": "nn_taken_not_null",
+                         "expression": "(VALUE > 0)"},
+                    ],
+                }))
+                .unwrap(),
+            ),
+        ),
+        // deviation 61: a CHECK with no name before a CHECK with a name
+        // that must be quoted, and a NOT NULL last
+        item(
+            21,
+            ObjectType::Domain,
+            Definition::Domain(
+                serde_json::from_value(serde_json::json!({
+                    "name": "quoted_check",
+                    "schema": "test",
+                    "owner": "postgres",
+                    "data_type": "integer",
+                    "check_constraints": [
+                        {"expression": "(VALUE > 1)"},
+                        {"name": "Quoted Check",
+                         "expression": "(VALUE > 0)"},
+                        {"nullable": false},
+                    ],
+                }))
+                .unwrap(),
+            ),
+        ),
     ]
 }
 
@@ -930,6 +971,28 @@ const OUTSIDE_CORRECTED: &[(&str, &str, &str, &str, &str)] = &[
         "CREATE DOMAIN test.required_label AS text CONSTRAINT \
          label_required NOT NULL;\n",
         "DROP DOMAIN IF EXISTS test.required_label;\n",
+    ),
+    // deviation 61: the NOT NULL first, then the constraints with a
+    // name, then the CHECKs with no name. A NOT NULL with no name has
+    // its name when PostgreSQL adds a number to it, and a name is
+    // quoted. The Python wrote the constraints in the order of the
+    // project and the names bare
+    (
+        "DOMAIN",
+        "test",
+        "nn_taken",
+        "CREATE DOMAIN test.nn_taken AS integer CONSTRAINT \
+         nn_taken_not_null1 NOT NULL CONSTRAINT nn_taken_not_null CHECK \
+         ((VALUE > 0));\n",
+        "DROP DOMAIN IF EXISTS test.nn_taken;\n",
+    ),
+    (
+        "DOMAIN",
+        "test",
+        "quoted_check",
+        "CREATE DOMAIN test.quoted_check AS integer NOT NULL CONSTRAINT \
+         \"Quoted Check\" CHECK ((VALUE > 0)) CHECK ((VALUE > 1));\n",
+        "DROP DOMAIN IF EXISTS test.quoted_check;\n",
     ),
     // deviation 58: the comment of the database is a COMMENT entry
     // with the tag `DATABASE name`, as pg_dump writes it. The Python
