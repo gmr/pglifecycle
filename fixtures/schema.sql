@@ -1064,3 +1064,13 @@ BEGIN
                    current_database(), 'pg_default');
 END
 $$;
+
+-- The comment of the database. pg_dump writes it in a COMMENT entry
+-- that names the database, as for the settings above. The comment has
+-- a quote and a line break.
+DO $$
+BEGIN
+    EXECUTE format('COMMENT ON DATABASE %I IS %L', current_database(),
+                   E'The gate''s database\nfor the fixtures');
+END
+$$;

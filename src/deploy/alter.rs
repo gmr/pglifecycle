@@ -2214,7 +2214,11 @@ fn comment_delta(
 
 /// `COMMENT ON <desc> <name> IS ...` matching the build's comment
 /// entry text shape; a removed comment becomes `IS NULL`
-fn comment_on(desc: &str, name: &str, comment: Option<&str>) -> String {
+pub(super) fn comment_on(
+    desc: &str,
+    name: &str,
+    comment: Option<&str>,
+) -> String {
     match comment {
         Some(comment) => {
             format!("COMMENT ON {desc} {name} IS {};\n", dollar_quote(comment))

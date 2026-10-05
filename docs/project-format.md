@@ -7,7 +7,8 @@ database object, validated against the JSON-Schema definitions in
 ```text
 my-project/
 ├── project.yaml          # name, superuser, extensions, languages,
-│                         # access methods, database settings
+│                         # access methods, database comment
+│                         # and settings
 ├── schemata/             # one file per schema
 │   └── test.yaml
 ├── tables/               # <schema>/<table>.yaml
@@ -500,11 +501,14 @@ settings:
   does not have to be in the project. `pull` reads both from `pg_dump`,
   thus also with `--no-roles` and `--dump`. `build` writes them as
   `pg_dump` does (see [build](commands.md#build)), and `deploy` makes
-  them the settings of the database:
+  them the settings of the database. `comment` is the comment of the
+  database (`COMMENT ON DATABASE`). `pull`, `build` and `deploy` use it
+  as they use the settings:
 
 ```yaml
 ---
 name: app
+comment: The application database
 settings:
 - search_path: [$user, public]
 - work_mem: 64MB
