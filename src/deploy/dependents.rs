@@ -911,7 +911,11 @@ mod tests {
                      test.f(2);\n",
                     true
                 ),
-                ("CREATE INDEX i ON test.t ( (test.f(id)) );\n", true),
+                (
+                    "CREATE INDEX i ON test.t USING btree ( (test.f(id)) \
+                     );\n",
+                    true
+                ),
             ]
         );
     }

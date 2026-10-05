@@ -4124,6 +4124,7 @@ mod tests {
         let plan = plan(
             &diff,
             &BTreeMap::new(),
+            &dependents::Dependents::default(),
             &output,
             &snapshot,
             &privileges::Privileges::default(),
