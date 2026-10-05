@@ -689,6 +689,91 @@ fn outside_items() -> Vec<Item> {
                 .unwrap(),
             ),
         ),
+        // deviation 60: a CHECK on a column, and an empty list of
+        // options or parameters
+        item(
+            20,
+            ObjectType::Table,
+            Definition::Table(
+                serde_json::from_value(serde_json::json!({
+                    "name": "gauges",
+                    "schema": "test",
+                    "owner": "postgres",
+                    "columns": [
+                        {"name": "ee", "data_type": "integer",
+                         "check_constraint": "ee > 0"},
+                    ],
+                    "storage_parameters": {},
+                    "indexes": [{
+                        "name": "gauges_ee_idx",
+                        "columns": [{"name": "ee"}],
+                        "storage_parameters": {},
+                    }],
+                }))
+                .unwrap(),
+            ),
+        ),
+        item(
+            21,
+            ObjectType::MaterializedView,
+            Definition::MaterializedView(
+                serde_json::from_value(serde_json::json!({
+                    "name": "gauge_totals",
+                    "schema": "test",
+                    "owner": "postgres",
+                    "storage_parameters": {},
+                    "query": "SELECT 1 AS n",
+                }))
+                .unwrap(),
+            ),
+        ),
+        item(
+            22,
+            ObjectType::ForeignDataWrapper,
+            Definition::ForeignDataWrapper(
+                serde_json::from_value(serde_json::json!({
+                    "name": "empty_fdw",
+                    "owner": "postgres",
+                    "options": {},
+                }))
+                .unwrap(),
+            ),
+        ),
+        item(
+            23,
+            ObjectType::Tablespace,
+            Definition::Tablespace(
+                serde_json::from_value(serde_json::json!({
+                    "name": "empty_space",
+                    "owner": "Space Owner",
+                    "location": "/srv/empty",
+                    "options": {},
+                }))
+                .unwrap(),
+            ),
+        ),
+        item(
+            24,
+            ObjectType::UserMapping,
+            Definition::UserMapping(
+                serde_json::from_value(serde_json::json!({
+                    "name": "postgres",
+                    "servers": [{"name": "empty_srv", "options": {}}],
+                }))
+                .unwrap(),
+            ),
+        ),
+        item(
+            25,
+            ObjectType::Publication,
+            Definition::Publication(
+                serde_json::from_value(serde_json::json!({
+                    "name": "empty_pub",
+                    "parameters": {},
+                }))
+                .unwrap(),
+            ),
+        ),
     ]
 }
 
@@ -940,6 +1025,60 @@ const OUTSIDE_CORRECTED: &[(&str, &str, &str, &str, &str)] = &[
         "DATABASE outside",
         "COMMENT ON DATABASE outside IS $$it's outside$$;\n",
         "",
+    ),
+    // deviation 60: a CHECK on a column is in parentheses, as the
+    // grammar needs them, and an empty list of storage parameters,
+    // options or parameters is no list. The Python wrote `CHECK ee >
+    // 0`, `WITH ()` and `OPTIONS ()`, which do not parse
+    (
+        "TABLE",
+        "test",
+        "gauges",
+        "CREATE TABLE test.gauges ( ee integer CHECK (ee > 0) );\n",
+        "DROP TABLE IF EXISTS test.gauges;\n",
+    ),
+    (
+        "INDEX",
+        "test",
+        "gauges_ee_idx",
+        "CREATE INDEX gauges_ee_idx ON test.gauges ( ee );\n",
+        "DROP INDEX IF EXISTS test.gauges_ee_idx;\n",
+    ),
+    (
+        "MATERIALIZED VIEW",
+        "test",
+        "gauge_totals",
+        "CREATE MATERIALIZED VIEW test.gauge_totals AS SELECT 1 AS n;\n",
+        "DROP MATERIALIZED VIEW IF EXISTS test.gauge_totals;\n",
+    ),
+    (
+        "FOREIGN DATA WRAPPER",
+        "",
+        "empty_fdw",
+        "CREATE FOREIGN DATA WRAPPER empty_fdw NO HANDLER NO VALIDATOR;\n",
+        "DROP FOREIGN DATA WRAPPER IF EXISTS empty_fdw;\n",
+    ),
+    (
+        "TABLESPACE",
+        "",
+        "empty_space",
+        "CREATE TABLESPACE empty_space OWNER \"Space Owner\" LOCATION \
+         '/srv/empty';\n",
+        "DROP TABLESPACE IF EXISTS empty_space;\n",
+    ),
+    (
+        "USER MAPPING",
+        "",
+        "postgres",
+        "CREATE USER MAPPING FOR postgres SERVER empty_srv;\n",
+        "DROP USER MAPPING IF EXISTS FOR postgres SERVER empty_srv;\n",
+    ),
+    (
+        "PUBLICATION",
+        "",
+        "empty_pub",
+        "CREATE PUBLICATION empty_pub;\n",
+        "DROP PUBLICATION IF EXISTS empty_pub;\n",
     ),
 ];
 

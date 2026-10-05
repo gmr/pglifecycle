@@ -303,6 +303,14 @@
 //!     statement, thus pg_restore does not set its owner. The Python
 //!     had no place for the comment. The test-project has none, thus
 //!     its archive does not change.
+//! 60. A CHECK on a column renders in parentheses, `CHECK (ee > 0)`,
+//!     as the grammar needs them. An empty map of storage parameters
+//!     (a table, an index, a materialized view), of options (a foreign
+//!     data wrapper, a tablespace, the server of a user mapping) or of
+//!     publication parameters renders no list. The Python wrote `CHECK
+//!     ee > 0`, `WITH ()` and `OPTIONS ()`, which do not parse. The
+//!     test-project has no CHECK on a column and no empty map, thus
+//!     its archive does not change.
 
 mod acls;
 mod calls;
@@ -1345,7 +1353,7 @@ impl Builder {
         } else {
             create.push("NO VALIDATOR".into());
         }
-        if let Some(options) = &d.options {
+        if let Some(options) = d.options.as_ref().filter(|o| !o.is_empty()) {
             create.push(format!("OPTIONS ({})", render_options(options)));
         }
         let drop = vec![
@@ -1662,7 +1670,9 @@ impl Builder {
             create.push("USING".into());
             create.push(method.clone());
         }
-        if let Some(storage_parameters) = &d.storage_parameters {
+        if let Some(storage_parameters) =
+            d.storage_parameters.as_ref().filter(|p| !p.is_empty())
+        {
             create.push("WITH".into());
             let params: Vec<String> = storage_parameters
                 .iter()
@@ -1868,7 +1878,9 @@ impl Builder {
                 create.push(objects.join(", "));
             }
         }
-        if let Some(parameters) = &d.parameters {
+        if let Some(parameters) =
+            d.parameters.as_ref().filter(|p| !p.is_empty())
+        {
             create.push("WITH".into());
             create.push(format!(
                 "({})",
@@ -2260,7 +2272,9 @@ impl Builder {
                 create.push("USING".into());
                 create.push(access_method.clone());
             }
-            if let Some(storage_parameters) = &d.storage_parameters {
+            if let Some(storage_parameters) =
+                d.storage_parameters.as_ref().filter(|p| !p.is_empty())
+            {
                 create.push("WITH".into());
                 let params: Vec<String> = storage_parameters
                     .iter()
@@ -2859,7 +2873,7 @@ impl Builder {
             "LOCATION".into(),
             postgres_value(&Value::String(d.location.clone())),
         ];
-        if let Some(options) = &d.options {
+        if let Some(options) = d.options.as_ref().filter(|o| !o.is_empty()) {
             let opts: Vec<String> = options
                 .iter()
                 .map(|(k, v)| format!("{k}={}", postgres_value(v)))
@@ -3485,7 +3499,9 @@ impl Builder {
                 "SERVER".into(),
                 quote_ident(&server.name),
             ];
-            if let Some(options) = &server.options {
+            if let Some(options) =
+                server.options.as_ref().filter(|o| !o.is_empty())
+            {
                 let opts: Vec<String> = options
                     .iter()
                     .map(|(k, v)| format!("{k} {}", postgres_value(v)))
@@ -3771,8 +3787,7 @@ pub(crate) fn render_table_column(column: &Column) -> String {
         sql.push(render_column_not_null(column));
     }
     if let Some(check_constraint) = &column.check_constraint {
-        sql.push("CHECK".into());
-        sql.push(check_constraint.clone());
+        sql.push(format!("CHECK ({check_constraint})"));
     }
     if let Some(default) = &column.default {
         sql.push("DEFAULT".into());
@@ -3899,7 +3914,9 @@ pub(crate) fn render_index(index: &Index, table_name: &str) -> Vec<String> {
     if index.nulls_not_distinct == Some(true) {
         create.push("NULLS NOT DISTINCT".into());
     }
-    if let Some(storage_parameters) = &index.storage_parameters {
+    if let Some(storage_parameters) =
+        index.storage_parameters.as_ref().filter(|p| !p.is_empty())
+    {
         create.push("WITH".into());
         let params: Vec<String> = storage_parameters
             .iter()

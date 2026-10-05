@@ -398,7 +398,16 @@ revocations:
   `true`, `false`, `on`, `off`, `yes` and `no` (in any case) are
   booleans, so `false` and `'off'` are equal. A number is its value,
   so `0.1` and `'0.10'` are equal. `1` and `0` compare as numbers, not
-  as booleans.
+  as booleans. An empty map (`storage_parameters: {}`) is the same as
+  no storage parameters.
+
+- A `check_constraint` on a column is a CHECK of the table.
+  PostgreSQL gives it the name `<table>_<column>_check` (with a
+  number when the name is in use), and `pull` writes it in
+  `check_constraints` of the table with that name. `deploy` compares
+  the column CHECK with that table CHECK, so `check_constraint: ee > 0`
+  on the column `ee` of `t` is the same as the CHECK `t_ee_check` with
+  the expression `(ee > 0)`.
 
 - A `collation` (of a column, a domain, a type, an index column, an
   exclusion constraint or a partition key) can leave out the
