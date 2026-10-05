@@ -33,6 +33,15 @@ CREATE DOMAIN test.required_label AS text CONSTRAINT label_required NOT NULL;
 CREATE DOMAIN test.a_domain_name_that_is_long_enough_to_cut_the_not_null_name
         AS integer NOT NULL;
 
+-- Domain CHECK names: a name that must be quoted, and a CHECK with the
+-- name that PostgreSQL makes for a NOT NULL, so that the NOT NULL gets
+-- the name `not_null_taken_not_null1`
+CREATE DOMAIN test.quoted_check AS integer
+        CONSTRAINT "Quoted Check" CHECK ( value > 0 );
+
+CREATE DOMAIN test.not_null_taken AS integer
+        CONSTRAINT not_null_taken_not_null CHECK ( value > 0 ) NOT NULL;
+
 CREATE TYPE user_state AS ENUM ('unverified', 'verified', 'suspended');
 
 CREATE TABLE users (
