@@ -316,7 +316,8 @@ that depend on them, and drops them before the object:
 - The indexes, constraints, triggers, rules and policies of a table,
   view or materialized view that deploy drops come back with it.
   PostgreSQL drops the partitions of a table, and the sequences that
-  its columns own, with the table, as before.
+  its columns own, with the table. A partition that is not an item of
+  its own (no `attached`) comes back with its table.
 
 A replaced object that has dependents is dropped after them, before
 the objects that deploy makes, and is made again at its position.
@@ -337,8 +338,10 @@ or an index has a statement after its `CREATE` that the project does
 not keep (`ALTER TABLE ... DISABLE TRIGGER` or `ENABLE REPLICA
 TRIGGER`, `CLUSTER ON`, an index column's `SET STATISTICS`), or it is
 of another type, such as an operator class, a table column of a type
-or domain that deploy drops, an inheritance child of a table that
-deploy drops, or a foreign key of another table that references it —
+or domain that deploy drops, an inheritance child or a partition with
+`attached` of a table that deploy drops, the attachment of a partition
+that deploy drops without its table, or a foreign key of another table
+that references it —
 deploy stops with an error
 that names it when `--allow-drop` is given, and gives a warning when
 it is not. An object that `--exclude-table` or `--exclude-schema`

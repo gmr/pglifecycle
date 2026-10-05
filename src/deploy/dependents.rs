@@ -214,8 +214,10 @@ pub(crate) fn rebuild(
             }
             let owner = relation(entry, &by_id);
             // a part of a relation that the source is dropped with, or
-            // an object that PostgreSQL drops with the source table: a
-            // partition, or a sequence that a column of the table owns
+            // an object that PostgreSQL drops with the source table and
+            // that the table makes again: a partition that is not an
+            // item of its own, or a sequence that a column of the table
+            // owns
             let own = (CHILDREN.contains(&entry.desc)
                 && owner.is_some_and(|owner| {
                     group.contains_key(&owner.dump_id)
@@ -223,7 +225,8 @@ pub(crate) fn rebuild(
                 }))
                 || (source.desc == OT::Table
                     && (entry.desc == OT::Sequence
-                        || partition(entry, source, entries)));
+                        || (partition(entry, source, entries)
+                            && item(entry).is_none())));
             if !own {
                 early.insert(root);
             }
@@ -240,6 +243,42 @@ pub(crate) fn rebuild(
                 origin.insert(entry.dump_id, root);
                 group.insert(entry.dump_id, group[&id]);
                 pending.push(entry.dump_id);
+                continue;
+            }
+            let reason = match entry.desc {
+                // PostgreSQL drops a partition with its table, and the
+                // plan does not make again a partition that is an item
+                // of its own
+                OT::Table if partition(entry, source, entries) => {
+                    Some(format!(
+                        "it is a partition of {}, and PostgreSQL drops it \
+                         with the table",
+                        entry_label(source)
+                    ))
+                }
+                // the plan attaches a partition that is an item of its
+                // own again only when it makes the partition and its
+                // table again
+                OT::TableAttach
+                    if attached(entry, &by_id).is_some_and(|tables| {
+                        item(tables[0]).is_some()
+                            && !tables
+                                .iter()
+                                .all(|table| roots.contains(&table.dump_id))
+                    }) =>
+                {
+                    Some(String::from(
+                        "deploy would not attach the partition again",
+                    ))
+                }
+                _ => None,
+            };
+            if let Some(reason) = reason {
+                if seen.insert(entry.dump_id) {
+                    dependents
+                        .refused
+                        .push(format!("{}: {reason}", entry_label(entry)));
+                }
                 continue;
             }
             match entry.desc {
@@ -467,6 +506,27 @@ pub(crate) fn rebuild(
     }
     dependents.labels.sort();
     dependents
+}
+
+/// The partition and the table of a TABLE ATTACH entry, whose tag is
+/// the name of the partition
+fn attached<'a>(
+    entry: &libpgdump::Entry,
+    by_id: &HashMap<i32, &'a libpgdump::Entry>,
+) -> Option<[&'a libpgdump::Entry; 2]> {
+    let tables: Vec<&libpgdump::Entry> = entry
+        .dependencies
+        .iter()
+        .filter_map(|id| by_id.get(id).copied())
+        .filter(|table| table.desc == OT::Table)
+        .collect();
+    let partition = tables.iter().find(|table| {
+        table.namespace == entry.namespace && table.tag == entry.tag
+    })?;
+    let parent = tables
+        .iter()
+        .find(|table| table.dump_id != partition.dump_id)?;
+    Some([partition, parent])
 }
 
 /// True when `entry` is a partition of the table `parent`: PostgreSQL
@@ -1685,6 +1745,67 @@ mod tests {
         for id in [0, 1, 2] {
             assert!(rebuilt(&resolutions[&id]), "{id}");
         }
+    }
+
+    /// PostgreSQL drops a partition with its table, and the plan does
+    /// not make again a partition that is an item of its own (with
+    /// `attached`). The plan also does not attach a partition again
+    /// when it makes only the partition again
+    #[test]
+    fn a_table_rebuild_refuses_its_partitions() {
+        let mut json = table("0");
+        json["name"] = serde_json::json!("p");
+        let project = project(vec![
+            item(0, ObjectType::Table, table("0")),
+            item(1, ObjectType::Table, json.clone()),
+        ]);
+        let mut snapshot =
+            libpgdump::new("test", "UTF8", "18.0").expect("new dump");
+        let t = entry(
+            &mut snapshot,
+            OT::Table,
+            "t",
+            Some("DROP TABLE test.t;\n"),
+            &[],
+        );
+        let p = entry(
+            &mut snapshot,
+            OT::Table,
+            "p",
+            Some("DROP TABLE test.p;\n"),
+            &[t],
+        );
+        entry(&mut snapshot, OT::TableAttach, "p", None, &[p, t]);
+        let (mut dependents, _, _) = replace(&project, &snapshot, &[0]);
+        dependents.refused.sort();
+        assert_eq!(
+            dependents.refused,
+            vec![
+                "TABLE ATTACH test.p: deploy would not attach the partition \
+                 again",
+                "TABLE test.p: it is a partition of TABLE test.t, and \
+                 PostgreSQL drops it with the table",
+            ]
+        );
+        // the plan makes the partition again, not its parent
+        let project = self::project(vec![item(0, ObjectType::Table, json)]);
+        let mut snapshot =
+            libpgdump::new("test", "UTF8", "18.0").expect("new dump");
+        let t = entry(&mut snapshot, OT::Table, "t", None, &[]);
+        let p = entry(
+            &mut snapshot,
+            OT::Table,
+            "p",
+            Some("DROP TABLE test.p;\n"),
+            &[t],
+        );
+        entry(&mut snapshot, OT::TableAttach, "p", None, &[p, t]);
+        let (dependents, _, _) = replace(&project, &snapshot, &[0]);
+        assert_eq!(
+            dependents.refused,
+            vec!["TABLE ATTACH test.p: deploy would not attach the partition \
+                  again"]
+        );
     }
 
     /// A replaced object with no dependents is dropped and made again
