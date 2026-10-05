@@ -919,6 +919,151 @@ impl Table {
             || self.tablespace.is_some()
             || self.access_method.is_some()
     }
+
+    /// This table, a partition of `parent`, without what CREATE TABLE
+    /// ... PARTITION OF makes in it from the parent: a column default
+    /// that the parent has, a CHECK constraint of the parent, a primary
+    /// key, unique or exclusion constraint that the parent has (with
+    /// another name), an index attached to an index of the parent, and
+    /// row security that is off. pg_dump writes these for the
+    /// partition, thus pull keeps them, and the partition stays a table
+    /// of its own (see [`Self::has_own_partition_properties`]).
+    pub fn without_parent_parts(&self, parent: &Table) -> Table {
+        // the constraint with no name, in one form
+        fn unnamed(key: &ConstraintColumns) -> ConstraintColumns {
+            match key.clone() {
+                ConstraintColumns::Detailed {
+                    columns,
+                    include,
+                    nulls_not_distinct,
+                    without_overlaps,
+                    ..
+                } => ConstraintColumns::Detailed {
+                    name: None,
+                    columns,
+                    include,
+                    nulls_not_distinct,
+                    without_overlaps,
+                },
+                other => ConstraintColumns::Detailed {
+                    name: None,
+                    columns: other.columns().to_vec(),
+                    include: None,
+                    nulls_not_distinct: None,
+                    without_overlaps: None,
+                },
+            }
+        }
+        fn unnamed_exclude(exclude: &ExcludeConstraint) -> ExcludeConstraint {
+            ExcludeConstraint {
+                name: String::new(),
+                comment: None,
+                ..exclude.clone()
+            }
+        }
+        fn kept<T>(
+            items: Option<Vec<T>>,
+            keep: impl Fn(&T) -> bool,
+        ) -> Option<Vec<T>> {
+            let items: Vec<T> = items?.into_iter().filter(keep).collect();
+            (!items.is_empty()).then_some(items)
+        }
+        let mut table = self.clone();
+        let parent_columns = parent.columns.as_deref().unwrap_or_default();
+        for column in table.columns.iter_mut().flatten() {
+            let inherited = parent_columns
+                .iter()
+                .find(|c| c.name == column.name)
+                .is_some_and(|c| c.default == column.default);
+            if inherited {
+                column.default = None;
+            }
+        }
+        table.indexes = kept(table.indexes, |index| index.parent.is_none());
+        if table.primary_key.as_ref().map(unnamed)
+            == parent.primary_key.as_ref().map(unnamed)
+        {
+            table.primary_key = None;
+        }
+        let unique = parent.unique_constraints.iter().flatten();
+        let unique: Vec<_> = unique.map(unnamed).collect();
+        table.unique_constraints = kept(table.unique_constraints, |key| {
+            !unique.contains(&unnamed(key))
+        });
+        let check = |c: &CheckConstraint| {
+            (
+                c.name.clone(),
+                crate::deploy::canonical_check(&c.expression),
+            )
+        };
+        let checks: Vec<_> = parent
+            .check_constraints
+            .iter()
+            .flatten()
+            .map(check)
+            .collect();
+        table.check_constraints =
+            kept(table.check_constraints, |c| !checks.contains(&check(c)));
+        let excludes = parent.exclude_constraints.iter().flatten();
+        let excludes: Vec<_> = excludes.map(unnamed_exclude).collect();
+        table.exclude_constraints = kept(table.exclude_constraints, |c| {
+            !excludes.contains(&unnamed_exclude(c))
+        });
+        if table.row_level_security == Some(RowLevelSecurity::default()) {
+            table.row_level_security = None;
+        }
+        table
+    }
+
+    /// This table, the database side of a comparison with `repo`, an
+    /// attached partition of `parent`, with no name on a NOT NULL
+    /// constraint that has the name of the NOT NULL of its parent,
+    /// where `repo` gives it no name. CREATE TABLE ... PARTITION OF
+    /// gives a partition the NOT NULL names of its parent, and CREATE
+    /// TABLE then ATTACH PARTITION keeps the names of the table, which
+    /// deploy makes as [`Self::not_null_names`] gives them. PostgreSQL
+    /// cannot rename an inherited constraint, thus a project that
+    /// gives no name accepts both names. An inheritance child has no
+    /// such difference: pg_dump writes no constraint that it only
+    /// inherits.
+    pub fn with_parent_not_null_names(
+        &self,
+        repo: &Table,
+        parent: &Table,
+    ) -> Table {
+        let parent_names = parent.canonical().not_null_names();
+        let repo = repo.with_canonical_not_nulls();
+        let named = |column: &str| {
+            let on_column = repo.columns.iter().flatten().any(|c| {
+                c.name == column
+                    && c.not_null_constraint
+                        .as_ref()
+                        .is_some_and(|n| n.name.is_some())
+            });
+            on_column
+                || repo
+                    .not_null_constraints
+                    .iter()
+                    .flatten()
+                    .any(|n| n.column == column && n.name.is_some())
+        };
+        let mut table = self.clone();
+        for column in table.columns.iter_mut().flatten() {
+            let Some(not_null) = column.not_null_constraint.as_mut() else {
+                continue;
+            };
+            if not_null.name.is_some()
+                && not_null.name.as_ref() == parent_names.get(&column.name)
+                && !named(&column.name)
+            {
+                not_null.name = None;
+                if not_null.no_inherit.is_none() {
+                    column.not_null_constraint = None;
+                }
+            }
+        }
+        table
+    }
 }
 
 /// Defines how a table is partitioned
