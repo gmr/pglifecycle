@@ -3719,6 +3719,8 @@ mod tests {
             " SELECT t.n FROM t"
         ));
         assert!(!replaces(" SELECT N FROM t;", " SELECT n FROM t"));
+        // PostgreSQL folds only the ASCII letters to lowercase
+        assert!(!replaces(" SELECT 1 AS GRÖßE", " SELECT 1 AS \"grÖße\""));
         assert!(!replaces(
             " SELECT DISTINCT n x FROM t",
             " SELECT n AS x FROM t"
