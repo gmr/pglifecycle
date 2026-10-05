@@ -289,6 +289,12 @@
 //!     the entry had no dependency and the owner of the superuser.
 //!     Pull now writes `z(x)()` for a routine `"z(x)"` with no
 //!     arguments. The test-project has no grant on a routine.
+//! 54. A domain constraint renders `CONSTRAINT name` only when it has
+//!     a name, as pg_dump writes it: `NOT NULL`, `CONSTRAINT nn NOT
+//!     NULL`, `CHECK (...)`. The Python wrote `CONSTRAINT` with no
+//!     name, which does not parse. Pull writes a NOT NULL with no
+//!     name for `CREATE DOMAIN d AS integer NOT NULL`. The
+//!     test-project domains have CHECK constraints with no name.
 //! 58. The `comment` of `project.yaml` renders as a `COMMENT` entry
 //!     with the tag `DATABASE name`, as pg_dump writes it: `COMMENT ON
 //!     DATABASE name IS ...`. As for the settings (see 48), the
@@ -1212,9 +1218,10 @@ impl Builder {
         if let Some(constraints) = &d.check_constraints {
             let mut rendered = Vec::new();
             for c in constraints {
-                let mut value = vec![String::from("CONSTRAINT")];
+                // deviation 54: CONSTRAINT only with a name
+                let mut value = Vec::new();
                 if let Some(name) = &c.name {
-                    value.push(name.clone());
+                    value.push(format!("CONSTRAINT {name}"));
                 }
                 if let Some(nullable) = c.nullable {
                     value.push(

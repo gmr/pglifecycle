@@ -22,6 +22,17 @@ CREATE DOMAIN test.email_address AS citext
 CREATE DOMAIN test.bcp47_locale AS TEXT
         CHECK ( value ~ '^[a-z]{2}-[A-Z]{2,3}$' );
 
+-- Domain NOT NULL constraints: an unnamed one, a named one, and an
+-- unnamed one on a long name, where PostgreSQL cuts the generated name
+-- and pg_dump writes it
+CREATE DOMAIN test.positive_count AS integer NOT NULL
+        CHECK ( value > 0 );
+
+CREATE DOMAIN test.required_label AS text CONSTRAINT label_required NOT NULL;
+
+CREATE DOMAIN test.a_domain_name_that_is_long_enough_to_cut_the_not_null_name
+        AS integer NOT NULL;
+
 CREATE TYPE user_state AS ENUM ('unverified', 'verified', 'suspended');
 
 CREATE TABLE users (

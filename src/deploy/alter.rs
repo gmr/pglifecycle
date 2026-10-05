@@ -31,8 +31,8 @@ use serde_json::{Map, Value};
 
 use crate::build;
 use crate::deploy::diff::{
-    canonical_collation, canonical_domain, canonical_type, identity_type,
-    result_type,
+    canonical_collation, canonical_domain, canonical_type,
+    domain_not_null_name, identity_type, is_domain_not_null, result_type,
 };
 use crate::models::{
     CheckConstraint, Column, ColumnDefault, ColumnGenerated, ColumnNotNull,
@@ -1871,12 +1871,21 @@ fn sequence(repo: &Sequence, db: &Sequence) -> Resolution {
 }
 
 /// Domain reconciliation: SET/DROP DEFAULT, ADD CONSTRAINT of a new
-/// named check (see [`added_domain_checks`]) and a comment delta in
-/// place. A base-type, collation, or other constraint change rebuilds
-/// (the domain's constraints are not all individually named). The two
-/// sides compare in the form of [`canonical_domain`].
+/// named check (see [`added_domain_checks`]), the NOT NULL and a
+/// comment delta in place. A base-type, collation, or other constraint
+/// change rebuilds (the domain's constraints are not all individually
+/// named). The two sides compare in the form of [`canonical_domain`].
 fn domain(repo: &Domain, db: &Domain) -> Resolution {
     let (repo, db) = (&canonical_domain(repo), &canonical_domain(db));
+    // the name of the NOT NULL, if the domain has one
+    let not_null = |domain: &Domain| {
+        domain
+            .check_constraints
+            .iter()
+            .flatten()
+            .find(|c| is_domain_not_null(c))
+            .map(|c| c.name.clone())
+    };
     let data_type_changed = match (&repo.data_type, &db.data_type) {
         (Some(r), Some(d)) => canonical_type(r) != canonical_type(d),
         (r, d) => r != d,
@@ -1912,6 +1921,27 @@ fn domain(repo: &Domain, db: &Domain) -> Resolution {
             None => format!("ALTER DOMAIN {name} DROP DEFAULT;\n"),
         }));
     }
+    // a NOT NULL with no name has the name that PostgreSQL makes. The
+    // other constraints are the same on the two sides
+    let constraint = |c: Option<String>| {
+        quote_ident(&c.unwrap_or_else(|| domain_not_null_name(repo)))
+    };
+    match (not_null(repo), not_null(db)) {
+        (Some(None), None) => alters
+            .push(Alter::new(format!("ALTER DOMAIN {name} SET NOT NULL;\n"))),
+        (Some(c), None) => alters.push(Alter::new(format!(
+            "ALTER DOMAIN {name} ADD CONSTRAINT {} NOT NULL;\n",
+            constraint(c)
+        ))),
+        (None, Some(_)) => alters
+            .push(Alter::new(format!("ALTER DOMAIN {name} DROP NOT NULL;\n"))),
+        (Some(r), Some(d)) if r != d => alters.push(Alter::new(format!(
+            "ALTER DOMAIN {name} RENAME CONSTRAINT {} TO {};\n",
+            constraint(d),
+            constraint(r)
+        ))),
+        _ => {}
+    }
     push_comment(&mut alters, "DOMAIN", &name, &repo.comment, &db.comment);
     Resolution::Statements(alters)
 }
@@ -1919,22 +1949,30 @@ fn domain(repo: &Domain, db: &Domain) -> Resolution {
 /// The checks of `repo` that `db` does not have, when the other checks
 /// are the same and in the same order, and each added one is a named
 /// CHECK: ALTER DOMAIN ... ADD CONSTRAINT adds them in place. Any other
-/// change of the checks gives None, which rebuilds the domain
+/// change of the checks gives None, which rebuilds the domain. The NOT
+/// NULL is not a check here; [`domain`] changes it in place
 fn added_domain_checks<'a>(
     repo: &'a Domain,
     db: &Domain,
 ) -> Option<Vec<&'a DomainConstraint>> {
-    let wanted = repo.check_constraints.as_deref().unwrap_or_default();
-    let existing = db.check_constraints.as_deref().unwrap_or_default();
-    let (kept, added): (Vec<_>, Vec<_>) =
-        wanted.iter().partition(|check| existing.contains(check));
+    fn checks(domain: &Domain) -> Vec<&DomainConstraint> {
+        domain
+            .check_constraints
+            .iter()
+            .flatten()
+            .filter(|c| !is_domain_not_null(c))
+            .collect()
+    }
+    let (wanted, existing) = (checks(repo), checks(db));
+    let (kept, added): (Vec<_>, Vec<_>) = wanted
+        .into_iter()
+        .partition(|check| existing.contains(check));
     let named = |check: &&DomainConstraint| {
         check.name.is_some()
             && check.expression.is_some()
             && check.nullable.is_none()
     };
-    (kept.into_iter().eq(existing.iter()) && added.iter().all(named))
-        .then_some(added)
+    (kept == existing && added.iter().all(named)).then_some(added)
 }
 
 /// Enum reconciliation: append-only value additions via ALTER TYPE
@@ -3845,6 +3883,104 @@ mod tests {
         ));
         repo.collation = Some("\"POSIX\"".into());
         assert!(matches!(domain(&repo, &db), Resolution::Replace));
+    }
+
+    /// A domain NOT NULL is added, renamed and removed in place. A NOT
+    /// NULL with no name has the name that PostgreSQL makes, also when
+    /// PostgreSQL cuts it
+    #[test]
+    fn domain_not_null_changes_in_place() {
+        let with = |constraints: serde_json::Value| -> Domain {
+            serde_json::from_value(serde_json::json!({
+                "name": "d", "schema": "test", "owner": "postgres",
+                "data_type": "integer", "check_constraints": constraints,
+            }))
+            .unwrap()
+        };
+        let check =
+            serde_json::json!({"name": "c", "expression": "VALUE > 0"});
+        let none = with(serde_json::json!([check]));
+        let unnamed = with(serde_json::json!([check, {"nullable": false}]));
+        let generated = with(
+            serde_json::json!([{"name": "d_not_null", "nullable": false}]),
+        );
+        let named =
+            with(serde_json::json!([{"name": "nn", "nullable": false}]));
+        let cases = [
+            (&unnamed, &none, "ALTER DOMAIN test.d SET NOT NULL;\n"),
+            (
+                &named,
+                &generated,
+                "ALTER DOMAIN test.d RENAME CONSTRAINT d_not_null TO nn;\n",
+            ),
+            (
+                &generated,
+                &named,
+                "ALTER DOMAIN test.d RENAME CONSTRAINT nn TO d_not_null;\n",
+            ),
+            (&none, &unnamed, "ALTER DOMAIN test.d DROP NOT NULL;\n"),
+        ];
+        for (repo, db, expected) in cases {
+            assert_eq!(sql(&statements(domain(repo, db))), vec![expected]);
+        }
+        let mut added = named.clone();
+        added.name = "e".into();
+        let mut base = added.clone();
+        base.check_constraints = None;
+        assert_eq!(
+            sql(&statements(domain(&added, &base))),
+            vec!["ALTER DOMAIN test.e ADD CONSTRAINT nn NOT NULL;\n"]
+        );
+        // the NOT NULL comes first, as pg_dump writes it
+        let reordered = with(serde_json::json!([{"nullable": false}, check]));
+        assert!(matches!(
+            domain(&unnamed, &reordered),
+            Resolution::Statements(ref alters) if alters.is_empty()
+        ));
+        // a new named check is added in place, next to the NOT NULL
+        assert_eq!(
+            sql(&statements(domain(&unnamed, &generated))),
+            vec![
+                "ALTER DOMAIN test.d ADD CONSTRAINT c CHECK ((VALUE > 0));\n"
+            ]
+        );
+        // a changed check falls back
+        let changed = with(serde_json::json!([
+            {"name": "c", "expression": "VALUE > 1"}, {"nullable": false},
+        ]));
+        assert!(matches!(domain(&unnamed, &changed), Resolution::Replace));
+        let long = "d".repeat(60);
+        let mut cut = with(serde_json::json!([{
+            "name": format!("{}_not_null", "d".repeat(54)),
+            "nullable": false,
+        }]));
+        cut.name = long.clone();
+        let mut repo = with(serde_json::json!([{"nullable": false}]));
+        repo.name = long;
+        assert!(matches!(
+            domain(&repo, &cut),
+            Resolution::Statements(ref alters) if alters.is_empty()
+        ));
+        // a CHECK has the name that PostgreSQL makes first, thus the NOT
+        // NULL with no name has the next name, `d_not_null1`
+        let taken = serde_json::json!({
+            "name": "d_not_null", "expression": "VALUE > 0",
+        });
+        let unnamed = with(serde_json::json!([taken, {"nullable": false}]));
+        let numbered = with(serde_json::json!([
+            {"name": "d_not_null1", "nullable": false}, taken,
+        ]));
+        let named = with(serde_json::json!([
+            {"name": "nn", "nullable": false}, taken,
+        ]));
+        assert!(matches!(
+            domain(&unnamed, &numbered),
+            Resolution::Statements(ref alters) if alters.is_empty()
+        ));
+        assert_eq!(
+            sql(&statements(domain(&unnamed, &named))),
+            vec!["ALTER DOMAIN test.d RENAME CONSTRAINT nn TO d_not_null1;\n"]
+        );
     }
 
     /// A table in the forms that a person writes, with a changed
