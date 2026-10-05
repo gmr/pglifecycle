@@ -237,8 +237,10 @@ reconciled in place where PostgreSQL can express it:
 - **Sequences** — a single `ALTER SEQUENCE` of the changed options.
   `data_type: bigint` (or an alias, such as `int8`) is the same as no
   type, as pg_dump writes no `AS` for a bigint sequence.
-- **Domains** — set/drop default; a base-type or constraint change
-  falls back.
+- **Domains** — set/drop default; add (`SET NOT NULL` or `ADD
+  CONSTRAINT name NOT NULL`), rename or drop the NOT NULL. A NOT NULL
+  with no name has the name that PostgreSQL makes for it. A base-type
+  or CHECK constraint change falls back.
 - **Enum types** — `ALTER TYPE ... ADD VALUE` for appended values;
   reordering or removing values falls back.
 - **Extensions** — `ALTER EXTENSION ... UPDATE` / `SET SCHEMA`.

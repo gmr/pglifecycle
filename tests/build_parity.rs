@@ -100,6 +100,9 @@ const DEVIATIONS: &[(&str, &str, &str)] = &[
         "test",
         "utf8_to_latin1(integer, integer, cstring, internal, integer)",
     ),
+    // deviation 54: a domain CHECK with no name has no CONSTRAINT
+    ("DOMAIN", "test", "bcp47_locale"),
+    ("DOMAIN", "test", "email_address"),
 ];
 
 /// Deviation 17: entries whose *drop* statement was corrected, with
@@ -289,6 +292,20 @@ const CORRECTED: &[(&str, &str, &str, &str)] = &[
         "test",
         "utf8_to_latin1(integer, integer, cstring, internal, integer)",
         "CREATE FUNCTION test.utf8_to_latin1(IN source_encoding_id INTEGER,",
+    ),
+    // deviation 54: no CONSTRAINT with no name. The Python wrote
+    // `CONSTRAINT CHECK`, which does not parse
+    (
+        "DOMAIN",
+        "test",
+        "bcp47_locale",
+        "CREATE DOMAIN test.bcp47_locale AS text CHECK (value ~",
+    ),
+    (
+        "DOMAIN",
+        "test",
+        "email_address",
+        "CREATE DOMAIN test.email_address AS citext CHECK (value ~",
     ),
 ];
 
@@ -636,6 +653,42 @@ fn outside_items() -> Vec<Item> {
                 .unwrap(),
             ),
         ),
+        // deviation 54: a NOT NULL with no name, as pull writes it, and
+        // one with a name
+        item(
+            18,
+            ObjectType::Domain,
+            Definition::Domain(
+                serde_json::from_value(serde_json::json!({
+                    "name": "positive_count",
+                    "schema": "test",
+                    "owner": "postgres",
+                    "data_type": "integer",
+                    "check_constraints": [
+                        {"nullable": false},
+                        {"name": "positive_count_check",
+                         "expression": "(VALUE > 0)"},
+                    ],
+                }))
+                .unwrap(),
+            ),
+        ),
+        item(
+            19,
+            ObjectType::Domain,
+            Definition::Domain(
+                serde_json::from_value(serde_json::json!({
+                    "name": "required_label",
+                    "schema": "test",
+                    "owner": "postgres",
+                    "data_type": "text",
+                    "check_constraints": [
+                        {"name": "label_required", "nullable": false},
+                    ],
+                }))
+                .unwrap(),
+            ),
+        ),
     ]
 }
 
@@ -859,6 +912,24 @@ const OUTSIDE_CORRECTED: &[(&str, &str, &str, &str, &str)] = &[
          ALTER ROLE \"App User\" IN DATABASE outside SET enable_seqscan \
          TO False;\n",
         "",
+    ),
+    // deviation 54: CONSTRAINT only with a name, as pg_dump writes it.
+    // The Python wrote `CONSTRAINT NOT NULL`, which does not parse
+    (
+        "DOMAIN",
+        "test",
+        "positive_count",
+        "CREATE DOMAIN test.positive_count AS integer NOT NULL CONSTRAINT \
+         positive_count_check CHECK ((VALUE > 0));\n",
+        "DROP DOMAIN IF EXISTS test.positive_count;\n",
+    ),
+    (
+        "DOMAIN",
+        "test",
+        "required_label",
+        "CREATE DOMAIN test.required_label AS text CONSTRAINT \
+         label_required NOT NULL;\n",
+        "DROP DOMAIN IF EXISTS test.required_label;\n",
     ),
     // deviation 58: the comment of the database is a COMMENT entry
     // with the tag `DATABASE name`, as pg_dump writes it. The Python
