@@ -812,20 +812,6 @@ ALTER TABLE test.quotas
     ADD CONSTRAINT quotas_n_check CHECK (test.quota_ok(n));
 COMMENT ON CONSTRAINT quotas_n_check ON test.quotas IS 'Within the quota';
 
--- A domain CHECK that calls a function, which has to exist before the
--- domain. When the function takes the domain, the domain also has to
--- exist before the function, so pg_dump makes the domain without the
--- check, then the function, then the check (TOC entry "CHECK
--- CONSTRAINT"). The build does the same (build deviation 65).
-CREATE FUNCTION test.rating_ok(v INTEGER) RETURNS BOOLEAN LANGUAGE sql
-    RETURN v BETWEEN 1 AND 5;
-CREATE DOMAIN test.rating AS INTEGER
-    CONSTRAINT rating_check CHECK (test.rating_ok(VALUE));
-CREATE DOMAIN test.score AS INTEGER;
-CREATE FUNCTION test.score_ok(v test.score) RETURNS BOOLEAN LANGUAGE sql
-    RETURN v::INTEGER >= 0;
-ALTER DOMAIN test.score ADD CONSTRAINT score_check CHECK (test.score_ok(VALUE));
-
 -- A column whose type is the row type of another table. Name order
 -- puts `a_segments` before `z_points`, and tables share one priority,
 -- so the table of the row type has to be ordered first (build

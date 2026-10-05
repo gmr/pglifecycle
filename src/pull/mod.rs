@@ -1176,24 +1176,6 @@ impl Assembly {
                 domain.owner = owner;
                 self.domains.push(domain);
             }
-            Statement::AddDomainCheck { domain, check } => {
-                let found = self.domains.iter_mut().find(|d| {
-                    Some(&d.schema) == domain.schema.as_ref()
-                        && d.name == domain.name
-                });
-                match found {
-                    Some(found) => {
-                        found
-                            .check_constraints
-                            .get_or_insert_default()
-                            .push(check);
-                    }
-                    None => {
-                        log::warn!("CHECK of unknown domain {domain}");
-                        self.push_remaining(entry);
-                    }
-                }
-            }
             Statement::CreateType(mut value) => {
                 value.owner = owner;
                 self.types.push(*value);

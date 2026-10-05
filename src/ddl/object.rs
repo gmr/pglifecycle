@@ -89,37 +89,6 @@ pub(crate) fn create_domain(
     Ok(Statement::CreateDomain(domain))
 }
 
-/// ALTER DOMAIN ... ADD CONSTRAINT ... CHECK → the CHECK of the domain.
-/// The model has no field for a NOT VALID CHECK, thus that one and the
-/// other forms of ALTER DOMAIN are not supported.
-pub(crate) fn alter_domain(node: &Node, src: &str) -> Statement {
-    let check = node
-        .child_of_kind("DomainConstraint")
-        .filter(|_| node.has("kw_add"))
-        .and_then(|constraint| {
-            let elem = constraint.child_of_kind("DomainConstraintElem")?;
-            if !elem.has("kw_check") || elem.has("ConstraintAttributeSpec") {
-                return None;
-            }
-            Some(DomainConstraint {
-                name: constraint
-                    .child_of_kind("name")
-                    .map(|n| unquote(n.text(src))),
-                nullable: None,
-                expression: Some(
-                    elem.child_of_kind("a_expr")?.text(src).to_string(),
-                ),
-            })
-        });
-    match (node.child_of_kind("any_name"), check) {
-        (Some(name), Some(check)) => Statement::AddDomainCheck {
-            domain: any_name(&name, src),
-            check,
-        },
-        _ => Statement::Unsupported(node.kind().to_string()),
-    }
-}
-
 /// CREATE TYPE (DefineStmt): enum, composite, range, and base forms
 pub(crate) fn create_type(
     node: &Node,
@@ -915,38 +884,6 @@ mod tests {
                     nullable: Some(false),
                     expression: None,
                 }])
-            );
-        }
-    }
-
-    /// pg_dump writes a domain CHECK that calls a function that needs
-    /// the domain, and a NOT VALID one, as ALTER DOMAIN ... ADD. The
-    /// model has no field for NOT VALID, thus that one is not supported
-    #[test]
-    fn parses_alter_domain_add_check() {
-        let Statement::AddDomainCheck { domain, check } = parse_one(
-            "ALTER DOMAIN s.a_dom\n    ADD CONSTRAINT \"A check\" \
-             CHECK (s.z_ok((VALUE)::s.a_dom));",
-        ) else {
-            panic!("expected AddDomainCheck")
-        };
-        assert_eq!(domain.to_string(), "s.a_dom");
-        assert_eq!(
-            check,
-            DomainConstraint {
-                name: Some("A check".into()),
-                nullable: None,
-                expression: Some("s.z_ok((VALUE)::s.a_dom)".into()),
-            }
-        );
-        for sql in [
-            "ALTER DOMAIN s.d ADD CONSTRAINT c CHECK (VALUE > 0) NOT VALID;",
-            "ALTER DOMAIN s.d ADD CONSTRAINT c NOT NULL;",
-            "ALTER DOMAIN s.d DROP CONSTRAINT c;",
-        ] {
-            assert!(
-                matches!(parse_one(sql), Statement::Unsupported(_)),
-                "{sql}"
             );
         }
     }

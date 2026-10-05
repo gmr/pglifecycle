@@ -88,13 +88,6 @@ pub enum Statement {
     },
     CreateSchema(models::Schema),
     CreateDomain(models::Domain),
-    /// ALTER DOMAIN ... ADD CONSTRAINT ... CHECK, which pg_dump writes
-    /// as its own entry when the CHECK calls a function that needs the
-    /// domain
-    AddDomainCheck {
-        domain: QualifiedName,
-        check: models::DomainConstraint,
-    },
     CreateType(Box<models::Type>),
     CreateSequence(models::Sequence),
     /// ALTER SEQUENCE — only the options present in the statement are
@@ -389,7 +382,6 @@ fn dispatch(node: &Node, src: &str) -> Result<Vec<Statement>, String> {
         "AlterTableStmt" => table::alter_table(node, src),
         "CreateSchemaStmt" => Ok(vec![object::create_schema(node, src)?]),
         "CreateDomainStmt" => Ok(vec![object::create_domain(node, src)?]),
-        "AlterDomainStmt" => Ok(vec![object::alter_domain(node, src)]),
         "DefineStmt" if let Some(statement) = misc::define(node, src) => {
             Ok(vec![statement?])
         }
