@@ -303,11 +303,15 @@
 //!     statement, thus pg_restore does not set its owner. The Python
 //!     had no place for the comment. The test-project has none, thus
 //!     its archive does not change.
-//! 60. A CHECK on a column renders in parentheses, `CHECK (ee > 0)`,
-//!     as the grammar needs them. An empty map of storage parameters
-//!     (a table, an index, a materialized view), of options (a foreign
-//!     data wrapper, a tablespace, the server of a user mapping) or of
-//!     publication parameters renders no list. The Python wrote `CHECK
+//! 60. A CHECK on a column renders as a CHECK of the table with the
+//!     name that deploy compares (`Table::with_table_checks`), in
+//!     parentheses, as the grammar needs them: `CONSTRAINT t_ee_check
+//!     CHECK (ee > 0)`. PostgreSQL takes the name of a CHECK with no
+//!     name from the columns of its expression, and it does not look
+//!     at the names of the constraints after it. An empty map of
+//!     storage parameters (a table, an index, a materialized view), of
+//!     options (a foreign data wrapper, a tablespace, the server of a
+//!     user mapping) or of publication parameters renders no list. The Python wrote `CHECK
 //!     ee > 0`, `WITH ()` and `OPTIONS ()`, which do not parse. The
 //!     test-project has no CHECK on a column and no empty map, thus
 //!     its archive does not change.
@@ -2199,6 +2203,9 @@ impl Builder {
         let Definition::Table(d) = &item.definition else {
             unreachable!()
         };
+        // a CHECK on a column renders as a CHECK of the table with the
+        // name that deploy compares (deviation 60)
+        let d = &d.with_table_checks();
         let all_calls = Rc::clone(&self.calls);
         let calls = all_calls.get(&item.id);
         let no_checks = HashSet::new();
@@ -5476,6 +5483,40 @@ mod tests {
         );
     }
 
+    /// A CHECK on a column renders as a CHECK of the table with the
+    /// name that deploy compares (deviation 60). PostgreSQL takes the
+    /// name of a CHECK with no name from the columns of its expression
+    /// and in the order of the constraints, thus a CHECK with no name
+    /// on `qty` that refers to `price` gets `orders_price_check`, and a
+    /// CHECK with no name on `price` fails when a later CHECK of the
+    /// table has the name `orders_price_check`.
+    #[test]
+    fn renders_column_check_with_its_name() {
+        let mut table = base_table("orders");
+        let mut qty = column("qty", "integer", false);
+        qty.check_constraint = Some("price > 0".into());
+        let mut price = column("price", "integer", false);
+        price.check_constraint = Some("price > 0".into());
+        table.columns = Some(vec![qty, price]);
+        table.check_constraints = Some(vec![CheckConstraint {
+            name: "orders_price_check".into(),
+            expression: "price < 100".into(),
+            enforced: None,
+            not_valid: None,
+        }]);
+        assert_eq!(
+            table_defn(
+                &table_item(1, table),
+                libpgdump::ObjectType::Table,
+                "orders"
+            ),
+            "CREATE TABLE test.orders ( qty integer, price integer, \
+             CONSTRAINT orders_price_check CHECK (price < 100), \
+             CONSTRAINT orders_qty_check CHECK (price > 0), \
+             CONSTRAINT orders_price_check1 CHECK (price > 0) );\n"
+        );
+    }
+
     /// Storage parameters need their parentheses; without them the
     /// CREATE TABLE does not parse (deviation 13)
     #[test]
@@ -5943,6 +5984,8 @@ mod tests {
         );
     }
 
+    /// The CHECK on a column of a typed table renders as a CHECK of the
+    /// table with its name (deviation 60)
     #[test]
     fn renders_typed_table_column_check_wrapped_in_parens() {
         let mut table = base_table("events");
@@ -5953,8 +5996,8 @@ mod tests {
         let item = table_item(1, table);
         assert_eq!(
             table_defn(&item, libpgdump::ObjectType::Table, "events"),
-            "CREATE TABLE test.events OF test.event_type (id WITH OPTIONS \
-             CHECK (id > 0));\n"
+            "CREATE TABLE test.events OF test.event_type (CONSTRAINT \
+             events_id_check CHECK (id > 0));\n"
         );
     }
 

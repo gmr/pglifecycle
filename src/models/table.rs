@@ -279,12 +279,12 @@ impl Table {
     /// CHECKs of the table.
     ///
     /// PostgreSQL keeps a CHECK on a column as a CHECK of the table, and
-    /// pg_dump and pull write it so. The name is the name that
-    /// PostgreSQL gives it, `<table>_<column>_check`, with a number when
-    /// the name is in use. PostgreSQL takes the column from the
-    /// expression: when the expression refers to one column other than
-    /// its own, or to no column or more than one, the name is not this
-    /// one. A CHECK on a column refers to its own column.
+    /// pg_dump and pull write it so. The name is
+    /// `<table>_<column>_check`, with a number when a CHECK of the table
+    /// has the name. Build writes the CHECK with this name (deviation
+    /// 60), because PostgreSQL takes the name of a CHECK with no name
+    /// from the columns of its expression and in the order of the
+    /// constraints.
     pub fn with_table_checks(&self) -> Table {
         let mut table = self.clone();
         let mut used: BTreeSet<String> = table

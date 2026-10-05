@@ -401,9 +401,10 @@ revocations:
   as booleans. An empty map (`storage_parameters: {}`) is the same as
   no storage parameters.
 
-- A `check_constraint` on a column is a CHECK of the table.
-  PostgreSQL gives it the name `<table>_<column>_check` (with a
-  number when the name is in use), and `pull` writes it in
+- A `check_constraint` on a column is a CHECK of the table with the
+  name `<table>_<column>_check` (with a number when a CHECK of the
+  table has the name). `build` and `deploy` write it with that name,
+  and `pull` writes it in
   `check_constraints` of the table with that name. `deploy` compares
   the column CHECK with that table CHECK, so `check_constraint: ee > 0`
   on the column `ee` of `t` is the same as the CHECK `t_ee_check` with

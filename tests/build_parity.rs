@@ -1089,15 +1089,17 @@ const OUTSIDE_CORRECTED: &[(&str, &str, &str, &str, &str)] = &[
         "COMMENT ON DATABASE outside IS $$it's outside$$;\n",
         "",
     ),
-    // deviation 60: a CHECK on a column is in parentheses, as the
-    // grammar needs them, and an empty list of storage parameters,
-    // options or parameters is no list. The Python wrote `CHECK ee >
-    // 0`, `WITH ()` and `OPTIONS ()`, which do not parse
+    // deviation 60: a CHECK on a column is a CHECK of the table with
+    // its name, in parentheses, as the grammar needs them, and an empty
+    // list of storage parameters, options or parameters is no list.
+    // The Python wrote `CHECK ee > 0`, `WITH ()` and `OPTIONS ()`,
+    // which do not parse
     (
         "TABLE",
         "test",
         "gauges",
-        "CREATE TABLE test.gauges ( ee integer CHECK (ee > 0) );\n",
+        "CREATE TABLE test.gauges ( ee integer, CONSTRAINT \
+         gauges_ee_check CHECK (ee > 0) );\n",
         "DROP TABLE IF EXISTS test.gauges;\n",
     ),
     (
