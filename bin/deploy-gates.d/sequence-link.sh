@@ -34,10 +34,6 @@ columns:
 - name: old
   data_type: integer
 YAML
-# the table comes first, as the project gives the sequences no
-# dependency on it
-./target/debug/pglifecycle deploy --apply -d "${TARGET_DB}" \
-    "${WORKDIR}/project"
 for name in gate_relink_a gate_relink_z; do
     cat > "${WORKDIR}/project/sequences/test/${name}.yaml" <<YAML
 ---
@@ -85,3 +81,34 @@ perl -pi -e 's/\.id$/.new/' \
 expect_links "gate_relink_a=new,gate_relink_z=" \
     "a sequence was not linked to a new column"
 expect_empty_plan "a sequence is linked after the ADD COLUMN of its column"
+
+# new sequences that sort before their table: one links to a column of
+# a table that the database has with another owner, and one to a
+# column of a new table. OWNED BY comes after the owner change of the
+# table and after its CREATE TABLE
+psql -d "${TARGET_DB}" -q -v ON_ERROR_STOP=1 \
+    -c 'ALTER TABLE test.gate_relink_t OWNER TO "Gate Owner"'
+cat > "${WORKDIR}/project/tables/test/gate_relink_n.yaml" <<'YAML'
+---
+name: gate_relink_n
+schema: test
+owner: postgres
+columns:
+- name: id
+  data_type: integer
+YAML
+for link in b:gate_relink_t m:gate_relink_n; do
+    cat > "${WORKDIR}/project/sequences/test/gate_relink_${link%%:*}.yaml" <<YAML
+---
+schema: test
+name: gate_relink_${link%%:*}
+owner: postgres
+data_type: integer
+owned_by: test.${link#*:}.id
+YAML
+done
+./target/debug/pglifecycle deploy --apply -d "${TARGET_DB}" \
+    "${WORKDIR}/project"
+expect_links "gate_relink_a=new,gate_relink_b=id,gate_relink_m=id,gate_relink_z=" \
+    "a new sequence was not linked"
+expect_empty_plan "a new sequence is linked after its table"

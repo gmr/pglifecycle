@@ -597,13 +597,22 @@ fn plan(
                 fails_open: false,
             });
         if changes.iter().all(|c| *c == Change::Added) {
-            // a statement that waits can add the column that owns the
-            // sequence, thus OWNED BY waits for the statements
-            let (defn, owned_by) = match owned_by(entry, &defn) {
-                Some((create, owned_by)) if !waiting.is_empty() => {
-                    (create, Some(owned_by))
+            // OWNED BY of a new sequence is a link: it comes after the
+            // statements that add the column or change the owner of
+            // its table
+            let defn = match owned_by(entry, &defn) {
+                Some((create, sql, column)) => {
+                    links.push((
+                        rebuild_adds(&column, diff, resolutions),
+                        Statement {
+                            label: label.clone(),
+                            sql,
+                            fails_open: false,
+                        },
+                    ));
+                    create
                 }
-                _ => (defn, None),
+                None => defn,
             };
             push(
                 false,
@@ -617,18 +626,6 @@ fn plan(
                     fails_open: false,
                 },
             );
-            if let Some(sql) = owned_by
-                && let Some(mut statements) = waiting.last_entry()
-            {
-                statements.get_mut().push((
-                    false,
-                    Statement {
-                        label,
-                        sql,
-                        fails_open: false,
-                    },
-                ));
-            }
             // the changed default privileges in a new schema
             if entry.desc == libpgdump::ObjectType::Schema {
                 let statements = entry
@@ -1111,9 +1108,12 @@ fn rebuild_adds(
 }
 
 /// The CREATE SEQUENCE of a sequence entry without its OWNED BY
-/// clause, and the ALTER SEQUENCE that sets it. The build writes the
-/// clause last
-fn owned_by(entry: &libpgdump::Entry, defn: &str) -> Option<(String, String)> {
+/// clause, the ALTER SEQUENCE that sets it, and its column. The build
+/// writes the clause last
+fn owned_by(
+    entry: &libpgdump::Entry,
+    defn: &str,
+) -> Option<(String, String, String)> {
     if entry.desc != libpgdump::ObjectType::Sequence {
         return None;
     }
@@ -1140,6 +1140,7 @@ fn owned_by(entry: &libpgdump::Entry, defn: &str) -> Option<(String, String)> {
     Some((
         format!("{create};\n"),
         format!("ALTER SEQUENCE {name} OWNED BY {column};\n"),
+        column.to_string(),
     ))
 }
 
@@ -3732,10 +3733,10 @@ mod tests {
         );
     }
 
-    /// A new sequence keeps its OWNED BY when no statement waits for
-    /// it, and a statement stays at the table when the sequence that
-    /// it gives to `nextval` comes before it. A string that is not
-    /// the argument of `nextval` is not a sequence
+    /// A new sequence gets its OWNED BY last, also when no statement
+    /// waits for it, and a statement stays at the table when the
+    /// sequence that it gives to `nextval` comes before it. A string
+    /// that is not the argument of `nextval` is not a sequence
     #[test]
     fn changed_table_statements_keep_their_sequence_order() {
         let alters = [
@@ -3750,7 +3751,8 @@ mod tests {
                 "CREATE SEQUENCE test.s;\n",
                 alters[0],
                 alters[1],
-                "CREATE SEQUENCE test.o OWNED BY test.t.n;\n",
+                "CREATE SEQUENCE test.o;\n",
+                "ALTER SEQUENCE test.o OWNED BY test.t.n;\n",
             ]
         );
     }
@@ -3892,6 +3894,7 @@ mod tests {
                 "CREATE SEQUENCE test.o;\n".to_string(),
                 "ALTER SEQUENCE test.o OWNED BY test.t.\"n OWNED BY x\";\n"
                     .to_string(),
+                "test.t.\"n OWNED BY x\"".to_string(),
             ))
         );
     }

@@ -382,7 +382,8 @@ the owner of its table; deploy warns when the project gives it another
 owner. When the project changes the link of a sequence, deploy runs
 `OWNED BY NONE` before all other statements, because a drop of the
 old column or of its table drops the sequence. It runs the new
-`OWNED BY` after each owner change, also that of the table. When
+`OWNED BY`, also that of a new sequence, after each owner change and
+after the statements that make the column. When
 only the rebuild of the table adds the new column, the new `OWNED
 BY` is withheld with the rebuild, unless `--allow-drop`. An event
 trigger with no `owner` in its file keeps the owner
