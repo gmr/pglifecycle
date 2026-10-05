@@ -13,11 +13,12 @@ use super::routine_body::{canonical_definition, canonical_sql_body};
 use crate::constants::ObjectType;
 use crate::ddl::NodeExt;
 use crate::models::{
-    Definition, Domain, Function, Subscription, canonical_settings,
+    Definition, Domain, DomainConstraint, Function, Subscription,
+    canonical_settings,
 };
 use crate::project::Project;
 use crate::pull::{Assembly, without_password};
-use crate::utils::quote_ident;
+use crate::utils::{make_object_name, quote_ident};
 
 /// Identity of a database object on either side of the diff
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -701,9 +702,21 @@ fn normalized(definition: &Definition) -> Value {
 /// The domain with the type of each cast in its default and its CHECK
 /// constraints in the form that PostgreSQL writes (see
 /// [`canonical_casts`]). A NULL default is in the form that PostgreSQL
-/// stores (see [`stored_null_default`]).
+/// stores (see [`stored_null_default`]). A NOT NULL comes first, as
+/// pg_dump writes it, and it has no name when its name is the one
+/// that PostgreSQL makes. pg_dump writes that name when PostgreSQL
+/// cuts it.
 pub(crate) fn canonical_domain(domain: &Domain) -> Domain {
     let mut domain = domain.clone();
+    let generated = make_object_name(&domain.name, None, "not_null");
+    if let Some(constraints) = &mut domain.check_constraints {
+        constraints.sort_by_key(|c| !is_domain_not_null(c));
+        for c in constraints.iter_mut().filter(|c| is_domain_not_null(c)) {
+            if c.name.as_deref() == Some(generated.as_str()) {
+                c.name = None;
+            }
+        }
+    }
     if let (Some(data_type), Some(default)) =
         (&domain.data_type, &domain.default)
         && let Some(stored) =
@@ -720,6 +733,11 @@ pub(crate) fn canonical_domain(domain: &Domain) -> Domain {
         }
     }
     domain
+}
+
+/// Whether a domain constraint is a NOT NULL
+pub(crate) fn is_domain_not_null(constraint: &DomainConstraint) -> bool {
+    constraint.nullable == Some(false) && constraint.expression.is_none()
 }
 
 /// A type of the project that is not built in, as

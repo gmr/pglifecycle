@@ -863,6 +863,31 @@ mod tests {
         );
     }
 
+    /// pg_dump writes a domain NOT NULL with no name, or with
+    /// `CONSTRAINT name` when the name is not `<domain>_not_null`
+    #[test]
+    fn parses_domain_not_null() {
+        for (sql, name) in [
+            ("CREATE DOMAIN test.d AS integer NOT NULL;", None),
+            (
+                "CREATE DOMAIN test.d AS integer CONSTRAINT nn NOT NULL;",
+                Some("nn".to_string()),
+            ),
+        ] {
+            let Statement::CreateDomain(domain) = parse_one(sql) else {
+                panic!("expected CreateDomain")
+            };
+            assert_eq!(
+                domain.check_constraints,
+                Some(vec![DomainConstraint {
+                    name,
+                    nullable: Some(false),
+                    expression: None,
+                }])
+            );
+        }
+    }
+
     #[test]
     fn parses_enum_type() {
         let Statement::CreateType(value) = parse_one(

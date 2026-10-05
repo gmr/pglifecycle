@@ -32,7 +32,7 @@ use serde_json::{Map, Value};
 use crate::build;
 use crate::deploy::diff::{
     canonical_collation, canonical_domain, canonical_type, identity_type,
-    result_type,
+    is_domain_not_null, result_type,
 };
 use crate::models::{
     CheckConstraint, Column, ColumnDefault, ColumnGenerated, ColumnNotNull,
@@ -1864,12 +1864,30 @@ fn sequence(repo: &Sequence, db: &Sequence) -> Resolution {
     Resolution::Statements(alters)
 }
 
-/// Domain reconciliation: SET/DROP DEFAULT and a comment delta in
-/// place. A base-type, collation, or constraint change rebuilds (the
-/// domain's constraints are not all individually named). The two sides
-/// compare in the form of [`canonical_domain`].
+/// Domain reconciliation: SET/DROP DEFAULT, the NOT NULL and a
+/// comment delta in place. A base-type, collation, or other constraint
+/// change rebuilds (the domain's constraints are not all individually
+/// named). The two sides compare in the form of [`canonical_domain`].
 fn domain(repo: &Domain, db: &Domain) -> Resolution {
     let (repo, db) = (&canonical_domain(repo), &canonical_domain(db));
+    // the name of the NOT NULL, if the domain has one
+    let not_null = |domain: &Domain| {
+        domain
+            .check_constraints
+            .iter()
+            .flatten()
+            .find(|c| is_domain_not_null(c))
+            .map(|c| c.name.clone())
+    };
+    let others = |domain: &Domain| {
+        domain
+            .check_constraints
+            .iter()
+            .flatten()
+            .filter(|c| !is_domain_not_null(c))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
     let data_type_changed = match (&repo.data_type, &db.data_type) {
         (Some(r), Some(d)) => canonical_type(r) != canonical_type(d),
         (r, d) => r != d,
@@ -1879,7 +1897,7 @@ fn domain(repo: &Domain, db: &Domain) -> Resolution {
     if repo.sql != db.sql
         || data_type_changed
         || collation(repo) != collation(db)
-        || repo.check_constraints != db.check_constraints
+        || others(repo) != others(db)
     {
         return Resolution::Replace;
     }
@@ -1892,6 +1910,29 @@ fn domain(repo: &Domain, db: &Domain) -> Resolution {
             }
             None => format!("ALTER DOMAIN {name} DROP DEFAULT;\n"),
         }));
+    }
+    // a NOT NULL with no name has the name that PostgreSQL makes
+    let constraint =
+        |c: Option<String>| {
+            quote_ident(&c.unwrap_or_else(|| {
+                make_object_name(&repo.name, None, "not_null")
+            }))
+        };
+    match (not_null(repo), not_null(db)) {
+        (Some(None), None) => alters
+            .push(Alter::new(format!("ALTER DOMAIN {name} SET NOT NULL;\n"))),
+        (Some(c), None) => alters.push(Alter::new(format!(
+            "ALTER DOMAIN {name} ADD CONSTRAINT {} NOT NULL;\n",
+            constraint(c)
+        ))),
+        (None, Some(_)) => alters
+            .push(Alter::new(format!("ALTER DOMAIN {name} DROP NOT NULL;\n"))),
+        (Some(r), Some(d)) if r != d => alters.push(Alter::new(format!(
+            "ALTER DOMAIN {name} RENAME CONSTRAINT {} TO {};\n",
+            constraint(d),
+            constraint(r)
+        ))),
+        _ => {}
     }
     push_comment(&mut alters, "DOMAIN", &name, &repo.comment, &db.comment);
     Resolution::Statements(alters)
@@ -3735,6 +3776,73 @@ mod tests {
         ));
         repo.collation = Some("\"POSIX\"".into());
         assert!(matches!(domain(&repo, &db), Resolution::Replace));
+    }
+
+    /// A domain NOT NULL is added, renamed and removed in place. A NOT
+    /// NULL with no name has the name that PostgreSQL makes, also when
+    /// PostgreSQL cuts it
+    #[test]
+    fn domain_not_null_changes_in_place() {
+        let with = |constraints: serde_json::Value| -> Domain {
+            serde_json::from_value(serde_json::json!({
+                "name": "d", "schema": "test", "owner": "postgres",
+                "data_type": "integer", "check_constraints": constraints,
+            }))
+            .unwrap()
+        };
+        let check =
+            serde_json::json!({"name": "c", "expression": "VALUE > 0"});
+        let none = with(serde_json::json!([check]));
+        let unnamed = with(serde_json::json!([check, {"nullable": false}]));
+        let generated = with(
+            serde_json::json!([{"name": "d_not_null", "nullable": false}]),
+        );
+        let named =
+            with(serde_json::json!([{"name": "nn", "nullable": false}]));
+        let cases = [
+            (&unnamed, &none, "ALTER DOMAIN test.d SET NOT NULL;\n"),
+            (
+                &named,
+                &generated,
+                "ALTER DOMAIN test.d RENAME CONSTRAINT d_not_null TO nn;\n",
+            ),
+            (
+                &generated,
+                &named,
+                "ALTER DOMAIN test.d RENAME CONSTRAINT nn TO d_not_null;\n",
+            ),
+            (&none, &unnamed, "ALTER DOMAIN test.d DROP NOT NULL;\n"),
+        ];
+        for (repo, db, expected) in cases {
+            assert_eq!(sql(&statements(domain(repo, db))), vec![expected]);
+        }
+        let mut added = named.clone();
+        added.name = "e".into();
+        let mut base = added.clone();
+        base.check_constraints = None;
+        assert_eq!(
+            sql(&statements(domain(&added, &base))),
+            vec!["ALTER DOMAIN test.e ADD CONSTRAINT nn NOT NULL;\n"]
+        );
+        // the NOT NULL comes first, as pg_dump writes it
+        let reordered = with(serde_json::json!([{"nullable": false}, check]));
+        assert!(matches!(
+            domain(&unnamed, &reordered),
+            Resolution::Statements(ref alters) if alters.is_empty()
+        ));
+        assert!(matches!(domain(&unnamed, &generated), Resolution::Replace));
+        let long = "d".repeat(60);
+        let mut cut = with(serde_json::json!([{
+            "name": format!("{}_not_null", "d".repeat(54)),
+            "nullable": false,
+        }]));
+        cut.name = long.clone();
+        let mut repo = with(serde_json::json!([{"nullable": false}]));
+        repo.name = long;
+        assert!(matches!(
+            domain(&repo, &cut),
+            Resolution::Statements(ref alters) if alters.is_empty()
+        ));
     }
 
     /// A table in the forms that a person writes, with a changed
