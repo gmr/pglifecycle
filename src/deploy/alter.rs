@@ -36,10 +36,11 @@ use crate::deploy::diff::{
 };
 use crate::models::{
     CheckConstraint, Column, ColumnDefault, ColumnGenerated, ColumnNotNull,
-    Definition, Domain, ExcludeConstraint, Extension, ForeignDataWrapper,
-    ForeignKey, Function, GeneratedKind, Index, NotNullConstraint, Policy,
-    ReplicaIdentity, Rule, Schema, Sequence, SequenceOptions, Server, Table,
-    Trigger, Type, UserMapping, View, ViewColumn,
+    Definition, Domain, DomainConstraint, ExcludeConstraint, Extension,
+    ForeignDataWrapper, ForeignKey, Function, GeneratedKind, Index,
+    NotNullConstraint, Policy, ReplicaIdentity, Rule, Schema, Sequence,
+    SequenceOptions, Server, Table, Trigger, Type, UserMapping, View,
+    ViewColumn,
 };
 use crate::project::{routine_base_name, split_sql_name};
 use crate::utils::{
@@ -1864,10 +1865,11 @@ fn sequence(repo: &Sequence, db: &Sequence) -> Resolution {
     Resolution::Statements(alters)
 }
 
-/// Domain reconciliation: SET/DROP DEFAULT and a comment delta in
-/// place. A base-type, collation, or constraint change rebuilds (the
-/// domain's constraints are not all individually named). The two sides
-/// compare in the form of [`canonical_domain`].
+/// Domain reconciliation: SET/DROP DEFAULT, ADD CONSTRAINT of a new
+/// named check (see [`added_domain_checks`]) and a comment delta in
+/// place. A base-type, collation, or other constraint change rebuilds
+/// (the domain's constraints are not all individually named). The two
+/// sides compare in the form of [`canonical_domain`].
 fn domain(repo: &Domain, db: &Domain) -> Resolution {
     let (repo, db) = (&canonical_domain(repo), &canonical_domain(db));
     let data_type_changed = match (&repo.data_type, &db.data_type) {
@@ -1876,15 +1878,27 @@ fn domain(repo: &Domain, db: &Domain) -> Resolution {
     };
     let collation =
         |domain: &Domain| domain.collation.as_deref().map(canonical_collation);
+    let Some(added) = added_domain_checks(repo, db) else {
+        return Resolution::Replace;
+    };
     if repo.sql != db.sql
         || data_type_changed
         || collation(repo) != collation(db)
-        || repo.check_constraints != db.check_constraints
     {
         return Resolution::Replace;
     }
     let name = qualified(&repo.schema, &repo.name);
     let mut alters = Vec::new();
+    for check in added {
+        if let (Some(check_name), Some(expression)) =
+            (&check.name, &check.expression)
+        {
+            alters.push(Alter::new(format!(
+                "ALTER DOMAIN {name} ADD CONSTRAINT {} CHECK ({expression});\n",
+                quote_ident(check_name)
+            )));
+        }
+    }
     if repo.default != db.default {
         alters.push(Alter::new(match &repo.default {
             Some(default) => {
@@ -1895,6 +1909,27 @@ fn domain(repo: &Domain, db: &Domain) -> Resolution {
     }
     push_comment(&mut alters, "DOMAIN", &name, &repo.comment, &db.comment);
     Resolution::Statements(alters)
+}
+
+/// The checks of `repo` that `db` does not have, when the other checks
+/// are the same and in the same order, and each added one is a named
+/// CHECK: ALTER DOMAIN ... ADD CONSTRAINT adds them in place. Any other
+/// change of the checks gives None, which rebuilds the domain
+fn added_domain_checks<'a>(
+    repo: &'a Domain,
+    db: &Domain,
+) -> Option<Vec<&'a DomainConstraint>> {
+    let wanted = repo.check_constraints.as_deref().unwrap_or_default();
+    let existing = db.check_constraints.as_deref().unwrap_or_default();
+    let (kept, added): (Vec<_>, Vec<_>) =
+        wanted.iter().partition(|check| existing.contains(check));
+    let named = |check: &&DomainConstraint| {
+        check.name.is_some()
+            && check.expression.is_some()
+            && check.nullable.is_none()
+    };
+    (kept.into_iter().eq(existing.iter()) && added.iter().all(named))
+        .then_some(added)
 }
 
 /// Enum reconciliation: append-only value additions via ALTER TYPE
@@ -3672,6 +3707,48 @@ mod tests {
         let mut retyped = db.clone();
         retyped.data_type = Some("citext".into());
         assert!(matches!(domain(&retyped, &db), Resolution::Replace));
+    }
+
+    /// A named check that only the project has is added in place; a
+    /// changed, removed or unnamed check rebuilds the domain
+    #[test]
+    fn domain_new_named_check_is_added_in_place() {
+        let check = |name: Option<&str>, expression: &str| DomainConstraint {
+            name: name.map(String::from),
+            nullable: None,
+            expression: Some(expression.to_string()),
+        };
+        let db: Domain = serde_json::from_value(serde_json::json!({
+            "name": "d", "schema": "test", "owner": "postgres",
+            "data_type": "integer",
+            "check_constraints": [
+                {"name": "d_a", "expression": "(VALUE > 0)"},
+            ],
+        }))
+        .unwrap();
+        let mut repo = db.clone();
+        repo.check_constraints
+            .as_mut()
+            .unwrap()
+            .push(check(Some("d_b"), "(VALUE < 9)"));
+        assert_eq!(
+            sql(&statements(domain(&repo, &db))),
+            vec![
+                "ALTER DOMAIN test.d ADD CONSTRAINT d_b CHECK ((VALUE < 9));\n"
+            ]
+        );
+        let mut unnamed = db.clone();
+        unnamed
+            .check_constraints
+            .as_mut()
+            .unwrap()
+            .push(check(None, "(VALUE < 9)"));
+        assert!(matches!(domain(&unnamed, &db), Resolution::Replace));
+        let mut changed = db.clone();
+        changed.check_constraints =
+            Some(vec![check(Some("d_a"), "(VALUE > 1)")]);
+        assert!(matches!(domain(&changed, &db), Resolution::Replace));
+        assert!(matches!(domain(&db, &repo), Resolution::Replace));
     }
 
     /// The type of a cast in a domain default or CHECK constraint

@@ -232,8 +232,8 @@ reconciled in place where PostgreSQL can express it:
 - **Sequences** — a single `ALTER SEQUENCE` of the changed options.
   `data_type: bigint` (or an alias, such as `int8`) is the same as no
   type, as pg_dump writes no `AS` for a bigint sequence.
-- **Domains** — set/drop default; a base-type or constraint change
-  falls back.
+- **Domains** — set/drop default, and `ADD CONSTRAINT` for a new named
+  check; a base-type change, or another constraint change, falls back.
 - **Enum types** — `ALTER TYPE ... ADD VALUE` for appended values;
   reordering or removing values falls back.
 - **Extensions** — `ALTER EXTENSION ... UPDATE` / `SET SCHEMA`.
@@ -271,6 +271,33 @@ any are pending. Trigger and constraint drops issued while
 reconciling a table are *not* gated: they lose no data and the project
 is authoritative. A changed index is also dropped and made again
 without a gate.
+
+When deploy drops a function — a change that `CREATE OR REPLACE
+FUNCTION` cannot do, or a function that only the database has —
+PostgreSQL refuses the drop while another object depends on it. Deploy
+finds these objects in the dependencies of the database's dump, also
+the objects that depend on them, and drops them before the function:
+
+- A view, a materialized view, a function, a procedure, an aggregate,
+  an operator or a cast is dropped and made again from the project,
+  with its comment, indexes, triggers, owner and privileges.
+- A column default, a check, an index, a trigger or a policy of a
+  table, and the default or a named check of a domain, is dropped, and
+  the table or domain makes it again in place. The table and its data
+  stay.
+
+These statements are destructive: without `--allow-drop` all of them
+are withheld with the drop of the function. The script header lists
+the objects (`-- dependents rebuilt with a replaced function:`).
+Deploy does not use `DROP ... CASCADE`, which drops each dependent
+with no list, also one that the project does not have. When an object
+depends on the function and deploy cannot make it again — the project
+does not have it, a generated column calls the function, or it is of
+another type, such as an operator class — deploy stops with an error
+that names it when `--allow-drop` is given, and gives a warning when
+it is not. An object that `--exclude-table` or `--exclude-schema`
+hides from the dump is not found: then the drop fails, and deploy
+rolls back.
 
 A `RESET` of a database setting is not gated. It loses no data, and a
 changed value replaces the value of the database as a `RESET` does. A

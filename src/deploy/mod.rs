@@ -11,6 +11,7 @@
 
 mod alter;
 mod database;
+mod dependents;
 mod diff;
 mod privileges;
 mod routine_body;
@@ -90,8 +91,29 @@ pub fn deploy(args: &cli::Deploy) -> Result<(), String> {
     }
     let groups = partition_index_groups(&project, &mut diff);
     let families = alter::operator_class::families(&project, &assembly);
-    let resolutions = resolutions(&project, &diff, &groups, &families);
+    let mut resolutions = resolutions(&project, &diff, &groups, &families);
+    let dependents = dependents::rebuild(
+        &project,
+        &mut diff,
+        &mut resolutions,
+        &snapshot,
+        &groups,
+        &families,
+    );
     task.finish();
+    if !dependents.refused.is_empty() {
+        let message = format!(
+            "The plan drops a function, but these objects depend on it, \
+             and deploy cannot drop and make them again: {}",
+            dependents.refused.join("; ")
+        );
+        // without --allow-drop the drop is withheld, thus the plan
+        // stays usable
+        if args.allow_drop {
+            return Err(message);
+        }
+        log::warn!("{message}");
+    }
     let mut output = build::assemble(&project)?;
     without_empty_statements(&mut output);
     let task = progress::spinner("Planning changes");
@@ -106,8 +128,15 @@ pub fn deploy(args: &cli::Deploy) -> Result<(), String> {
         args,
         creator(args).as_deref(),
     )?;
-    let mut plan =
-        plan(&diff, &resolutions, &output, &snapshot, &privileges, args)?;
+    let mut plan = plan(
+        &diff,
+        &resolutions,
+        &dependents,
+        &output,
+        &snapshot,
+        &privileges,
+        args,
+    )?;
     let (settings, resets) =
         database::statements(&project.settings, &assembly);
     plan.included.extend(settings);
@@ -303,10 +332,14 @@ struct Plan {
     /// plan resets, as `name of label`. A RESET is not destructive, but
     /// it can remove a setting that a DBA made
     resets: Vec<String>,
+    /// The objects that the plan drops and makes again, because they
+    /// depend on a function that it drops (see [`dependents`])
+    dependents: Vec<String>,
 }
 
 /// Assemble the ordered plan: OWNED BY NONE of changed sequences first,
-/// then DROPs for database-only objects (reverse snapshot order), then
+/// then DROPs for database-only objects and for the dependents of a
+/// function that the plan drops (reverse snapshot order), then
 /// changed default privileges (those in a new schema directly after
 /// its CREATE SCHEMA), then the repo archive's entries in topological
 /// order — plain CREATEs for added objects, in-place ALTERs where a
@@ -314,6 +347,7 @@ struct Plan {
 fn plan(
     diff: &Diff,
     resolutions: &BTreeMap<usize, Resolution>,
+    dependents: &dependents::Dependents,
     output: &build::BuildOutput,
     snapshot: &libpgdump::Dump,
     privileges: &privileges::Privileges,
@@ -369,17 +403,29 @@ fn plan(
         .collect();
     let mut emitted: std::collections::BTreeSet<&ObjectKey> =
         std::collections::BTreeSet::new();
-    let ordered: Vec<&ObjectKey> = snapshot
-        .entries()
-        .iter()
-        .rev()
-        .filter_map(entry_key)
-        .filter_map(|key| wanted.get(&key).copied())
-        .collect();
     let filtered = !(args.exclude_table.is_empty()
         && args.exclude_schema.is_empty()
         && args.exclude_extension.is_empty());
-    for key in ordered {
+    for entry in snapshot.entries().iter().rev() {
+        // a dependent of a function that the plan drops, which the
+        // plan makes again
+        for (label, sql) in
+            dependents.drops.get(&entry.dump_id).into_iter().flatten()
+        {
+            push(
+                true,
+                Statement {
+                    label: label.clone(),
+                    sql: sql.clone(),
+                    fails_open: false,
+                },
+            );
+        }
+        let Some(key) =
+            entry_key(entry).and_then(|key| wanted.get(&key).copied())
+        else {
+            continue;
+        };
         if emitted.insert(key) {
             let definition = diff.removed.get(key);
             // a base type drops with CASCADE, which must not drop an
@@ -509,12 +555,14 @@ fn plan(
         &mut parser,
         output,
         diff,
+        resolutions,
         libpgdump::ObjectType::Function,
     );
     let sequences = created_entries(
         &mut parser,
         output,
         diff,
+        resolutions,
         libpgdump::ObjectType::Sequence,
     );
     let shells = new_shell_types(output, diff);
@@ -839,6 +887,7 @@ fn plan(
         included_destructive,
         unowned,
         resets: Vec::new(),
+        dependents: dependents.labels.clone(),
     })
 }
 
@@ -1145,21 +1194,27 @@ fn owned_by(
 }
 
 /// The archive position of each object of type `desc` that the
-/// deploy creates, by schema and name. The last overload of a function
-/// name gives the position
+/// deploy creates, or drops and makes again, by schema and name. The
+/// last overload of a function name gives the position
 fn created_entries(
     parser: &mut tree_sitter::Parser,
     output: &build::BuildOutput,
     diff: &Diff,
+    resolutions: &BTreeMap<usize, Resolution>,
     desc: libpgdump::ObjectType,
 ) -> HashMap<(String, String), usize> {
     let mut created = HashMap::new();
     for (position, entry) in output.dump.entries().iter().enumerate() {
-        let added = output
-            .item_ids
-            .get(&entry.dump_id)
-            .and_then(|id| diff.items.get(id))
-            == Some(&Change::Added);
+        let added = output.item_ids.get(&entry.dump_id).is_some_and(|id| {
+            match diff.items.get(id) {
+                Some(Change::Added) => true,
+                Some(Change::Changed) => matches!(
+                    resolutions.get(id),
+                    Some(Resolution::Replace | Resolution::Rebuild { .. })
+                ),
+                _ => false,
+            }
+        });
         if entry.desc == desc
             && added
             && let (Some(schema), Some(tag)) =
@@ -1321,6 +1376,13 @@ fn report(diff: &Diff, plan: &Plan, assembly: &pull::Assembly) {
              untouched"
         );
     }
+    if !plan.dependents.is_empty() {
+        log::warn!(
+            "These objects depend on a function that the plan drops, \
+             thus the plan drops them and makes them again: {}",
+            plan.dependents.join(", ")
+        );
+    }
     for reset in &plan.resets {
         log::warn!(
             "Setting {reset}: the project does not have it, thus deploy \
@@ -1456,6 +1518,13 @@ fn render_script(
         ));
     } else {
         script.push_str("-- destructive statements: none\n");
+    }
+    if !plan.dependents.is_empty() {
+        script.push_str(&format!(
+            "-- dependents rebuilt with a replaced function: {} ({})\n",
+            plan.dependents.len(),
+            one_line(&plan.dependents.join(", "))
+        ));
     }
     if !plan.resets.is_empty() {
         script.push_str(&format!(
@@ -2054,6 +2123,7 @@ mod tests {
         let plan = plan(
             &diff,
             &BTreeMap::new(),
+            &dependents::Dependents::default(),
             &output,
             &snapshot,
             &privileges::Privileges::default(),
@@ -2361,6 +2431,7 @@ mod tests {
                 plan(
                     &diff,
                     &BTreeMap::new(),
+                    &dependents::Dependents::default(),
                     &output,
                     &snapshot,
                     &privileges::Privileges::default(),
@@ -2476,6 +2547,7 @@ mod tests {
         let plan = plan(
             &diff,
             &BTreeMap::new(),
+            &dependents::Dependents::default(),
             &output,
             &snapshot,
             &privileges::Privileges::default(),
@@ -2537,6 +2609,7 @@ mod tests {
         let plan = plan(
             &diff,
             &resolutions,
+            &dependents::Dependents::default(),
             &output,
             &snapshot,
             &privileges::Privileges::default(),
@@ -2556,6 +2629,7 @@ mod tests {
         let unchanged = super::plan(
             &diff,
             &resolutions,
+            &dependents::Dependents::default(),
             &output,
             &snapshot,
             &privileges::Privileges::default(),
@@ -2648,6 +2722,7 @@ mod tests {
         let plan = plan(
             &diff,
             &resolutions,
+            &dependents::Dependents::default(),
             &output,
             &snapshot,
             &privileges::Privileges::default(),
@@ -2763,6 +2838,7 @@ mod tests {
         let plan = plan(
             &diff,
             &resolutions,
+            &dependents::Dependents::default(),
             &output,
             &snapshot,
             &privileges::Privileges::default(),
@@ -2848,6 +2924,7 @@ mod tests {
             included_destructive: 0,
             unowned: Vec::new(),
             resets: Vec::new(),
+            dependents: Vec::new(),
         };
         let script = render_script(&plan, "test", "db", None);
         for line in script.lines() {
@@ -2873,6 +2950,7 @@ mod tests {
             included_destructive: 0,
             unowned: Vec::new(),
             resets: Vec::new(),
+            dependents: Vec::new(),
         };
         let script = render_script(&plan, "test", "db", None);
         assert!(!script.contains("\nDROP TABLE"), "{script}");
@@ -2905,6 +2983,7 @@ mod tests {
                 "work_mem of DATABASE app".to_string(),
                 "a\nb of ROLE x IN DATABASE app".to_string(),
             ],
+            dependents: Vec::new(),
         };
         let script = render_script(&plan, "test", "db", None);
         assert!(
@@ -2912,6 +2991,39 @@ mod tests {
                 "-- destructive statements: none\n\
                  -- settings reset: 2 (work_mem of DATABASE app, a\\nb of \
                  ROLE x IN DATABASE app)\n"
+            ),
+            "{script}"
+        );
+    }
+
+    /// The header names each object that the plan drops and makes
+    /// again because it depends on a function that the plan drops
+    #[test]
+    fn script_names_the_rebuilt_dependents() {
+        let statement = |label: &str| Statement {
+            label: label.to_string(),
+            sql: "DROP VIEW test.v;\n".to_string(),
+            fails_open: false,
+        };
+        let plan = Plan {
+            included: Vec::new(),
+            excluded: vec![statement("VIEW test.v"), statement("VIEW x")],
+            kept: Vec::new(),
+            included_destructive: 0,
+            unowned: Vec::new(),
+            resets: Vec::new(),
+            dependents: vec![
+                "VIEW test.v".to_string(),
+                "VIEW a\nb".to_string(),
+            ],
+        };
+        let script = render_script(&plan, "test", "db", None);
+        assert!(
+            script.contains(
+                "-- destructive statements: 2 excluded (re-run with \
+                 --allow-drop)\n\
+                 -- dependents rebuilt with a replaced function: 2 (VIEW \
+                 test.v, VIEW a\\nb)\n"
             ),
             "{script}"
         );
@@ -2957,6 +3069,7 @@ mod tests {
             included_destructive: 0,
             unowned: Vec::new(),
             resets: Vec::new(),
+            dependents: Vec::new(),
         };
         let script = render_script(
             &plan,
@@ -2992,6 +3105,7 @@ mod tests {
             included_destructive: 0,
             unowned: Vec::new(),
             resets: Vec::new(),
+            dependents: Vec::new(),
         };
         let script = render_script(&plan, "test", "db", None);
         assert_eq!(
@@ -3025,6 +3139,7 @@ mod tests {
             included_destructive: 0,
             unowned: Vec::new(),
             resets: Vec::new(),
+            dependents: Vec::new(),
         };
         let script = render_script(&plan, "test", "db", Some("App Owner"));
         assert!(
@@ -3177,6 +3292,7 @@ mod tests {
             plan(
                 &diff,
                 &BTreeMap::new(),
+                &dependents::Dependents::default(),
                 &output,
                 &snapshot,
                 &privileges::Privileges::default(),
@@ -3284,6 +3400,7 @@ mod tests {
             let plan = plan(
                 &diff,
                 &resolutions,
+                &dependents::Dependents::default(),
                 &output,
                 &snapshot,
                 &privileges::Privileges::default(),
@@ -3388,6 +3505,7 @@ mod tests {
             let plan = plan(
                 &diff,
                 &resolutions,
+                &dependents::Dependents::default(),
                 &output,
                 &snapshot,
                 &privileges::Privileges::default(),
@@ -3462,6 +3580,7 @@ mod tests {
             plan(
                 &diff,
                 &BTreeMap::new(),
+                &dependents::Dependents::default(),
                 &output,
                 &snapshot,
                 &privileges::Privileges::default(),
@@ -3619,6 +3738,7 @@ mod tests {
         plan(
             &diff,
             &resolutions,
+            &dependents::Dependents::default(),
             &output,
             &snapshot,
             &privileges::Privileges::default(),
@@ -3941,6 +4061,7 @@ mod tests {
         let plan = plan(
             &diff,
             &BTreeMap::new(),
+            &dependents::Dependents::default(),
             &output,
             &snapshot,
             &privileges::Privileges::default(),
@@ -4188,6 +4309,7 @@ mod tests {
         let plan = plan(
             &diff,
             &BTreeMap::new(),
+            &dependents::Dependents::default(),
             &output,
             &snapshot,
             &privileges::Privileges::default(),
