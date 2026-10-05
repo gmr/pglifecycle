@@ -567,6 +567,10 @@ and it is matched by them.
 An expression (a default, a `CHECK` constraint, an index or policy
 expression, a generated column) is compared as text after deploy
 makes each cast the same form (see [Project format](project-format.md)).
+deploy also puts a `CHECK` expression that has an operator in
+parentheses, as PostgreSQL does: `ee > 0` is `(ee > 0)`. It does not
+add the parentheses that PostgreSQL adds in an expression:
+`a > 0 AND b > 0` is `((a > 0) AND (b > 0))`.
 Some changes that PostgreSQL makes to an expression depend on the
 types of its parts. deploy does not know these types, so it cannot
 make these changes itself:

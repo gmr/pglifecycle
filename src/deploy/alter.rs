@@ -167,7 +167,12 @@ pub(crate) fn rebuilt_index_groups<'a>(
                 .iter()
                 .flatten()
                 .find(|index| index.name == existing.name)
-                .is_some_and(|wanted| same_but_comment(wanted, existing));
+                .is_some_and(|wanted| {
+                    same_but_comment(
+                        &wanted.canonical(),
+                        &existing.canonical(),
+                    )
+                });
             if unchanged {
                 continue;
             }
@@ -2405,7 +2410,7 @@ mod tests {
             vec![
                 "ALTER TABLE test.users DROP CONSTRAINT email_has_at;\n",
                 "ALTER TABLE test.users ADD CONSTRAINT email_has_at CHECK \
-                 (email ~ '@');\n",
+                 ((email ~ '@'));\n",
             ]
         );
     }
@@ -2429,7 +2434,7 @@ mod tests {
             vec![
                 "ALTER TABLE test.users DROP CONSTRAINT email_has_at;\n",
                 "ALTER TABLE test.users ADD CONSTRAINT email_has_at CHECK \
-                 (email ~ '@') NOT ENFORCED;\n",
+                 ((email ~ '@')) NOT ENFORCED;\n",
             ]
         );
     }
@@ -2912,8 +2917,8 @@ mod tests {
             sql(&alters),
             vec![
                 "DROP INDEX IF EXISTS test.users_legacy_idx;\n",
-                "CREATE UNIQUE INDEX users_email_idx ON test.users ( email \
-                 );\n",
+                "CREATE UNIQUE INDEX users_email_idx ON test.users USING \
+                 btree ( email );\n",
             ]
         );
         assert!(alters.iter().all(|a| !a.destructive));
@@ -2981,8 +2986,8 @@ mod tests {
             sql(&alters),
             vec![
                 "DROP INDEX IF EXISTS test.users_email_idx;\n",
-                "CREATE INDEX users_email_idx ON test.users ( email );\n\
-                 COMMENT ON INDEX test.users_email_idx IS \
+                "CREATE INDEX users_email_idx ON test.users USING btree ( \
+                 email );\nCOMMENT ON INDEX test.users_email_idx IS \
                  $$lookup by email$$;\n",
             ]
         );
@@ -4307,6 +4312,92 @@ mod tests {
         assert!(sql(&statements(table(&repo, &repo))).is_empty());
     }
 
+    /// A CHECK expression with no outer parentheses, which PostgreSQL
+    /// adds, is not a change; another expression is
+    #[test]
+    fn check_without_outer_parentheses_is_unchanged() {
+        let check = |expression: &str| {
+            serde_json::json!([
+                {"name": "positive", "expression": expression},
+                {"name": "small", "expression": expression,
+                 "not_valid": true},
+            ])
+        };
+        let db = with_key("check_constraints", check("(ee > 0)"));
+        let repo = with_key("check_constraints", check("ee > 0"));
+        assert!(sql(&statements(table(&repo, &db))).is_empty());
+        let repo = with_key("check_constraints", check("ee > 1"));
+        assert!(!sql(&statements(table(&repo, &db))).is_empty());
+        let domain_with = |expression: &str| -> Domain {
+            serde_json::from_value(serde_json::json!({
+                "name": "d", "schema": "test", "owner": "postgres",
+                "data_type": "integer",
+                "check_constraints": [
+                    {"name": "d_check", "expression": expression},
+                ],
+            }))
+            .unwrap()
+        };
+        let db = domain_with("(VALUE > 0)");
+        assert!(matches!(
+            domain(&domain_with("VALUE > 0"), &db),
+            Resolution::Statements(ref alters) if alters.is_empty()
+        ));
+        assert!(matches!(
+            domain(&domain_with("VALUE > 1"), &db),
+            Resolution::Replace
+        ));
+    }
+
+    /// An index with the values that pg_dump does not write, or with
+    /// no method, compares equal to the index that pull writes; another
+    /// method or order is a change
+    #[test]
+    fn index_defaults_compare_as_pg_dump_writes_them() {
+        let db = with_key(
+            "indexes",
+            serde_json::json!([{
+                "name": "users_email_idx", "method": "btree",
+                "columns": [{"name": "email"},
+                            {"name": "id", "direction": "DESC"}],
+            }]),
+        );
+        let index = |method: Option<&str>, placement: &str| {
+            let mut index = serde_json::json!({
+                "name": "users_email_idx",
+                "unique": false, "recurse": true,
+                "nulls_not_distinct": false, "storage_parameters": {},
+                "columns": [
+                    {"name": "email", "direction": "ASC",
+                     "null_placement": placement},
+                    {"name": "id", "direction": "DESC",
+                     "null_placement": "FIRST"},
+                ],
+            });
+            if let Some(method) = method {
+                index["method"] = serde_json::json!(method);
+            }
+            with_key("indexes", serde_json::json!([index]))
+        };
+        assert!(sql(&statements(table(&index(None, "LAST"), &db))).is_empty());
+        assert_eq!(
+            sql(&statements(table(&index(Some("hash"), "LAST"), &db))),
+            vec![
+                "DROP INDEX IF EXISTS test.users_email_idx;\n",
+                "CREATE INDEX users_email_idx ON test.users USING hash ( \
+                 email, id DESC );\n",
+            ]
+        );
+        assert_eq!(
+            sql(&statements(table(&index(None, "FIRST"), &db))),
+            vec![
+                "DROP INDEX IF EXISTS test.users_email_idx;\n",
+                "CREATE INDEX users_email_idx ON test.users USING btree ( \
+                 email NULLS FIRST, id DESC );\n",
+            ]
+        );
+    }
+
     #[test]
     fn exclude_constraint_without_method_is_btree() {
         let constraint = |method: Option<&str>| {
@@ -4439,6 +4530,21 @@ mod tests {
                          "method": "btree", "columns": [column]}],
         }));
         (parent, child)
+    }
+
+    /// A partition index with no method is the btree index that pull
+    /// writes, so its group is not rebuilt
+    #[test]
+    fn a_partition_index_with_no_method_rebuilds_no_group() {
+        let (db_parent, db_child) = partitioned(None);
+        let (mut repo_parent, mut repo_child) = partitioned(None);
+        for table in [&mut repo_parent, &mut repo_child] {
+            table.indexes.as_mut().unwrap()[0].method = None;
+        }
+        let groups = rebuilt_index_groups(
+            [(&repo_parent, &db_parent), (&repo_child, &db_child)].into_iter(),
+        );
+        assert!(groups.is_empty());
     }
 
     #[test]
