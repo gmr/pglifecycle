@@ -783,9 +783,14 @@ fn constraint_names(table: &Table) -> std::collections::BTreeSet<String> {
             ConstraintColumns::Name(column) => {
                 generated(std::slice::from_ref(column), suffix)
             }
-            ConstraintColumns::Columns(columns)
-            | ConstraintColumns::Detailed { columns, .. } => {
-                generated(columns, suffix)
+            ConstraintColumns::Columns(columns) => generated(columns, suffix),
+            // the key columns and then the INCLUDE columns
+            ConstraintColumns::Detailed {
+                columns, include, ..
+            } => {
+                let mut columns = columns.clone();
+                columns.extend(include.iter().flatten().cloned());
+                generated(&columns, suffix)
             }
         };
         names.insert(name);

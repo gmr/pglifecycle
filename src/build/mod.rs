@@ -328,6 +328,11 @@
 //!     PostgreSQL makes, and a name that must be quoted did not make
 //!     the domain. The test-project domains have one CHECK each, thus
 //!     its archive does not change.
+//! 64. The INCLUDE columns of an index render as identifiers, quoted
+//!     when they need quotes, as the key columns render. The Python
+//!     wrote them bare, which does not parse for a name that needs
+//!     quotes. The test-project has no index with INCLUDE columns,
+//!     thus its archive does not change.
 
 mod acls;
 mod calls;
@@ -3942,6 +3947,8 @@ pub(crate) fn render_index(index: &Index, table_name: &str) -> Vec<String> {
     create.push(columns.join(", "));
     create.push(")".into());
     if let Some(include) = &index.include {
+        let include: Vec<String> =
+            include.iter().map(|c| quote_ident(c)).collect();
         create.push(format!("INCLUDE ({})", include.join(", ")));
     }
     // pg_dump writes this after the column list and any INCLUDE, and

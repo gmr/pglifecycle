@@ -381,10 +381,22 @@ pub(crate) fn create_index(
         .child_of_kind("opt_single_name")
         .map(|n| unquote(n.text(src)))
         .unwrap_or_default();
+    // the INCLUDE columns are index_elem nodes too, in opt_include;
+    // only those of index_params are key columns
     let columns: Vec<IndexColumn> = node
-        .find_all("index_elem")
+        .child_of_kind("index_params")
+        .map(|n| n.find_all("index_elem"))
+        .unwrap_or_default()
         .iter()
         .map(|elem| index_column(elem, src))
+        .collect();
+    // PostgreSQL accepts only a column name in INCLUDE
+    let include: Vec<String> = node
+        .child_of_kind("opt_include")
+        .map(|n| n.find_all("index_elem"))
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|elem| index_column(elem, src).name)
         .collect();
     let index = Index {
         name,
@@ -400,7 +412,7 @@ pub(crate) fn create_index(
             .and_then(|n| n.child_of_kind("name"))
             .map(|n| unquote(n.text(src))),
         columns: (!columns.is_empty()).then_some(columns),
-        include: node.find("opt_c_include").map(|n| column_elems(&n, src)),
+        include: (!include.is_empty()).then_some(include),
         nulls_not_distinct: node
             .child_of_kind("opt_unique_null_treatment")
             .map(|n| n.has("kw_not"))
@@ -1088,7 +1100,14 @@ fn drop_generated_name(
     else {
         return;
     };
-    let columns_name = cols.join("_");
+    // PostgreSQL makes the name from the key columns and then the
+    // INCLUDE columns
+    let columns_name = cols
+        .iter()
+        .chain(include.iter().flatten())
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join("_");
     let name2 = (suffix != "pkey").then_some(columns_name.as_str());
     if name.as_deref().is_some_and(|name| {
         is_generated_name(name, table, name2, suffix, &BTreeSet::new())
@@ -1525,6 +1544,27 @@ mod tests {
         assert_eq!(columns[0].name, Some("email".into()));
     }
 
+    /// INCLUDE columns are not key columns of the index
+    #[test]
+    fn parses_index_include() {
+        let statement = parse_one(
+            "CREATE INDEX i ON ONLY t USING btree (w DESC) \
+             INCLUDE (v, \"Has Space\") WHERE (w > 0);",
+        );
+        let Statement::CreateIndex { index, .. } = statement else {
+            panic!("expected CreateIndex")
+        };
+        let columns = index.columns.unwrap();
+        assert_eq!(columns.len(), 1);
+        assert_eq!(columns[0].name, Some("w".into()));
+        assert_eq!(columns[0].direction, Some("DESC".into()));
+        assert_eq!(
+            index.include,
+            Some(vec![String::from("v"), String::from("Has Space")])
+        );
+        assert_eq!(index.recurse, Some(false));
+    }
+
     #[test]
     fn parses_partial_index() {
         let statement = parse_one("CREATE INDEX i ON t (c) WHERE d IS NULL;");
@@ -1749,6 +1789,44 @@ mod tests {
                     ..not_null("users_email_not_null")
                 },
                 not_null("email_required"),
+            ])
+        );
+    }
+
+    /// PostgreSQL makes the name of a unique constraint from its key
+    /// columns and then its INCLUDE columns
+    #[test]
+    fn drops_generated_names_with_include_columns() {
+        let Statement::CreateTable(mut table) =
+            parse_one("CREATE TABLE t (w integer, v text);")
+        else {
+            panic!("expected CreateTable")
+        };
+        let unique = |name: &str| ConstraintColumns::Detailed {
+            name: Some(name.into()),
+            columns: vec!["w".into()],
+            include: Some(vec!["v".into()]),
+            nulls_not_distinct: None,
+            without_overlaps: None,
+        };
+        for name in ["t_w_v_key", "t_w_key"] {
+            apply_constraint(
+                &mut table,
+                Some(name.into()),
+                TableConstraint::Unique(unique(name)),
+            );
+        }
+        assert_eq!(
+            table.unique_constraints,
+            Some(vec![
+                ConstraintColumns::Detailed {
+                    name: None,
+                    columns: vec!["w".into()],
+                    include: Some(vec!["v".into()]),
+                    nulls_not_distinct: None,
+                    without_overlaps: None,
+                },
+                unique("t_w_key"),
             ])
         );
     }
