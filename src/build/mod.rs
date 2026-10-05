@@ -289,6 +289,14 @@
 //!     the entry had no dependency and the owner of the superuser.
 //!     Pull now writes `z(x)()` for a routine `"z(x)"` with no
 //!     arguments. The test-project has no grant on a routine.
+//! 58. The `comment` of `project.yaml` renders as a `COMMENT` entry
+//!     with the tag `DATABASE name`, as pg_dump writes it: `COMMENT ON
+//!     DATABASE name IS ...`. As for the settings (see 48), the
+//!     statement names the database of the project, and pg_restore
+//!     restores the entry only with `--create`. The entry has no drop
+//!     statement, thus pg_restore does not set its owner. The Python
+//!     had no place for the comment. The test-project has none, thus
+//!     its archive does not change.
 
 mod acls;
 mod calls;
@@ -365,6 +373,7 @@ pub fn assemble(project: &Project) -> Result<BuildOutput, String> {
         task.inc();
     }
     task.finish();
+    builder.dump_database_comment(project)?;
     builder.dump_database_settings(project)?;
     acls::dump_acls(&mut builder, project)?;
     // record inventory dependency edges on the entries so the weighted
@@ -1924,6 +1933,36 @@ impl Builder {
                 )?;
             }
         }
+        Ok(())
+    }
+
+    /// Emit the comment of the database as a `COMMENT` entry with the
+    /// tag `DATABASE name`, as pg_dump writes it (deviation 58). As for
+    /// the settings, the statement names the database of the project,
+    /// and pg_restore restores the entry only with `--create`
+    fn dump_database_comment(
+        &mut self,
+        project: &Project,
+    ) -> Result<(), String> {
+        let Some(comment) = &project.settings.comment else {
+            return Ok(());
+        };
+        let name = quote_ident(&project.name);
+        self.dump
+            .add_entry(
+                libpgdump::ObjectType::Comment,
+                Some(""),
+                Some(&format!("DATABASE {name}")),
+                Some(&self.superuser),
+                Some(&format!(
+                    "COMMENT ON DATABASE {name} IS {};\n",
+                    dollar_quote(comment)
+                )),
+                None,
+                None,
+                &[],
+            )
+            .map_err(|e| format!("failed to add COMMENT ON DATABASE: {e}"))?;
         Ok(())
     }
 

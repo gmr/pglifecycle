@@ -53,6 +53,11 @@ createdb app
 pg_restore --create -d app app.dump
 ```
 
+The `comment` of `project.yaml` goes in a `COMMENT` entry with the tag
+`DATABASE name`, as `pg_dump` writes it: `COMMENT ON DATABASE name IS
+...`. The entry names the database of the project, and `pg_restore`
+restores it only with `--create`, as for the settings.
+
 ## deploy
 
 Compare a live database (or an existing dump) against the project and
@@ -259,6 +264,12 @@ reconciled in place where PostgreSQL can express it:
   statements. A setting changes only the sessions that start after the
   script. Deploy does not make roles, so a role in `role_settings` must
   exist (deploy warns when it does not).
+- **Database comment** — the `comment` of `project.yaml`. A comment
+  that is different, or that only the project has, gets `COMMENT ON
+  DATABASE name IS ...`, and a comment that only the database has gets
+  `COMMENT ON DATABASE name IS NULL`, as for the comment of an object.
+  `name` is the name of the database that deploy reads. The statement
+  comes with the settings, after all other statements.
 - Everything else falls back to drop+recreate.
 
 ### Destructive statements and limits
@@ -278,6 +289,9 @@ project that does not have a setting of the database thus resets it:
 pull the project again to record the settings. Each such `RESET` is
 reported on stderr and listed in the script header (`-- settings
 reset:`).
+
+The removal of the database comment (`IS NULL`) is also not gated. It
+loses no data, as the removal of the comment of an object.
 
 An index that the database has and the project does not is **kept**
 unless `--allow-drop-indexes` is given. Such an index is often made at

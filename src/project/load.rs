@@ -168,6 +168,8 @@ impl Loader {
                 path.display()
             ));
         }
+        self.project.settings.comment =
+            project["comment"].as_str().map(String::from);
         if let Ok(settings) =
             serde_json::from_value(project["settings"].clone())
         {

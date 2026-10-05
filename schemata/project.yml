@@ -25,6 +25,11 @@ properties:
       so. A project loads only if the value is `true`. Remove the field.
     type: boolean
     deprecated: true
+  comment:
+    title: Comment
+    description: >
+      An optional comment about the database (`COMMENT ON DATABASE`)
+    type: string
   superuser:
     description: The PostgreSQL super user
     type: string

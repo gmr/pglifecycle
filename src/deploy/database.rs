@@ -1,6 +1,12 @@
-//! The settings of the database, and of each role in the database: the
-//! `settings` and `role_settings` of `project.yaml` compared with the
-//! DATABASE PROPERTIES entry of the snapshot.
+//! The comment and the settings of the database, and the settings of
+//! each role in the database: the `comment`, `settings` and
+//! `role_settings` of `project.yaml` compared with the COMMENT and
+//! DATABASE PROPERTIES entries of the snapshot.
+//!
+//! A comment that is different or that only the project has gets
+//! `COMMENT ON DATABASE`, and a comment that only the database has
+//! gets `IS NULL`, as for the comment of an object. The removal is not
+//! destructive: it loses no data.
 //!
 //! A setting that is different or that only the project has gets
 //! `SET`, and a setting that only the database has gets `RESET`. A
@@ -14,14 +20,15 @@
 use serde_json::{Map, Value};
 
 use super::Statement;
+use super::alter::comment_on;
 use crate::models::canonical_settings;
 use crate::project::DatabaseSettings;
 use crate::pull::Assembly;
 use crate::utils::{quote_ident, setting_value};
 
-/// The statements that make the settings of the database `assembly`
-/// the settings of the project, and each setting that they reset, as
-/// `name of label`
+/// The statements that make the comment and the settings of the
+/// database `assembly` those of the project, and each setting that
+/// they reset, as `name of label`
 pub(super) fn statements(
     project: &DatabaseSettings,
     assembly: &Assembly,
@@ -29,13 +36,21 @@ pub(super) fn statements(
     let database = quote_ident(&assembly.dbname);
     let label = format!("DATABASE {}", assembly.dbname);
     let mut resets = Vec::new();
-    let mut statements = changes(
+    let mut statements = Vec::new();
+    if project.comment != assembly.comment {
+        statements.push(Statement {
+            label: label.clone(),
+            sql: comment_on("DATABASE", &database, project.comment.as_deref()),
+            fails_open: false,
+        });
+    }
+    statements.extend(changes(
         &label,
         &format!("ALTER DATABASE {database}"),
         &flatten(&project.database),
         &assembly.settings,
         &mut resets,
-    );
+    ));
     let empty = Map::new();
     let mut roles: Vec<&String> = project
         .roles
@@ -194,6 +209,39 @@ mod tests {
         );
         assert_eq!(statements[0].label, "ROLE App User IN DATABASE app");
         assert_eq!(resets, ["work_mem of ROLE old IN DATABASE app"]);
+    }
+
+    /// A changed comment, and a comment that only the project has, get
+    /// COMMENT ON DATABASE, and a comment that only the database has
+    /// gets IS NULL. The same comment is not a change
+    #[test]
+    fn database_comment_set_and_removed() {
+        let comment = |project: Option<&str>, database: Option<&str>| {
+            let project = DatabaseSettings {
+                comment: project.map(String::from),
+                ..Default::default()
+            };
+            let mut assembly = assembly("App DB");
+            assembly.comment = database.map(String::from);
+            let (statements, resets) = statements(&project, &assembly);
+            assert!(resets.is_empty());
+            assert!(statements.iter().all(|s| s.label == "DATABASE App DB"));
+            statements.into_iter().map(|s| s.sql).collect::<Vec<_>>()
+        };
+        assert_eq!(
+            comment(Some("it's new"), Some("old")),
+            ["COMMENT ON DATABASE \"App DB\" IS $$it's new$$;\n"]
+        );
+        assert_eq!(
+            comment(Some("new"), None),
+            ["COMMENT ON DATABASE \"App DB\" IS $$new$$;\n"]
+        );
+        assert_eq!(
+            comment(None, Some("old")),
+            ["COMMENT ON DATABASE \"App DB\" IS NULL;\n"]
+        );
+        assert!(comment(Some("same"), Some("same")).is_empty());
+        assert!(comment(None, None).is_empty());
     }
 
     #[test]

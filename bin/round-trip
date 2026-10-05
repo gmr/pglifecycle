@@ -206,6 +206,46 @@ else
     fi
 fi
 
+# The comment of the database is also not in a dump without --create.
+# pg_restore restores the COMMENT entry of the database only with
+# --create, and the entry names the database of the project, as the
+# DATABASE PROPERTIES entry does. The step removes the comment of the
+# source database and restores the entry into it. The comment that it
+# restores must be the comment that pull read.
+echo "==> Database comment: build, restore with --create"
+db_comment() {
+    psql -d postgres -tA -v ON_ERROR_STOP=1 -c "
+        SELECT shobj_description(oid, 'pg_database')
+          FROM pg_database WHERE datname = '${SOURCE_DB}'
+           AND shobj_description(oid, 'pg_database') IS NOT NULL"
+}
+db_comment > "${WORKDIR}/db-comment-source.txt"
+if [ ! -s "${WORKDIR}/db-comment-source.txt" ]; then
+    # fixtures/schema.sql has a comment; another fixture can have none
+    if [ "${FIXTURE}" = fixtures/schema.sql ]; then
+        echo "Database comment gate FAILED: the source has no comment" >&2
+        exit 1
+    fi
+    echo "Database comment gate SKIPPED: ${FIXTURE} has no comment"
+else
+    pg_restore --create -l "${WORKDIR}/build.dump" \
+        | grep -E " COMMENT -? DATABASE " > "${WORKDIR}/db-comment.list" \
+        || true
+    psql -d postgres -q -v ON_ERROR_STOP=1 \
+        -c "COMMENT ON DATABASE ${SOURCE_DB} IS NULL"
+    pg_restore --create -d "${SOURCE_DB}" --exit-on-error \
+        -L "${WORKDIR}/db-comment.list" "${WORKDIR}/build.dump"
+    db_comment > "${WORKDIR}/db-comment-restored.txt"
+    if diff -u "${WORKDIR}/db-comment-source.txt" \
+            "${WORKDIR}/db-comment-restored.txt"; then
+        echo "Database comment gate passed: the restored comment is the" \
+            "same"
+    else
+        echo "Database comment gate FAILED: database comments differ" >&2
+        exit 1
+    fi
+fi
+
 # Roles are cluster objects, so pull reads them with pg_dumpall only
 # when it connects to a database, and the steps above do not see them.
 # A role and a user get settings that need quotes, a list setting with

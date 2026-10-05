@@ -700,6 +700,8 @@ pub struct Assembly {
     /// From the globals dump of pg_dumpall, as the roles
     pub tablespaces: Vec<models::Tablespace>,
     pub roles: BTreeMap<String, RoleState>,
+    /// The comment of the database (`COMMENT ON DATABASE`)
+    pub comment: Option<String>,
     /// The settings of the database (`ALTER DATABASE ... SET`)
     pub settings: Map<String, Value>,
     /// The settings of each role in the database (`ALTER ROLE ... IN
@@ -1867,6 +1869,12 @@ impl Assembly {
         let schema = target.schema.clone().unwrap_or_default();
         let name = &target.name;
         let found = match on {
+            // pg_dump writes only the comment of the database that it
+            // dumps
+            "DATABASE" => {
+                self.comment = Some(comment.clone());
+                true
+            }
             "SCHEMA" => self
                 .schemas
                 .iter_mut()
@@ -4442,6 +4450,68 @@ mod tests {
         assert_eq!(assembly.remaining.len(), 1);
         assert_eq!(assembly.remaining[0].desc, "DATABASE PROPERTIES");
         assert_eq!(assembly.settings.len(), 1);
+    }
+
+    /// The comment of the database survives pull → write → load →
+    /// build: pg_dump writes it in a COMMENT entry that names the
+    /// database, pull writes it in project.yaml, and build writes the
+    /// entry again for the database of the project
+    #[test]
+    fn database_comment_round_trip_through_build() {
+        use clap::Parser;
+        let mut dump = libpgdump::new("App DB", "UTF8", "18.0").unwrap();
+        add(
+            &mut dump,
+            OT::Comment,
+            "",
+            "DATABASE \"App DB\"",
+            "COMMENT ON DATABASE \"App DB\" IS 'it''s\nhere';\n",
+        );
+        let mut assembly = Assembly::default();
+        assembly.ingest(&dump).unwrap();
+        assert!(assembly.remaining.is_empty());
+        assert_eq!(assembly.comment.as_deref(), Some("it's\nhere"));
+
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("project");
+        let unused = dir.path().join("unused.dump");
+        let args = match cli::Cli::try_parse_from([
+            "pglifecycle",
+            "pull",
+            "--dump",
+            unused.to_str().unwrap(),
+            dest.to_str().unwrap(),
+        ])
+        .unwrap()
+        .action
+        {
+            cli::Action::Pull(args) => args,
+            _ => unreachable!(),
+        };
+        let files = writer::render(&assembly, &args).unwrap();
+        writer::write_bootstrap(&files, &args).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dest.join("project.yaml")).unwrap(),
+            "---\nname: App DB\ncomment: |-\n  it's\n  here\n"
+        );
+
+        // load validates project.yaml against its schema
+        let project = crate::project::load(&dest).unwrap();
+        assert_eq!(project.settings.comment.as_deref(), Some("it's\nhere"));
+        let archive = dir.path().join("app.dump");
+        crate::build::build(&project, &archive).unwrap();
+        let built = libpgdump::load(&archive).unwrap();
+        let entry = built
+            .entries()
+            .iter()
+            .find(|e| e.desc == OT::Comment)
+            .expect("COMMENT entry");
+        assert_eq!(entry.tag.as_deref(), Some("DATABASE \"App DB\""));
+        assert_eq!(entry.drop_stmt, None);
+        assert_eq!(
+            entry.defn.as_deref(),
+            Some("COMMENT ON DATABASE \"App DB\" IS $$it's\nhere$$;\n")
+        );
     }
 
     /// Role membership grants survive the full pull → write → load →
