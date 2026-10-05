@@ -310,7 +310,7 @@ impl Table {
         for check in table.check_constraints.iter_mut().flatten() {
             check.not_valid = true_only(check.not_valid);
             check.expression =
-                crate::deploy::canonical_casts(&check.expression);
+                crate::deploy::canonical_check(&check.expression);
         }
         for column_default in table.column_defaults.iter_mut().flatten() {
             if let Value::String(text) = &mut column_default.default {
@@ -744,13 +744,31 @@ impl Index {
     /// The same index in the form deploy compares: the storage
     /// parameters and the collations in the form that PostgreSQL
     /// reads, and the type of each cast in an expression and in the
-    /// WHERE clause in the form that PostgreSQL writes
+    /// WHERE clause in the form that PostgreSQL writes. A value at its
+    /// default is absent, and the method is btree when it is absent,
+    /// as pg_dump writes them: `unique`, `nulls_not_distinct` and
+    /// `recurse` at their defaults, no storage parameters, the order
+    /// `ASC`, and the NULL placement of the order (`LAST` with `ASC`,
+    /// `FIRST` with `DESC`).
     pub fn canonical(&self) -> Index {
         let mut index = self.clone();
+        index.unique = true_only(index.unique);
+        index.nulls_not_distinct = true_only(index.nulls_not_distinct);
+        index.recurse = index.recurse.filter(|recurse| !recurse);
+        index.method.get_or_insert_with(|| String::from("btree"));
         canonical_expression(&mut index.where_clause);
         index.storage_parameters =
-            canonical_storage_parameters(index.storage_parameters.take());
+            canonical_storage_parameters(index.storage_parameters.take())
+                .filter(|parameters| !parameters.is_empty());
         for column in index.columns.iter_mut().flatten() {
+            let descending = column.direction.as_deref() == Some("DESC");
+            if !descending {
+                column.direction = None;
+            }
+            let default_placement = if descending { "FIRST" } else { "LAST" };
+            if column.null_placement.as_deref() == Some(default_placement) {
+                column.null_placement = None;
+            }
             canonical_collation(&mut column.collation);
             if let Some(expression) = &mut column.expression {
                 *expression = crate::deploy::canonical_casts(expression);

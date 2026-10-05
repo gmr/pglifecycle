@@ -698,10 +698,10 @@ fn normalized(definition: &Definition) -> Value {
     value
 }
 
-/// The domain with the type of each cast in its default and its CHECK
-/// constraints in the form that PostgreSQL writes (see
-/// [`canonical_casts`]). A NULL default is in the form that PostgreSQL
-/// stores (see [`stored_null_default`]).
+/// The domain with the type of each cast in its default in the form
+/// that PostgreSQL writes (see [`canonical_casts`]), and its CHECK
+/// constraints in the form of [`canonical_check`]. A NULL default is
+/// in the form that PostgreSQL stores (see [`stored_null_default`]).
 pub(crate) fn canonical_domain(domain: &Domain) -> Domain {
     let mut domain = domain.clone();
     if let (Some(data_type), Some(default)) =
@@ -716,7 +716,7 @@ pub(crate) fn canonical_domain(domain: &Domain) -> Domain {
     }
     for check in domain.check_constraints.iter_mut().flatten() {
         if let Some(expression) = &mut check.expression {
-            *expression = canonical_casts(expression);
+            *expression = canonical_check(expression);
         }
     }
     domain
@@ -1608,26 +1608,58 @@ pub(crate) fn canonical_casts(expression: &str) -> String {
 /// `ARRAY[]`. An operand that has parentheses stays as it is. An
 /// expression that the grammar cannot read stays as it is.
 fn cast_syntax(expression: &str) -> String {
-    // the grammar reads an expression only in a statement
-    let prefix = "SELECT ";
-    let source = format!("{prefix}{expression}");
-    let mut parser = tree_sitter::Parser::new();
-    if parser
-        .set_language(&tree_sitter_postgres::LANGUAGE.into())
-        .is_err()
-    {
-        return expression.to_string();
-    }
-    let Some(tree) = parser.parse(&source, None) else {
+    let source = format!("{EXPRESSION_PREFIX}{expression}");
+    let Some(tree) = parse_expression(&source) else {
         return expression.to_string();
     };
-    let root = tree.root_node();
-    if root.has_error() {
-        return expression.to_string();
-    }
     let mut result = String::with_capacity(source.len());
-    write_casts(&root, &source, &mut result);
-    result.split_off(prefix.len())
+    write_casts(&tree.root_node(), &source, &mut result);
+    result.split_off(EXPRESSION_PREFIX.len())
+}
+
+/// The grammar reads an expression only in a statement, thus
+/// [`parse_expression`] reads the expression after this text
+const EXPRESSION_PREFIX: &str = "SELECT ";
+
+/// The tree of the source, an expression after [`EXPRESSION_PREFIX`],
+/// or none when the grammar cannot read it
+fn parse_expression(source: &str) -> Option<tree_sitter::Tree> {
+    let mut parser = tree_sitter::Parser::new();
+    parser
+        .set_language(&tree_sitter_postgres::LANGUAGE.into())
+        .ok()?;
+    let tree = parser.parse(source, None)?;
+    (!tree.root_node().has_error()).then_some(tree)
+}
+
+/// A CHECK expression in the form that PostgreSQL writes: each cast
+/// in the form that [`canonical_casts`] gives, and the expression in
+/// parentheses when it has an operator. PostgreSQL keeps `CHECK (ee >
+/// 0)` as `CHECK ((ee > 0))`, which pull writes as `(ee > 0)`. An
+/// expression with no operator (a column, a function call, a constant
+/// or a cast) and an expression in parentheses stay as they are. An
+/// expression that the grammar cannot read stays as it is.
+pub(crate) fn canonical_check(expression: &str) -> String {
+    let expression = canonical_casts(expression.trim());
+    let source = format!("{EXPRESSION_PREFIX}{expression}");
+    let operator = parse_expression(&source).is_some_and(|tree| {
+        // the first a_expr is the expression of the SELECT
+        let Some(mut node) = tree.root_node().find("a_expr") else {
+            return false;
+        };
+        // a node with one child is the child
+        while node.child_count() == 1 {
+            node = node.child(0).expect("one child");
+        }
+        let kinds: Vec<&str> =
+            node.children(&mut node.walk()).map(|c| c.kind()).collect();
+        node.kind() == "a_expr" && !matches!(kinds[..], [_, "::", "Typename"])
+    });
+    if operator {
+        format!("({expression})")
+    } else {
+        expression
+    }
 }
 
 /// The text of the node with each cast in it in the form that
@@ -2437,6 +2469,31 @@ mod tests {
         );
         // text that the grammar cannot read stays as it is
         assert_eq!(canonical_casts("(i::INT4 >"), "(i::integer >");
+    }
+
+    /// Each hand-written CHECK expression against the form that
+    /// pull writes from `pg_get_constraintdef` on PostgreSQL 18
+    #[test]
+    fn canonicalizes_check_parentheses() {
+        let same = |written: &str, stored: &str| {
+            assert_eq!(canonical_check(written), stored, "{written}");
+            assert_eq!(canonical_check(stored), stored, "{stored}");
+        };
+        same("ee > 0", "(ee > 0)");
+        same(" ee > 0\n", "(ee > 0)");
+        same("VALUE > 0", "(VALUE > 0)");
+        same("ee IS NOT NULL", "(ee IS NOT NULL)");
+        same("NOT b", "(NOT b)");
+        same("i::int > 0", "((i)::integer > 0)");
+        // parentheses that are not around all of it
+        same("(a > 0) AND (b > 0)", "((a > 0) AND (b > 0))");
+        // no operator: a column, a function call, a constant or a cast
+        same("b", "b");
+        same("is_valid(ee)", "is_valid(ee)");
+        same("true", "true");
+        same("b::boolean", "(b)::boolean");
+        // text that the grammar cannot read stays as it is
+        assert_eq!(canonical_check("ee >"), "ee >");
     }
 
     #[test]

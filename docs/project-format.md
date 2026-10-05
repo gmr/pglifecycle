@@ -290,6 +290,16 @@ revocations:
   `build` creates it as an ordinary table and attaches it with `ALTER
   TABLE ... ATTACH PARTITION`, as `pg_dump` writes it.
 
+- An index with no `method` is a btree index, as `pull` writes it
+  (`method: btree`). `deploy` compares an index without the values
+  that `pg_dump` does not write: `unique: false`, `recurse: true`,
+  `nulls_not_distinct: false`, `direction: ASC`, and the
+  `null_placement` of the order (`LAST` with `ASC`, `FIRST` with
+  `DESC`). An operator class that is the default for the
+  type of the column, and a tablespace that is the default of the
+  database, are a change: `pg_dump` does not write them, and `deploy`
+  does not know these defaults. Leave them out.
+
 - An index column that is an expression, such as a cast for an HNSW
   index, is written without parentheses around all of it:
   `expression: (embedding)::public.halfvec(1536)`. `build` adds them,
