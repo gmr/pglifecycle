@@ -931,13 +931,25 @@ const OUTSIDE_CORRECTED: &[(&str, &str, &str, &str, &str)] = &[
          label_required NOT NULL;\n",
         "DROP DOMAIN IF EXISTS test.required_label;\n",
     ),
+    // deviation 58: the comment of the database is a COMMENT entry
+    // with the tag `DATABASE name`, as pg_dump writes it. The Python
+    // had no place for it
+    (
+        "COMMENT",
+        "",
+        "DATABASE outside",
+        "COMMENT ON DATABASE outside IS $$it's outside$$;\n",
+        "",
+    ),
 ];
 
-/// The settings of the database for deviation 48
+/// The settings of the database for deviation 48, and its comment for
+/// deviation 58
 fn outside_settings() -> project::DatabaseSettings {
     let setting =
         |value: serde_json::Value| serde_json::from_value(value).unwrap();
     project::DatabaseSettings {
+        comment: Some(String::from("it's outside")),
         database: vec![
             setting(
                 serde_json::json!({"search_path": ["$user", "my schema"]}),

@@ -7,7 +7,8 @@ database object, validated against the JSON-Schema definitions in
 ```text
 my-project/
 ├── project.yaml          # name, superuser, extensions, languages,
-│                         # access methods, database settings
+│                         # access methods, database comment
+│                         # and settings
 ├── schemata/             # one file per schema
 │   └── test.yaml
 ├── tables/               # <schema>/<table>.yaml
@@ -290,6 +291,16 @@ revocations:
   `build` creates it as an ordinary table and attaches it with `ALTER
   TABLE ... ATTACH PARTITION`, as `pg_dump` writes it.
 
+- An index with no `method` is a btree index, as `pull` writes it
+  (`method: btree`). `deploy` compares an index without the values
+  that `pg_dump` does not write: `unique: false`, `recurse: true`,
+  `nulls_not_distinct: false`, `direction: ASC`, and the
+  `null_placement` of the order (`LAST` with `ASC`, `FIRST` with
+  `DESC`). An operator class that is the default for the
+  type of the column, and a tablespace that is the default of the
+  database, are a change: `pg_dump` does not write them, and `deploy`
+  does not know these defaults. Leave them out.
+
 - An index column that is an expression, such as a cast for an HNSW
   index, is written without parentheses around all of it:
   `expression: (embedding)::public.halfvec(1536)`. `build` adds them,
@@ -371,6 +382,13 @@ revocations:
   write the column and the sequence as `pull` writes them. Do not
   write the sequence of a serial column as its own file: write the
   column in one of the two forms.
+
+- PostgreSQL makes each column of the primary key and each identity
+  column NOT NULL, with a NOT NULL constraint of the name
+  `<table>_<column>_not_null`. `pull` writes `nullable: false` for
+  these columns. A project can leave it out: `deploy` compares the
+  column as NOT NULL. `nullable: true` on one of these columns is a
+  load error, because the database cannot have it.
 
 - A storage parameter (`storage_parameters` of a table, a
   materialized view or an index) can be a YAML number or boolean:
@@ -490,11 +508,14 @@ settings:
   does not have to be in the project. `pull` reads both from `pg_dump`,
   thus also with `--no-roles` and `--dump`. `build` writes them as
   `pg_dump` does (see [build](commands.md#build)), and `deploy` makes
-  them the settings of the database:
+  them the settings of the database. `comment` is the comment of the
+  database (`COMMENT ON DATABASE`). `pull`, `build` and `deploy` use it
+  as they use the settings:
 
 ```yaml
 ---
 name: app
+comment: The application database
 settings:
 - search_path: [$user, public]
 - work_mem: 64MB

@@ -181,6 +181,12 @@ impl Writer {
             String::from("name"),
             Value::String(assembly.dbname.clone()),
         );
+        if let Some(comment) = &assembly.comment {
+            project.insert(
+                String::from("comment"),
+                Value::String(comment.clone()),
+            );
+        }
         if !assembly.extensions.is_empty() {
             project.insert(
                 String::from("extensions"),

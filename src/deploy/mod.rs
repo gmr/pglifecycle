@@ -19,8 +19,8 @@ mod serial;
 pub(crate) use serial::integer_type as serial_integer_type;
 
 pub(crate) use diff::{
-    UserTypes, canonical_casts, canonical_collation, identity_type,
-    is_built_in, stored_null_default,
+    UserTypes, canonical_casts, canonical_check, canonical_collation,
+    identity_type, is_built_in, stored_null_default,
 };
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -563,12 +563,22 @@ fn plan(
         }
         let owners = entry_owners(entry, output, &entries_by_id);
         if owners.is_empty() {
-            if matches!(
-                entry.desc,
-                libpgdump::ObjectType::Acl
-                    | libpgdump::ObjectType::Comment
-                    | libpgdump::ObjectType::SecurityLabel
-            ) {
+            // the statements of `database` change the comment of the
+            // database
+            let database_comment = entry.desc
+                == libpgdump::ObjectType::Comment
+                && entry
+                    .tag
+                    .as_deref()
+                    .is_some_and(|tag| tag.starts_with("DATABASE "));
+            if !database_comment
+                && matches!(
+                    entry.desc,
+                    libpgdump::ObjectType::Acl
+                        | libpgdump::ObjectType::Comment
+                        | libpgdump::ObjectType::SecurityLabel
+                )
+            {
                 unowned.push(entry_label(entry));
             }
             continue;
@@ -3952,6 +3962,55 @@ mod tests {
             plan.unowned,
             vec!["ACL pg_catalog.FUNCTION pg_reload_conf()".to_string()]
         );
+    }
+
+    /// The comment of the database is in the build, but no item owns
+    /// it. The statements of `database` change it, thus the plan does
+    /// not have the entry, and the entry is not unowned
+    #[test]
+    fn database_comment_is_not_unowned() {
+        let diff = Diff {
+            items: BTreeMap::new(),
+            changed: BTreeMap::new(),
+            removed: BTreeMap::new(),
+            owned: BTreeSet::new(),
+            owner_changed: BTreeSet::new(),
+        };
+        let mut dump =
+            libpgdump::new("test", "UTF8", "18.0").expect("new dump");
+        dump.add_entry(
+            libpgdump::ObjectType::Comment,
+            Some(""),
+            Some("DATABASE test"),
+            Some("postgres"),
+            Some("COMMENT ON DATABASE test IS $$c$$;\n"),
+            None,
+            None,
+            &[],
+        )
+        .expect("add comment entry");
+        let output = build::BuildOutput {
+            dump,
+            item_ids: std::collections::HashMap::new(),
+        };
+        let snapshot =
+            libpgdump::new("test", "UTF8", "18.0").expect("new snapshot");
+        let cli = cli::Cli::parse_from(["pglifecycle", "deploy", "proj"]);
+        let args = match cli.action {
+            cli::Action::Deploy(deploy) => deploy,
+            _ => unreachable!("parsed the deploy subcommand"),
+        };
+        let plan = plan(
+            &diff,
+            &BTreeMap::new(),
+            &output,
+            &snapshot,
+            &privileges::Privileges::default(),
+            &args,
+        )
+        .expect("plan succeeds");
+        assert!(plan.included.is_empty());
+        assert!(plan.unowned.is_empty(), "{:?}", plan.unowned);
     }
 
     /// Each role that a planned statement names and the database does

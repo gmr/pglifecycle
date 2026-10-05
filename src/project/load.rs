@@ -168,6 +168,8 @@ impl Loader {
                 path.display()
             ));
         }
+        self.project.settings.comment =
+            project["comment"].as_str().map(String::from);
         if let Ok(settings) =
             serde_json::from_value(project["settings"].clone())
         {
@@ -853,6 +855,10 @@ impl Loader {
             Definition::Table(table) => {
                 normalize_table(table);
                 index_expressions(table.indexes.as_mut());
+                for message in nullable_errors(table) {
+                    log::error!("{message}");
+                    self.errors += 1;
+                }
             }
             Definition::MaterializedView(view) => {
                 index_expressions(view.indexes.as_mut());
@@ -1384,6 +1390,27 @@ fn normalize_table(table: &mut crate::models::Table) {
     }
 }
 
+/// An error for each column with `nullable: true` that PostgreSQL makes
+/// NOT NULL (see [`Table::is_always_not_null`]). PostgreSQL refuses
+/// `NULL` on an identity column, and makes a column of the primary key
+/// NOT NULL, so the database never has what the project says.
+fn nullable_errors(table: &Table) -> Vec<String> {
+    table
+        .columns
+        .iter()
+        .flatten()
+        .filter(|c| c.nullable == Some(true) && table.is_always_not_null(c))
+        .map(|c| {
+            format!(
+                "TABLE {}.{}: column {} has nullable: true, but it is in \
+                 the primary key or is an identity column, which \
+                 PostgreSQL makes NOT NULL. Remove nullable: true",
+                table.schema, table.name, c.name
+            )
+        })
+        .collect()
+}
+
 fn inject(defn: &mut Value, key: &str, value: &str) {
     if let Value::Object(map) = defn
         && !map.contains_key(key)
@@ -1885,6 +1912,29 @@ mod tests {
         loader.read_object_files(ObjectType::Table).unwrap();
         assert_eq!(loader.errors, 0);
         assert_eq!(loader.project.inventory.len(), 1);
+    }
+
+    /// PostgreSQL makes a column of the primary key and an identity
+    /// column NOT NULL, so `nullable: true` on one is an error
+    #[test]
+    fn nullable_primary_key_or_identity_column_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let tables = dir.path().join("tables").join("public");
+        std::fs::create_dir_all(&tables).unwrap();
+        std::fs::write(
+            tables.join("t.yaml"),
+            "owner: postgres\n\
+             columns:\n  - name: id\n    data_type: integer\n\
+             \x20   nullable: true\n\
+             \x20 - name: i\n    data_type: integer\n    nullable: true\n\
+             \x20   generated:\n      sequence_behavior: ALWAYS\n\
+             \x20 - name: v\n    data_type: text\n    nullable: true\n\
+             primary_key: id\n",
+        )
+        .unwrap();
+        let mut loader = Loader::new(dir.path());
+        loader.read_object_files(ObjectType::Table).unwrap();
+        assert_eq!(loader.errors, 2);
     }
 
     /// L7: a cast's `dependencies` block is cached under the same tag

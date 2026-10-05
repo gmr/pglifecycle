@@ -26,11 +26,13 @@ pub struct Project {
     pub inventory: Vec<models::Item>,
 }
 
-/// The settings of the database, from `project.yaml`. Each list has
-/// one `{ name: value }` object for each setting, as `role.yml`
-/// `settings` has
+/// The settings and the comment of the database, from `project.yaml`.
+/// Each list has one `{ name: value }` object for each setting, as
+/// `role.yml` `settings` has
 #[derive(Debug, Default)]
 pub struct DatabaseSettings {
+    /// `comment`: `COMMENT ON DATABASE`
+    pub comment: Option<String>,
     /// `settings`: `ALTER DATABASE ... SET`
     pub database: Vec<Map<String, Value>>,
     /// `role_settings`: `ALTER ROLE ... IN DATABASE ... SET`, by role

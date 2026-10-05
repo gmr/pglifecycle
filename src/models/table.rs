@@ -215,6 +215,23 @@ impl Table {
         names
     }
 
+    /// Whether PostgreSQL makes the column NOT NULL, also when the
+    /// column does not say it: a column of the primary key, or an
+    /// identity column. PostgreSQL 18 gives the column a NOT NULL
+    /// constraint of the name that [`Self::not_null_names`] gives, and
+    /// refuses DROP NOT NULL on it.
+    pub fn is_always_not_null(&self, column: &Column) -> bool {
+        let in_key = self
+            .primary_key
+            .as_ref()
+            .is_some_and(|key| key.columns().contains(&column.name));
+        let identity = column.generated.as_ref().is_some_and(|g| {
+            g.expression.is_none()
+                && (g.sequence_behavior.is_some() || g.sequence.is_some())
+        });
+        in_key || identity
+    }
+
     /// The same table with each *valid* table-level NOT NULL on one of
     /// its own columns moved onto that column.
     ///
@@ -285,10 +302,22 @@ impl Table {
     /// or an exclusion constraint expression, in a WHERE clause, a CHECK
     /// constraint, a default, a generated column expression, a policy
     /// expression or a trigger WHEN condition) is in the form that
-    /// PostgreSQL reads.
+    /// PostgreSQL reads. A column that PostgreSQL makes NOT NULL (see
+    /// [`Self::is_always_not_null`]) is NOT NULL.
     pub fn canonical(&self) -> Table {
         let mut table = self.with_canonical_not_nulls();
-        for column in table.columns.iter_mut().flatten() {
+        let not_null: Vec<bool> = table
+            .columns
+            .iter()
+            .flatten()
+            .map(|c| table.is_always_not_null(c))
+            .collect();
+        for (column, not_null) in
+            table.columns.iter_mut().flatten().zip(not_null)
+        {
+            if not_null {
+                column.nullable = Some(false);
+            }
             canonical_collation(&mut column.collation);
             canonical_default(&column.data_type, &mut column.default);
             canonical_expression(&mut column.check_constraint);
@@ -310,7 +339,7 @@ impl Table {
         for check in table.check_constraints.iter_mut().flatten() {
             check.not_valid = true_only(check.not_valid);
             check.expression =
-                crate::deploy::canonical_casts(&check.expression);
+                crate::deploy::canonical_check(&check.expression);
         }
         for column_default in table.column_defaults.iter_mut().flatten() {
             if let Value::String(text) = &mut column_default.default {
@@ -595,6 +624,16 @@ pub enum ConstraintColumns {
     },
 }
 
+impl ConstraintColumns {
+    /// The columns of the constraint
+    pub fn columns(&self) -> &[String] {
+        match self {
+            Self::Name(column) => std::slice::from_ref(column),
+            Self::Columns(columns) | Self::Detailed { columns, .. } => columns,
+        }
+    }
+}
+
 /// Represents a Foreign Key on a Table
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -744,13 +783,31 @@ impl Index {
     /// The same index in the form deploy compares: the storage
     /// parameters and the collations in the form that PostgreSQL
     /// reads, and the type of each cast in an expression and in the
-    /// WHERE clause in the form that PostgreSQL writes
+    /// WHERE clause in the form that PostgreSQL writes. A value at its
+    /// default is absent, and the method is btree when it is absent,
+    /// as pg_dump writes them: `unique`, `nulls_not_distinct` and
+    /// `recurse` at their defaults, no storage parameters, the order
+    /// `ASC`, and the NULL placement of the order (`LAST` with `ASC`,
+    /// `FIRST` with `DESC`).
     pub fn canonical(&self) -> Index {
         let mut index = self.clone();
+        index.unique = true_only(index.unique);
+        index.nulls_not_distinct = true_only(index.nulls_not_distinct);
+        index.recurse = index.recurse.filter(|recurse| !recurse);
+        index.method.get_or_insert_with(|| String::from("btree"));
         canonical_expression(&mut index.where_clause);
         index.storage_parameters =
-            canonical_storage_parameters(index.storage_parameters.take());
+            canonical_storage_parameters(index.storage_parameters.take())
+                .filter(|parameters| !parameters.is_empty());
         for column in index.columns.iter_mut().flatten() {
+            let descending = column.direction.as_deref() == Some("DESC");
+            if !descending {
+                column.direction = None;
+            }
+            let default_placement = if descending { "FIRST" } else { "LAST" };
+            if column.null_placement.as_deref() == Some(default_placement) {
+                column.null_placement = None;
+            }
             canonical_collation(&mut column.collation);
             if let Some(expression) = &mut column.expression {
                 *expression = crate::deploy::canonical_casts(expression);
@@ -1032,6 +1089,42 @@ pub struct Trigger {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// PostgreSQL makes a column of the primary key and an identity
+    /// column NOT NULL, and pull records `nullable: false` for each. A
+    /// project without it compares equal, so deploy plans no DROP NOT
+    /// NULL, which PostgreSQL refuses on a primary key column
+    #[test]
+    fn primary_key_and_identity_columns_are_canonically_not_null() {
+        let table = |nullable: serde_json::Value| -> Table {
+            let mut value = serde_json::json!({
+                "name": "t", "schema": "s", "owner": "o",
+                "columns": [
+                    {"name": "a", "data_type": "integer"},
+                    {"name": "b", "data_type": "integer"},
+                    {"name": "i", "data_type": "integer",
+                     "generated": {"sequence_behavior": "ALWAYS"}},
+                    {"name": "v", "data_type": "text"},
+                ],
+                "primary_key": {"name": "k", "columns": ["a", "b"]},
+            });
+            for column in 0..3 {
+                value["columns"][column]["nullable"] = nullable.clone();
+            }
+            serde_json::from_value(value).unwrap()
+        };
+        let written = table(serde_json::Value::Null);
+        let pulled = table(serde_json::json!(false));
+        assert_ne!(written, pulled);
+        assert_eq!(written.canonical(), pulled.canonical());
+        let canonical = written.canonical();
+        assert_eq!(canonical.columns.as_ref().unwrap()[3].nullable, None);
+        assert_eq!(
+            canonical.not_null_names().into_keys().collect::<Vec<_>>(),
+            ["a", "b", "i"]
+        );
+        assert_eq!(canonical.not_null_names()["a"], "t_a_not_null");
+    }
 
     /// A value written at its default compares equal to the absent
     /// value pull records, so deploy does not see a change on every
