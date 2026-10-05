@@ -239,6 +239,9 @@ reconciled in place where PostgreSQL can express it:
   type, as pg_dump writes no `AS` for a bigint sequence.
 - **Domains** — set/drop default, and `ADD CONSTRAINT` for a new named
   check; a base-type change, or another constraint change, falls back.
+  PostgreSQL checks the existing values against the new check, so the
+  statement fails if a value does not satisfy it. `--allow-drop` does
+  not gate this statement.
 - **Enum types** — `ALTER TYPE ... ADD VALUE` for appended values;
   reordering or removing values falls back.
 - **Extensions** — `ALTER EXTENSION ... UPDATE` / `SET SCHEMA`.
