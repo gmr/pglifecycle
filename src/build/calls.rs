@@ -215,7 +215,7 @@ fn function_index(project: &Project) -> HashMap<(String, String), Vec<usize>> {
 /// `search_path`, so a name without a schema is a `pg_catalog`
 /// function. The arguments of a call do not have known types, so a
 /// call names each overload of its name.
-fn called_functions(
+pub(crate) fn called_functions(
     parser: &mut Parser,
     expression: &str,
     functions: &HashMap<(String, String), Vec<usize>>,

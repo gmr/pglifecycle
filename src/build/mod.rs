@@ -307,6 +307,8 @@
 mod acls;
 mod calls;
 
+pub(crate) use calls::called_functions;
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::rc::Rc;
