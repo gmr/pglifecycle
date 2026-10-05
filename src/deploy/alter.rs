@@ -31,8 +31,8 @@ use serde_json::{Map, Value};
 
 use crate::build;
 use crate::deploy::diff::{
-    canonical_collation, canonical_domain, canonical_type,
-    domain_not_null_name, identity_type, is_domain_not_null, result_type,
+    canonical_collation, canonical_domain, canonical_type, identity_type,
+    result_type,
 };
 use crate::models::{
     CheckConstraint, Column, ColumnDefault, ColumnGenerated, ColumnNotNull,
@@ -1871,10 +1871,10 @@ fn sequence(repo: &Sequence, db: &Sequence) -> Resolution {
 }
 
 /// Domain reconciliation: SET/DROP DEFAULT, ADD CONSTRAINT of a new
-/// named check (see [`added_domain_checks`]), the NOT NULL and a
+/// check (see [`added_domain_checks`]), the NOT NULL and a
 /// comment delta in place. A base-type, collation, or other constraint
-/// change rebuilds (the domain's constraints are not all individually
-/// named). The two sides compare in the form of [`canonical_domain`].
+/// change rebuilds. The two sides compare in the form of
+/// [`canonical_domain`].
 fn domain(repo: &Domain, db: &Domain) -> Resolution {
     let (repo, db) = (&canonical_domain(repo), &canonical_domain(db));
     // the name of the NOT NULL, if the domain has one
@@ -1883,7 +1883,7 @@ fn domain(repo: &Domain, db: &Domain) -> Resolution {
             .check_constraints
             .iter()
             .flatten()
-            .find(|c| is_domain_not_null(c))
+            .find(|c| c.is_not_null())
             .map(|c| c.name.clone())
     };
     let data_type_changed = match (&repo.data_type, &db.data_type) {
@@ -1924,7 +1924,7 @@ fn domain(repo: &Domain, db: &Domain) -> Resolution {
     // a NOT NULL with no name has the name that PostgreSQL makes. The
     // other constraints are the same on the two sides
     let constraint = |c: Option<String>| {
-        quote_ident(&c.unwrap_or_else(|| domain_not_null_name(repo)))
+        quote_ident(&c.unwrap_or_else(|| repo.not_null_name()))
     };
     match (not_null(repo), not_null(db)) {
         (Some(None), None) => alters
@@ -1947,10 +1947,12 @@ fn domain(repo: &Domain, db: &Domain) -> Resolution {
 }
 
 /// The checks of `repo` that `db` does not have, when the other checks
-/// are the same and in the same order, and each added one is a named
-/// CHECK: ALTER DOMAIN ... ADD CONSTRAINT adds them in place. Any other
-/// change of the checks gives None, which rebuilds the domain. The NOT
-/// NULL is not a check here; [`domain`] changes it in place
+/// are the same, and each added one is a CHECK with a name (in the form
+/// of [`canonical_domain`], each CHECK has a name, and the checks are
+/// in the order of their names): ALTER DOMAIN ... ADD CONSTRAINT adds
+/// them in place. Any other change of the checks gives None, which
+/// rebuilds the domain. The NOT NULL is not a check here; [`domain`]
+/// changes it in place
 fn added_domain_checks<'a>(
     repo: &'a Domain,
     db: &Domain,
@@ -1960,7 +1962,7 @@ fn added_domain_checks<'a>(
             .check_constraints
             .iter()
             .flatten()
-            .filter(|c| !is_domain_not_null(c))
+            .filter(|c| !c.is_not_null())
             .collect()
     }
     let (wanted, existing) = (checks(repo), checks(db));
@@ -3780,10 +3782,11 @@ mod tests {
         assert!(matches!(domain(&retyped, &db), Resolution::Replace));
     }
 
-    /// A named check that only the project has is added in place; a
-    /// changed, removed or unnamed check rebuilds the domain
+    /// A check that only the project has is added in place, with the
+    /// name that PostgreSQL gives it when it has no name; a changed or
+    /// removed check rebuilds the domain
     #[test]
-    fn domain_new_named_check_is_added_in_place() {
+    fn domain_new_check_is_added_in_place() {
         let check = |name: Option<&str>, expression: &str| DomainConstraint {
             name: name.map(String::from),
             nullable: None,
@@ -3814,12 +3817,86 @@ mod tests {
             .as_mut()
             .unwrap()
             .push(check(None, "(VALUE < 9)"));
-        assert!(matches!(domain(&unnamed, &db), Resolution::Replace));
+        assert_eq!(
+            sql(&statements(domain(&unnamed, &db))),
+            vec![
+                "ALTER DOMAIN test.d ADD CONSTRAINT d_check CHECK ((VALUE < 9));\n"
+            ]
+        );
         let mut changed = db.clone();
         changed.check_constraints =
             Some(vec![check(Some("d_a"), "(VALUE > 1)")]);
         assert!(matches!(domain(&changed, &db), Resolution::Replace));
         assert!(matches!(domain(&db, &repo), Resolution::Replace));
+    }
+
+    /// A CHECK with no name compares with the name that PostgreSQL
+    /// gives it: `<domain>_check`, with a number when the name is in use,
+    /// cut to 63 bytes. The checks compare in the order of their names,
+    /// as pg_dump writes them
+    #[test]
+    fn domain_checks_compare_by_name() {
+        let with = |name: &str, constraints: serde_json::Value| -> Domain {
+            serde_json::from_value(serde_json::json!({
+                "name": name, "schema": "test", "owner": "postgres",
+                "data_type": "integer", "check_constraints": constraints,
+            }))
+            .unwrap()
+        };
+        // the names and the order that PostgreSQL 18 and pg_dump gave
+        let long =
+            "a_long_gate_domain_name_that_cuts_the_generated_check_name_xx";
+        let repo = with(
+            long,
+            serde_json::json!([
+                {"name": "zz", "expression": "VALUE < 1000"},
+                {"expression": "VALUE > 0"},
+                {"expression": "VALUE <> 5"},
+            ]),
+        );
+        let db = with(
+            long,
+            serde_json::json!([
+                {
+                    "name": "a_long_gate_domain_name_that_cuts_the_generated_check_na_check1",
+                    "expression": "(VALUE <> 5)",
+                },
+                {
+                    "name": "a_long_gate_domain_name_that_cuts_the_generated_check_nam_check",
+                    "expression": "(VALUE > 0)",
+                },
+                {"name": "zz", "expression": "(VALUE < 1000)"},
+            ]),
+        );
+        assert!(matches!(
+            domain(&repo, &db),
+            Resolution::Statements(ref alters) if alters.is_empty()
+        ));
+        // a named check takes `d_check`, thus the check with no name
+        // gets `d_check1`
+        let repo = with(
+            "d",
+            serde_json::json!([
+                {"expression": "VALUE > 0"},
+                {"name": "d_check", "expression": "VALUE < 10"},
+            ]),
+        );
+        let db = with(
+            "d",
+            serde_json::json!([
+                {"name": "d_check", "expression": "(VALUE < 10)"},
+                {"name": "d_check1", "expression": "(VALUE > 0)"},
+            ]),
+        );
+        assert!(matches!(
+            domain(&repo, &db),
+            Resolution::Statements(ref alters) if alters.is_empty()
+        ));
+        // a changed check with no name is still a change
+        let mut changed = repo.clone();
+        changed.check_constraints.as_mut().unwrap()[0].expression =
+            Some("VALUE > 1".into());
+        assert!(matches!(domain(&changed, &db), Resolution::Replace));
     }
 
     /// The type of a cast in a domain default or CHECK constraint
