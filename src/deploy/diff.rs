@@ -704,11 +704,12 @@ fn normalized(definition: &Definition) -> Value {
 /// constraints in the form of [`canonical_check`]. A NULL default is
 /// in the form that PostgreSQL stores (see [`stored_null_default`]).
 /// A NOT NULL comes first, as pg_dump writes it, and it has no name
-/// when its name is the one that PostgreSQL makes. pg_dump writes
-/// that name when PostgreSQL cuts it.
+/// when its name is the one that PostgreSQL makes (see
+/// [`domain_not_null_name`]). pg_dump writes that name when
+/// PostgreSQL cuts it or adds a number to it.
 pub(crate) fn canonical_domain(domain: &Domain) -> Domain {
     let mut domain = domain.clone();
-    let generated = make_object_name(&domain.name, None, "not_null");
+    let generated = domain_not_null_name(&domain);
     if let Some(constraints) = &mut domain.check_constraints {
         constraints.sort_by_key(|c| !is_domain_not_null(c));
         for c in constraints.iter_mut().filter(|c| is_domain_not_null(c)) {
@@ -733,6 +734,29 @@ pub(crate) fn canonical_domain(domain: &Domain) -> Domain {
         }
     }
     domain
+}
+
+/// The name that PostgreSQL makes for a NOT NULL of the domain with no
+/// name: `<domain>_not_null`, or `<domain>_not_null1`, `2` and so on
+/// when another constraint of the domain has that name
+pub(crate) fn domain_not_null_name(domain: &Domain) -> String {
+    let taken: Vec<&str> = domain
+        .check_constraints
+        .iter()
+        .flatten()
+        .filter(|c| !is_domain_not_null(c))
+        .filter_map(|c| c.name.as_deref())
+        .collect();
+    (0..)
+        .map(|pass: usize| {
+            let label = match pass {
+                0 => String::from("not_null"),
+                pass => format!("not_null{pass}"),
+            };
+            make_object_name(&domain.name, None, &label)
+        })
+        .find(|name| !taken.contains(&name.as_str()))
+        .expect("a name that no constraint has")
 }
 
 /// Whether a domain constraint is a NOT NULL

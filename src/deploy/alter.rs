@@ -31,8 +31,8 @@ use serde_json::{Map, Value};
 
 use crate::build;
 use crate::deploy::diff::{
-    canonical_collation, canonical_domain, canonical_type, identity_type,
-    is_domain_not_null, result_type,
+    canonical_collation, canonical_domain, canonical_type,
+    domain_not_null_name, identity_type, is_domain_not_null, result_type,
 };
 use crate::models::{
     CheckConstraint, Column, ColumnDefault, ColumnGenerated, ColumnNotNull,
@@ -1916,13 +1916,11 @@ fn domain(repo: &Domain, db: &Domain) -> Resolution {
             None => format!("ALTER DOMAIN {name} DROP DEFAULT;\n"),
         }));
     }
-    // a NOT NULL with no name has the name that PostgreSQL makes
-    let constraint =
-        |c: Option<String>| {
-            quote_ident(&c.unwrap_or_else(|| {
-                make_object_name(&repo.name, None, "not_null")
-            }))
-        };
+    // a NOT NULL with no name has the name that PostgreSQL makes. The
+    // other constraints are the same on the two sides
+    let constraint = |c: Option<String>| {
+        quote_ident(&c.unwrap_or_else(|| domain_not_null_name(repo)))
+    };
     match (not_null(repo), not_null(db)) {
         (Some(None), None) => alters
             .push(Alter::new(format!("ALTER DOMAIN {name} SET NOT NULL;\n"))),
@@ -3876,6 +3874,26 @@ mod tests {
             domain(&repo, &cut),
             Resolution::Statements(ref alters) if alters.is_empty()
         ));
+        // a CHECK has the name that PostgreSQL makes first, thus the NOT
+        // NULL with no name has the next name, `d_not_null1`
+        let taken = serde_json::json!({
+            "name": "d_not_null", "expression": "VALUE > 0",
+        });
+        let unnamed = with(serde_json::json!([taken, {"nullable": false}]));
+        let numbered = with(serde_json::json!([
+            {"name": "d_not_null1", "nullable": false}, taken,
+        ]));
+        let named = with(serde_json::json!([
+            {"name": "nn", "nullable": false}, taken,
+        ]));
+        assert!(matches!(
+            domain(&unnamed, &numbered),
+            Resolution::Statements(ref alters) if alters.is_empty()
+        ));
+        assert_eq!(
+            sql(&statements(domain(&unnamed, &named))),
+            vec!["ALTER DOMAIN test.d RENAME CONSTRAINT nn TO d_not_null1;\n"]
+        );
     }
 
     /// A table in the forms that a person writes, with a changed
