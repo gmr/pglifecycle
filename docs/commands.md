@@ -245,10 +245,15 @@ reconciled in place where PostgreSQL can express it:
 - **Sequences** — a single `ALTER SEQUENCE` of the changed options.
   `data_type: bigint` (or an alias, such as `int8`) is the same as no
   type, as pg_dump writes no `AS` for a bigint sequence.
-- **Domains** — set/drop default; `ADD CONSTRAINT` for a new named
-  check; add (`SET NOT NULL` or `ADD CONSTRAINT name NOT NULL`), rename
-  or drop the NOT NULL. A NOT NULL with no name has the name that
-  PostgreSQL makes for it. A base-type change, or another CHECK
+- **Domains** — set/drop default; `ADD CONSTRAINT` for a new check;
+  add (`SET NOT NULL` or `ADD CONSTRAINT name NOT NULL`), rename or
+  drop the NOT NULL. A NOT NULL or a CHECK with no name has the name
+  that PostgreSQL makes for it (`<domain>_not_null` or
+  `<domain>_check`, with a number when another constraint of the
+  domain has that name). PostgreSQL also adds the number when a
+  constraint of another object in the schema has the name; give such
+  a constraint a name in the project. The checks compare as a set, in
+  the order of their names. A base-type change, or another CHECK
   constraint change, falls back. PostgreSQL checks the existing values
   against a new check or NOT NULL, so the statement fails if a value
   does not satisfy it. `--allow-drop` does not gate this statement.
@@ -306,7 +311,7 @@ the objects that depend on them, and drops them before the function:
   an operator or a cast is dropped and made again from the project,
   with its comment, indexes, triggers, owner and privileges.
 - A column default, a check, an index, a trigger or a policy of a
-  table, and the default or a named check of a domain, is dropped, and
+  table, and the default or a check of a domain, is dropped, and
   the table or domain makes it again in place. The table and its data
   stay. A column default is dropped and set with `ALTER TABLE ONLY`,
   thus the default of an inheritance child or a partition stays.

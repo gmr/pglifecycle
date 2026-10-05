@@ -3,6 +3,8 @@
 //! classes and families, publications, schemas, sequences, servers,
 //! subscriptions, tablespaces, and user mappings
 
+use std::collections::BTreeSet;
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -181,6 +183,62 @@ pub struct DomainConstraint {
     pub nullable: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expression: Option<String>,
+}
+
+impl Domain {
+    /// The name that PostgreSQL makes for a NOT NULL of the domain with
+    /// no name: `<domain>_not_null`, or `<domain>_not_null1`, `2` and
+    /// so on when another constraint of the domain has that name
+    pub fn not_null_name(&self) -> String {
+        let used = self
+            .check_constraints
+            .iter()
+            .flatten()
+            .filter(|c| !c.is_not_null())
+            .filter_map(|c| c.name.clone())
+            .collect();
+        crate::utils::choose_constraint_name(
+            &self.name, None, "not_null", &used,
+        )
+    }
+
+    /// The domain with a name for each CHECK that has no name: the name
+    /// that PostgreSQL gives it, `<domain>_check`, or `<domain>_check1`,
+    /// `2` and so on when another constraint of the domain has that
+    /// name. Build makes the constraints with a name before the CHECKs
+    /// with no name, and these in their order, thus PostgreSQL gives
+    /// them these names. PostgreSQL also looks at the names of the
+    /// constraints of the other objects in the schema, which the domain
+    /// does not know.
+    pub fn with_check_names(&self) -> Domain {
+        let mut domain = self.clone();
+        let Some(constraints) = &mut domain.check_constraints else {
+            return domain;
+        };
+        let mut used: BTreeSet<String> =
+            constraints.iter().filter_map(|c| c.name.clone()).collect();
+        for check in constraints
+            .iter_mut()
+            .filter(|c| c.name.is_none() && c.expression.is_some())
+        {
+            let name = crate::utils::choose_constraint_name(
+                &domain.name,
+                None,
+                "check",
+                &used,
+            );
+            used.insert(name.clone());
+            check.name = Some(name);
+        }
+        domain
+    }
+}
+
+impl DomainConstraint {
+    /// Whether the constraint is a NOT NULL
+    pub fn is_not_null(&self) -> bool {
+        self.nullable == Some(false) && self.expression.is_none()
+    }
 }
 
 /// Represents an event trigger

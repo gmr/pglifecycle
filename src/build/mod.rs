@@ -303,6 +303,19 @@
 //!     statement, thus pg_restore does not set its owner. The Python
 //!     had no place for the comment. The test-project has none, thus
 //!     its archive does not change.
+//! 61. A domain renders its NOT NULL first, as pg_dump writes it, then
+//!     the constraints with a name, then the CHECKs with no name, and
+//!     each name is quoted. PostgreSQL gives a name to each constraint
+//!     with no name when it makes it, thus this order gives the names
+//!     that deploy compares (`Domain::with_check_names`). A NOT NULL
+//!     with no name renders `CONSTRAINT <domain>_not_null1 NOT NULL`
+//!     when a CHECK has the name `<domain>_not_null`, as pg_dump writes
+//!     it. The Python wrote the constraints in the order of the project
+//!     and the names bare: a NOT NULL with no name before that CHECK,
+//!     a CHECK with no name before a CHECK with the name that
+//!     PostgreSQL makes, and a name that must be quoted did not make
+//!     the domain. The test-project domains have one CHECK each, thus
+//!     its archive does not change.
 
 mod acls;
 mod calls;
@@ -323,8 +336,8 @@ use crate::models::{
 use crate::progress;
 use crate::project::{Project, routine_base_name, split_sql_name};
 use crate::utils::{
-    dollar_quote, postgres_value, quote_ident, raw_value, setting_value,
-    user_mapping_subject,
+    dollar_quote, make_object_name, postgres_value, quote_ident, raw_value,
+    setting_value, user_mapping_subject,
 };
 
 pub fn build(project: &Project, destination: &Path) -> Result<(), String> {
@@ -1216,12 +1229,27 @@ impl Builder {
             create.push(render_default(&Value::String(default.clone())));
         }
         if let Some(constraints) = &d.check_constraints {
+            // deviation 61: the NOT NULL first, then the constraints
+            // with a name, then the ones with no name, which thus get
+            // the names of `Domain::with_check_names`. A NOT NULL with
+            // no name gets its name here when PostgreSQL adds a number
+            let mut constraints: Vec<_> = constraints.iter().collect();
+            constraints.sort_by_key(|c| (!c.is_not_null(), c.name.is_none()));
+            let not_null_name = d.not_null_name();
+            let numbered =
+                not_null_name != make_object_name(&d.name, None, "not_null");
             let mut rendered = Vec::new();
             for c in constraints {
                 // deviation 54: CONSTRAINT only with a name
                 let mut value = Vec::new();
-                if let Some(name) = &c.name {
-                    value.push(format!("CONSTRAINT {name}"));
+                let name = match &c.name {
+                    None if numbered && c.is_not_null() => {
+                        Some(&not_null_name)
+                    }
+                    name => name.as_ref(),
+                };
+                if let Some(name) = name {
+                    value.push(format!("CONSTRAINT {}", quote_ident(name)));
                 }
                 if let Some(nullable) = c.nullable {
                     value.push(
