@@ -25,6 +25,8 @@ fn true_only(value: Option<bool>) -> Option<bool> {
 ///   1 and 0 are numbers here, although a boolean option also accepts
 ///   them.
 /// - Other text stays as it is.
+///
+/// An empty map is none: the build writes no `WITH ()` for it.
 pub(crate) fn canonical_storage_parameters(
     parameters: Option<Map<String, Value>>,
 ) -> Option<Map<String, Value>> {
@@ -43,7 +45,7 @@ pub(crate) fn canonical_storage_parameters(
         };
         Value::String(text)
     };
-    parameters.map(|parameters| {
+    parameters.filter(|p| !p.is_empty()).map(|parameters| {
         parameters
             .into_iter()
             .map(|(key, parameter)| (key, value(parameter)))
@@ -273,6 +275,52 @@ impl Table {
         table
     }
 
+    /// The same table with the CHECK of each column moved to the
+    /// CHECKs of the table.
+    ///
+    /// PostgreSQL keeps a CHECK on a column as a CHECK of the table, and
+    /// pg_dump and pull write it so. The name is
+    /// `<table>_<column>_check`, with a number when a CHECK of the table
+    /// has the name. Build writes the CHECK with this name (deviation
+    /// 60), because PostgreSQL takes the name of a CHECK with no name
+    /// from the columns of its expression and in the order of the
+    /// constraints.
+    pub fn with_table_checks(&self) -> Table {
+        let mut table = self.clone();
+        let mut used: BTreeSet<String> = table
+            .check_constraints
+            .iter()
+            .flatten()
+            .map(|c| c.name.clone())
+            .collect();
+        let mut moved = Vec::new();
+        for column in table.columns.iter_mut().flatten() {
+            let Some(expression) = column.check_constraint.take() else {
+                continue;
+            };
+            let name = crate::utils::choose_constraint_name(
+                &table.name,
+                Some(&column.name),
+                "check",
+                &used,
+            );
+            used.insert(name.clone());
+            moved.push(CheckConstraint {
+                name,
+                expression,
+                enforced: None,
+                not_valid: None,
+            });
+        }
+        if !moved.is_empty() {
+            table
+                .check_constraints
+                .get_or_insert_default()
+                .extend(moved);
+        }
+        table
+    }
+
     /// This table, the database side of a comparison, without the row
     /// security state and policies that `repo` does not manage.
     ///
@@ -303,9 +351,11 @@ impl Table {
     /// constraint, a default, a generated column expression, a policy
     /// expression or a trigger WHEN condition) is in the form that
     /// PostgreSQL reads. A column that PostgreSQL makes NOT NULL (see
-    /// [`Self::is_always_not_null`]) is NOT NULL.
+    /// [`Self::is_always_not_null`]) is NOT NULL. A CHECK on a column is
+    /// a CHECK of the table (see [`Self::with_table_checks`]), and the
+    /// CHECKs are in name order.
     pub fn canonical(&self) -> Table {
-        let mut table = self.with_canonical_not_nulls();
+        let mut table = self.with_canonical_not_nulls().with_table_checks();
         let not_null: Vec<bool> = table
             .columns
             .iter()
@@ -320,7 +370,6 @@ impl Table {
             }
             canonical_collation(&mut column.collation);
             canonical_default(&column.data_type, &mut column.default);
-            canonical_expression(&mut column.check_constraint);
             if let Some(options) = column
                 .generated
                 .as_mut()
@@ -340,6 +389,9 @@ impl Table {
             check.not_valid = true_only(check.not_valid);
             check.expression =
                 crate::deploy::canonical_check(&check.expression);
+        }
+        if let Some(checks) = &mut table.check_constraints {
+            checks.sort_by(|a, b| a.name.cmp(&b.name));
         }
         for column_default in table.column_defaults.iter_mut().flatten() {
             if let Value::String(text) = &mut column_default.default {
@@ -797,8 +849,7 @@ impl Index {
         index.method.get_or_insert_with(|| String::from("btree"));
         canonical_expression(&mut index.where_clause);
         index.storage_parameters =
-            canonical_storage_parameters(index.storage_parameters.take())
-                .filter(|parameters| !parameters.is_empty());
+            canonical_storage_parameters(index.storage_parameters.take());
         for column in index.columns.iter_mut().flatten() {
             let descending = column.direction.as_deref() == Some("DESC");
             if !descending {
@@ -1252,6 +1303,77 @@ mod tests {
         different(
             serde_json::json!({"buffering": "auto"}),
             serde_json::json!({"buffering": "on"}),
+        );
+    }
+
+    /// An empty map of storage parameters is none, as the build writes
+    /// no list for it and pull writes none
+    #[test]
+    fn empty_storage_parameters_are_none() {
+        let table = with_parameters(serde_json::json!({})).canonical();
+        assert_eq!(table.storage_parameters, None);
+        assert_eq!(table.indexes.unwrap()[0].storage_parameters, None);
+        let view: crate::models::MaterializedView =
+            serde_json::from_value(serde_json::json!({
+                "name": "v", "schema": "s", "owner": "o",
+                "storage_parameters": {}, "query": "SELECT 1",
+            }))
+            .unwrap();
+        assert_eq!(view.canonical().storage_parameters, None);
+    }
+
+    /// A CHECK on a column compares equal to the CHECK of the table
+    /// that PostgreSQL makes of it and pull writes:
+    /// `<table>_<column>_check`, cut to 63 bytes, with a number when
+    /// the name is in use. Each expected name is the one PostgreSQL 18
+    /// gave the constraint.
+    #[test]
+    fn column_checks_compare_as_table_checks() {
+        let written = with_fields(serde_json::json!({
+            "columns": [
+                {"name": "ee", "data_type": "integer",
+                 "check_constraint": "ee > 0"},
+                {"name": "label", "data_type": "text"},
+            ],
+            "check_constraints": [
+                {"name": "t_label_check", "expression": "(label <> '')"},
+            ],
+        }));
+        let pulled = with_fields(serde_json::json!({
+            "check_constraints": [
+                {"name": "t_label_check", "expression": "(label <> '')"},
+                {"name": "t_ee_check", "expression": "(ee > 0)"},
+            ],
+            "columns": [
+                {"name": "ee", "data_type": "integer"},
+                {"name": "label", "data_type": "text"},
+            ],
+        }));
+        assert_eq!(written.canonical(), pulled.canonical());
+        let c40 = "c".repeat(40);
+        let long: Table = serde_json::from_value(serde_json::json!({
+            "name": "a".repeat(40), "schema": "s", "owner": "o",
+            "columns": [
+                {"name": format!("{c40}_1"), "data_type": "integer",
+                 "check_constraint": format!("{c40}_1 > 0")},
+                {"name": format!("{c40}_2"), "data_type": "integer",
+                 "check_constraint": format!("{c40}_2 > 0")},
+            ],
+        }))
+        .unwrap();
+        let names: Vec<String> = long
+            .with_table_checks()
+            .check_constraints
+            .unwrap()
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaa_cccccccccccccccccccccccccccc_check",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaa_ccccccccccccccccccccccccccc_check1",
+            ]
         );
     }
 

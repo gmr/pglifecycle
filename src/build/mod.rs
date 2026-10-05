@@ -303,6 +303,18 @@
 //!     statement, thus pg_restore does not set its owner. The Python
 //!     had no place for the comment. The test-project has none, thus
 //!     its archive does not change.
+//! 60. A CHECK on a column renders as a CHECK of the table with the
+//!     name that deploy compares (`Table::with_table_checks`), in
+//!     parentheses, as the grammar needs them: `CONSTRAINT t_ee_check
+//!     CHECK (ee > 0)`. PostgreSQL takes the name of a CHECK with no
+//!     name from the columns of its expression, and it does not look
+//!     at the names of the constraints after it. An empty map of
+//!     storage parameters (a table, an index, a materialized view), of
+//!     options (a foreign data wrapper, a tablespace, the server of a
+//!     user mapping) or of publication parameters renders no list. The Python wrote `CHECK
+//!     ee > 0`, `WITH ()` and `OPTIONS ()`, which do not parse. The
+//!     test-project has no CHECK on a column and no empty map, thus
+//!     its archive does not change.
 //! 61. A domain renders its NOT NULL first, as pg_dump writes it, then
 //!     the constraints with a name, then the CHECKs with no name, and
 //!     each name is quoted. PostgreSQL gives a name to each constraint
@@ -1373,7 +1385,7 @@ impl Builder {
         } else {
             create.push("NO VALIDATOR".into());
         }
-        if let Some(options) = &d.options {
+        if let Some(options) = d.options.as_ref().filter(|o| !o.is_empty()) {
             create.push(format!("OPTIONS ({})", render_options(options)));
         }
         let drop = vec![
@@ -1690,7 +1702,9 @@ impl Builder {
             create.push("USING".into());
             create.push(method.clone());
         }
-        if let Some(storage_parameters) = &d.storage_parameters {
+        if let Some(storage_parameters) =
+            d.storage_parameters.as_ref().filter(|p| !p.is_empty())
+        {
             create.push("WITH".into());
             let params: Vec<String> = storage_parameters
                 .iter()
@@ -1896,7 +1910,9 @@ impl Builder {
                 create.push(objects.join(", "));
             }
         }
-        if let Some(parameters) = &d.parameters {
+        if let Some(parameters) =
+            d.parameters.as_ref().filter(|p| !p.is_empty())
+        {
             create.push("WITH".into());
             create.push(format!(
                 "({})",
@@ -2187,6 +2203,9 @@ impl Builder {
         let Definition::Table(d) = &item.definition else {
             unreachable!()
         };
+        // a CHECK on a column renders as a CHECK of the table with the
+        // name that deploy compares (deviation 60)
+        let d = &d.with_table_checks();
         let all_calls = Rc::clone(&self.calls);
         let calls = all_calls.get(&item.id);
         let no_checks = HashSet::new();
@@ -2288,7 +2307,9 @@ impl Builder {
                 create.push("USING".into());
                 create.push(access_method.clone());
             }
-            if let Some(storage_parameters) = &d.storage_parameters {
+            if let Some(storage_parameters) =
+                d.storage_parameters.as_ref().filter(|p| !p.is_empty())
+            {
                 create.push("WITH".into());
                 let params: Vec<String> = storage_parameters
                     .iter()
@@ -2887,7 +2908,7 @@ impl Builder {
             "LOCATION".into(),
             postgres_value(&Value::String(d.location.clone())),
         ];
-        if let Some(options) = &d.options {
+        if let Some(options) = d.options.as_ref().filter(|o| !o.is_empty()) {
             let opts: Vec<String> = options
                 .iter()
                 .map(|(k, v)| format!("{k}={}", postgres_value(v)))
@@ -3513,7 +3534,9 @@ impl Builder {
                 "SERVER".into(),
                 quote_ident(&server.name),
             ];
-            if let Some(options) = &server.options {
+            if let Some(options) =
+                server.options.as_ref().filter(|o| !o.is_empty())
+            {
                 let opts: Vec<String> = options
                     .iter()
                     .map(|(k, v)| format!("{k} {}", postgres_value(v)))
@@ -3799,8 +3822,7 @@ pub(crate) fn render_table_column(column: &Column) -> String {
         sql.push(render_column_not_null(column));
     }
     if let Some(check_constraint) = &column.check_constraint {
-        sql.push("CHECK".into());
-        sql.push(check_constraint.clone());
+        sql.push(format!("CHECK ({check_constraint})"));
     }
     if let Some(default) = &column.default {
         sql.push("DEFAULT".into());
@@ -3927,7 +3949,9 @@ pub(crate) fn render_index(index: &Index, table_name: &str) -> Vec<String> {
     if index.nulls_not_distinct == Some(true) {
         create.push("NULLS NOT DISTINCT".into());
     }
-    if let Some(storage_parameters) = &index.storage_parameters {
+    if let Some(storage_parameters) =
+        index.storage_parameters.as_ref().filter(|p| !p.is_empty())
+    {
         create.push("WITH".into());
         let params: Vec<String> = storage_parameters
             .iter()
@@ -5459,6 +5483,40 @@ mod tests {
         );
     }
 
+    /// A CHECK on a column renders as a CHECK of the table with the
+    /// name that deploy compares (deviation 60). PostgreSQL takes the
+    /// name of a CHECK with no name from the columns of its expression
+    /// and in the order of the constraints, thus a CHECK with no name
+    /// on `qty` that refers to `price` gets `orders_price_check`, and a
+    /// CHECK with no name on `price` fails when a later CHECK of the
+    /// table has the name `orders_price_check`.
+    #[test]
+    fn renders_column_check_with_its_name() {
+        let mut table = base_table("orders");
+        let mut qty = column("qty", "integer", false);
+        qty.check_constraint = Some("price > 0".into());
+        let mut price = column("price", "integer", false);
+        price.check_constraint = Some("price > 0".into());
+        table.columns = Some(vec![qty, price]);
+        table.check_constraints = Some(vec![CheckConstraint {
+            name: "orders_price_check".into(),
+            expression: "price < 100".into(),
+            enforced: None,
+            not_valid: None,
+        }]);
+        assert_eq!(
+            table_defn(
+                &table_item(1, table),
+                libpgdump::ObjectType::Table,
+                "orders"
+            ),
+            "CREATE TABLE test.orders ( qty integer, price integer, \
+             CONSTRAINT orders_price_check CHECK (price < 100), \
+             CONSTRAINT orders_qty_check CHECK (price > 0), \
+             CONSTRAINT orders_price_check1 CHECK (price > 0) );\n"
+        );
+    }
+
     /// Storage parameters need their parentheses; without them the
     /// CREATE TABLE does not parse (deviation 13)
     #[test]
@@ -5926,6 +5984,8 @@ mod tests {
         );
     }
 
+    /// The CHECK on a column of a typed table renders as a CHECK of the
+    /// table with its name (deviation 60)
     #[test]
     fn renders_typed_table_column_check_wrapped_in_parens() {
         let mut table = base_table("events");
@@ -5936,8 +5996,8 @@ mod tests {
         let item = table_item(1, table);
         assert_eq!(
             table_defn(&item, libpgdump::ObjectType::Table, "events"),
-            "CREATE TABLE test.events OF test.event_type (id WITH OPTIONS \
-             CHECK (id > 0));\n"
+            "CREATE TABLE test.events OF test.event_type (CONSTRAINT \
+             events_id_check CHECK (id > 0));\n"
         );
     }
 
