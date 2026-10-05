@@ -317,7 +317,8 @@ that depend on them, and drops them before the object:
   view or materialized view that deploy drops come back with it.
   PostgreSQL drops the partitions of a table, and the sequences that
   its columns own, with the table. A partition that is not an item of
-  its own (no `attached`) comes back with its table.
+  its own (no `attached`), and the sequence of an identity column,
+  come back with their table.
 
 A replaced object that has dependents is dropped after them, before
 the objects that deploy makes, and is made again at its position.
@@ -342,7 +343,8 @@ of another type, such as an operator class, a table column of a type
 or domain that deploy drops, an inheritance child or a partition with
 `attached` of a table that deploy drops, the attachment of a partition
 that deploy drops without its table, the membership of a table that
-deploy drops in a publication, or a foreign key of another table that
+deploy drops in a publication, a sequence that a column of a table
+that deploy drops owns (`serial` or `OWNED BY`), or a foreign key of another table that
 references it —
 deploy stops with an error
 that names it when `--allow-drop` is given, and gives a warning when

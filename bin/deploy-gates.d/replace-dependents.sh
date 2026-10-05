@@ -261,3 +261,43 @@ ALTER TABLE test.gate_rd_trig ENABLE TRIGGER gate_rd_tg;
 ALTER TABLE test.gate_rd_trig RESET (fillfactor);
 SQL
 expect_empty_plan "a table with a disabled trigger is restored"
+
+# a sequence that a column owns: PostgreSQL drops it with the table,
+# and the plan does not make it again with its value
+mkdir -p "${WORKDIR}/project/sequences/test"
+cat > "${WORKDIR}/project/sequences/test/gate_rd_serial_id_seq.yaml" <<'YAML'
+---
+name: gate_rd_serial_id_seq
+schema: test
+owner: postgres
+data_type: integer
+increment_by: 1
+start_with: 1
+cache: 1
+owned_by: test.gate_rd_serial.id
+YAML
+cat > "${WORKDIR}/project/tables/test/gate_rd_serial.yaml" <<'YAML'
+---
+name: gate_rd_serial
+schema: test
+owner: postgres
+columns:
+- name: id
+  data_type: integer
+  nullable: false
+  default: nextval('test.gate_rd_serial_id_seq'::regclass)
+YAML
+./target/debug/pglifecycle deploy --apply -d "${TARGET_DB}" \
+    "${WORKDIR}/project"
+expect_empty_plan "a table that owns a sequence is made"
+psql -d "${TARGET_DB}" -q -v ON_ERROR_STOP=1 <<'SQL'
+INSERT INTO test.gate_rd_serial DEFAULT VALUES;
+ALTER TABLE test.gate_rd_serial SET (fillfactor = 50);
+SQL
+expect_refused "a table that owns a sequence" \
+    'SEQUENCE test.gate_rd_serial_id_seq: a column of TABLE test.gate_rd_serial owns it'
+expect_kept "a table that owns a sequence" \
+    "(SELECT last_value FROM test.gate_rd_serial_id_seq) = 1"
+psql -d "${TARGET_DB}" -q -v ON_ERROR_STOP=1 \
+    -c 'ALTER TABLE test.gate_rd_serial RESET (fillfactor)'
+expect_empty_plan "a table that owns a sequence is restored"

@@ -216,15 +216,15 @@ pub(crate) fn rebuild(
             // a part of a relation that the source is dropped with, or
             // an object that PostgreSQL drops with the source table and
             // that the table makes again: a partition that is not an
-            // item of its own, or a sequence that a column of the table
-            // owns
+            // item of its own, or the sequence of an identity column
             let own = (CHILDREN.contains(&entry.desc)
                 && owner.is_some_and(|owner| {
                     group.contains_key(&owner.dump_id)
                         && group.get(&owner.dump_id) == group.get(&id)
                 }))
                 || (source.desc == OT::Table
-                    && (entry.desc == OT::Sequence
+                    && ((entry.desc == OT::Sequence
+                        && !owned_by(entry, entries))
                         || (partition(entry, source, entries)
                             && item(entry).is_none())));
             if !own {
@@ -256,6 +256,14 @@ pub(crate) fn rebuild(
                         entry_label(source)
                     ))
                 }
+                // a sequence that a column of the table owns (serial, or
+                // OWNED BY)
+                OT::Sequence if source.desc == OT::Table => Some(format!(
+                    "a column of {} owns it, thus PostgreSQL drops it with \
+                     the table, and deploy cannot make it again with its \
+                     value",
+                    entry_label(source)
+                )),
                 // the plan attaches a partition that is an item of its
                 // own again only when it makes the partition and its
                 // table again
@@ -524,6 +532,16 @@ pub(crate) fn rebuild(
     }
     dependents.labels.sort();
     dependents
+}
+
+/// True when a SEQUENCE OWNED BY entry links the sequence `entry` to a
+/// column (serial, or OWNED BY). The sequence of an identity column
+/// has no such entry
+fn owned_by(entry: &libpgdump::Entry, entries: &[libpgdump::Entry]) -> bool {
+    entries.iter().any(|link| {
+        link.desc == OT::SequenceOwnedBy
+            && link.dependencies.contains(&entry.dump_id)
+    })
 }
 
 /// The partition and the table of a TABLE ATTACH entry, whose tag is
@@ -1691,8 +1709,9 @@ mod tests {
     /// A table that the plan makes again: a view on it and a function
     /// on its row type are dropped first and made again. The table is
     /// dropped after them, before the objects that the plan makes. Its
-    /// own constraint and index, its partition and the sequence that
-    /// it owns go with it, with no statement of their own
+    /// own constraint and index, its partition that is not an item of
+    /// its own and the sequence of its identity column go with it,
+    /// with no statement of their own
     #[test]
     fn a_table_rebuild_drops_its_dependents_first() {
         let project = project(vec![
@@ -1709,19 +1728,13 @@ mod tests {
             Some("DROP TABLE test.t;\n"),
             &[],
         );
+        // an identity column has no SEQUENCE OWNED BY entry
         let sequence = entry(
             &mut snapshot,
             OT::Sequence,
             "t_id_seq",
-            Some("DROP SEQUENCE test.t_id_seq;\n"),
+            Some("ALTER TABLE test.t ALTER COLUMN id DROP IDENTITY;\n"),
             &[t],
-        );
-        entry(
-            &mut snapshot,
-            OT::SequenceOwnedBy,
-            "t_id_seq",
-            None,
-            &[sequence],
         );
         let p = entry(
             &mut snapshot,
@@ -1730,7 +1743,7 @@ mod tests {
             Some("DROP TABLE test.p;\n"),
             &[t],
         );
-        entry(&mut snapshot, OT::TableAttach, "p", None, &[p, t]);
+        let attach = entry(&mut snapshot, OT::TableAttach, "p", None, &[p, t]);
         let f = entry(
             &mut snapshot,
             OT::Function,
@@ -1772,7 +1785,7 @@ mod tests {
             vec!["DROP FUNCTION test.f(integer);\n"]
         );
         assert_eq!(drops(&dependents, v), vec!["DROP VIEW test.v;\n"]);
-        for id in [sequence, p, pk, i] {
+        for id in [sequence, p, attach, pk, i] {
             assert!(!dependents.drops.contains_key(&id));
         }
         for id in [0, 1, 2] {
@@ -1934,6 +1947,46 @@ mod tests {
         );
         let (dependents, _, _) = replace(&project, &snapshot, &[0]);
         assert!(dependents.refused.is_empty(), "{:?}", dependents.refused);
+    }
+
+    /// PostgreSQL drops a sequence that a column of the table owns
+    /// (serial, or OWNED BY) with the table, and the plan does not make
+    /// it again with its value
+    #[test]
+    fn a_table_rebuild_refuses_an_owned_sequence() {
+        let project = project(vec![item(0, ObjectType::Table, table("0"))]);
+        let mut snapshot =
+            libpgdump::new("test", "UTF8", "18.0").expect("new dump");
+        let t = entry(
+            &mut snapshot,
+            OT::Table,
+            "t",
+            Some("DROP TABLE test.t;\n"),
+            &[],
+        );
+        let sequence = entry(
+            &mut snapshot,
+            OT::Sequence,
+            "t_id_seq",
+            Some("DROP SEQUENCE test.t_id_seq;\n"),
+            &[t],
+        );
+        entry(
+            &mut snapshot,
+            OT::SequenceOwnedBy,
+            "t_id_seq",
+            None,
+            &[sequence],
+        );
+        let (dependents, _, _) = replace(&project, &snapshot, &[0]);
+        assert_eq!(
+            dependents.refused,
+            vec![
+                "SEQUENCE test.t_id_seq: a column of TABLE test.t owns it, \
+                 thus PostgreSQL drops it with the table, and deploy cannot \
+                 make it again with its value"
+            ]
+        );
     }
 
     /// A replaced object with no dependents is dropped and made again
