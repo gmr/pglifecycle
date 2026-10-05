@@ -308,8 +308,11 @@ the objects (`-- dependents rebuilt with a replaced function:`).
 Deploy does not use `DROP ... CASCADE`, which drops each dependent
 with no list, also one that the project does not have. When an object
 depends on the function and deploy cannot make it again — the project
-does not have it, a generated column calls the function, or it is of
-another type, such as an operator class — deploy stops with an error
+does not have it, a generated column calls the function, a trigger
+or an index has a statement after its `CREATE` that the project does
+not keep (`ALTER TABLE ... DISABLE TRIGGER` or `ENABLE REPLICA
+TRIGGER`, `CLUSTER ON`, an index column's `SET STATISTICS`), or it is
+of another type, such as an operator class — deploy stops with an error
 that names it when `--allow-drop` is given, and gives a warning when
 it is not. An object that `--exclude-table` or `--exclude-schema`
 hides from the dump is not found: then the drop fails, and deploy

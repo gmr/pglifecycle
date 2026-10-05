@@ -576,6 +576,20 @@ fn entry_part<'a>(
     drops: &mut Vec<Drop<'a>>,
 ) -> Result<(), String> {
     let label = entry_label(entry);
+    // the project does not keep a statement after the CREATE: the
+    // enabled state of a trigger (ALTER TABLE ... DISABLE TRIGGER), or
+    // ALTER TABLE ... CLUSTER ON and SET STATISTICS of an index
+    if entry
+        .defn
+        .as_deref()
+        .is_some_and(|defn| crate::ddl::split_statements(defn).len() > 1)
+    {
+        return Err(format!(
+            "{label} has statements after its CREATE that the project \
+             does not keep (for example, ALTER TABLE ... DISABLE \
+             TRIGGER), and deploy would lose them"
+        ));
+    }
     let tag = entry.tag.as_deref().unwrap_or_default();
     // the tag of a part other than an index starts with the name of
     // its relation
@@ -778,12 +792,24 @@ mod tests {
         drop: Option<&str>,
         dependencies: &[i32],
     ) -> i32 {
+        entry_with(dump, desc, tag, "CREATE ...;\n", drop, dependencies)
+    }
+
+    /// [`entry`] with the statements of the entry
+    fn entry_with(
+        dump: &mut libpgdump::Dump,
+        desc: OT,
+        tag: &str,
+        defn: &str,
+        drop: Option<&str>,
+        dependencies: &[i32],
+    ) -> i32 {
         dump.add_entry(
             desc,
             Some("test"),
             Some(tag),
             Some("postgres"),
-            Some("CREATE ...;\n"),
+            Some(defn),
             drop,
             None,
             dependencies,
@@ -1035,5 +1061,64 @@ mod tests {
         assert!(dependents.drops.is_empty());
         assert!(dependents.labels.is_empty());
         assert!(!resolutions.contains_key(&3));
+    }
+
+    /// A disabled trigger and a clustered index: the project does not
+    /// keep the statements after the CREATE, thus a DROP and a CREATE
+    /// would lose them
+    #[test]
+    fn a_part_with_more_statements_is_refused() {
+        let mut json = table("0");
+        json["triggers"] = serde_json::json!([{
+            "name": "tg",
+            "when": "BEFORE",
+            "events": ["UPDATE"],
+            "for_each": "ROW",
+            "condition": "(test.f(new.id) > 0)",
+            "function": "test.tf()",
+        }]);
+        let project = project(vec![
+            item(0, ObjectType::Function, function("integer")),
+            item(3, ObjectType::Table, json),
+        ]);
+        for (desc, tag, defn, drop, label) in [
+            (
+                OT::Trigger,
+                "t tg",
+                "CREATE TRIGGER tg BEFORE UPDATE ON test.t FOR EACH ROW \
+                 WHEN ((test.f(new.id) > 0)) EXECUTE FUNCTION \
+                 test.tf();\n\nALTER TABLE test.t DISABLE TRIGGER tg;\n",
+                "DROP TRIGGER tg ON test.t;\n",
+                "TRIGGER test.t tg",
+            ),
+            (
+                OT::Index,
+                "i",
+                "CREATE INDEX i ON test.t USING btree (test.f(id));\n\n\
+                 ALTER TABLE test.t CLUSTER ON i;\n",
+                "DROP INDEX test.i;\n",
+                "INDEX test.i",
+            ),
+        ] {
+            let mut snapshot =
+                libpgdump::new("test", "UTF8", "18.0").expect("new dump");
+            let f =
+                entry(&mut snapshot, OT::Function, "f(integer)", None, &[]);
+            let t = entry(&mut snapshot, OT::Table, "t", None, &[]);
+            entry_with(&mut snapshot, desc, tag, defn, Some(drop), &[t, f]);
+            let (dependents, resolutions) =
+                run(&project, &mut diff(&project), &snapshot);
+            assert_eq!(
+                dependents.refused,
+                vec![format!(
+                    "TABLE test.t: {label} has statements after its CREATE \
+                     that the project does not keep (for example, ALTER \
+                     TABLE ... DISABLE TRIGGER), and deploy would lose them"
+                )]
+            );
+            assert!(dependents.drops.is_empty());
+            assert!(dependents.labels.is_empty());
+            assert!(!resolutions.contains_key(&3));
+        }
     }
 }
