@@ -120,6 +120,11 @@ These limits are new on this page:
   `<domain>_check1`, and so on. A new unnamed check before existing
   ones changes their names, and `deploy` plans a rebuild of the
   domain. Add a new check after the others, or give it a name.
+- **The detailed form of key columns.** A unique constraint written
+  as `- columns: [w]`, or a primary key written as `primary_key:
+  {columns: [w]}`, does not compare equal to the plain list that
+  `pull` writes, so `deploy` changes it on each run. Write the plain
+  list form that `pull` writes.
 
 ## Deploy: order and rebuild limits
 
@@ -146,6 +151,14 @@ These limits are already described:
 
 These limits are new on this page:
 
+- **A change to a primary key or a unique constraint.** A change to
+  the columns or the `INCLUDE` columns of a primary key or a unique
+  constraint drops the table and makes it again. Without
+  `--allow-drop`, the change is withheld. When a foreign key of
+  another table references the constraint, `deploy` stops with an
+  error. See
+  [Destructive statements and limits](commands.md#destructive-statements-and-limits).
+  To keep the data, make the change by hand, then `pull` the database.
 - **A new partition of an existing partitioned table.** `deploy`
   plans a rebuild of the parent table, not `CREATE TABLE ... PARTITION
   OF`. Without `--allow-drop`, the rebuild is withheld. With
