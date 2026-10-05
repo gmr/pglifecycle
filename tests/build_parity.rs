@@ -815,6 +815,29 @@ fn outside_items() -> Vec<Item> {
                 .unwrap(),
             ),
         ),
+        // deviation 64: INCLUDE columns that need quotes
+        item(
+            28,
+            ObjectType::Table,
+            Definition::Table(
+                serde_json::from_value(serde_json::json!({
+                    "name": "covered",
+                    "schema": "test",
+                    "owner": "postgres",
+                    "columns": [
+                        {"name": "w", "data_type": "integer"},
+                        {"name": "v", "data_type": "text"},
+                        {"name": "Has Space", "data_type": "text"},
+                    ],
+                    "indexes": [{
+                        "name": "covered_w",
+                        "columns": [{"name": "w"}],
+                        "include": ["v", "Has Space"],
+                    }],
+                }))
+                .unwrap(),
+            ),
+        ),
     ]
 }
 
@@ -1144,6 +1167,16 @@ const OUTSIDE_CORRECTED: &[(&str, &str, &str, &str, &str)] = &[
         "empty_pub",
         "CREATE PUBLICATION empty_pub;\n",
         "DROP PUBLICATION IF EXISTS empty_pub;\n",
+    ),
+    // deviation 64: an INCLUDE column is an identifier. The Python
+    // wrote it bare, which does not parse for a name that needs quotes
+    (
+        "INDEX",
+        "test",
+        "covered_w",
+        "CREATE INDEX covered_w ON test.covered ( w ) INCLUDE (v, \"Has \
+         Space\");\n",
+        "DROP INDEX IF EXISTS test.covered_w;\n",
     ),
 ];
 
