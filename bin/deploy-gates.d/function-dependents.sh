@@ -199,3 +199,36 @@ cp "${WORKDIR}/gate_dep_table.yaml" \
 ./target/debug/pglifecycle deploy --apply --allow-drop \
     -d "${TARGET_DB}" "${WORKDIR}/project"
 expect_dependents "a function with no disabled trigger converges"
+
+# an index that calls the function and that the project does not have.
+# Deploy drops it as an index that only the database has: only with
+# --allow-drop-indexes, and not as a dependent that it makes again
+mutate_dependents 'CREATE FUNCTION test.gate_dep(a integer,
+    b integer DEFAULT 0) RETURNS integer LANGUAGE sql
+    AS $$SELECT a + b;$$'
+psql -d "${TARGET_DB}" -q -v ON_ERROR_STOP=1 -c 'CREATE INDEX gate_dep_index
+    ON test.gate_dep_table ((test.gate_dep(n, 1)))'
+expect_refused "a removed index without --allow-drop-indexes" \
+    gate_dep_index
+if [ -z "$(psql -d "${TARGET_DB}" -tAc \
+        "SELECT to_regclass('test.gate_dep_index')")" ]; then
+    echo "Convergence gate FAILED: the index was dropped without" \
+        "--allow-drop-indexes" >&2
+    exit 1
+fi
+./target/debug/pglifecycle deploy -o "${WORKDIR}/dependents.sql" \
+    --allow-drop --allow-drop-indexes -d "${TARGET_DB}" \
+    "${WORKDIR}/project"
+if ! grep -q '^-- dependents rebuilt with a replaced function: 3 ' \
+        "${WORKDIR}/dependents.sql" \
+    || ! grep -q '^DROP INDEX test.gate_dep_index;' \
+        "${WORKDIR}/dependents.sql"
+then
+    echo "Convergence gate FAILED: the removed index is not dropped" \
+        "or is listed as made again" >&2
+    cat "${WORKDIR}/dependents.sql" >&2
+    exit 1
+fi
+./target/debug/pglifecycle deploy --apply --allow-drop --allow-drop-indexes \
+    -d "${TARGET_DB}" "${WORKDIR}/project"
+expect_dependents "a removed index that calls the function is dropped"

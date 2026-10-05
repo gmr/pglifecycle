@@ -99,6 +99,7 @@ pub fn deploy(args: &cli::Deploy) -> Result<(), String> {
         &snapshot,
         &groups,
         &families,
+        args.allow_drop_indexes,
     );
     task.finish();
     if !dependents.refused.is_empty() {
@@ -407,19 +408,20 @@ fn plan(
         && args.exclude_schema.is_empty()
         && args.exclude_extension.is_empty());
     for entry in snapshot.entries().iter().rev() {
-        // a dependent of a function that the plan drops, which the
-        // plan makes again
-        for (label, sql) in
-            dependents.drops.get(&entry.dump_id).into_iter().flatten()
+        // a dependent of a function that the plan drops: the plan makes
+        // it again, or the project does not have it
+        for alter in dependents.drops.get(&entry.dump_id).into_iter().flatten()
         {
-            push(
-                true,
-                Statement {
-                    label: label.clone(),
-                    sql: sql.clone(),
-                    fails_open: false,
-                },
-            );
+            let statement = Statement {
+                label: alter.label.clone().unwrap_or_default(),
+                sql: alter.sql.clone(),
+                fails_open: alter.fails_open,
+            };
+            if alter.index_removal && !args.allow_drop_indexes {
+                kept.push(statement);
+                continue;
+            }
+            push(alter.destructive, statement);
         }
         let Some(key) =
             entry_key(entry).and_then(|key| wanted.get(&key).copied())

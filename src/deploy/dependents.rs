@@ -32,11 +32,12 @@ use crate::utils::quote_ident;
 /// The dependents that the plan drops and makes again
 #[derive(Default)]
 pub(crate) struct Dependents {
-    /// The DROP statements of the dependents, as (label, sql), by the
-    /// snapshot entry that they come from. The plan writes them with
-    /// the drops of the removed objects, in reverse snapshot order
-    pub drops: HashMap<i32, Vec<(String, String)>>,
-    /// The label of each dependent, for the script header
+    /// The DROP statements of the dependents, labeled, by the snapshot
+    /// entry that they come from. The plan writes them with the drops
+    /// of the removed objects, in reverse snapshot order
+    pub drops: HashMap<i32, Vec<alter::Alter>>,
+    /// The label of each dependent that the plan makes again, for the
+    /// script header
     pub labels: Vec<String>,
     /// Each dependent that the plan cannot drop and make again, with
     /// the reason
@@ -83,6 +84,7 @@ pub(crate) fn rebuild(
     snapshot: &libpgdump::Dump,
     groups: &alter::IndexGroups,
     families: &alter::operator_class::Families,
+    allow_drop_indexes: bool,
 ) -> Dependents {
     let mut dependents = Dependents::default();
     let entries = snapshot.entries();
@@ -262,6 +264,7 @@ pub(crate) fn rebuild(
             (relation, id),
             &list,
             (groups, families),
+            allow_drop_indexes,
             &mut dependents,
         );
     }
@@ -292,7 +295,7 @@ pub(crate) fn rebuild(
                 .drops
                 .entry(entry.dump_id)
                 .or_default()
-                .push((label.clone(), drop));
+                .push(alter::Alter::destructive(drop).labeled(&label));
         }
         dependents.labels.push(label);
     }
@@ -301,7 +304,9 @@ pub(crate) fn rebuild(
 }
 
 /// Drop the parts in `list` of a table or domain, and resolve the
-/// table or domain again without them, so that it makes them again
+/// table or domain again without them, so that it makes them again.
+/// A part that the project does not have is only dropped, with the
+/// gate of the drop that the table or domain would write for it
 #[allow(clippy::too_many_arguments)]
 fn rebuild_parts(
     parser: &mut tree_sitter::Parser,
@@ -314,6 +319,7 @@ fn rebuild_parts(
         &alter::IndexGroups,
         &alter::operator_class::Families,
     ),
+    allow_drop_indexes: bool,
     dependents: &mut Dependents,
 ) {
     let repo = &project
@@ -337,16 +343,24 @@ fn rebuild_parts(
         .unwrap_or_else(|| repo.clone());
     let mut drops = Vec::new();
     for part in list {
-        let result = match (part, &mut database) {
-            (Part::Inline(functions), Definition::Table(table)) => {
-                inline_table(parser, table, functions, &mut drops)
-            }
-            (Part::Inline(functions), Definition::Domain(domain)) => {
-                inline_domain(parser, domain, functions, &mut drops)
-            }
-            (Part::Entry(entry), definition) => {
-                entry_part(relation, entry, definition, &mut drops)
-            }
+        let result = match (part, &mut database, repo) {
+            (
+                Part::Inline(functions),
+                Definition::Table(table),
+                Definition::Table(wanted),
+            ) => inline_table(parser, table, wanted, functions, &mut drops),
+            (
+                Part::Inline(functions),
+                Definition::Domain(domain),
+                Definition::Domain(wanted),
+            ) => inline_domain(parser, domain, wanted, functions, &mut drops),
+            (Part::Entry(entry), definition, wanted) => entry_part(
+                (relation, entry),
+                definition,
+                wanted,
+                allow_drop_indexes,
+                &mut drops,
+            ),
             _ => Err(String::from("deploy cannot change it in place")),
         };
         if let Err(reason) = result {
@@ -385,14 +399,12 @@ fn rebuild_parts(
                 return;
             }
         };
-    for (entry, (part, sql)) in drops {
+    for (entry, drop, again) in drops {
         let entry_id = entry.map_or(relation.dump_id, |entry| entry.dump_id);
-        dependents
-            .drops
-            .entry(entry_id)
-            .or_default()
-            .push((part.clone(), sql));
-        dependents.labels.push(part);
+        if again {
+            dependents.labels.extend(drop.label.iter().cloned());
+        }
+        dependents.drops.entry(entry_id).or_default().push(drop);
     }
     diff.items.insert(id, Change::Changed);
     diff.changed.insert(id, database);
@@ -400,8 +412,19 @@ fn rebuild_parts(
 }
 
 /// A part to drop: its entry (None for a part of the relation's own
-/// entry), and its (label, DROP statement)
-type Drop<'a> = (Option<&'a libpgdump::Entry>, (String, String));
+/// entry), its labeled DROP statement, and true when the project has
+/// the part, thus the plan makes it again
+type Drop<'a> = (Option<&'a libpgdump::Entry>, alter::Alter, bool);
+
+/// The drop of a part: gated with --allow-drop when the plan makes it
+/// again, else a statement that the table or domain would write
+fn part_drop(label: String, sql: String, again: bool) -> alter::Alter {
+    if again {
+        alter::Alter::destructive(sql).labeled(&label)
+    } else {
+        alter::Alter::new(sql).labeled(&label)
+    }
+}
 
 /// Remove from `table` the column defaults and checks that call one of
 /// `functions`, with the statements that drop them. Each function must
@@ -410,6 +433,7 @@ type Drop<'a> = (Option<&'a libpgdump::Entry>, (String, String));
 fn inline_table<'a>(
     parser: &mut tree_sitter::Parser,
     table: &mut Table,
+    wanted: &Table,
     functions: &[(i32, String, String)],
     drops: &mut Vec<Drop<'a>>,
 ) -> Result<(), String> {
@@ -419,6 +443,16 @@ fn inline_table<'a>(
         quote_ident(&table.name)
     );
     let tag = format!("{}.{}", table.schema, table.name);
+    // the project has a default for the column, thus the plan makes it
+    // again
+    let default_again = |column: &str| {
+        wanted
+            .columns
+            .iter()
+            .flatten()
+            .any(|wanted| wanted.name == column && wanted.default.is_some())
+            || has(&wanted.column_defaults, |wanted| wanted.column == column)
+    };
     let mut found = BTreeSet::new();
     let mut calls = |expression: &str| {
         let called = called(parser, expression, functions);
@@ -441,13 +475,15 @@ fn inline_table<'a>(
             column.default = None;
             drops.push((
                 None,
-                (
+                part_drop(
                     format!("DEFAULT {tag} {}", column.name),
                     format!(
                         "ALTER TABLE {name} ALTER COLUMN {} DROP DEFAULT;\n",
                         quote_ident(&column.name)
                     ),
+                    default_again(&column.name),
                 ),
+                default_again(&column.name),
             ));
         }
     }
@@ -458,14 +494,16 @@ fn inline_table<'a>(
             }
             drops.push((
                 None,
-                (
+                part_drop(
                     format!("DEFAULT {tag} {}", default.column),
                     format!(
                         "ALTER TABLE ONLY {name} ALTER COLUMN {} DROP \
                          DEFAULT;\n",
                         quote_ident(&default.column)
                     ),
+                    default_again(&default.column),
                 ),
+                default_again(&default.column),
             ));
             false
         });
@@ -475,15 +513,20 @@ fn inline_table<'a>(
             if !calls(&check.expression) {
                 return true;
             }
+            let again = has(&wanted.check_constraints, |wanted| {
+                wanted.name == check.name
+            });
             drops.push((
                 None,
-                (
+                part_drop(
                     format!("CHECK CONSTRAINT {tag} {}", check.name),
                     format!(
                         "ALTER TABLE {name} DROP CONSTRAINT {};\n",
                         quote_ident(&check.name)
                     ),
+                    again,
                 ),
+                again,
             ));
             false
         });
@@ -495,6 +538,7 @@ fn inline_table<'a>(
 fn inline_domain<'a>(
     parser: &mut tree_sitter::Parser,
     domain: &mut Domain,
+    wanted: &Domain,
     functions: &[(i32, String, String)],
     drops: &mut Vec<Drop<'a>>,
 ) -> Result<(), String> {
@@ -512,12 +556,15 @@ fn inline_domain<'a>(
     };
     if domain.default.as_deref().is_some_and(&mut calls) {
         domain.default = None;
+        let again = wanted.default.is_some();
         drops.push((
             None,
-            (
+            part_drop(
                 format!("DEFAULT {tag}"),
                 format!("ALTER DOMAIN {name} DROP DEFAULT;\n"),
+                again,
             ),
+            again,
         ));
     }
     let mut unnamed = false;
@@ -530,15 +577,20 @@ fn inline_domain<'a>(
                 unnamed = true;
                 return true;
             };
+            let again = has(&wanted.check_constraints, |wanted| {
+                wanted.name.as_ref() == Some(check_name)
+            });
             drops.push((
                 None,
-                (
+                part_drop(
                     format!("CHECK CONSTRAINT {tag} {check_name}"),
                     format!(
                         "ALTER DOMAIN {name} DROP CONSTRAINT {};\n",
                         quote_ident(check_name)
                     ),
+                    again,
                 ),
+                again,
             ));
             false
         });
@@ -568,28 +620,15 @@ fn all_found(
 }
 
 /// Remove from `definition` the part that `entry` makes, with the
-/// statement that drops it
+/// statement that drops it. `wanted` is the project's table or domain
 fn entry_part<'a>(
-    relation: &libpgdump::Entry,
-    entry: &'a libpgdump::Entry,
+    (relation, entry): (&libpgdump::Entry, &'a libpgdump::Entry),
     definition: &mut Definition,
+    wanted: &Definition,
+    allow_drop_indexes: bool,
     drops: &mut Vec<Drop<'a>>,
 ) -> Result<(), String> {
     let label = entry_label(entry);
-    // the project does not keep a statement after the CREATE: the
-    // enabled state of a trigger (ALTER TABLE ... DISABLE TRIGGER), or
-    // ALTER TABLE ... CLUSTER ON and SET STATISTICS of an index
-    if entry
-        .defn
-        .as_deref()
-        .is_some_and(|defn| crate::ddl::split_statements(defn).len() > 1)
-    {
-        return Err(format!(
-            "{label} has statements after its CREATE that the project \
-             does not keep (for example, ALTER TABLE ... DISABLE \
-             TRIGGER), and deploy would lose them"
-        ));
-    }
     let tag = entry.tag.as_deref().unwrap_or_default();
     // the tag of a part other than an index starts with the name of
     // its relation
@@ -600,6 +639,62 @@ fn entry_part<'a>(
             .as_deref()
             .and_then(|relation| tag.strip_prefix(&format!("{relation} "))),
     };
+    // true when the project has the part, thus the plan makes it again
+    let again =
+        match (&entry.desc, wanted, name) {
+            (OT::Index, Definition::Table(table), Some(name)) => {
+                has(&table.indexes, |index| index.name == name)
+            }
+            (OT::Trigger, Definition::Table(table), Some(name)) => {
+                has(&table.triggers, |trigger| {
+                    trigger.name.as_deref() == Some(name)
+                })
+            }
+            (OT::Policy, Definition::Table(table), Some(name)) => {
+                has(&table.policies, |policy| policy.name == name)
+            }
+            (OT::CheckConstraint, Definition::Table(table), Some(name)) => {
+                has(&table.check_constraints, |check| check.name == name)
+            }
+            (OT::CheckConstraint, Definition::Domain(domain), Some(name)) => {
+                has(&domain.check_constraints, |check| {
+                    check.name.as_deref() == Some(name)
+                })
+            }
+            (OT::Default, Definition::Table(table), Some(name)) => {
+                table.columns.iter().flatten().any(|column| {
+                    column.name == name && column.default.is_some()
+                }) || has(&table.column_defaults, |default| {
+                    default.column == name
+                })
+            }
+            _ => false,
+        };
+    // the project does not keep a statement after the CREATE: the
+    // enabled state of a trigger (ALTER TABLE ... DISABLE TRIGGER), or
+    // ALTER TABLE ... CLUSTER ON and SET STATISTICS of an index
+    if again
+        && entry
+            .defn
+            .as_deref()
+            .is_some_and(|defn| crate::ddl::split_statements(defn).len() > 1)
+    {
+        return Err(format!(
+            "{label} has statements after its CREATE that the project \
+             does not keep (for example, ALTER TABLE ... DISABLE \
+             TRIGGER), and deploy would lose them"
+        ));
+    }
+    // a part that the project does not have is dropped as the table
+    // would drop it. Deploy keeps an index that only the database has
+    // without --allow-drop-indexes, and then the function's drop fails
+    if !again && entry.desc == OT::Index && !allow_drop_indexes {
+        return Err(format!(
+            "the project does not have {label}, and deploy keeps it \
+             without --allow-drop-indexes"
+        ));
+    }
+    let mut restrictive = false;
     let removed = match (&entry.desc, definition, name) {
         (OT::Index, Definition::Table(table), Some(name)) => {
             remove(&mut table.indexes, |index| index.name == name)
@@ -610,6 +705,9 @@ fn entry_part<'a>(
             })
         }
         (OT::Policy, Definition::Table(table), Some(name)) => {
+            restrictive = has(&table.policies, |policy| {
+                policy.name == name && policy.restrictive == Some(true)
+            });
             remove(&mut table.policies, |policy| policy.name == name)
         }
         (OT::CheckConstraint, Definition::Table(table), Some(name)) => {
@@ -636,13 +734,28 @@ fn entry_part<'a>(
         }
         _ => false,
     };
-    match (&entry.drop_stmt, removed) {
-        (Some(drop), true) => {
-            drops.push((Some(entry), (label, drop.clone())));
-            Ok(())
+    let drop = match (&entry.drop_stmt, removed) {
+        (Some(drop), true) => drop.clone(),
+        _ => return Err(format!("deploy cannot drop and make again {label}")),
+    };
+    let drop = match entry.desc {
+        // the gates of the table's drop of a part that the project
+        // does not have
+        OT::Index if !again => {
+            alter::Alter::index_removal(drop).labeled(&label)
         }
-        _ => Err(format!("deploy cannot drop and make again {label}")),
-    }
+        OT::Policy if !again && restrictive => {
+            alter::Alter::destructive(drop).labeled(&label)
+        }
+        _ => part_drop(label, drop, again),
+    };
+    drops.push((Some(entry), drop, again));
+    Ok(())
+}
+
+/// True when `list` has an item that `matches` finds
+fn has<T>(list: &Option<Vec<T>>, matches: impl Fn(&T) -> bool) -> bool {
+    list.iter().flatten().any(matches)
 }
 
 /// Remove the items that `matches` finds; true when there was one
@@ -845,6 +958,16 @@ mod tests {
         diff: &mut Diff,
         snapshot: &libpgdump::Dump,
     ) -> (Dependents, BTreeMap<usize, Resolution>) {
+        run_with(project, diff, snapshot, false)
+    }
+
+    /// [`run`] with `--allow-drop-indexes` or without it
+    fn run_with(
+        project: &crate::project::Project,
+        diff: &mut Diff,
+        snapshot: &libpgdump::Dump,
+        allow_drop_indexes: bool,
+    ) -> (Dependents, BTreeMap<usize, Resolution>) {
         let mut resolutions = BTreeMap::new();
         resolutions.insert(0, Resolution::Replace);
         let dependents = rebuild(
@@ -854,6 +977,7 @@ mod tests {
             snapshot,
             &alter::IndexGroups::new(),
             &alter::operator_class::Families::new(),
+            allow_drop_indexes,
         );
         (dependents, resolutions)
     }
@@ -916,7 +1040,10 @@ mod tests {
         let drop = |id: i32| -> Vec<String> {
             dependents.drops[&id]
                 .iter()
-                .map(|(_, sql)| sql.clone())
+                .map(|alter| {
+                    assert!(alter.destructive);
+                    alter.sql.clone()
+                })
                 .collect()
         };
         assert_eq!(drop(v), vec!["DROP VIEW test.v;\n"]);
@@ -1120,5 +1247,66 @@ mod tests {
             assert!(dependents.labels.is_empty());
             assert!(!resolutions.contains_key(&3));
         }
+    }
+
+    /// An index that calls the function and that the project does not
+    /// have is dropped as the table drops an index that only the
+    /// database has: only with --allow-drop-indexes, and not as a
+    /// dependent that the plan makes again
+    #[test]
+    fn a_part_that_the_project_removes_is_only_dropped() {
+        let mut json = table("test.f(2)");
+        json["indexes"] = serde_json::json!([]);
+        let project = project(vec![
+            item(0, ObjectType::Function, function("integer")),
+            item(3, ObjectType::Table, json),
+        ]);
+        let mut snapshot =
+            libpgdump::new("test", "UTF8", "18.0").expect("new dump");
+        let f = entry(&mut snapshot, OT::Function, "f(integer)", None, &[]);
+        let t = entry(&mut snapshot, OT::Table, "t", None, &[f]);
+        let i = entry(
+            &mut snapshot,
+            OT::Index,
+            "i",
+            Some("DROP INDEX test.i;\n"),
+            &[t, f],
+        );
+        // the database has the index
+        let database = || {
+            let mut database = diff(&project);
+            database.items.insert(3, Change::Changed);
+            database.changed.insert(
+                3,
+                Definition::Table(
+                    serde_json::from_value(table("test.f(2)")).unwrap(),
+                ),
+            );
+            database
+        };
+        let (dependents, resolutions) =
+            run_with(&project, &mut database(), &snapshot, false);
+        assert_eq!(
+            dependents.refused,
+            vec![
+                "TABLE test.t: the project does not have INDEX test.i, and \
+                 deploy keeps it without --allow-drop-indexes"
+            ]
+        );
+        assert!(dependents.drops.is_empty());
+        assert!(!resolutions.contains_key(&3));
+        let (dependents, resolutions) =
+            run_with(&project, &mut database(), &snapshot, true);
+        assert!(dependents.refused.is_empty(), "{:?}", dependents.refused);
+        assert_eq!(dependents.labels, vec!["DEFAULT test.t id"]);
+        let drop = &dependents.drops[&i];
+        assert_eq!(drop.len(), 1);
+        assert_eq!(drop[0].sql, "DROP INDEX test.i;\n");
+        assert!(drop[0].index_removal && !drop[0].destructive);
+        // the table does not drop the index again
+        let Resolution::Statements(alters) = &resolutions[&3] else {
+            panic!("the table changes in place");
+        };
+        assert!(alters.iter().all(|alter| !alter.sql.contains("INDEX")));
     }
 }

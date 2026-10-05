@@ -305,6 +305,12 @@ the objects that depend on them, and drops them before the function:
 These statements are destructive: without `--allow-drop` all of them
 are withheld with the drop of the function. The script header lists
 the objects (`-- dependents rebuilt with a replaced function:`).
+A default, check, index, trigger or policy that calls the function and
+that the project does not have is only dropped, before the function,
+with the gate that its drop has without the function: an index only
+with `--allow-drop-indexes`. The header does not list it. When deploy
+keeps such an index, the drop of the function would fail, thus deploy
+stops with an error, as for a dependent that it cannot make again.
 Deploy does not use `DROP ... CASCADE`, which drops each dependent
 with no list, also one that the project does not have. When an object
 depends on the function and deploy cannot make it again — the project

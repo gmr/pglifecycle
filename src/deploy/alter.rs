@@ -98,21 +98,21 @@ impl Alter {
         }
     }
 
-    fn index_removal(sql: String) -> Self {
+    pub(crate) fn index_removal(sql: String) -> Self {
         Self {
             index_removal: true,
             ..Self::new(sql)
         }
     }
 
-    fn destructive(sql: String) -> Self {
+    pub(crate) fn destructive(sql: String) -> Self {
         Self {
             destructive: true,
             ..Self::new(sql)
         }
     }
 
-    fn labeled(self, label: &str) -> Self {
+    pub(crate) fn labeled(self, label: &str) -> Self {
         Self {
             label: Some(label.to_string()),
             ..self
