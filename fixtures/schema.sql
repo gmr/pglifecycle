@@ -164,6 +164,17 @@ CREATE TABLE products (
 CREATE VIEW active_users AS
     SELECT id, name, surname FROM users WHERE state = 'verified';
 
+-- Sequence that sorts alphabetically BEFORE the table that it is
+-- OWNED BY ("a_counter_seq" < "counters"). pg_dump writes OWNED BY as
+-- a separate SEQUENCE OWNED BY entry after the table; build writes it
+-- in CREATE SEQUENCE, so the sequence must restore after the table.
+CREATE SEQUENCE a_counter_seq;
+CREATE TABLE counters (
+    id   INTEGER NOT NULL DEFAULT nextval('a_counter_seq'),
+    name TEXT    NOT NULL
+);
+ALTER SEQUENCE a_counter_seq OWNED BY counters.id;
+
 -- View with security_barrier and check_option.
 CREATE VIEW verified_users
     WITH (security_barrier = true, check_option = 'local') AS

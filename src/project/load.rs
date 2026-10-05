@@ -488,6 +488,16 @@ impl Loader {
                         t.language.clone(),
                     ));
                 }
+                // build writes OWNED BY in CREATE SEQUENCE, where pg_dump
+                // writes a separate entry after the table
+                Definition::Sequence(s) => {
+                    if let Some(owned_by) = &s.owned_by {
+                        references.push((
+                            ObjectType::Table,
+                            column_table(owned_by).to_string(),
+                        ));
+                    }
+                }
                 Definition::Statistics(s) => {
                     references.push((ObjectType::Table, s.table.clone()));
                     references
@@ -1455,6 +1465,22 @@ pub(crate) fn split_sql_name(value: &str) -> (String, String) {
     (parts.pop().unwrap_or_default(), tag)
 }
 
+/// The `schema.table` part of a `schema.table.column` reference, as a
+/// sequence's `owned_by` states it: the text before the last dot that
+/// is not in quotes
+fn column_table(value: &str) -> &str {
+    let mut quoted = false;
+    let mut end = 0;
+    for (i, c) in value.char_indices() {
+        match c {
+            '"' => quoted = !quoted,
+            '.' if !quoted => end = i,
+            _ => {}
+        }
+    }
+    &value[..end]
+}
+
 /// The operators, functions, sort families and types that the members
 /// of an operator class or family name
 fn operator_class_members(
@@ -2091,6 +2117,39 @@ mod tests {
         assert!(loader.project.inventory[3].dependencies.is_empty());
         // a quoted reference resolves to the unquoted name
         assert_eq!(loader.project.inventory[4].dependencies, [0].into());
+    }
+
+    /// A sequence orders after the table that it is OWNED BY, as build
+    /// writes OWNED BY in CREATE SEQUENCE; a table outside the project
+    /// orders nothing
+    #[test]
+    fn owned_sequences_order_after_their_tables() {
+        let mut loader = Loader::new(Path::new("."));
+        loader.add_definition(
+            ObjectType::Table,
+            json!({"name": "Counters", "schema": "test", "owner": "postgres",
+                   "columns": [{"name": "id", "data_type": "int"}]}),
+            None,
+        );
+        for (name, owned_by) in
+            [("a_seq", "test.\"Counters\".id"), ("b_seq", "ext.t.id")]
+        {
+            loader.add_definition(
+                ObjectType::Sequence,
+                json!({"name": name, "schema": "test",
+                       "owner": "postgres", "owned_by": owned_by}),
+                None,
+            );
+        }
+        loader.index.insert(
+            index_key(ObjectType::Table, Some("test"), "Counters"),
+            vec![0],
+        );
+        loader.apply_structural_dependencies();
+
+        assert_eq!(loader.project.inventory[1].dependencies, [0].into());
+        assert!(loader.project.inventory[2].dependencies.is_empty());
+        assert_eq!(column_table("\"s.x\".\"t.y\".\"c.z\""), "\"s.x\".\"t.y\"");
     }
 
     /// Overloads are distinct objects: pull writes them to `f.yaml`
