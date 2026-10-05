@@ -129,6 +129,7 @@ pub(crate) fn rebuild(
     let mut pending: Vec<i32> = closure.iter().copied().collect();
     let mut whole: Vec<(&libpgdump::Entry, usize)> = Vec::new();
     let mut parts: BTreeMap<i32, Vec<Part>> = BTreeMap::new();
+    let mut later: Vec<(&libpgdump::Entry, i32)> = Vec::new();
     let mut seen: BTreeSet<i32> = BTreeSet::new();
     while let Some(id) = pending.pop() {
         let source = by_id[&id];
@@ -207,7 +208,9 @@ pub(crate) fn rebuild(
                                 .or_default()
                                 .push(Part::Entry(entry));
                         }
-                        _ => dependents.refused.push(format!(
+                        // the traversal can add its relation later
+                        Some(owner) => later.push((entry, owner.dump_id)),
+                        None => dependents.refused.push(format!(
                             "{}: deploy cannot drop and make it again",
                             entry_label(entry)
                         )),
@@ -222,6 +225,14 @@ pub(crate) fn rebuild(
                     }
                 }
             }
+        }
+    }
+    for (entry, owner) in later {
+        if !closure.contains(&owner) {
+            dependents.refused.push(format!(
+                "{}: deploy cannot drop and make it again",
+                entry_label(entry)
+            ));
         }
     }
     // a relation that the rebuild of a whole object drops is not
@@ -696,6 +707,9 @@ mod tests {
             ObjectType::View => {
                 Definition::View(serde_json::from_value(json).unwrap())
             }
+            ObjectType::MaterializedView => Definition::MaterializedView(
+                serde_json::from_value(json).unwrap(),
+            ),
             ObjectType::Table => {
                 Definition::Table(serde_json::from_value(json).unwrap())
             }
@@ -918,6 +932,55 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    /// An index that calls the function, on a materialized view that
+    /// depends on the function only through a view, is made again by
+    /// the rebuild of the materialized view. The traversal finds the
+    /// index before the materialized view
+    #[test]
+    fn a_part_of_a_later_rebuilt_relation_is_not_refused() {
+        let project = project(vec![
+            item(0, ObjectType::Function, function("integer")),
+            item(1, ObjectType::View, view("v", " SELECT test.f(1) AS n")),
+            item(
+                2,
+                ObjectType::MaterializedView,
+                view("m", " SELECT n FROM test.v"),
+            ),
+        ]);
+        let mut diff = diff(&project);
+        let mut snapshot =
+            libpgdump::new("test", "UTF8", "18.0").expect("new dump");
+        let f = entry(&mut snapshot, OT::Function, "f(integer)", None, &[]);
+        let v = entry(
+            &mut snapshot,
+            OT::View,
+            "v",
+            Some("DROP VIEW test.v;\n"),
+            &[f],
+        );
+        let m = entry(
+            &mut snapshot,
+            OT::MaterializedView,
+            "m",
+            Some("DROP MATERIALIZED VIEW test.m;\n"),
+            &[v],
+        );
+        let i = entry(
+            &mut snapshot,
+            OT::Index,
+            "i",
+            Some("DROP INDEX test.i;\n"),
+            &[m, f],
+        );
+        let (dependents, _) = run(&project, &mut diff, &snapshot);
+        assert!(dependents.refused.is_empty(), "{:?}", dependents.refused);
+        assert_eq!(
+            dependents.labels,
+            vec!["MATERIALIZED VIEW test.m", "VIEW test.v"]
+        );
+        assert!(!dependents.drops.contains_key(&i));
     }
 
     /// A dependent that the project does not have, and a table that
