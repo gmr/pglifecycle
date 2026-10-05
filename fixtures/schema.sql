@@ -61,6 +61,8 @@ CREATE TABLE users (
 );
 
 CREATE UNIQUE INDEX users_unique_email ON users (email);
+-- INCLUDE columns are not key columns of the index
+CREATE INDEX users_email_names ON users (email) INCLUDE (name, surname);
 
 CREATE TYPE address_type AS ENUM ('billing', 'delivery');
 
@@ -643,6 +645,8 @@ ALTER TABLE test.quoted_cols ALTER COLUMN "Has Space" SET STATISTICS 200;
 ALTER TABLE test.quoted_cols ALTER COLUMN "Has Space" SET STORAGE EXTERNAL;
 COMMENT ON COLUMN test.quoted_cols."Name" IS 'A quoted column';
 CREATE INDEX quoted_cols_name ON test.quoted_cols ("Name" DESC, "select");
+CREATE INDEX quoted_cols_select ON test.quoted_cols ("select")
+    INCLUDE ("Has Space", "Name");
 GRANT SELECT ("Has Space") ON test.quoted_cols TO PUBLIC;
 CREATE TRIGGER quoted_cols_touch BEFORE UPDATE OF "Name" ON test.quoted_cols
     FOR EACH ROW EXECUTE FUNCTION test.touch_last_modified();
@@ -914,19 +918,23 @@ CREATE INDEX heap_copied_id ON test.heap_copied USING btree_copy (id);
 -- Indexes on a partitioned table. pg_dump makes the parent's index ON
 -- ONLY, each partition's index on its own, and an INDEX ATTACH for
 -- each. One index has partition indexes with names of their own, and
--- a unique constraint's indexes attach with their partitions.
-CREATE TABLE test.readings (id INTEGER, taken DATE) PARTITION BY RANGE (taken);
+-- a unique constraint's indexes attach with their partitions. One
+-- index and the primary key have INCLUDE columns.
+CREATE TABLE test.readings (id INTEGER, taken DATE, label TEXT)
+    PARTITION BY RANGE (taken);
 CREATE TABLE test.readings_2020 PARTITION OF test.readings
     FOR VALUES FROM ('2020-01-01') TO ('2021-01-01');
 CREATE TABLE test.readings_2021 PARTITION OF test.readings
     FOR VALUES FROM ('2021-01-01') TO ('2022-01-01');
 CREATE INDEX readings_id ON test.readings (id);
-CREATE INDEX readings_taken ON ONLY test.readings (taken);
-CREATE INDEX readings_2020_by_day ON test.readings_2020 (taken);
+CREATE INDEX readings_taken ON ONLY test.readings (taken) INCLUDE (id);
+CREATE INDEX readings_2020_by_day ON test.readings_2020 (taken) INCLUDE (id);
 ALTER INDEX test.readings_taken ATTACH PARTITION test.readings_2020_by_day;
-CREATE INDEX readings_2021_by_day ON test.readings_2021 (taken);
+CREATE INDEX readings_2021_by_day ON test.readings_2021 (taken) INCLUDE (id);
 ALTER INDEX test.readings_taken ATTACH PARTITION test.readings_2021_by_day;
 ALTER TABLE test.readings ADD CONSTRAINT readings_unique UNIQUE (id, taken);
+ALTER TABLE test.readings ADD CONSTRAINT readings_pkey
+    PRIMARY KEY (taken, id) INCLUDE (label);
 COMMENT ON INDEX test.readings_2020_by_day IS 'Readings by day';
 
 -- A base type: pg_dump writes a SHELL TYPE entry before the functions
