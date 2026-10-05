@@ -266,7 +266,7 @@ fn signature_domains(project: &Project) -> HashMap<usize, Vec<usize>> {
                     .get(..6)
                     .filter(|word| word.eq_ignore_ascii_case("setof "))
                     .map_or(name, |_| &name[6..]);
-                let name = name.split(['(', '[']).next()?.trim();
+                let name = without_modifiers(name).trim();
                 let (schema, name) = split_sql_name(name);
                 domains.get(&(schema, name)).copied()
             })
@@ -276,6 +276,21 @@ fn signature_domains(project: &Project) -> HashMap<usize, Vec<usize>> {
         }
     }
     result
+}
+
+/// A type name without its modifier or its array suffix: the text
+/// before the first `(` or `[` that is not in a quoted identifier
+fn without_modifiers(name: &str) -> &str {
+    let mut quoted = false;
+    for (index, c) in name.char_indices() {
+        match c {
+            // a doubled quote in a quoted identifier toggles twice
+            '"' => quoted = !quoted,
+            '(' | '[' if !quoted => return &name[..index],
+            _ => {}
+        }
+    }
+    name
 }
 
 /// Whether the build emits a column default as its own entry whatever
@@ -575,5 +590,46 @@ mod tests {
             calls.separate_checks.iter().map(String::as_str).collect();
         assert_eq!(separate, ["d_loop"].into());
         assert_eq!(calls.inline_functions().collect::<Vec<_>>(), [2]);
+    }
+
+    /// A parenthesis or a bracket in a quoted domain name is part of
+    /// the name, not a modifier or an array suffix
+    #[test]
+    fn signature_domains_keep_a_quoted_name() {
+        let domain = |id, name: &str| {
+            item(
+                id,
+                ObjectType::Domain,
+                Definition::Domain(
+                    serde_json::from_value(json!({
+                        "name": name, "schema": "test", "owner": "postgres",
+                        "data_type": "integer",
+                    }))
+                    .unwrap(),
+                ),
+                &[],
+            )
+        };
+        let project = project(vec![
+            domain(0, "d(x)"),
+            domain(1, "e[\"y\"]"),
+            item(
+                2,
+                ObjectType::Function,
+                Definition::Function(
+                    serde_json::from_value(json!({
+                        "name": "f", "schema": "test", "owner": "postgres",
+                        "returns": "test.\"e[\"\"y\"\"]\"[]",
+                        "language": "sql", "sql_body": "RETURN 1",
+                        "parameters": [
+                            {"mode": "IN", "data_type": "test.\"d(x)\""},
+                        ],
+                    }))
+                    .unwrap(),
+                ),
+                &[],
+            ),
+        ]);
+        assert_eq!(signature_domains(&project)[&2], [0, 1]);
     }
 }
