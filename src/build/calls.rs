@@ -92,6 +92,8 @@ pub(super) fn table_calls(project: &Project) -> HashMap<usize, TableCalls> {
         {
             continue;
         }
+        // the CHECKs as the build writes them (deviation 60)
+        let table = &table.with_table_checks();
         let mut calls = TableCalls::default();
         let (forced_defaults, forced_checks) =
             forced.entry(item.id).or_default();
@@ -404,5 +406,25 @@ mod tests {
         let calls = table_calls(&project);
         assert!(calls[&0].separate_defaults.contains("n"));
         assert!(calls[&1].separate_defaults.contains("n"));
+    }
+
+    /// A CHECK on a column is a CHECK of the table with its name, as
+    /// the build writes it (deviation 60), thus one that calls a
+    /// function that reads its table is separate too
+    #[test]
+    fn separates_a_column_check() {
+        let project = project(vec![
+            table(
+                0,
+                "t",
+                json!({"columns": [{"name": "a", "data_type": "integer",
+                                    "check_constraint":
+                                        "test.reads_t() > a"}]}),
+            ),
+            function(1, "reads_t", &[0]),
+        ]);
+        let calls = table_calls(&project);
+        assert_eq!(calls[&0].checks["t_a_check"], [1]);
+        assert!(calls[&0].separate_checks.contains("t_a_check"));
     }
 }
