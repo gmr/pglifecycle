@@ -2651,6 +2651,30 @@ mod tests {
         assert!(statements(table(&repo, &db)).is_empty());
     }
 
+    /// A column of the primary key is NOT NULL without `nullable:
+    /// false`, so a primary key added to a table makes the column NOT
+    /// NULL, and a table that has it is unchanged
+    #[test]
+    fn primary_key_column_is_not_null() {
+        let mut repo = base_table();
+        repo["columns"][0]["nullable"] = serde_json::Value::Null;
+        repo["primary_key"] = serde_json::json!(["id"]);
+        let mut db = base_table();
+        db["primary_key"] = serde_json::json!(["id"]);
+        let repo = parse_table(repo);
+        assert!(statements(table(&repo, &parse_table(db))).is_empty());
+        let mut db = base_table();
+        db["columns"][0]["nullable"] = serde_json::Value::Null;
+        let alters = statements(table(&repo, &parse_table(db)));
+        assert_eq!(
+            sql(&alters),
+            vec![
+                "ALTER TABLE test.users ALTER COLUMN id SET NOT NULL;\n",
+                "ALTER TABLE test.users ADD PRIMARY KEY (id);\n",
+            ]
+        );
+    }
+
     /// A NOT NULL rename reconciles even though nullability itself is
     /// unchanged: from PostgreSQL 18 the constraint is named, so the
     /// name is part of the state deploy has to converge. It renames in
