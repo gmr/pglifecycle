@@ -38,16 +38,17 @@ the project without these entries. See
   ALTER COLUMN c SET STATISTICS` (or `SET STORAGE`) on a column that
   the child inherits puts the table entry in `remaining.yaml`. Set the
   value by hand after the restore or the deploy.
+- **A domain CHECK that pg_dump writes apart from its domain.**
+  When a domain CHECK calls a function that uses the domain type,
+  `pg_dump` writes the CHECK as a `CHECK CONSTRAINT` entry of its own,
+  after the function. `pull` does not model this entry, and it stops
+  with `1 dump entry could not be modeled (CHECK CONSTRAINT)`. Use
+  `--allow-unsupported`: the entry goes to `remaining.yaml`. Then add
+  the CHECK by hand after the restore. `deploy` gives a warning for
+  this CHECK and does not change it.
 
 ## Build
 
-- **Order of composite types and domains.** The build does not order
-  a composite type after the types of its attributes, or a domain
-  after its base type, when those are types, domains or tables of the
-  project. The restore can then make the object before the type that
-  it uses, and fail. Add a `dependencies` entry (`types`, `domains` or
-  `tables`) to the file of the object. See
-  [Conventions](project-format.md#conventions).
 - **Text search mappings that differ only in case.** A text search
   configuration with two token types that differ only in case (for
   example `word` and `Word`) gets two `ADD MAPPING` statements, and
