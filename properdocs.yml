@@ -73,5 +73,6 @@ nav:
   - Home: index.md
   - Commands: commands.md
   - Project Format: project-format.md
+  - Known Limitations: known-limitations.md
   - Schema Reference: reference/
   - GitHub Actions: github-actions.md
