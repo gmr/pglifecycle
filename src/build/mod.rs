@@ -328,6 +328,17 @@
 //!     PostgreSQL makes, and a name that must be quoted did not make
 //!     the domain. The test-project domains have one CHECK each, thus
 //!     its archive does not change.
+//! 65. A composite type comes after the types, the domains and the
+//!     tables, views or materialized views of the row types of its
+//!     attributes, a range after the type or domain of its subtype,
+//!     and a domain after the type, domain or relation of its base
+//!     type. The Python did not order them, and types and domains
+//!     share one priority, so the archive had them in name order, and
+//!     `CREATE TYPE a_pair AS (p z_point)` failed when `z_point` came
+//!     later. A table comes after the types, thus the row type of a
+//!     table was always later than the type that uses it. No
+//!     test-project type or domain uses another, thus its archive does
+//!     not change.
 
 mod acls;
 mod calls;

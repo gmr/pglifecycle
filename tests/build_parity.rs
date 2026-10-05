@@ -1885,3 +1885,69 @@ fn orders_each_user_mapping_after_its_user() {
         assert!(user < mapping, "{server} comes before the user: {order:?}");
     }
 }
+
+/// Deviation 65: a composite type, a range and a domain come after the
+/// type, the domain or the relation of the row type that they use,
+/// which name order puts later
+#[test]
+fn orders_types_and_domains_after_the_types_they_use() {
+    let dir = tempfile::tempdir().unwrap();
+    let files = [
+        ("project.yaml", "name: types\n"),
+        ("schemata/test.yaml", "name: test\nowner: postgres\n"),
+        (
+            "tables/test/z_points.yaml",
+            "name: z_points\nschema: test\nowner: postgres\ncolumns:\n\
+             - name: x\n  data_type: integer\n",
+        ),
+        (
+            "types/test.yaml",
+            "schema: test\ntypes:\n\
+             - name: a_reading\n  schema: test\n  owner: postgres\n  \
+             type: composite\n  columns:\n  - name: at\n    \
+             data_type: test.z_points\n  - name: level\n    \
+             data_type: test.z_level\n\
+             - name: a_range\n  schema: test\n  owner: postgres\n  \
+             type: range\n  subtype: test.z_mood\n\
+             - name: z_mood\n  schema: test\n  owner: postgres\n  \
+             type: enum\n  enum: [calm]\n",
+        ),
+        (
+            "domains/test/a_point.yaml",
+            "name: a_point\nschema: test\nowner: postgres\n\
+             data_type: test.z_points\n",
+        ),
+        (
+            "domains/test/z_level.yaml",
+            "name: z_level\nschema: test\nowner: postgres\n\
+             data_type: integer\n",
+        ),
+    ];
+    for (file, text) in files {
+        let path = dir.path().join(file);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+    let project = project::load(dir.path()).unwrap();
+    let mut dump = build::assemble(&project).unwrap().dump;
+    dump.sort_entries();
+    let position = |desc: &str, tag: &str| {
+        dump.entries()
+            .iter()
+            .position(|e| {
+                e.desc.as_str() == desc && e.tag.as_deref() == Some(tag)
+            })
+            .unwrap_or_else(|| panic!("missing entry {desc} {tag}"))
+    };
+    for (first, then) in [
+        (("TABLE", "z_points"), ("TYPE", "a_reading")),
+        (("DOMAIN", "z_level"), ("TYPE", "a_reading")),
+        (("TYPE", "z_mood"), ("TYPE", "a_range")),
+        (("TABLE", "z_points"), ("DOMAIN", "a_point")),
+    ] {
+        assert!(
+            position(first.0, first.1) < position(then.0, then.1),
+            "{then:?} comes before {first:?}"
+        );
+    }
+}

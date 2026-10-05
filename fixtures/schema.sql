@@ -823,6 +823,21 @@ CREATE TABLE test.a_segments (
     stops    test.z_points[]
 );
 
+-- A composite type, a domain and a range of a type that is a row type,
+-- an enum or a domain of the project. Name order puts each one before
+-- the type that it uses, and types and domains share one priority, so
+-- the type that it uses has to be ordered first.
+CREATE TYPE test.z_mood AS ENUM ('calm', 'busy');
+CREATE DOMAIN test.z_level AS INTEGER;
+CREATE TYPE test.a_reading AS (
+    at    test.z_points,
+    level test.z_level,
+    mood  test.z_mood
+);
+CREATE DOMAIN test.a_point_domain AS test.z_points;
+CREATE DOMAIN test.a_mood_domain AS test.z_mood;
+CREATE TYPE test.a_mood_range AS RANGE (SUBTYPE = test.z_mood);
+
 -- Routines that set a list setting. PostgreSQL searches pg_temp first
 -- when search_path does not name it, so a SECURITY DEFINER function
 -- names pg_temp last. pg_dump writes each element as a string
