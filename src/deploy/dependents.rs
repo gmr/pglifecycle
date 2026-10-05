@@ -388,15 +388,6 @@ fn rebuild_parts(
                     if !old.contains(&alter.sql) {
                         alter.destructive = true;
                     }
-                    // a column default is set again with ALTER TABLE
-                    // ONLY, as it is dropped: without ONLY, PostgreSQL
-                    // sets it on each inheritance child and partition
-                    for (_, drop, _) in &drops {
-                        if let Some(set) = only_default(&drop.sql, &alter.sql)
-                        {
-                            alter.sql = set;
-                        }
-                    }
                 }
                 Resolution::Statements(alters)
             }
@@ -770,21 +761,6 @@ fn entry_part<'a>(
     };
     drops.push((Some(entry), drop, again));
     Ok(())
-}
-
-/// `set` with ALTER TABLE ONLY, when it sets the column default that
-/// `drop` (an ALTER TABLE ONLY ... DROP DEFAULT) drops
-fn only_default(drop: &str, set: &str) -> Option<String> {
-    let target = drop
-        .strip_prefix("ALTER TABLE ONLY ")?
-        .strip_suffix(" DROP DEFAULT;\n")?;
-    let expression = set
-        .strip_prefix("ALTER TABLE ")?
-        .strip_prefix(target)?
-        .strip_prefix(" SET DEFAULT ")?;
-    Some(format!(
-        "ALTER TABLE ONLY {target} SET DEFAULT {expression}"
-    ))
 }
 
 /// True when `list` has an item that `matches` finds
