@@ -1057,6 +1057,7 @@ fn columns(
     }
     let repo_names = repo.not_null_names();
     let db_names = db.not_null_names();
+    let partitioned = repo.partition.is_some();
     for column in repo_columns {
         match db_columns.iter().find(|c| c.name == column.name) {
             None => alters.push(Alter::new(format!(
@@ -1065,7 +1066,14 @@ fn columns(
             ))),
             Some(existing) => {
                 let names = (&repo_names, &db_names);
-                if !alter_column(table, names, column, existing, alters) {
+                if !alter_column(
+                    table,
+                    names,
+                    partitioned,
+                    column,
+                    existing,
+                    alters,
+                ) {
                     return false;
                 }
             }
@@ -1087,6 +1095,12 @@ fn no_inherit(not_null: &Option<ColumnNotNull>) -> bool {
     not_null.as_ref().and_then(|c| c.no_inherit) == Some(true)
 }
 
+/// `ONLY ` when `partitioned`, for a statement that must not change the
+/// partitions, which the project models with all of their columns
+fn only_if(partitioned: bool) -> &'static str {
+    if partitioned { "ONLY " } else { "" }
+}
+
 /// The NOT NULL names of the repository table and of the database
 /// table, as [`Table::not_null_names`] gives them
 type NotNullNames<'a> = (
@@ -1094,9 +1108,16 @@ type NotNullNames<'a> = (
     &'a std::collections::BTreeMap<String, String>,
 );
 
+/// Reconcile one column in place; returns false where only a rebuild
+/// works. A partition models each of its columns, thus on a
+/// `partitioned` table SET EXPRESSION and DROP NOT NULL use ONLY: else
+/// PostgreSQL also changes each partition (checked on PostgreSQL 18).
+/// On an inheritance child, the project models neither of them, so
+/// they recurse there.
 fn alter_column(
     table: &str,
     not_null_names: NotNullNames,
+    partitioned: bool,
     repo: &Column,
     db: &Column,
     alters: &mut Vec<Alter>,
@@ -1128,10 +1149,11 @@ fn alter_column(
         return false;
     }
     let column = quote_ident(&repo.name);
+    let only = only_if(partitioned);
     if let Some(expression) = expression {
         alters.push(Alter::new(format!(
-            "ALTER TABLE {table} ALTER COLUMN {column} SET EXPRESSION AS \
-             ({expression});\n"
+            "ALTER TABLE {only}{table} ALTER COLUMN {column} SET EXPRESSION \
+             AS ({expression});\n"
         )));
     }
     // DROP IDENTITY goes first: PostgreSQL rejects SET DEFAULT and DROP
@@ -1166,15 +1188,19 @@ fn alter_column(
             repo.data_type
         )));
     }
+    // ONLY, as pg_dump writes it: each inheritance child and partition
+    // has a default of its own in the project, which PostgreSQL also
+    // changes without ONLY
     if repo.default != db.default {
         alters.push(dependent(match &repo.default {
             Some(default) => format!(
-                "ALTER TABLE {table} ALTER COLUMN {column} SET DEFAULT \
+                "ALTER TABLE ONLY {table} ALTER COLUMN {column} SET DEFAULT \
                  {};\n",
                 build::render_default(default)
             ),
             None => format!(
-                "ALTER TABLE {table} ALTER COLUMN {column} DROP DEFAULT;\n"
+                "ALTER TABLE ONLY {table} ALTER COLUMN {column} DROP \
+                 DEFAULT;\n"
             ),
         }));
     }
@@ -1188,7 +1214,7 @@ fn alter_column(
     if repo_not_null != db_not_null {
         if db_not_null {
             alters.push(dependent(format!(
-                "ALTER TABLE {table} ALTER COLUMN {column} DROP NOT \
+                "ALTER TABLE {only}{table} ALTER COLUMN {column} DROP NOT \
                  NULL;\n"
             )));
         }
@@ -1264,7 +1290,10 @@ fn alter_column(
 /// place. None of them rewrites existing rows: a new compression or
 /// storage applies to values written later. An attribute the repo no
 /// longer states goes back to its default (DEFAULT, or -1 for the
-/// statistics target, and RESET for an option).
+/// statistics target, and RESET for an option). ALTER TABLE ONLY, as
+/// pg_dump writes them: without ONLY, PostgreSQL also sets STATISTICS
+/// and STORAGE on each inheritance child and partition, which have
+/// values of their own.
 fn column_attributes(
     table: &str,
     column: &str,
@@ -1272,7 +1301,7 @@ fn column_attributes(
     db: &Column,
     alters: &mut Vec<Alter>,
 ) {
-    let prefix = format!("ALTER TABLE {table} ALTER COLUMN {column}");
+    let prefix = format!("ALTER TABLE ONLY {table} ALTER COLUMN {column}");
     if repo.statistics != db.statistics {
         alters.push(Alter::new(format!(
             "{prefix} SET STATISTICS {};\n",
@@ -1503,6 +1532,7 @@ fn constraints(
     let repo_not_null =
         repo.not_null_constraints.as_deref().unwrap_or_default();
     let db_not_null_names = db.not_null_names();
+    let only = only_if(repo.partition.is_some());
     let db_not_null = validations(
         table,
         db.not_null_constraints.as_deref().unwrap_or_default(),
@@ -1524,7 +1554,7 @@ fn constraints(
         |not_null: &NotNullConstraint| not_null.column.clone(),
         |not_null| {
             format!(
-                "ALTER TABLE {table} ALTER COLUMN {} DROP NOT NULL;\n",
+                "ALTER TABLE {only}{table} ALTER COLUMN {} DROP NOT NULL;\n",
                 quote_ident(&not_null.column)
             )
         },
@@ -2530,6 +2560,10 @@ mod tests {
         assert!(alters.is_empty(), "alias must not diff: {:?}", sql(&alters));
     }
 
+    /// A default is set with ALTER TABLE ONLY, which does not change the
+    /// default of an inheritance child or a partition. On a table that
+    /// is not partitioned, DROP NOT NULL recurses: an inheritance child
+    /// models no NOT NULL that it inherits
     #[test]
     fn default_and_nullability_toggle() {
         let mut repo = base_table();
@@ -2540,12 +2574,55 @@ mod tests {
         assert_eq!(
             sql(&alters),
             vec![
-                "ALTER TABLE test.users ALTER COLUMN email SET DEFAULT \
+                "ALTER TABLE ONLY test.users ALTER COLUMN email SET DEFAULT \
                  'unknown'::text;\n",
                 "ALTER TABLE test.users ALTER COLUMN email DROP NOT NULL;\n",
             ]
         );
         assert!(alters.iter().all(|a| !a.destructive));
+    }
+
+    /// A partition models each of its columns, so on a partitioned
+    /// table DROP DEFAULT, DROP NOT NULL, SET EXPRESSION and SET
+    /// STATISTICS use ONLY. SET NOT NULL must change each partition
+    /// too, which PostgreSQL requires
+    #[test]
+    fn partitioned_table_keeps_its_partitions() {
+        let partitioned = |mut table: serde_json::Value| {
+            table["partition"] =
+                serde_json::json!({"type": "RANGE", "columns": ["id"]});
+            table["columns"]
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!({
+                    "name": "doubled",
+                    "data_type": "integer",
+                    "generated": {"expression": "(id * 2)"},
+                }));
+            table
+        };
+        let mut repo = partitioned(base_table());
+        repo["columns"][0]["nullable"] = true.into();
+        repo["columns"][1]["nullable"] = false.into();
+        repo["columns"][1]["statistics"] = 50.into();
+        repo["columns"][2]["generated"]["expression"] = "(id * 3)".into();
+        let mut db = partitioned(base_table());
+        db["columns"][1]["default"] = "'unknown'::text".into();
+        db["columns"][1]["nullable"] = true.into();
+        let alters = statements(table(&parse_table(repo), &parse_table(db)));
+        assert_eq!(
+            sql(&alters),
+            vec![
+                "ALTER TABLE ONLY test.users ALTER COLUMN id DROP NOT NULL;\n",
+                "ALTER TABLE ONLY test.users ALTER COLUMN email DROP \
+                 DEFAULT;\n",
+                "ALTER TABLE test.users ALTER COLUMN email SET NOT NULL;\n",
+                "ALTER TABLE ONLY test.users ALTER COLUMN email SET \
+                 STATISTICS 50;\n",
+                "ALTER TABLE ONLY test.users ALTER COLUMN doubled SET \
+                 EXPRESSION AS (id * 3);\n",
+            ]
+        );
     }
 
     #[test]
@@ -2816,7 +2893,7 @@ mod tests {
             sql(&alters),
             vec![
                 "ALTER TABLE test.users ALTER COLUMN id DROP IDENTITY;\n",
-                "ALTER TABLE test.users ALTER COLUMN id SET DEFAULT \
+                "ALTER TABLE ONLY test.users ALTER COLUMN id SET DEFAULT \
                  nextval('test.users_id'::regclass);\n",
                 "ALTER TABLE test.users ALTER COLUMN id DROP NOT NULL;\n",
             ]
@@ -4909,12 +4986,16 @@ mod tests {
         assert_eq!(
             sql(&alters),
             vec![
-                "ALTER TABLE test.users ALTER COLUMN email SET STATISTICS -1;\n",
-                "ALTER TABLE test.users ALTER COLUMN email SET STORAGE EXTERNAL;\n",
-                "ALTER TABLE test.users ALTER COLUMN email SET COMPRESSION lz4;\n",
-                "ALTER TABLE test.users ALTER COLUMN email RESET \
+                "ALTER TABLE ONLY test.users ALTER COLUMN email SET \
+                 STATISTICS -1;\n",
+                "ALTER TABLE ONLY test.users ALTER COLUMN email SET STORAGE \
+                 EXTERNAL;\n",
+                "ALTER TABLE ONLY test.users ALTER COLUMN email SET \
+                 COMPRESSION lz4;\n",
+                "ALTER TABLE ONLY test.users ALTER COLUMN email RESET \
                  (n_distinct_inherited);\n",
-                "ALTER TABLE test.users ALTER COLUMN email SET (n_distinct=100);\n",
+                "ALTER TABLE ONLY test.users ALTER COLUMN email SET \
+                 (n_distinct=100);\n",
             ]
         );
         assert!(alters.iter().all(|a| !a.destructive));

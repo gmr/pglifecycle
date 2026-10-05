@@ -74,7 +74,7 @@ psql -d "${TARGET_DB}" -q -v ON_ERROR_STOP=1 \
 ./target/debug/pglifecycle deploy -o "${WORKDIR}/null-defaults.sql" \
     -d "${TARGET_DB}" "${WORKDIR}/project"
 for pattern in \
-    '^ALTER TABLE test\.null_defaults ALTER COLUMN b DROP DEFAULT;' \
+    '^ALTER TABLE ONLY test\.null_defaults ALTER COLUMN b DROP DEFAULT;' \
     '^ALTER DOMAIN test\.null_defaults_domain DROP DEFAULT;'; do
     if ! grep -Eq "${pattern}" "${WORKDIR}/null-defaults.sql"; then
         echo "Convergence gate FAILED: no ${pattern}" >&2
@@ -241,11 +241,11 @@ psql -d "${TARGET_DB}" -q -v ON_ERROR_STOP=1 \
 ./target/debug/pglifecycle deploy -o "${WORKDIR}/null-typmods.sql" \
     -d "${TARGET_DB}" "${WORKDIR}/project"
 for pattern in \
-    '^ALTER TABLE test\.null_typmods ALTER COLUMN a SET DEFAULT NULL::character varying;' \
-    '^ALTER TABLE test\.null_typmods ALTER COLUMN h SET DEFAULT NULL::integer;' \
-    '^ALTER TABLE test\.null_typmods ALTER COLUMN k DROP DEFAULT;' \
-    '^ALTER TABLE test\.null_typmods ALTER COLUMN p SET DEFAULT \(NULL::integer\)::test\.null_defaults_domain;' \
-    '^ALTER TABLE test\.null_typmods ALTER COLUMN r DROP DEFAULT;' \
+    '^ALTER TABLE ONLY test\.null_typmods ALTER COLUMN a SET DEFAULT NULL::character varying;' \
+    '^ALTER TABLE ONLY test\.null_typmods ALTER COLUMN h SET DEFAULT NULL::integer;' \
+    '^ALTER TABLE ONLY test\.null_typmods ALTER COLUMN k DROP DEFAULT;' \
+    '^ALTER TABLE ONLY test\.null_typmods ALTER COLUMN p SET DEFAULT \(NULL::integer\)::test\.null_defaults_domain;' \
+    '^ALTER TABLE ONLY test\.null_typmods ALTER COLUMN r DROP DEFAULT;' \
     '^ALTER TABLE ONLY test\.null_typmods_child ALTER COLUMN v SET DEFAULT NULL::character varying;' \
     '^ALTER TABLE ONLY test\.null_typmods_child ALTER COLUMN i DROP DEFAULT;' \
     '^ALTER DOMAIN test\.null_typmods_varchar SET DEFAULT NULL::character varying;' \

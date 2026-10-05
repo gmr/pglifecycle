@@ -94,7 +94,7 @@ psql -d "${TARGET_DB}" -q -v ON_ERROR_STOP=1 \
 ./target/debug/pglifecycle deploy -o "${WORKDIR}/serial-drift.sql" \
     -d "${TARGET_DB}" "${WORKDIR}/project"
 for pattern in \
-    "^ALTER TABLE test\.gate_serial ALTER COLUMN s SET DEFAULT nextval\('test\.gate_serial_s_seq'::regclass\);" \
+    "^ALTER TABLE ONLY test\.gate_serial ALTER COLUMN s SET DEFAULT nextval\('test\.gate_serial_s_seq'::regclass\);" \
     '^ALTER TABLE test\.gate_serial ALTER COLUMN u SET NOT NULL;'; do
     if ! grep -Eq "${pattern}" "${WORKDIR}/serial-drift.sql"; then
         echo "Convergence gate FAILED: no ${pattern}" >&2

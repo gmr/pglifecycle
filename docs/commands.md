@@ -196,6 +196,14 @@ reconciled in place where PostgreSQL can express it:
   that dropping and re-adding it would take. Dropping a column, changing a column
   type, reordering columns, and partitioning/storage changes fall back
   to drop+recreate.
+  Each inheritance child and partition has a default, a statistics
+  target and a storage of its own in the project, so deploy changes
+  them on a parent with `ALTER TABLE ONLY`; without `ONLY`, PostgreSQL
+  also changes them on each child. A partition also has the NOT NULL
+  and the generated expression of each column, so on a partitioned
+  table `DROP NOT NULL` and `SET EXPRESSION` use `ONLY` too. Where
+  PostgreSQL must change the children too (a new column, a type, a
+  new NOT NULL or constraint), the statement has no `ONLY`.
 - **Row-level security** — `ENABLE`/`DISABLE` and `[NO] FORCE ROW
   LEVEL SECURITY`, and one statement per policy, labeled with the
   policy's own name in the script. A new policy is created. A changed

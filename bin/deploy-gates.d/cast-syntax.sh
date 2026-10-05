@@ -124,7 +124,7 @@ perl -pi -e 's/^  expression: \(i::int > 1\)$/  expression: (i::int > 0)/' \
     "${table}"
 perl -pi -e 's/^  default: 1::bigint$/  default: 3::bigint/' "${table}"
 expect_syntax_change \
-    '^ALTER TABLE test\.cast_syntax ALTER COLUMN d SET DEFAULT \(3\)::bigint' \
+    '^ALTER TABLE ONLY test\.cast_syntax ALTER COLUMN d SET DEFAULT \(3\)::bigint' \
     "a changed default is a change"
 perl -pi -e 's/^  default: 3::bigint$/  default: 1::bigint/' "${table}"
 perl -pi -e 's/^  condition: \(new\.i::int > 0\)$/  condition: (new.id::bigint > 0)/' \

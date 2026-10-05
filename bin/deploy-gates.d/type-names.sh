@@ -260,7 +260,7 @@ expect_type_change '^ALTER TABLE test\.type_names ADD CONSTRAINT type_names_chec
 perl -pi -e 's/^  expression: \(\(i2\)::INT8 > 0\)$/  expression: ((i2)::INT4 > 0)/' \
     "${table}"
 perl -pi -e 's/ \(3\)::INT8$/ (3)::INT4/' "${table}"
-expect_type_change '^ALTER TABLE test\.type_names ALTER COLUMN dfn SET DEFAULT \(3\)::integer' \
+expect_type_change '^ALTER TABLE ONLY test\.type_names ALTER COLUMN dfn SET DEFAULT \(3\)::integer' \
     "a changed cast type in a default is a change"
 perl -pi -e 's/ \(3\)::INT4$/ (3)::INT8/' "${table}"
 perl -pi -e 's/^  where: \(\(i2\)::INT8 > 0\)$/  where: ((i2)::INT4 > 0)/' "${table}"
