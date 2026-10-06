@@ -1913,10 +1913,16 @@ fn write_casts(node: &Node, source: &str, result: &mut String) {
     result.push_str(&source[position..node.end_byte()]);
 }
 
-/// A dollar-quoted string (`$$a$$` or `$tag$a$tag$`) in single quotes,
-/// the form that PostgreSQL writes (`'a'`), or none when the text is
-/// not one dollar-quoted string
+/// A dollar-quoted string (`$$a$$` or `$tag$a$tag$`), also in
+/// parentheses, in single quotes, the form that PostgreSQL writes
+/// (`'a'`), or none when the text is not one dollar-quoted string
 fn single_quoted(text: &str) -> Option<String> {
+    if let Some(inner) = text
+        .strip_prefix('(')
+        .and_then(|text| text.strip_suffix(')'))
+    {
+        return single_quoted(inner.trim());
+    }
     if !text.starts_with('$') || dollar_quoted_length(text)? != text.len() {
         return None;
     }
@@ -2693,6 +2699,8 @@ mod tests {
         same("(t <> $$a$$::text)", "(t <> 'a'::text)");
         same("(t <> $q$it's$q$::text)", "(t <> 'it''s'::text)");
         same("CAST($$a$$ AS text)", "'a'::text");
+        same("($$a$$)::text", "'a'::text");
+        same("( $$a$$ )::text", "'a'::text");
         same("'x'::varchar", "'x'::character varying");
         same("CAST(NULL AS int)", "NULL::integer");
         same("ARRAY[]::int[]", "ARRAY[]::integer[]");
