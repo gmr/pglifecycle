@@ -1569,9 +1569,6 @@ impl Builder {
         procedure: bool,
     ) -> Result<(), String> {
         let kind = if procedure { "PROCEDURE" } else { "FUNCTION" };
-        if let Some(sql) = &d.sql {
-            return self.add_item(item, vec![sql.clone()], vec![], false);
-        }
         // `comment_target` is only set when `func_name` diverges from the
         // default comment target (`namespace.d.name`) computed in
         // `add_comment` — i.e. for the bare, unparenthesized
@@ -1673,6 +1670,19 @@ impl Builder {
             Some(_) => Some(drop_target.clone()),
             None => comment_target.clone(),
         };
+        // raw SQL keeps the bare comment target for parity. Its security
+        // labels name the signature when `parameters` gives one; without
+        // `parameters`, `()` can be wrong, thus they keep the bare name
+        if let Some(sql) = &d.sql {
+            return self.add_item_with_targets(
+                item,
+                vec![sql.clone()],
+                vec![],
+                false,
+                None,
+                drop_name.and(label_target),
+            );
+        }
         let drop = vec![format!("DROP {kind}"), drop_target];
         if let Some(transform_types) = &d.transform_types {
             let tts: Vec<String> = transform_types
@@ -6748,6 +6758,60 @@ mod tests {
                 "COMMENT ON PROCEDURE test.archive(IN days integer) IS \
                  $$archives rows$$;\n;\n"
             ]
+        );
+    }
+
+    #[test]
+    fn raw_sql_function_labels_name_the_signature() {
+        let function: crate::models::Function =
+            serde_json::from_value(json!({
+                "name": "f",
+                "schema": "test",
+                "owner": "app",
+                "parameters": [
+                    {"mode": "IN", "name": "a", "data_type": "integer"},
+                ],
+                "sql": "CREATE FUNCTION test.f(a integer) RETURNS integer \
+                        LANGUAGE sql AS $$SELECT a$$;",
+                "comment": "raw",
+                "security_labels": {"dummy": "classified"},
+            }))
+            .unwrap();
+        let item = Item {
+            id: 1,
+            desc: ObjectType::Function,
+            definition: Definition::Function(function),
+            dependencies: BTreeSet::new(),
+        };
+        // the comment keeps the bare name for parity
+        assert_eq!(
+            comment_defns(&item),
+            vec!["COMMENT ON FUNCTION test.f IS $$raw$$;\n;\n"]
+        );
+        let dump = libpgdump::new("t", "UTF-8", "18.0").unwrap();
+        let mut builder = Builder {
+            dump,
+            dump_id_map: HashMap::new(),
+            text_search_last: HashMap::new(),
+            pending_attaches: Vec::new(),
+            index_attaches: IndexAttaches::default(),
+            text_search_ids: HashMap::new(),
+            text_search_refs: Vec::new(),
+            partition_ids: HashMap::new(),
+            superuser: "postgres".into(),
+            calls: Rc::default(),
+        };
+        builder.dump_item(&item).unwrap();
+        let label = builder
+            .dump
+            .entries()
+            .iter()
+            .find(|e| e.desc == libpgdump::ObjectType::SecurityLabel)
+            .and_then(|e| e.defn.clone())
+            .expect("a SECURITY LABEL entry");
+        assert!(
+            label.contains("ON FUNCTION test.f(IN a integer) IS"),
+            "unexpected label: {label}"
         );
     }
 
