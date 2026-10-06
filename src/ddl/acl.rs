@@ -248,6 +248,46 @@ pub(crate) fn database_setting(
     })
 }
 
+/// ALTER DATABASE db [WITH] CONNECTION LIMIT n IS_TEMPLATE b, the
+/// properties that pg_dump writes in the DATABASE PROPERTIES entry. A
+/// statement with another property is not supported. pg_dump cannot
+/// connect to a database with ALLOW_CONNECTIONS false, thus it never
+/// writes that property
+pub(crate) fn database_properties(node: &Node, src: &str) -> Statement {
+    let unsupported = || Statement::Unsupported(node.kind().to_string());
+    let Some(list) = node.child_of_kind("createdb_opt_list") else {
+        return unsupported();
+    };
+    let (mut connection_limit, mut is_template) = (None, None);
+    for item in list.find_all("createdb_opt_item") {
+        let Some(name) = item.child_of_kind("createdb_opt_name") else {
+            return unsupported();
+        };
+        let value = item
+            .child_of_kind("NumericOnly")
+            .or_else(|| item.child_of_kind("opt_boolean_or_string"))
+            .map(|v| v.text(src).to_ascii_lowercase());
+        if name.has("kw_connection") && name.has("kw_limit") {
+            match value.and_then(|v| v.parse::<i64>().ok()) {
+                Some(limit) => connection_limit = Some(limit),
+                None => return unsupported(),
+            }
+        } else if name.text(src).eq_ignore_ascii_case("is_template") {
+            match value.as_deref() {
+                Some("true" | "on") => is_template = Some(true),
+                Some("false" | "off") => is_template = Some(false),
+                _ => return unsupported(),
+            }
+        } else {
+            return unsupported();
+        }
+    }
+    Statement::DatabaseProperties {
+        connection_limit,
+        is_template,
+    }
+}
+
 /// Map a privilege_target's keywords onto the ACL target kind;
 /// a bare object list means TABLE
 fn target_kind(target: &Node) -> Option<AclTarget> {
@@ -860,13 +900,48 @@ mod tests {
         assert_eq!(name, "TimeZone");
     }
 
-    /// The other properties that pg_dump writes in the entry are not
-    /// modeled, thus the entry is kept
+    /// pg_dump writes CONNECTION LIMIT and IS_TEMPLATE in the DATABASE
+    /// PROPERTIES entry when they are not the default
+    #[test]
+    fn parses_database_properties() {
+        for (sql, connection_limit, is_template) in [
+            (
+                "ALTER DATABASE fixtures CONNECTION LIMIT = 5;",
+                Some(5),
+                None,
+            ),
+            ("ALTER DATABASE x CONNECTION LIMIT -1;", Some(-1), None),
+            (
+                "ALTER DATABASE \"a b\" IS_TEMPLATE = true;",
+                None,
+                Some(true),
+            ),
+            ("ALTER DATABASE x is_template false;", None, Some(false)),
+            (
+                "ALTER DATABASE x WITH CONNECTION LIMIT 2 IS_TEMPLATE true;",
+                Some(2),
+                Some(true),
+            ),
+        ] {
+            assert_eq!(
+                parse_one(sql),
+                Statement::DatabaseProperties {
+                    connection_limit,
+                    is_template,
+                },
+                "{sql}"
+            );
+        }
+    }
+
+    /// The other properties of ALTER DATABASE are not modeled, thus
+    /// the entry is kept
     #[test]
     fn other_database_properties_are_unsupported() {
         for sql in [
-            "ALTER DATABASE fixtures CONNECTION LIMIT = 5;",
-            "ALTER DATABASE fixtures IS_TEMPLATE = true;",
+            "ALTER DATABASE fixtures ALLOW_CONNECTIONS = false;",
+            "ALTER DATABASE fixtures CONNECTION LIMIT 5 TABLESPACE t;",
+            "ALTER DATABASE fixtures SET TABLESPACE t;",
             "ALTER DATABASE fixtures RESET work_mem;",
         ] {
             assert!(

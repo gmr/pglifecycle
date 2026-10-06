@@ -1446,8 +1446,8 @@ fn calls_later(
 
 /// The warnings for the entries of the snapshot that pull could not
 /// model. The DATABASE PROPERTIES entry can have properties that pull
-/// does not model, as CONNECTION LIMIT, but the plan still changes the
-/// settings of the entry, thus it gets its own warning
+/// does not model, but the plan still changes the settings of the
+/// entry, thus it gets its own warning
 fn unmodeled_warnings(assembly: &pull::Assembly) -> Vec<String> {
     let properties = "DATABASE PROPERTIES";
     let mut warnings = Vec::new();
@@ -1476,10 +1476,10 @@ fn unmodeled_warnings(assembly: &pull::Assembly) -> Vec<String> {
         .any(|entry| entry.desc == properties)
     {
         warnings.push(format!(
-            "{properties}: the database has properties, as CONNECTION \
-             LIMIT, that this version cannot model; they were left \
-             untouched, but the plan changes the settings of the database \
-             and of its roles as the project gives them"
+            "{properties}: the database has properties that this version \
+             cannot model; they were left untouched, but the plan changes \
+             the modeled properties and the settings of the database and \
+             of its roles as the project gives them"
         ));
     }
     warnings
@@ -3182,7 +3182,7 @@ mod tests {
         let warnings = unmodeled_warnings(&assembly);
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert!(warnings[0].starts_with("DATABASE PROPERTIES: "));
-        assert!(warnings[0].contains("the plan changes the settings"));
+        assert!(warnings[0].contains("the plan changes the modeled"));
         assembly.remaining.push(remaining("EVENT TRIGGER"));
         let warnings = unmodeled_warnings(&assembly);
         assert_eq!(
