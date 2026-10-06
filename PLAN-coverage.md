@@ -904,11 +904,11 @@ empty list: then pull must succeed on the fixture and write no
 **Done since:** the settings of the database (`ALTER DATABASE ...
 SET`) and of a role in the database (`ALTER ROLE ... IN DATABASE ...
 SET`), in the `DATABASE PROPERTIES` entry. They are in `project.yaml`
-(`settings`, `role_settings`). pg_dump writes the other properties of
-the database (`CONNECTION LIMIT`, `IS_TEMPLATE`, `ALLOW_CONNECTIONS`)
-in the same entry, and pull does not model them: the entry goes to
-`remaining.yaml`. The coverage fixture has `CONNECTION LIMIT` for this
-gap.
+(`settings`, `role_settings`). The other properties that pg_dump writes
+in the same entry (`CONNECTION LIMIT`, `IS_TEMPLATE`) are in
+`project.yaml` too (`connection_limit`, `is_template`). pg_dump cannot
+connect to a database with `ALLOW_CONNECTIONS false`, thus it never
+writes that property.
 
 ## Effort
 
