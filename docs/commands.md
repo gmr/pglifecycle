@@ -121,8 +121,10 @@ the options of most user mappings (see the PostgreSQL documentation
 of that view). Then the plan can make again a subscription or the
 options of a user mapping that the database has already. deploy does
 not change the plan, but it writes a warning that names the role and
-those objects. Read the database as a role that can read them, for
-example a superuser. With `--dump`, deploy does not read a database,
+those objects. The plan also does not drop a subscription that only
+the database has, because the role cannot see it. deploy writes a
+warning that names those subscriptions too. Read the database as a
+role that can read them, for example a superuser. With `--dump`, deploy does not read a database,
 thus there is no warning.
 
 The script does not set the other settings that pg_restore sets.
@@ -912,7 +914,8 @@ gives `pg_dump`, `pg_dumpall`, and `psql` only the options that you
 set. For the other values, libpq uses the standard environment
 variables (`PGHOST`, `PGPORT`, `PGUSER`, `PGSERVICE`, and the other
 `PG*` variables), a service in `pg_service.conf`, and then its
-defaults. `--dbname` also uses `PGDATABASE`:
+defaults. Without `--dbname`, libpq reads `PGDATABASE` only as a
+database name, not as a connection string:
 
 | Option | Description |
 | --- | --- |
