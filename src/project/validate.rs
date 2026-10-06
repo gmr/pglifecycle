@@ -478,6 +478,22 @@ mod tests {
         assert_eq!(project("bad-name", json!("x")), (false, false));
     }
 
+    /// PostgreSQL reads `CONNECTION LIMIT` as a 32-bit integer
+    #[test]
+    fn connection_limit_is_a_postgres_int4() {
+        let valid = |limit: Value| {
+            validate_object(
+                "project",
+                "db",
+                &json!({"name": "db", "connection_limit": limit}),
+            )
+        };
+        assert!(valid(json!(-1)));
+        assert!(valid(json!(2_147_483_647_i64)));
+        assert!(!valid(json!(-2)));
+        assert!(!valid(json!(2_147_483_648_i64)));
+    }
+
     #[test]
     fn merges_package_schemas() {
         // casts.yml composes cast.yml via $package_schema

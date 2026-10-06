@@ -38,6 +38,7 @@ properties:
       limit. Absent is the same as -1.
     type: integer
     minimum: -1
+    maximum: 2147483647
   is_template:
     title: Is Template
     description: >
