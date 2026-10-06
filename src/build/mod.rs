@@ -666,6 +666,28 @@ impl Builder {
         no_owner: bool,
         comment_target: Option<String>,
     ) -> Result<(), String> {
+        let label_target = comment_target.clone();
+        self.add_item_with_targets(
+            item,
+            defn,
+            drop_stmt,
+            no_owner,
+            comment_target,
+            label_target,
+        )
+    }
+
+    /// Like [`add_item_with_comment_target`], but with a different
+    /// object reference for the `SECURITY LABEL` statements
+    fn add_item_with_targets(
+        &mut self,
+        item: &Item,
+        defn: Vec<String>,
+        drop_stmt: Vec<String>,
+        no_owner: bool,
+        comment_target: Option<String>,
+        label_target: Option<String>,
+    ) -> Result<(), String> {
         let namespace =
             item.definition.schema().unwrap_or_default().to_string();
         let tag = item.definition.name();
@@ -694,7 +716,7 @@ impl Builder {
                 &owner,
                 dump_id,
                 comment,
-                comment_target.clone(),
+                comment_target,
             )?;
         }
         if let Some(labels) = item.definition.security_labels() {
@@ -705,7 +727,7 @@ impl Builder {
                 &owner,
                 dump_id,
                 labels,
-                comment_target,
+                label_target,
             )?;
         }
         Ok(())
@@ -1644,6 +1666,13 @@ impl Builder {
             Some(_) if procedure => Some(drop_target.clone()),
             _ => comment_target,
         };
+        // a security label names the full signature, so that it
+        // identifies one overload: PostgreSQL refuses a bare name when
+        // the schema has more than one routine of that name
+        let label_target = match &drop_name {
+            Some(_) => Some(drop_target.clone()),
+            None => comment_target.clone(),
+        };
         let drop = vec![format!("DROP {kind}"), drop_target];
         if let Some(transform_types) = &d.transform_types {
             let tts: Vec<String> = transform_types
@@ -1707,12 +1736,13 @@ impl Builder {
         // AS and its string
         if let Some(body) = &d.sql_body {
             create.push(body.clone());
-            return self.add_item_with_comment_target(
+            return self.add_item_with_targets(
                 item,
                 create,
                 drop,
                 false,
                 comment_target,
+                label_target,
             );
         }
         create.push("AS".into());
@@ -1724,23 +1754,25 @@ impl Builder {
                 .is_some_and(|l| l.eq_ignore_ascii_case("internal"))
         {
             create.push(postgres_value(&Value::String(definition.clone())));
-            return self.add_item_with_comment_target(
+            return self.add_item_with_targets(
                 item,
                 create,
                 drop,
                 false,
                 comment_target,
+                label_target,
             );
         }
         if let Some(definition) = &d.definition {
             let create_sql =
                 vec![format!("{} $$\n{}\n$$", create.join(" "), definition)];
-            return self.add_item_with_comment_target(
+            return self.add_item_with_targets(
                 item,
                 create_sql,
                 drop,
                 false,
                 comment_target,
+                label_target,
             );
         }
         if let (Some(object_file), Some(link_symbol)) =
@@ -1752,12 +1784,13 @@ impl Builder {
                 postgres_value(&Value::String(link_symbol.clone()))
             ));
         }
-        self.add_item_with_comment_target(
+        self.add_item_with_targets(
             item,
             create,
             drop,
             false,
             comment_target,
+            label_target,
         )
     }
 

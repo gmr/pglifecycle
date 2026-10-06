@@ -4870,9 +4870,9 @@ mod tests {
                          $$classified$$;\n"
                     )
                 ),
-                // as the comment of a function, the label names the
-                // function by its name only
-                entry("f", "FUNCTION s.f"),
+                // the label names the function by its signature, so
+                // that it identifies one overload
+                entry("f", "FUNCTION s.f(IN a integer)"),
                 entry("s", "SCHEMA s"),
                 entry("t", "TABLE s.t"),
                 entry("t.secret", "COLUMN s.t.secret"),
