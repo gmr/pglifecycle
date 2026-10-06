@@ -177,11 +177,6 @@ These limits are new on this page:
   a sequence in the database, `deploy` writes `ALTER COLUMN ... TYPE
   serial`, and PostgreSQL refuses it. Make the sequence and the
   default by hand, then `pull` the database.
-- **Operator classes and implied families.** A project class that the
-  database does not have, where the database has an implied family of
-  that name with members, fails on `CREATE OPERATOR CLASS`. A class
-  member that replaces a member that an explicit family of the project
-  drops is not gated with that drop. Make such changes by hand.
 - **NO INHERIT on a parent's NOT NULL.** After `deploy` makes a NOT
   NULL of a parent `NO INHERIT`, the children keep a local copy. A
   second deploy removes it.
