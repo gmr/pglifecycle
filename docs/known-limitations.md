@@ -167,19 +167,3 @@ These limits are already described:
   options of most user mappings. See [deploy](commands.md#deploy).
 - pglifecycle does not read `pg_service.conf` to show the connection.
   See [pull](commands.md#pull).
-
-These limits are new on this page:
-
-- **pg_dump warnings.** When `pg_dump` or `pg_dumpall` succeeds,
-  pglifecycle does not show its warnings. Run `pg_dump --schema-only`
-  by hand to see them.
-- **A connection string in `PGDATABASE`.** pglifecycle reads
-  `PGDATABASE` as the `--dbname` value, so it accepts a connection
-  string there. libpq, `psql` and `pg_dump` read `PGDATABASE` only as
-  a database name. Give a connection string with `--dbname`, not in
-  `PGDATABASE`.
-- **Subscriptions that a role cannot read.** A role that is not a
-  superuser does not see the subscriptions. `deploy` warns about a
-  subscription that the project adds or changes, but not about one
-  that only the database has. That subscription is not dropped. Run
-  `deploy` as a superuser.
