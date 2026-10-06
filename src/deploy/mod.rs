@@ -294,7 +294,8 @@ fn resolutions(
         .iter()
         .map(|item| (item.id, &item.definition))
         .collect::<BTreeMap<_, _>>();
-    diff.changed
+    let mut resolutions: BTreeMap<usize, Resolution> = diff
+        .changed
         .iter()
         .map(|(id, database)| {
             let repo = inventory_by_id
@@ -302,7 +303,79 @@ fn resolutions(
                 .expect("changed item id missing from project inventory");
             (*id, alter::resolve_with(repo, database, groups, families))
         })
-        .collect()
+        .collect();
+    no_inherit_children(project, diff, &mut resolutions);
+    resolutions
+}
+
+/// Add to the in-place statements of a changed parent table the DROP
+/// NOT NULL statements of each inheritance child that the database has
+/// (see [`alter::no_inherit_children`])
+fn no_inherit_children(
+    project: &project::Project,
+    diff: &Diff,
+    resolutions: &mut BTreeMap<usize, Resolution>,
+) {
+    use alter::names::name;
+    let key = |table: &crate::models::Table| {
+        name(&format!(
+            "{}.{}",
+            quote_ident(&table.schema),
+            quote_ident(&table.name)
+        ))
+    };
+    // the id, the project table and the database table of each table
+    // that the database has. A table that is not changed in place
+    // keeps the database table, thus it changes no NOT NULL
+    let mut tables = Vec::new();
+    for item in &project.inventory {
+        let Some(table) = as_table(&item.definition) else {
+            continue;
+        };
+        let pair = match diff.items.get(&item.id) {
+            Some(Change::Unchanged) => (table, table),
+            Some(Change::Changed) => {
+                let Some(database) =
+                    diff.changed.get(&item.id).and_then(as_table)
+                else {
+                    continue;
+                };
+                match resolutions.get(&item.id) {
+                    Some(Resolution::Statements(_)) => (table, database),
+                    _ => (database, database),
+                }
+            }
+            _ => continue,
+        };
+        tables.push((item.id, pair));
+    }
+    let by_key: HashMap<String, (usize, (&crate::models::Table, _))> = tables
+        .iter()
+        .map(|(id, pair)| (key(pair.0), (*id, *pair)))
+        .collect();
+    for (_, (repo, db)) in &tables {
+        let parents: Vec<_> = repo
+            .parents
+            .iter()
+            .flatten()
+            .filter_map(|parent| by_key.get(&name(parent)))
+            .collect();
+        let pairs: Vec<_> = parents.iter().map(|(_, pair)| *pair).collect();
+        let alters = alter::no_inherit_children(repo, db, &pairs);
+        if alters.is_empty() {
+            continue;
+        }
+        // a parent that changes a NOT NULL to NO INHERIT is changed in
+        // place; the statements are deferred, thus one parent is enough
+        let target = parents.iter().find_map(|(id, (repo, db))| {
+            (!std::ptr::eq(*repo, *db)).then_some(*id)
+        });
+        if let Some(Resolution::Statements(statements)) =
+            target.and_then(|id| resolutions.get_mut(&id))
+        {
+            statements.extend(alters);
+        }
+    }
 }
 
 /// One statement in the deploy plan
@@ -575,6 +648,8 @@ fn plan(
     let mut waiting: BTreeMap<usize, Vec<(bool, Statement)>> = BTreeMap::new();
     // OWNED BY of a changed sequence, after each owner change
     let mut links = Vec::new();
+    // the statements that wait for all in-place statements
+    let mut deferred = Vec::new();
     for (position, entry) in output.dump.entries().iter().enumerate() {
         let later = waiting.split_off(&position);
         for (destructive, statement) in std::mem::replace(&mut waiting, later)
@@ -750,6 +825,10 @@ fn plan(
                             ));
                             continue;
                         }
+                        if alter.deferred {
+                            deferred.push((alter.destructive, statement));
+                            continue;
+                        }
                         after = after.max(calls_later(
                             &mut parser,
                             &alter.sql,
@@ -877,6 +956,9 @@ fn plan(
         }
     }
     for (destructive, statement) in waiting.into_values().flatten() {
+        push(destructive, statement);
+    }
+    for (destructive, statement) in deferred {
         push(destructive, statement);
     }
     // a link to a column that only the rebuild of its table adds is
@@ -3784,6 +3866,7 @@ mod tests {
                 links: None,
                 unlinks: false,
                 drops_key: None,
+                deferred: false,
             })
             .collect();
         let resolutions =

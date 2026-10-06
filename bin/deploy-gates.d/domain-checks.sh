@@ -84,6 +84,26 @@ fi
     "${WORKDIR}/project"
 expect_empty_plan "an unnamed domain check is added in place"
 
+# an unnamed check before the others moves their names: they are
+# renamed in place, and the domain is not made again
+write_long "- expression: VALUE <> 4
+- expression: VALUE <> 5
+- expression: VALUE <> 7"
+./target/debug/pglifecycle deploy -o "${WORKDIR}/domain-chk.sql" \
+    -d "${TARGET_DB}" "${WORKDIR}/project"
+renamed="ALTER DOMAIN test.${long} RENAME CONSTRAINT \
+a_long_gate_domain_name_that_cuts_the_generated_check_na_check2 TO \
+a_long_gate_domain_name_that_cuts_the_generated_check_na_check3;"
+if ! grep -Fxq "${renamed}" "${WORKDIR}/domain-chk.sql" \
+    || grep -q "DROP DOMAIN" "${WORKDIR}/domain-chk.sql"; then
+    echo "Convergence gate FAILED: no ${renamed}" >&2
+    cat "${WORKDIR}/domain-chk.sql" >&2
+    exit 1
+fi
+./target/debug/pglifecycle deploy --apply -d "${TARGET_DB}" \
+    "${WORKDIR}/project"
+expect_empty_plan "a new unnamed domain check before the others"
+
 # a changed check is still a change: the domain is made again
 write_long "- expression: VALUE <> 6
 - expression: VALUE <> 7"
