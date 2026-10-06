@@ -5767,8 +5767,8 @@ mod tests {
             ),
             "CREATE TABLE test.orders ( qty integer, price integer, \
              CONSTRAINT orders_price_check CHECK (price < 100), \
-             CONSTRAINT orders_qty_check CHECK (price > 0), \
-             CONSTRAINT orders_price_check1 CHECK (price > 0) );\n"
+             CONSTRAINT orders_price_check1 CHECK (price > 0), \
+             CONSTRAINT orders_price_check2 CHECK (price > 0) );\n"
         );
     }
 

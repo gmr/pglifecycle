@@ -78,25 +78,10 @@ These limits are new on this page:
 - **Dollar-quoted constants in expressions.** PostgreSQL writes
   `$$a$$::text` as `'a'::text`. Write a string constant in single
   quotes.
-- **A column CHECK on no column or on other columns.** `deploy` gives
-  a column `check_constraint` the name `<table>_<column>_check`. When
-  the expression uses no column, or more than one column, PostgreSQL
-  gives it the name `<table>_check`. Write such a constraint as a
-  table CHECK, with the name that PostgreSQL gives.
 - **Partitioned tables with mixed partitions.** When some partitions
   of a table are only bounds in the parent and others are files with
   `attached: true`, the parent's `ON ONLY` index is a change on each
   deploy. Write all partitions in the same form.
-- **A new unnamed domain CHECK before other unnamed checks.**
-  PostgreSQL names unnamed checks in order: `<domain>_check`,
-  `<domain>_check1`, and so on. A new unnamed check before existing
-  ones changes their names, and `deploy` plans a rebuild of the
-  domain. Add a new check after the others, or give it a name.
-- **The detailed form of key columns.** A unique constraint written
-  as `- columns: [w]`, or a primary key written as `primary_key:
-  {columns: [w]}`, does not compare equal to the plain list that
-  `pull` writes, so `deploy` changes it on each run. Write the plain
-  list form that `pull` writes.
 
 ## Deploy: order and rebuild limits
 
@@ -151,9 +136,11 @@ These limits are new on this page:
   a sequence in the database, `deploy` writes `ALTER COLUMN ... TYPE
   serial`, and PostgreSQL refuses it. Make the sequence and the
   default by hand, then `pull` the database.
-- **NO INHERIT on a parent's NOT NULL.** After `deploy` makes a NOT
-  NULL of a parent `NO INHERIT`, the children keep a local copy. A
-  second deploy removes it.
+- **NO INHERIT on one of two parents.** When a child has a NOT NULL
+  from two parents, and only one parent changes it to `NO INHERIT`,
+  the child keeps a NOT NULL of its own. PostgreSQL cannot remove it
+  while the other parent gives the NOT NULL. Give the child that NOT
+  NULL in the project, as `pull` writes it.
 
 ## Connection and CLI
 

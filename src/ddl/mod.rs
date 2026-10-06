@@ -647,6 +647,38 @@ pub(crate) fn column_elems(node: &Node, src: &str) -> Vec<String> {
         .collect()
 }
 
+/// The names of the columns that an expression refers to, each one time.
+/// A reference with a table (`t.a`) gives the column name. None when the
+/// expression does not parse.
+pub(crate) fn expression_columns(
+    expression: &str,
+) -> Option<std::collections::BTreeSet<String>> {
+    let sql = format!("SELECT ({expression});");
+    let mut parser = tree_sitter::Parser::new();
+    parser
+        .set_language(&tree_sitter_postgres::LANGUAGE.into())
+        .ok()?;
+    let tree = parser.parse(&sql, None)?;
+    let root = tree.root_node();
+    if root.has_error() {
+        return None;
+    }
+    root.find_all("columnref")
+        .iter()
+        .map(|column| {
+            // the last name after a dot, else the first name
+            let last = column.child_of_kind("indirection").and_then(|list| {
+                list.find_all("attr_name").last().map(|n| n.text(&sql))
+            });
+            let name = match last {
+                Some(name) => name,
+                None => column.child_of_kind("ColId")?.text(&sql),
+            };
+            Some(unquote(name))
+        })
+        .collect()
+}
+
 /// Like [`unquote`], but preserves the pseudo-role keyword `PUBLIC` as
 /// the canonical uppercase literal. Use only for role references
 /// (grantees, USER MAPPING subjects) where `PUBLIC` is a keyword rather
