@@ -187,6 +187,12 @@ impl Writer {
                 Value::String(comment.clone()),
             );
         }
+        if let Some(limit) = assembly.connection_limit {
+            project.insert(String::from("connection_limit"), limit.into());
+        }
+        if let Some(is_template) = assembly.is_template {
+            project.insert(String::from("is_template"), is_template.into());
+        }
         if !assembly.extensions.is_empty() {
             project.insert(
                 String::from("extensions"),

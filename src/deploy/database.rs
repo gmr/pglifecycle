@@ -1,12 +1,17 @@
-//! The comment and the settings of the database, and the settings of
-//! each role in the database: the `comment`, `settings` and
-//! `role_settings` of `project.yaml` compared with the COMMENT and
-//! DATABASE PROPERTIES entries of the snapshot.
+//! The comment, the properties and the settings of the database, and
+//! the settings of each role in the database: the `comment`,
+//! `connection_limit`, `is_template`, `settings` and `role_settings` of
+//! `project.yaml` compared with the COMMENT and DATABASE PROPERTIES
+//! entries of the snapshot.
 //!
 //! A comment that is different or that only the project has gets
 //! `COMMENT ON DATABASE`, and a comment that only the database has
 //! gets `IS NULL`, as for the comment of an object. The removal is not
 //! destructive: it loses no data.
+//!
+//! A different connection limit gets `CONNECTION LIMIT`, and a
+//! different template state gets `IS_TEMPLATE`. No value is the
+//! default: -1 (no limit) and false. These changes lose no data.
 //!
 //! A setting that is different or that only the project has gets
 //! `SET`, and a setting that only the database has gets `RESET`. A
@@ -41,6 +46,29 @@ pub(super) fn statements(
         statements.push(Statement {
             label: label.clone(),
             sql: comment_on("DATABASE", &database, project.comment.as_deref()),
+            fails_open: false,
+        });
+    }
+    // no value is the default: no limit, and not a template
+    let limit = |limit: Option<i64>| limit.unwrap_or(-1);
+    if limit(project.connection_limit) != limit(assembly.connection_limit) {
+        statements.push(Statement {
+            label: label.clone(),
+            sql: format!(
+                "ALTER DATABASE {database} CONNECTION LIMIT {};\n",
+                limit(project.connection_limit)
+            ),
+            fails_open: false,
+        });
+    }
+    let template = |is_template: Option<bool>| is_template == Some(true);
+    if template(project.is_template) != template(assembly.is_template) {
+        statements.push(Statement {
+            label: label.clone(),
+            sql: format!(
+                "ALTER DATABASE {database} IS_TEMPLATE {};\n",
+                template(project.is_template)
+            ),
             fails_open: false,
         });
     }
@@ -242,6 +270,47 @@ mod tests {
         );
         assert!(comment(Some("same"), Some("same")).is_empty());
         assert!(comment(None, None).is_empty());
+    }
+
+    /// A different connection limit or template state gets ALTER
+    /// DATABASE. No value is the same as the default, -1 and false
+    #[test]
+    fn database_properties_change() {
+        let sql_of =
+            |project: (Option<i64>, Option<bool>),
+             database: (Option<i64>, Option<bool>)| {
+                let project = DatabaseSettings {
+                    connection_limit: project.0,
+                    is_template: project.1,
+                    ..Default::default()
+                };
+                let mut assembly = assembly("App DB");
+                (assembly.connection_limit, assembly.is_template) = database;
+                let (statements, resets) = statements(&project, &assembly);
+                assert!(resets.is_empty());
+                assert!(
+                    statements.iter().all(|s| s.label == "DATABASE App DB")
+                );
+                statements.into_iter().map(|s| s.sql).collect::<Vec<_>>()
+            };
+        assert_eq!(
+            sql_of((Some(5), Some(true)), (None, None)),
+            [
+                "ALTER DATABASE \"App DB\" CONNECTION LIMIT 5;\n",
+                "ALTER DATABASE \"App DB\" IS_TEMPLATE true;\n",
+            ]
+        );
+        assert_eq!(
+            sql_of((None, None), (Some(5), Some(true))),
+            [
+                "ALTER DATABASE \"App DB\" CONNECTION LIMIT -1;\n",
+                "ALTER DATABASE \"App DB\" IS_TEMPLATE false;\n",
+            ]
+        );
+        assert!(sql_of((Some(-1), Some(false)), (None, None)).is_empty());
+        assert!(
+            sql_of((Some(5), Some(true)), (Some(5), Some(true))).is_empty()
+        );
     }
 
     #[test]
