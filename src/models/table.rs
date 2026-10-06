@@ -280,8 +280,10 @@ impl Table {
     ///
     /// PostgreSQL keeps a CHECK on a column as a CHECK of the table, and
     /// pg_dump and pull write it so. The name is
-    /// `<table>_<column>_check`, with a number when a CHECK of the table
-    /// has the name. Build writes the CHECK with this name (deviation
+    /// `<table>_<column>_check` when the expression uses one column,
+    /// else `<table>_check` (ports `AddRelationNewConstraints` in
+    /// `src/backend/catalog/heap.c`), with a number when a CHECK of the
+    /// table has the name. Build writes the CHECK with this name (deviation
     /// 60), because PostgreSQL takes the name of a CHECK with no name
     /// from the columns of its expression and in the order of the
     /// constraints.
@@ -298,9 +300,17 @@ impl Table {
             let Some(expression) = column.check_constraint.take() else {
                 continue;
             };
+            // PostgreSQL takes the name from the columns of the
+            // expression: the column name only for exactly one column
+            let referenced = crate::ddl::expression_columns(&expression)
+                .unwrap_or_else(|| BTreeSet::from([column.name.clone()]));
+            let single = match referenced.len() {
+                1 => referenced.first().map(String::as_str),
+                _ => None,
+            };
             let name = crate::utils::choose_constraint_name(
                 &table.name,
-                Some(&column.name),
+                single,
                 "check",
                 &used,
             );
@@ -353,7 +363,9 @@ impl Table {
     /// PostgreSQL reads. A column that PostgreSQL makes NOT NULL (see
     /// [`Self::is_always_not_null`]) is NOT NULL. A CHECK on a column is
     /// a CHECK of the table (see [`Self::with_table_checks`]), and the
-    /// CHECKs are in name order.
+    /// CHECKs are in name order. The columns of a primary key or a
+    /// unique constraint are in the form that pull writes (see
+    /// [`ConstraintColumns::canonical`]).
     pub fn canonical(&self) -> Table {
         let mut table = self.with_canonical_not_nulls().with_table_checks();
         let not_null: Vec<bool> = table
@@ -400,6 +412,10 @@ impl Table {
         }
         for trigger in table.triggers.iter_mut().flatten() {
             canonical_expression(&mut trigger.condition);
+        }
+        table.primary_key = table.primary_key.as_ref().map(|k| k.canonical());
+        for unique in table.unique_constraints.iter_mut().flatten() {
+            *unique = unique.canonical();
         }
         for not_null in table.not_null_constraints.iter_mut().flatten() {
             not_null.not_valid = true_only(not_null.not_valid);
@@ -682,6 +698,41 @@ impl ConstraintColumns {
         match self {
             Self::Name(column) => std::slice::from_ref(column),
             Self::Columns(columns) | Self::Detailed { columns, .. } => columns,
+        }
+    }
+
+    /// The same constraint in the form that pull writes: the plain list
+    /// when no other field has a value, else the detailed form with
+    /// each value at its default as absent
+    pub fn canonical(&self) -> ConstraintColumns {
+        match self {
+            Self::Name(column) => Self::Columns(vec![column.clone()]),
+            Self::Columns(_) => self.clone(),
+            Self::Detailed {
+                name,
+                columns,
+                include,
+                nulls_not_distinct,
+                without_overlaps,
+            } => {
+                let include = include.clone().filter(|i| !i.is_empty());
+                let nulls_not_distinct = true_only(*nulls_not_distinct);
+                let without_overlaps = true_only(*without_overlaps);
+                if name.is_none()
+                    && include.is_none()
+                    && nulls_not_distinct.is_none()
+                    && without_overlaps.is_none()
+                {
+                    return Self::Columns(columns.clone());
+                }
+                Self::Detailed {
+                    name: name.clone(),
+                    columns: columns.clone(),
+                    include,
+                    nulls_not_distinct,
+                    without_overlaps,
+                }
+            }
         }
     }
 }
@@ -1584,6 +1635,82 @@ mod tests {
                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaa_ccccccccccccccccccccccccccc_check1",
             ]
         );
+    }
+
+    /// PostgreSQL takes the name of a CHECK with no name from the
+    /// columns of its expression, not from the column that has it:
+    /// `<table>_<column>_check` for one column, `<table>_check` for no
+    /// column or more than one column. Each expected name is the one
+    /// PostgreSQL 18 gave the constraint.
+    #[test]
+    fn column_check_names_come_from_the_expression() {
+        let names = |checks: [&str; 4]| {
+            let table = with_fields(serde_json::json!({
+                "columns": [
+                    {"name": "a", "data_type": "integer",
+                     "check_constraint": checks[0]},
+                    {"name": "b", "data_type": "integer",
+                     "check_constraint": checks[1]},
+                    {"name": "c", "data_type": "integer",
+                     "check_constraint": checks[2]},
+                    {"name": "d", "data_type": "integer",
+                     "check_constraint": checks[3]},
+                ],
+            }));
+            table
+                .with_table_checks()
+                .check_constraints
+                .unwrap()
+                .into_iter()
+                .map(|c| c.name)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            names(["1 > 0", "a < b", "t.a > 0", "d > 0 AND \"d\" < D"]),
+            ["t_check", "t_check1", "t_a_check", "t_d_check"]
+        );
+        assert_eq!(
+            names(["a > 0", "b > 0", "(c > 0)", "d IS NOT NULL"]),
+            ["t_a_check", "t_b_check", "t_c_check", "t_d_check"]
+        );
+    }
+
+    /// A key written as one name, or in the detailed form with only
+    /// its columns, compares equal to the plain list that pull writes
+    #[test]
+    fn key_column_forms_compare_equal() {
+        let pulled = with_fields(serde_json::json!({
+            "primary_key": ["label"],
+            "unique_constraints": [["label"], ["label", "w"]],
+        }));
+        for written in [
+            serde_json::json!({
+                "primary_key": {"columns": ["label"]},
+                "unique_constraints": [
+                    {"columns": ["label"]},
+                    {"columns": ["label", "w"], "include": [],
+                     "nulls_not_distinct": false,
+                     "without_overlaps": false},
+                ],
+            }),
+            serde_json::json!({
+                "primary_key": "label",
+                "unique_constraints": ["label", ["label", "w"]],
+            }),
+        ] {
+            assert_eq!(with_fields(written).canonical(), pulled.canonical());
+        }
+        // a name or an INCLUDE list is a difference
+        for written in [
+            serde_json::json!({"primary_key": {
+                "name": "k", "columns": ["label"]}}),
+            serde_json::json!({"primary_key": {
+                "columns": ["label"], "include": ["w"]}}),
+        ] {
+            let mut written = with_fields(written);
+            written.unique_constraints = pulled.unique_constraints.clone();
+            assert_ne!(written.canonical(), pulled.canonical());
+        }
     }
 
     /// A collation compares as PostgreSQL finds it: pg_catalog is
