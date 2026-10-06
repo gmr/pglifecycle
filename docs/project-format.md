@@ -558,12 +558,16 @@ role_settings:
   and the database. The key is the name of the label provider, and
   the value is the label (`SECURITY LABEL FOR provider ON ... IS
   'label'`). `pull` reads the labels, `build` writes a `SECURITY
-  LABEL` entry after the object, and `deploy` changes them in place,
-  as it does a comment: a label that only the database has gets `IS
-  NULL`. A label applies only when its provider is loaded in the
-  server, for example with `shared_preload_libraries`. `pull
-  --no-security-labels` leaves the labels out of the project, but then
-  `deploy` removes the labels of the database.
+  LABEL` entry after the object, and `deploy` changes them in place.
+  An object with no `security_labels` does not manage its labels:
+  `deploy` leaves the labels of the database as they are, as it does
+  for `row_level_security`. An object with the field has exactly the
+  labels that it lists: a label that only the database has gets `IS
+  NULL`, and `security_labels: {}` removes all of them. A label
+  applies only when its provider is loaded in the server, for example
+  with `shared_preload_libraries`. `pull` writes the field only for an
+  object that has labels, thus `pull --no-security-labels` gives a
+  project that does not manage labels.
 
 ```yaml
 ---

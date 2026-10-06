@@ -342,6 +342,13 @@ pub fn diff(project: &Project, assembly: &Assembly) -> Diff {
                             }
                             (_, db) => db,
                         };
+                        // labels that the project does not manage are
+                        // not a change
+                        let db =
+                            super::alter::security_label::without_unmanaged(
+                                &item.definition,
+                                db,
+                            );
                         // a dump made without owners gives none to
                         // compare
                         if db.owner().is_some_and(|owner| !owner.is_empty())

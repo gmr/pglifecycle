@@ -3,6 +3,12 @@
 //! a label that only the database has gets `IS NULL`, as a comment
 //! does. The removal is not destructive: it loses no data.
 //!
+//! A project object with no `security_labels` does not manage its
+//! labels: deploy leaves the labels of the database as they are (see
+//! [`without_unmanaged`]). An explicit map, also an empty one, is
+//! compared, so a label that it does not have is removed. The same is
+//! true for each column and partition of a table.
+//!
 //! A change to the labels only changes nothing else, so the object
 //! keeps its in-place form, even a type that otherwise has no in-place
 //! form (a language). The labels of a table's columns and partitions
@@ -96,6 +102,59 @@ pub(super) fn alters(repo: &Definition, db: &Definition) -> Vec<Alter> {
     sql.into_iter().map(Alter::new).collect()
 }
 
+/// `db` with no labels where `repo` has no `security_labels`: on the
+/// object, and on each column and partition of a table. The project
+/// does not manage those labels, so they are not a change.
+pub(crate) fn without_unmanaged(
+    repo: &Definition,
+    db: Definition,
+) -> Definition {
+    if repo.security_labels().is_none() {
+        // the object labels; a table keeps those of its children
+        let mut stripped = without(&db);
+        if let (Definition::Table(stripped), Definition::Table(db)) =
+            (&mut stripped, &db)
+        {
+            stripped.columns.clone_from(&db.columns);
+            stripped.partitions.clone_from(&db.partitions);
+        }
+        return keep_children(repo, stripped);
+    }
+    keep_children(repo, db)
+}
+
+/// `db` with no labels on each column and partition that has no
+/// `security_labels` in `repo`
+fn keep_children(repo: &Definition, mut db: Definition) -> Definition {
+    if let (Definition::Table(repo), Definition::Table(db)) = (repo, &mut db) {
+        for column in db.columns.iter_mut().flatten() {
+            let managed = repo
+                .columns
+                .iter()
+                .flatten()
+                .find(|c| c.name == column.name)
+                .is_some_and(|c| c.security_labels.is_some());
+            if !managed {
+                column.security_labels = None;
+            }
+        }
+        for partition in db.partitions.iter_mut().flatten() {
+            let managed = repo
+                .partitions
+                .iter()
+                .flatten()
+                .find(|p| {
+                    p.schema == partition.schema && p.name == partition.name
+                })
+                .is_some_and(|p| p.security_labels.is_some());
+            if !managed {
+                partition.security_labels = None;
+            }
+        }
+    }
+    db
+}
+
 /// `definition` with no security labels, also on its columns and its
 /// partitions
 pub(super) fn without(definition: &Definition) -> Definition {
@@ -168,6 +227,7 @@ mod tests {
     use serde_json::json;
 
     use super::super::{Resolution, resolve};
+    use super::without_unmanaged;
     use crate::models::Definition;
 
     fn table(value: serde_json::Value) -> Definition {
@@ -268,12 +328,61 @@ mod tests {
             sql(resolution),
             ["SECURITY LABEL FOR dummy ON FUNCTION s.f IS $$x$$;\n"]
         );
+    }
+
+    fn view(labels: Option<serde_json::Value>) -> Definition {
+        let mut value = json!({
+            "name": "v", "schema": "s", "owner": "postgres",
+            "query": "SELECT 1",
+        });
+        if let Some(labels) = labels {
+            value["security_labels"] = labels;
+        }
+        Definition::View(serde_json::from_value(value).unwrap())
+    }
+
+    /// With no `security_labels`, the project does not manage the
+    /// labels: the labels of the database are not a change
+    #[test]
+    fn missing_field_leaves_labels_alone() {
+        let db = view(Some(json!({"dummy": "x"})));
+        let compared = without_unmanaged(&view(None), db.clone());
+        assert!(crate::deploy::diff::same(&view(None), &compared));
+        assert!(sql(resolve(&view(None), &compared)).is_empty());
+        // a table that manages no labels has none to compare, also
+        // on its columns
+        let repo = table(json!({
+            "name": "t", "schema": "s", "owner": "postgres",
+            "columns": [{"name": "a", "data_type": "text"}],
+        }));
+        let db = table(json!({
+            "name": "t", "schema": "s", "owner": "postgres",
+            "columns": [{"name": "a", "data_type": "text",
+                         "security_labels": {"dummy": "y"}}],
+            "security_labels": {"dummy": "x"},
+        }));
+        assert_eq!(without_unmanaged(&repo, db), repo);
+    }
+
+    /// An explicit map is compared: a label that it does not have gets
+    /// IS NULL, also when the map is empty
+    #[test]
+    fn explicit_map_removes_the_labels_it_omits() {
+        let db = view(Some(json!({"dummy": "x", "other": "y"})));
+        let repo = view(Some(json!({"other": "y"})));
+        let compared = without_unmanaged(&repo, db.clone());
         assert_eq!(
-            sql(resolve(
-                &function("SELECT 1", None),
-                &function("SELECT 1", Some("x"))
-            )),
-            ["SECURITY LABEL FOR dummy ON FUNCTION s.f IS NULL;\n"]
+            sql(resolve(&repo, &compared)),
+            ["SECURITY LABEL FOR dummy ON VIEW s.v IS NULL;\n"]
+        );
+        let repo = view(Some(json!({})));
+        let compared = without_unmanaged(&repo, db);
+        assert_eq!(
+            sql(resolve(&repo, &compared)),
+            [
+                "SECURITY LABEL FOR dummy ON VIEW s.v IS NULL;\n",
+                "SECURITY LABEL FOR other ON VIEW s.v IS NULL;\n",
+            ]
         );
     }
 }

@@ -8,7 +8,8 @@
 //! `COMMENT ON DATABASE`, and a comment that only the database has
 //! gets `IS NULL`, as for the comment of an object. The removal is not
 //! destructive: it loses no data. The security labels change in the
-//! same way.
+//! same way, but only when `project.yaml` has `security_labels`: with
+//! no field, the project does not manage them.
 //!
 //! A setting that is different or that only the project has gets
 //! `SET`, and a setting that only the database has gets `RESET`. A
@@ -47,19 +48,26 @@ pub(super) fn statements(
             fails_open: false,
         });
     }
+    // with no `security_labels`, the project does not manage them
     statements.extend(
-        security_label::changes(
-            "DATABASE",
-            &database,
-            project.security_labels.as_ref(),
-            assembly.security_labels.as_ref(),
-        )
-        .into_iter()
-        .map(|sql| Statement {
-            label: label.clone(),
-            sql,
-            fails_open: false,
-        }),
+        project
+            .security_labels
+            .as_ref()
+            .map(|labels| {
+                security_label::changes(
+                    "DATABASE",
+                    &database,
+                    Some(labels),
+                    assembly.security_labels.as_ref(),
+                )
+            })
+            .unwrap_or_default()
+            .into_iter()
+            .map(|sql| Statement {
+                label: label.clone(),
+                sql,
+                fails_open: false,
+            }),
     );
     statements.extend(changes(
         &label,
@@ -149,6 +157,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::models::SecurityLabels;
 
     fn settings(value: Value) -> Map<String, Value> {
         value.as_object().unwrap().clone()
@@ -261,37 +270,50 @@ mod tests {
         assert!(comment(None, None).is_empty());
     }
 
-    /// The security labels of the database change as its comment does
+    /// The security labels of the database change as its comment does,
+    /// but only when `project.yaml` has `security_labels`
     #[test]
     fn database_security_labels_set_and_removed() {
-        let labels = |project: &[(&str, &str)], database: &[(&str, &str)]| {
-            let map = |pairs: &[(&str, &str)]| {
-                (!pairs.is_empty()).then(|| {
-                    pairs
-                        .iter()
-                        .map(|(p, l)| (p.to_string(), l.to_string()))
-                        .collect()
-                })
-            };
+        let map = |pairs: &[(&str, &str)]| -> SecurityLabels {
+            pairs
+                .iter()
+                .map(|(p, l)| (p.to_string(), l.to_string()))
+                .collect()
+        };
+        let labels = |project: Option<&[(&str, &str)]>,
+                      database: &[(&str, &str)]| {
             let project = DatabaseSettings {
-                security_labels: map(project),
+                security_labels: project.map(map),
                 ..Default::default()
             };
             let mut assembly = assembly("App DB");
-            assembly.security_labels = map(database);
+            assembly.security_labels =
+                (!database.is_empty()).then(|| map(database));
             let (statements, _) = statements(&project, &assembly);
             assert!(statements.iter().all(|s| s.label == "DATABASE App DB"));
             statements.into_iter().map(|s| s.sql).collect::<Vec<_>>()
         };
         assert_eq!(
-            labels(&[("dummy", "new")], &[("dummy", "old"), ("gone", "x")]),
+            labels(
+                Some(&[("dummy", "new")]),
+                &[("dummy", "old"), ("gone", "x")]
+            ),
             [
                 "SECURITY LABEL FOR dummy ON DATABASE \"App DB\" IS $$new$$;\n",
                 "SECURITY LABEL FOR gone ON DATABASE \"App DB\" IS NULL;\n",
             ]
         );
-        assert!(labels(&[("dummy", "same")], &[("dummy", "same")]).is_empty());
-        assert!(labels(&[], &[]).is_empty());
+        assert!(
+            labels(Some(&[("dummy", "same")]), &[("dummy", "same")])
+                .is_empty()
+        );
+        // an empty map removes each label
+        assert_eq!(
+            labels(Some(&[]), &[("dummy", "old")]),
+            ["SECURITY LABEL FOR dummy ON DATABASE \"App DB\" IS NULL;\n"]
+        );
+        // with no field, the project does not manage the labels
+        assert!(labels(None, &[("dummy", "old")]).is_empty());
     }
 
     #[test]

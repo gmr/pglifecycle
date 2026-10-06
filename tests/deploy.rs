@@ -331,8 +331,7 @@ fn deploy_refuses_a_dump_with_other_session_settings() {
 
 /// Security labels pulled from an archive give an empty plan against
 /// that archive. A label that is different, or that only the project
-/// has, is set in place, and a label that only the database has gets
-/// IS NULL. No object is made again.
+/// has, is set in place. No object is made again.
 #[test]
 fn security_labels_change_in_place() {
     let dir = tempfile::tempdir().unwrap();
@@ -374,20 +373,40 @@ fn security_labels_change_in_place() {
             "unexpected {verb} statement in:\n{script}"
         );
     }
+}
 
-    let plain = dir.path().join("plain.project");
+/// A project object with no `security_labels` does not manage its
+/// labels: deploy leaves the labels of the database alone. An explicit
+/// map is compared, so a label that it does not have gets IS NULL.
+#[test]
+fn security_labels_are_managed_only_when_given() {
+    let dir = tempfile::tempdir().unwrap();
+    let labeled = dir.path().join("labeled.dump");
+    labeled_archive(&labeled, Some("secret"));
     let unlabeled = dir.path().join("unlabeled.dump");
     labeled_archive(&unlabeled, None);
-    pull_project(&unlabeled, &plain);
-    let script = deploy_script(&plain, &labeled, &[]);
-    for statement in [
-        "SECURITY LABEL FOR dummy ON TABLE test.t IS NULL;",
-        "SECURITY LABEL FOR dummy ON COLUMN test.t.secret IS NULL;",
-        "SECURITY LABEL FOR dummy ON DATABASE labels IS NULL;",
-    ] {
-        assert!(
-            script.contains(statement),
-            "missing {statement} in:\n{script}"
-        );
-    }
+    let project = dir.path().join("project");
+    pull_project(&unlabeled, &project);
+
+    let script = deploy_script(&project, &labeled, &[]);
+    assert!(
+        script.contains("-- no changes"),
+        "labels with no field must be left alone, got:\n{script}"
+    );
+
+    // an explicit, empty map on the table removes its labels; its
+    // column and the other objects still have no field
+    let path = project.join("tables/test/t.yaml");
+    let table = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(&path, format!("{table}security_labels: {{}}\n")).unwrap();
+    let script = deploy_script(&project, &labeled, &[]);
+    let labels: Vec<&str> = script
+        .lines()
+        .filter(|line| line.starts_with("SECURITY LABEL"))
+        .collect();
+    assert_eq!(
+        labels,
+        ["SECURITY LABEL FOR dummy ON TABLE test.t IS NULL;"],
+        "in:\n{script}"
+    );
 }

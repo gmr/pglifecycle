@@ -297,7 +297,9 @@ reconciled in place where PostgreSQL can express it:
   `name` is the name of the database that deploy reads. The statement
   comes with the settings, after all other statements. The
   `security_labels` of `project.yaml` change in the same way, with
-  `SECURITY LABEL FOR provider ON DATABASE name IS ...`.
+  `SECURITY LABEL FOR provider ON DATABASE name IS ...`, but only when
+  `project.yaml` has the field: with no field, deploy leaves the labels
+  of the database as they are.
 - Everything else falls back to drop+recreate.
 
 ### Destructive statements and limits
@@ -509,10 +511,13 @@ the roles of the database with `pg_dumpall --globals-only`; with
 roles. PUBLIC, `CURRENT_USER` and the reserved `pg_` roles are not
 checked.
 
-A security label changes in place, as a comment does: a label that is
-different or that only the project has gets `SECURITY LABEL FOR
-provider ON ... IS label`, and a label that only the database has gets
-`IS NULL`. A change to the labels only does not make the object again.
+A security label changes in place: a label that is different or that
+only the project has gets `SECURITY LABEL FOR provider ON ... IS
+label`. An object, a column or a partition with no `security_labels`
+does not manage its labels, and deploy leaves the labels of the
+database as they are. With the field, a label that only the database
+has gets `IS NULL`. A change to the labels only does not make the
+object again.
 
 A grant, comment or security label on an object that is not in the
 project, for example a grant on the `public` schema or on a
