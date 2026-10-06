@@ -1387,16 +1387,18 @@ fn column_settings(
             "ALTER TABLE ONLY {table} ALTER COLUMN {}",
             quote_ident(column)
         );
-        if repo.statistics != db.statistics {
+        // compare the effective values: an absent setting is the
+        // default, as an explicit -1 or DEFAULT is
+        let statistics = repo.statistics.unwrap_or(-1);
+        if statistics != db.statistics.unwrap_or(-1) {
             alters.push(Alter::new(format!(
-                "{prefix} SET STATISTICS {};\n",
-                repo.statistics.unwrap_or(-1)
+                "{prefix} SET STATISTICS {statistics};\n"
             )));
         }
-        if repo.storage != db.storage {
+        let storage = repo.storage.as_deref().unwrap_or("DEFAULT");
+        if storage != db.storage.as_deref().unwrap_or("DEFAULT") {
             alters.push(Alter::new(format!(
-                "{prefix} SET STORAGE {};\n",
-                repo.storage.as_deref().unwrap_or("DEFAULT")
+                "{prefix} SET STORAGE {storage};\n"
             )));
         }
     }
@@ -5391,7 +5393,8 @@ mod tests {
 
     /// The settings of an inherited column reconcile per column through
     /// `ALTER TABLE ONLY`; a setting the repo removed goes back to its
-    /// default, and a setting with no value is the same as none
+    /// default, and a setting with no value, or with the default value,
+    /// is the same as none
     #[test]
     fn column_settings_reconcile_by_column() {
         let mut repo = base_table();
@@ -5399,6 +5402,7 @@ mod tests {
             {"column": "a", "statistics": 500},
             {"column": "b", "storage": "EXTERNAL"},
             {"column": "c"},
+            {"column": "e", "statistics": -1, "storage": "DEFAULT"},
         ]);
         let mut db = base_table();
         db["column_settings"] = serde_json::json!([
