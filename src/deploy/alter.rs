@@ -1117,6 +1117,11 @@ fn columns(
     let repo_names = repo.not_null_names();
     let db_names = db.not_null_names();
     let partitioned = repo.partition.is_some();
+    // the columns of a primary key that [`key_drops`] drops
+    let dropped_pk = match &db.primary_key {
+        Some(pk) if repo.primary_key != db.primary_key => pk.columns(),
+        _ => &[],
+    };
     for column in repo_columns {
         match db_columns.iter().find(|c| c.name == column.name) {
             None => alters.push(Alter::new(format!(
@@ -1129,6 +1134,7 @@ fn columns(
                     table,
                     names,
                     partitioned,
+                    dropped_pk.contains(&column.name),
                     column,
                     existing,
                     alters,
@@ -1237,11 +1243,14 @@ type NotNullNames<'a> = (
 /// `partitioned` table SET EXPRESSION and DROP NOT NULL use ONLY: else
 /// PostgreSQL also changes each partition (checked on PostgreSQL 18).
 /// On an inheritance child, the project models neither of them, so
-/// they recurse there.
+/// they recurse there. `in_dropped_pk` tells that the column is in a
+/// primary key that [`key_drops`] drops: its DROP NOT NULL is gated
+/// with the drop, because PostgreSQL refuses it while the key exists.
 fn alter_column(
     table: &str,
     not_null_names: NotNullNames,
     partitioned: bool,
+    in_dropped_pk: bool,
     repo: &Column,
     db: &Column,
     alters: &mut Vec<Alter>,
@@ -1337,10 +1346,15 @@ fn alter_column(
     let db_not_null = db.nullable == Some(false);
     if repo_not_null != db_not_null {
         if db_not_null {
-            alters.push(dependent(format!(
+            let sql = format!(
                 "ALTER TABLE {only}{table} ALTER COLUMN {column} DROP NOT \
                  NULL;\n"
-            )));
+            );
+            alters.push(if in_dropped_pk {
+                Alter::destructive(sql)
+            } else {
+                dependent(sql)
+            });
         }
         if repo_not_null {
             alters.push(Alter::new(match repo.not_null_constraint.as_ref() {
@@ -2882,6 +2896,8 @@ mod tests {
                 "ALTER TABLE test.users ALTER COLUMN id DROP NOT NULL;\n",
             ]
         );
+        // gated with the drop: without it, PostgreSQL refuses it
+        assert!(alters[0].destructive && alters[1].destructive);
     }
 
     /// A changed primary key is dropped and added again in place, not
