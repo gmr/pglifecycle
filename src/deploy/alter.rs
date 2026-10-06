@@ -1402,6 +1402,15 @@ fn column_settings(
     }
 }
 
+/// Whether the settings of the inherited columns differ, compared by
+/// column as [`column_settings`] compares them: the order of the
+/// entries is not a difference
+fn column_settings_differ(repo: &Table, db: &Table) -> bool {
+    let mut alters = Vec::new();
+    column_settings("", repo, db, &mut alters);
+    !alters.is_empty()
+}
+
 /// Whether a column's generation is absent or an identity, the two
 /// states [`identity`] reconciles in place. A pulled identity carries
 /// only its behavior; an older project file names a separate sequence
@@ -2392,7 +2401,7 @@ fn foreign_table(repo: &Table, db: &Table) -> Resolution {
         || repo.check_constraints != db.check_constraints
         || repo.not_null_constraints != db.not_null_constraints
         || repo.column_defaults != db.column_defaults
-        || repo.column_settings != db.column_settings
+        || column_settings_differ(repo, db)
     {
         return Resolution::Replace;
     }
@@ -4936,6 +4945,25 @@ mod tests {
             comment: None,
         }]);
         assert!(matches!(table(&repo, &db), Resolution::Statements(_)));
+    }
+
+    #[test]
+    fn foreign_table_column_settings_order_is_not_replace() {
+        let mut repo =
+            foreign_table_value(serde_json::json!({"table_name": "t"}), None);
+        let mut db = repo.clone();
+        repo["column_settings"] = serde_json::json!([
+            {"column": "a", "statistics": 500},
+            {"column": "b", "storage": "EXTERNAL"},
+        ]);
+        db["column_settings"] = serde_json::json!([
+            {"column": "b", "storage": "EXTERNAL"},
+            {"column": "a", "statistics": 500},
+        ]);
+        let (repo, mut db) = (parse_table(repo), parse_table(db));
+        assert!(matches!(table(&repo, &db), Resolution::Statements(_)));
+        db.column_settings.as_mut().unwrap()[1].statistics = Some(100);
+        assert!(matches!(table(&repo, &db), Resolution::Replace));
     }
 
     #[test]

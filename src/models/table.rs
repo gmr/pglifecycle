@@ -1035,6 +1035,7 @@ impl Table {
             || self.partition.is_some()
             || self.partitions.is_some()
             || self.storage_parameters.is_some()
+            || self.column_settings.is_some()
             || self.tablespace.is_some()
             || self.access_method.is_some()
     }
@@ -1353,6 +1354,23 @@ pub struct Trigger {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A partition with only settings of inherited columns keeps them:
+    /// it stays a table of its own and does not fold into its parent
+    #[test]
+    fn column_settings_are_own_partition_properties() {
+        let mut table: Table = serde_json::from_value(serde_json::json!({
+            "name": "p1", "schema": "s", "owner": "o",
+        }))
+        .unwrap();
+        assert!(!table.has_own_partition_properties());
+        table.column_settings = Some(vec![ColumnSetting {
+            column: "v".into(),
+            statistics: Some(300),
+            storage: None,
+        }]);
+        assert!(table.has_own_partition_properties());
+    }
 
     /// PostgreSQL makes a column of the primary key and an identity
     /// column NOT NULL, and pull records `nullable: false` for each. A
