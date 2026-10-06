@@ -191,6 +191,12 @@ pub struct DomainConstraint {
     pub nullable: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expression: Option<String>,
+    /// `true` renders `NOT VALID`: the values in the columns of the
+    /// domain were never checked, and only new ones are. Only a CHECK
+    /// has it, and only ALTER DOMAIN can add it, thus the build writes
+    /// such a CHECK as its own entry.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub not_valid: Option<bool>,
 }
 
 impl Domain {

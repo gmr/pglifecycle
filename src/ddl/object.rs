@@ -71,6 +71,7 @@ pub(crate) fn create_domain(
                         name,
                         nullable: None,
                         expression: Some(expr.text(src).to_string()),
+                        not_valid: None,
                     },
                 );
             }
@@ -80,6 +81,7 @@ pub(crate) fn create_domain(
                     name,
                     nullable: Some(false),
                     expression: None,
+                    not_valid: None,
                 },
             );
         } else if elem.has("kw_default")
@@ -91,18 +93,35 @@ pub(crate) fn create_domain(
     Ok(Statement::CreateDomain(domain))
 }
 
-/// ALTER DOMAIN ... ADD CONSTRAINT ... CHECK → the CHECK of the domain.
-/// The model has no field for a NOT VALID CHECK, thus that one and the
-/// other forms of ALTER DOMAIN are not supported.
+/// ALTER DOMAIN ... ADD CONSTRAINT ... CHECK → the CHECK of the domain,
+/// with its NOT VALID. The other forms of ALTER DOMAIN are not
+/// supported.
 pub(crate) fn alter_domain(node: &Node, src: &str) -> Statement {
     let check = node
         .child_of_kind("DomainConstraint")
         .filter(|_| node.has("kw_add"))
         .and_then(|constraint| {
             let elem = constraint.child_of_kind("DomainConstraintElem")?;
-            if !elem.has("kw_check") || elem.has("ConstraintAttributeSpec") {
+            if !elem.has("kw_check") {
                 return None;
             }
+            // NOT VALID is the only attribute that a domain CHECK can
+            // have
+            let not_valid = match elem.child_of_kind("ConstraintAttributeSpec")
+            {
+                None => None,
+                Some(spec) => {
+                    let elems = spec.find_all("ConstraintAttributeElem");
+                    let only_not_valid = !elems.is_empty()
+                        && elems
+                            .iter()
+                            .all(|e| e.has("kw_valid") && e.has("kw_not"));
+                    if !only_not_valid {
+                        return None;
+                    }
+                    Some(true)
+                }
+            };
             Some(DomainConstraint {
                 name: constraint
                     .child_of_kind("name")
@@ -111,6 +130,7 @@ pub(crate) fn alter_domain(node: &Node, src: &str) -> Statement {
                 expression: Some(
                     elem.child_of_kind("a_expr")?.text(src).to_string(),
                 ),
+                not_valid,
             })
         });
     match (node.child_of_kind("any_name"), check) {
@@ -962,14 +982,14 @@ mod tests {
                     name,
                     nullable: Some(false),
                     expression: None,
+                    not_valid: None,
                 }])
             );
         }
     }
 
     /// pg_dump writes a domain CHECK that calls a function that needs
-    /// the domain, and a NOT VALID one, as ALTER DOMAIN ... ADD. The
-    /// model has no field for NOT VALID, thus that one is not supported
+    /// the domain, and a NOT VALID one, as ALTER DOMAIN ... ADD
     #[test]
     fn parses_alter_domain_add_check() {
         let Statement::AddDomainCheck { domain, check } = parse_one(
@@ -985,10 +1005,25 @@ mod tests {
                 name: Some("A check".into()),
                 nullable: None,
                 expression: Some("s.z_ok((VALUE)::s.a_dom)".into()),
+                not_valid: None,
+            }
+        );
+        let Statement::AddDomainCheck { check, .. } = parse_one(
+            "ALTER DOMAIN s.d\n    ADD CONSTRAINT c CHECK (VALUE > 0) \
+             NOT VALID;",
+        ) else {
+            panic!("expected AddDomainCheck")
+        };
+        assert_eq!(
+            check,
+            DomainConstraint {
+                name: Some("c".into()),
+                nullable: None,
+                expression: Some("VALUE > 0".into()),
+                not_valid: Some(true),
             }
         );
         for sql in [
-            "ALTER DOMAIN s.d ADD CONSTRAINT c CHECK (VALUE > 0) NOT VALID;",
             "ALTER DOMAIN s.d ADD CONSTRAINT c NOT NULL;",
             "ALTER DOMAIN s.d DROP CONSTRAINT c;",
         ] {

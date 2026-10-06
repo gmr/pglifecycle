@@ -360,6 +360,12 @@
 //!     `USER` or `GROUP` form. The Python had no place for security
 //!     labels. The test-project has none, thus its archive does not
 //!     change.
+//! 92. A domain CHECK with `not_valid: true` renders as its own `CHECK
+//!     CONSTRAINT` entry after the domain, `ALTER DOMAIN d ADD
+//!     CONSTRAINT c CHECK (...) NOT VALID`, as pg_dump writes it. Only
+//!     ALTER DOMAIN can add a NOT VALID CHECK. The Python had no field
+//!     for it. No test-project domain CHECK is NOT VALID, thus its
+//!     archive does not change.
 
 mod acls;
 mod calls;
@@ -1303,7 +1309,8 @@ impl Builder {
         }
         // deviation 65: a CHECK that calls a function that needs the
         // domain is its own entry after the function, by the name of
-        // `Domain::with_check_names`
+        // `Domain::with_check_names`. A NOT VALID CHECK is also its own
+        // entry (deviation 92)
         let all_calls = Rc::clone(&self.calls);
         let named = d.with_check_names();
         let (separate, inline): (Vec<_>, Vec<_>) = d
@@ -1364,6 +1371,12 @@ impl Builder {
             else {
                 continue;
             };
+            // deviation 92
+            let not_valid = if check.not_valid == Some(true) {
+                " NOT VALID"
+            } else {
+                ""
+            };
             self.add_entry(
                 "CHECK CONSTRAINT",
                 &d.schema,
@@ -1371,7 +1384,7 @@ impl Builder {
                 &d.owner,
                 &[format!(
                     "ALTER DOMAIN {qualified} ADD CONSTRAINT {} \
-                     CHECK ({expression})",
+                     CHECK ({expression}){not_valid}",
                     quote_ident(name)
                 )],
                 &[format!(

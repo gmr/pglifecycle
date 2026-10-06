@@ -86,6 +86,46 @@ fn validation_errors(obj_type: &str, name: &str, data: &Value) -> Vec<String> {
             ));
         }
     }
+    if obj_type == "text_search" {
+        for (path, error) in mapping_case_errors(data) {
+            errors.push(format!(
+                "Validation error for {obj_type} {name}: {error} at {path}"
+            ));
+        }
+    }
+    errors
+}
+
+/// (path, error) for each text search configuration with two token
+/// types that differ only in case. Build writes a token type in
+/// lowercase, thus the two give two ADD MAPPING statements for one
+/// token type, and the restore fails.
+fn mapping_case_errors(data: &Value) -> Vec<(String, String)> {
+    let mut errors = Vec::new();
+    for (i, configuration) in data["configurations"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        let mut seen: HashMap<String, &String> = HashMap::new();
+        for token in configuration["mappings"]
+            .as_object()
+            .into_iter()
+            .flat_map(|mappings| mappings.keys())
+        {
+            if let Some(other) = seen.insert(token.to_lowercase(), token) {
+                errors.push((
+                    format!("/configurations/{i}/mappings"),
+                    format!(
+                        "token types {other:?} and {token:?} differ only \
+                         in case, and PostgreSQL makes them one token \
+                         type: write each token type one time"
+                    ),
+                ));
+            }
+        }
+    }
     errors
 }
 
@@ -231,6 +271,55 @@ mod tests {
         assert!(!tablespace(json!([{"seq_page_cost": 1.5}])));
         assert!(!tablespace(json!({"seq_page_cost": "1.5"})));
         assert!(!tablespace(json!({"fillfactor": 70})));
+    }
+
+    /// A tablespace without a location is not valid: CREATE
+    /// TABLESPACE needs one
+    #[test]
+    fn tablespace_needs_a_location() {
+        let data = json!({"name": "fast", "owner": "postgres"});
+        assert!(!validate_object("tablespace", "fast", &data));
+    }
+
+    /// Build writes a token type in lowercase. Two token types that
+    /// differ only in case give two ADD MAPPING statements for one
+    /// token type, and the restore fails
+    #[test]
+    fn text_search_mapping_keys_differ_by_more_than_case() {
+        let text_search = |mappings| {
+            let data = json!({
+                "schema": "test",
+                "configurations": [{
+                    "name": "cfg",
+                    "parser": "pg_catalog.default",
+                    "mappings": mappings,
+                }],
+            });
+            validation_errors("text_search", "test", &data)
+        };
+        assert!(
+            text_search(json!({"word": ["simple"], "url": ["simple"]}))
+                .is_empty()
+        );
+        let errors =
+            text_search(json!({"word": ["simple"], "Word": ["english"]}));
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("/configurations/0/mappings"));
+    }
+
+    /// JSON Schema ignores a keyword it does not know. A schema that
+    /// writes `requires` in place of `required` makes no field
+    /// mandatory, and validation reports nothing
+    #[test]
+    fn no_schema_uses_requires() {
+        for file in SCHEMATA.files() {
+            let text = file.contents_utf8().expect("schema text");
+            assert!(
+                !text.lines().any(|line| line.starts_with("requires:")),
+                "{}: write 'required:', not 'requires:'",
+                file.path().display()
+            );
+        }
     }
 
     /// PostgreSQL rejects PERIOD on one side of a foreign key only

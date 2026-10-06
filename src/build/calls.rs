@@ -43,7 +43,7 @@ pub(super) struct TableCalls {
     pub separate_defaults: HashSet<String>,
     /// The CHECK constraints that CREATE TABLE or CREATE DOMAIN cannot
     /// contain, for the same cause, and the NOT VALID ones of a table
-    /// (deviation 19)
+    /// (deviation 19) or a domain (deviation 92)
     pub separate_checks: HashSet<String>,
 }
 
@@ -94,8 +94,11 @@ pub(super) fn table_calls(project: &Project) -> HashMap<usize, TableCalls> {
         if let Definition::Domain(domain) = &item.definition {
             if domain.sql.is_none() {
                 let calls = domain_calls(&mut parser, domain, &functions);
-                if !calls.checks.is_empty() {
-                    forced.entry(item.id).or_default();
+                if !calls.checks.is_empty()
+                    || !calls.separate_checks.is_empty()
+                {
+                    forced.entry(item.id).or_default().1 =
+                        calls.separate_checks.clone();
                     result.insert(item.id, calls);
                 }
             }
@@ -225,6 +228,10 @@ fn domain_calls(
         else {
             continue;
         };
+        // only ALTER DOMAIN can add a NOT VALID check (deviation 92)
+        if check.not_valid == Some(true) {
+            calls.separate_checks.insert(name.clone());
+        }
         let called = called_functions(parser, expression, functions);
         if !called.is_empty() {
             calls.checks.insert(name.clone(), called);

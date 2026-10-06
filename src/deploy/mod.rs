@@ -31,7 +31,7 @@ use crate::ddl::{self, NodeExt};
 use crate::deploy::alter::Resolution;
 use crate::deploy::diff::{Change, Diff, ObjectKey};
 use crate::models::{Definition, Item};
-use crate::utils::quote_ident;
+use crate::utils::{quote_ident, user_mapping_subject};
 use crate::{
     build, cli, constants, diagnostics, pgdump, progress, project, pull,
 };
@@ -678,8 +678,10 @@ fn plan(
                 }
                 None => defn,
             };
+            // a CREATE that needs the DROP of a database-only object,
+            // and its child entries, are withheld with the DROP
             push(
-                false,
+                owners.iter().any(|id| diff.gated.contains(id)),
                 Statement {
                     label: label.clone(),
                     sql: format!(
@@ -1682,7 +1684,7 @@ fn drop_sql(key: &ObjectKey, definition: Option<&Definition>) -> String {
             .map(|server| {
                 format!(
                     "DROP USER MAPPING IF EXISTS FOR {} SERVER {};\n",
-                    quote_ident(&mapping.name),
+                    user_mapping_subject(&mapping.name),
                     quote_ident(&server.name),
                 )
             })
@@ -2084,6 +2086,7 @@ mod tests {
             removed: BTreeMap::new(),
             owned: BTreeSet::new(),
             owner_changed: BTreeSet::new(),
+            gated: BTreeSet::new(),
         };
         diff.removed
             .insert(dep_key.clone(), Definition::Function(dep_fn));
@@ -2443,6 +2446,7 @@ mod tests {
                         .collect(),
                     owned: BTreeSet::new(),
                     owner_changed: BTreeSet::new(),
+                    gated: BTreeSet::new(),
                 };
                 plan(
                     &diff,
@@ -2528,6 +2532,7 @@ mod tests {
             removed: BTreeMap::new(),
             owned: BTreeSet::new(),
             owner_changed: BTreeSet::new(),
+            gated: BTreeSet::new(),
         };
         diff.removed.insert(key.clone(), definition);
         let mut snapshot =
@@ -2602,6 +2607,7 @@ mod tests {
             removed: BTreeMap::new(),
             owned: BTreeSet::new(),
             owner_changed: BTreeSet::new(),
+            gated: BTreeSet::new(),
         };
         diff.items.insert(0, Change::Changed);
         diff.changed
@@ -2685,6 +2691,7 @@ mod tests {
             removed: BTreeMap::new(),
             owned: BTreeSet::new(),
             owner_changed: BTreeSet::new(),
+            gated: BTreeSet::new(),
         };
         diff.items.insert(0, Change::Changed);
         diff.items.insert(1, Change::Added);
@@ -2784,6 +2791,7 @@ mod tests {
             removed: BTreeMap::new(),
             owned: BTreeSet::new(),
             owner_changed: BTreeSet::new(),
+            gated: BTreeSet::new(),
         };
         diff.items.insert(0, Change::Changed);
         diff.items.insert(1, Change::Added);
@@ -3297,6 +3305,7 @@ mod tests {
             removed: BTreeMap::new(),
             owned: BTreeSet::from([0, 1]),
             owner_changed: BTreeSet::from([1]),
+            gated: BTreeSet::new(),
         };
         let snapshot =
             libpgdump::new("test", "UTF8", "18.0").expect("new dump");
@@ -3408,6 +3417,7 @@ mod tests {
                 removed: BTreeMap::new(),
                 owned: BTreeSet::from([0, 1]),
                 owner_changed: BTreeSet::from([0, 1]),
+                gated: BTreeSet::new(),
             };
             let resolutions = BTreeMap::from([(
                 0,
@@ -3513,6 +3523,7 @@ mod tests {
                 removed: BTreeMap::new(),
                 owned: BTreeSet::new(),
                 owner_changed: BTreeSet::new(),
+                gated: BTreeSet::new(),
             };
             let resolutions = BTreeMap::from([
                 (0, alter::resolve(&sequence(Some(column)), &sequence(None))),
@@ -3592,6 +3603,7 @@ mod tests {
                 removed: BTreeMap::new(),
                 owned: BTreeSet::new(),
                 owner_changed: BTreeSet::new(),
+                gated: BTreeSet::new(),
             };
             plan(
                 &diff,
@@ -3719,6 +3731,7 @@ mod tests {
             removed: BTreeMap::new(),
             owned: BTreeSet::new(),
             owner_changed: BTreeSet::new(),
+            gated: BTreeSet::new(),
         };
         diff.changed.insert(
             0,
@@ -4046,6 +4059,7 @@ mod tests {
             removed: BTreeMap::new(),
             owned: BTreeSet::new(),
             owner_changed: BTreeSet::new(),
+            gated: BTreeSet::new(),
         };
         let mut dump =
             libpgdump::new("test", "UTF8", "18.0").expect("new dump");
@@ -4102,6 +4116,7 @@ mod tests {
             removed: BTreeMap::new(),
             owned: BTreeSet::new(),
             owner_changed: BTreeSet::new(),
+            gated: BTreeSet::new(),
         };
         let mut dump =
             libpgdump::new("test", "UTF8", "18.0").expect("new dump");
@@ -4285,6 +4300,7 @@ mod tests {
             removed: BTreeMap::new(),
             owned: BTreeSet::new(),
             owner_changed: BTreeSet::new(),
+            gated: BTreeSet::new(),
         };
         let mut limits = pgdump::ReadLimits {
             role: "Gate Reader".into(),
@@ -4362,6 +4378,7 @@ mod tests {
             removed: BTreeMap::new(),
             owned: BTreeSet::new(),
             owner_changed: BTreeSet::new(),
+            gated: BTreeSet::new(),
         };
         let mut output = build::assemble(&project).expect("assemble");
         output.dump.sort_entries();
@@ -4445,5 +4462,24 @@ mod tests {
             let entry = output.dump.get_entry_mut(*id).expect("entry");
             assert_eq!(entry.defn.as_deref(), Some(expected));
         }
+    }
+
+    /// In quotes, `PUBLIC` is the name of a role, so the drop of a
+    /// mapping for PUBLIC writes it as the keyword
+    #[test]
+    fn removed_public_user_mapping_drops_for_the_keyword() {
+        let definition = Definition::UserMapping(
+            serde_json::from_value(serde_json::json!({
+                "name": "PUBLIC",
+                "servers": [{"name": "srv"}],
+            }))
+            .expect("user mapping"),
+        );
+        let key =
+            ObjectKey::new(constants::ObjectType::UserMapping, &definition);
+        assert_eq!(
+            drop_sql(&key, Some(&definition)),
+            "DROP USER MAPPING IF EXISTS FOR PUBLIC SERVER srv;\n"
+        );
     }
 }

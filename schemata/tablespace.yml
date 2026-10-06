@@ -40,7 +40,7 @@ properties:
   security_labels:
     title: Security Labels
     $package_schema: security_labels
-requires:
+required:
   - name
   - location
 additionalProperties: false

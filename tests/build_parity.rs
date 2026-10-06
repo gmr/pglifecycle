@@ -2115,3 +2115,100 @@ fn separates_a_domain_check_that_calls_a_function_of_the_domain() {
     let rating_ok = entry("FUNCTION", "rating_ok");
     assert_eq!(rating.dependencies, [rating_ok.dump_id]);
 }
+
+/// Deviation 92: a NOT VALID domain CHECK is its own entry after the
+/// domain, `ALTER DOMAIN ... ADD CONSTRAINT ... NOT VALID`, as pg_dump
+/// writes it. A NOT VALID CHECK that calls a function also comes after
+/// that function, and the domain does not
+#[test]
+fn separates_a_not_valid_domain_check() {
+    let item = |id, desc, definition| Item {
+        id,
+        desc,
+        definition,
+        dependencies: BTreeSet::new(),
+    };
+    let project = project::Project {
+        name: "domains".into(),
+        superuser: "postgres".into(),
+        default_schema: "public".into(),
+        path: std::path::PathBuf::new(),
+        settings: Default::default(),
+        inventory: vec![
+            item(
+                0,
+                ObjectType::Domain,
+                Definition::Domain(
+                    serde_json::from_value(serde_json::json!({
+                        "name": "level", "schema": "test",
+                        "owner": "postgres", "data_type": "integer",
+                        "check_constraints": [
+                            {"name": "level_low",
+                             "expression": "VALUE < 10"},
+                            {"name": "level_ok",
+                             "expression": "test.level_ok(VALUE)",
+                             "not_valid": true},
+                            {"name": "level_high",
+                             "expression": "VALUE > 0",
+                             "not_valid": true},
+                        ],
+                    }))
+                    .unwrap(),
+                ),
+            ),
+            item(
+                1,
+                ObjectType::Function,
+                Definition::Function(
+                    serde_json::from_value(serde_json::json!({
+                        "name": "level_ok", "schema": "test",
+                        "owner": "postgres", "returns": "boolean",
+                        "language": "sql", "sql_body": "RETURN true",
+                        "parameters": [
+                            {"mode": "IN", "name": "v",
+                             "data_type": "integer"},
+                        ],
+                    }))
+                    .unwrap(),
+                ),
+            ),
+        ],
+    };
+    let output = build::assemble(&project).unwrap();
+    let entry = |desc: &str, tag: &str| {
+        output
+            .dump
+            .entries()
+            .iter()
+            .find(|e| {
+                // a function's tag has its argument types
+                let found = e.tag.as_deref().unwrap_or_default();
+                e.desc.as_str() == desc
+                    && (found == tag || found.starts_with(&format!("{tag}(")))
+            })
+            .unwrap_or_else(|| panic!("missing entry {desc} {tag}"))
+    };
+    let level = entry("DOMAIN", "level");
+    assert_eq!(
+        level.defn.as_deref(),
+        Some(
+            "CREATE DOMAIN test.level AS integer \
+             CONSTRAINT level_low CHECK (VALUE < 10);\n"
+        )
+    );
+    assert!(level.dependencies.is_empty());
+    let high = entry("CHECK CONSTRAINT", "level level_high");
+    assert_eq!(
+        high.defn.as_deref(),
+        Some(
+            "ALTER DOMAIN test.level ADD CONSTRAINT level_high \
+             CHECK (VALUE > 0) NOT VALID;\n"
+        )
+    );
+    assert_eq!(high.dependencies, [level.dump_id]);
+    let ok = entry("CHECK CONSTRAINT", "level level_ok");
+    let mut deps = ok.dependencies.clone();
+    deps.sort_unstable();
+    let level_ok = entry("FUNCTION", "level_ok");
+    assert_eq!(deps, [level.dump_id, level_ok.dump_id]);
+}

@@ -94,7 +94,7 @@ properties:
     description: Database objects this object is dependent upon
     $package_schema: dependencies
 additionalProperties: false
-requires:
+required:
   - schema
   - name
 oneOf:
