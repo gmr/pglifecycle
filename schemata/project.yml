@@ -30,6 +30,22 @@ properties:
     description: >
       An optional comment about the database (`COMMENT ON DATABASE`)
     type: string
+  connection_limit:
+    title: Connection Limit
+    description: >
+      The number of concurrent connections that the database allows
+      (`ALTER DATABASE ... CONNECTION LIMIT`). -1, the default, means no
+      limit. Absent is the same as -1.
+    type: integer
+    minimum: -1
+    maximum: 2147483647
+  is_template:
+    title: Is Template
+    description: >
+      true makes the database a template (`ALTER DATABASE ... IS_TEMPLATE`):
+      a user with CREATEDB can clone it. Absent is the same as false, the
+      default.
+    type: boolean
   superuser:
     description: The PostgreSQL super user
     type: string

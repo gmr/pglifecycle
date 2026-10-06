@@ -36,9 +36,11 @@ setting. pg_restore converts the text to the encoding of the database,
 thus the same archive restores into a UTF8 and into a LATIN1 database.
 Create the database with the encoding before the restore.
 
-The `settings` and `role_settings` of `project.yaml` go in one
-`DATABASE PROPERTIES` entry, as `pg_dump` writes them: `ALTER DATABASE
-name SET ...` and `ALTER ROLE role IN DATABASE name SET ...`, where
+The `connection_limit`, `is_template`, `settings` and `role_settings`
+of `project.yaml` go in one `DATABASE PROPERTIES` entry, as `pg_dump`
+writes them: `ALTER DATABASE name CONNECTION LIMIT = ...`, `ALTER
+DATABASE name IS_TEMPLATE = true`, `ALTER DATABASE name SET ...` and
+`ALTER ROLE role IN DATABASE name SET ...`, where
 `name` is the `name` of the project. PostgreSQL has no statement that
 sets a setting of the current database without its name, thus the
 archive cannot use the name of the database that you restore into.
@@ -306,6 +308,12 @@ reconciled in place where PostgreSQL can express it:
   `COMMENT ON DATABASE name IS NULL`, as for the comment of an object.
   `name` is the name of the database that deploy reads. The statement
   comes with the settings, after all other statements.
+- **Database properties** — the `connection_limit` and `is_template`
+  of `project.yaml`. A different connection limit gets `ALTER DATABASE
+  name CONNECTION LIMIT n`, and a different template state gets `ALTER
+  DATABASE name IS_TEMPLATE true` (or `false`). No value is the
+  default: -1 (no limit) and `false`. The statements come with the
+  settings, after all other statements.
 - Everything else falls back to drop+recreate.
 
 ### Destructive statements and limits
@@ -824,9 +832,9 @@ The entry was preserved in ./project/remaining.yaml; re-run with
 A `COMMENT` entry counts as unmodeled when the model has no place for
 it, such as a comment on an object type that `pull` does not model.
 A `DATABASE PROPERTIES` entry counts as unmodeled when it has a
-property of the database other than a setting (`CONNECTION LIMIT`,
-`IS_TEMPLATE` or `ALLOW_CONNECTIONS`). `pull` keeps the settings in the
-entry, and the entry also goes to `remaining.yaml`.
+statement other than a setting, `CONNECTION LIMIT` or `IS_TEMPLATE`.
+`pull` keeps the settings and the properties in the entry, and the
+entry also goes to `remaining.yaml`.
 
 The project directory is written either way, so `remaining.yaml` is
 there to inspect. `--allow-unsupported` downgrades the failure to a
