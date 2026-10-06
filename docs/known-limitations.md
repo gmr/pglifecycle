@@ -109,10 +109,6 @@ These limits are new on this page:
 - **A user mapping file named `public`.** `pull` writes the mapping
   for `PUBLIC` in a file named `PUBLIC`. A file named `public` does
   not match it, so `deploy` drops and makes the mapping on each run.
-- **Partitioned tables with mixed partitions.** When some partitions
-  of a table are only bounds in the parent and others are files with
-  `attached: true`, the parent's `ON ONLY` index is a change on each
-  deploy. Write all partitions in the same form.
 - **A new unnamed domain CHECK before other unnamed checks.**
   PostgreSQL names unnamed checks in order: `<domain>_check`,
   `<domain>_check1`, and so on. A new unnamed check before existing
