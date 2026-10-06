@@ -702,6 +702,12 @@ pub struct Assembly {
     pub roles: BTreeMap<String, RoleState>,
     /// The comment of the database (`COMMENT ON DATABASE`)
     pub comment: Option<String>,
+    /// The connection limit of the database (`ALTER DATABASE ...
+    /// CONNECTION LIMIT`), when pg_dump writes it
+    pub connection_limit: Option<i64>,
+    /// Whether the database is a template (`ALTER DATABASE ...
+    /// IS_TEMPLATE`), when pg_dump writes it
+    pub is_template: Option<bool>,
     /// The settings of the database (`ALTER DATABASE ... SET`)
     pub settings: Map<String, Value>,
     /// The settings of each role in the database (`ALTER ROLE ... IN
@@ -1715,6 +1721,17 @@ impl Assembly {
                         .insert(name, value),
                     None => self.settings.insert(name, value),
                 };
+            }
+            Statement::DatabaseProperties {
+                connection_limit,
+                is_template,
+            } => {
+                if connection_limit.is_some() {
+                    self.connection_limit = connection_limit;
+                }
+                if is_template.is_some() {
+                    self.is_template = is_template;
+                }
             }
             Statement::Unsupported(kind) => {
                 log::warn!("Cannot model {}: {kind}", entry_label(entry));
@@ -4368,11 +4385,12 @@ mod tests {
         );
     }
 
-    /// The settings of the database, and of a role in the database,
+    /// The connection limit, the template state and the settings of
+    /// the database, and the settings of a role in the database,
     /// survive pull → write → load → build: pg_dump writes them in the
     /// DATABASE PROPERTIES entry, pull writes them in project.yaml, and
     /// build writes the entry again for the database of the project.
-    /// Another property in the entry is not modeled, thus the entry
+    /// Another statement in the entry is not modeled, thus the entry
     /// is also kept
     #[test]
     fn database_settings_round_trip_through_build() {
@@ -4383,7 +4401,9 @@ mod tests {
             OT::DatabaseProperties,
             "",
             "app",
-            "ALTER DATABASE app SET work_mem TO '64MB';\n\
+            "ALTER DATABASE app CONNECTION LIMIT = 5;\n\
+             ALTER DATABASE app IS_TEMPLATE = true;\n\
+             ALTER DATABASE app SET work_mem TO '64MB';\n\
              ALTER DATABASE app SET search_path TO '$user', 'my schema';\n\
              ALTER DATABASE app SET \"TimeZone\" TO 'UTC';\n\
              ALTER ROLE \"App User\" IN DATABASE app SET \
@@ -4392,6 +4412,8 @@ mod tests {
         let mut assembly = Assembly::default();
         assembly.ingest(&dump).unwrap();
         assert!(assembly.remaining.is_empty());
+        assert_eq!(assembly.connection_limit, Some(5));
+        assert_eq!(assembly.is_template, Some(true));
         assert_eq!(
             Value::Object(assembly.settings.clone()),
             serde_json::json!({
@@ -4421,7 +4443,8 @@ mod tests {
         writer::write_bootstrap(&files, &args).unwrap();
         assert_eq!(
             std::fs::read_to_string(dest.join("project.yaml")).unwrap(),
-            "---\nname: app\nsettings:\n- TimeZone: UTC\n\
+            "---\nname: app\nconnection_limit: 5\nis_template: true\n\
+             settings:\n- TimeZone: UTC\n\
              - search_path:\n  - $user\n  - my schema\n\
              - work_mem: 64MB\nrole_settings:\n  App User:\n\
              \x20 - statement_timeout: 5s\n"
@@ -4442,7 +4465,9 @@ mod tests {
         assert_eq!(
             entry.defn.as_deref(),
             Some(
-                "ALTER DATABASE app SET \"TimeZone\" TO 'UTC';\n\
+                "ALTER DATABASE app CONNECTION LIMIT = 5;\n\
+                 ALTER DATABASE app IS_TEMPLATE = true;\n\
+                 ALTER DATABASE app SET \"TimeZone\" TO 'UTC';\n\
                  ALTER DATABASE app SET search_path TO '$user', \
                  'my schema';\n\
                  ALTER DATABASE app SET work_mem TO '64MB';\n\
@@ -4457,9 +4482,9 @@ mod tests {
             OT::DatabaseProperties,
             "",
             "app",
-            "ALTER DATABASE app CONNECTION LIMIT = 5;\n\
+            "ALTER DATABASE app SET TABLESPACE a;\n\
              ALTER DATABASE app SET work_mem TO '64MB';\n\
-             ALTER DATABASE app IS_TEMPLATE = true;\n",
+             ALTER DATABASE app RESET work_mem;\n",
         );
         let mut assembly = Assembly::default();
         assembly.ingest(&dump).unwrap();

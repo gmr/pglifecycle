@@ -168,16 +168,21 @@ fi
 # the project. The build has no DATABASE entry, thus with --create
 # pg_restore restores the entry into the database of -d. The step
 # removes the settings of the source database, and of postgres in it
-# (fixtures/schema.sql sets them), and restores the entry into it. The
-# settings that it restores must be the settings that pull read.
+# (fixtures/schema.sql sets them), and its connection limit, and
+# restores the entry into it. The settings and the connection limit
+# that it restores must be the ones that pull read.
 echo "==> Database settings: build, restore with --create"
 db_settings() {
     psql -d postgres -tA -v ON_ERROR_STOP=1 -c "
-        SELECT setrole::regrole::text, s
+        SELECT 'CONNECTION LIMIT', datconnlimit::text
+          FROM pg_database
+         WHERE datname = '${SOURCE_DB}' AND datconnlimit <> -1
+        UNION ALL
+        (SELECT setrole::regrole::text, s
           FROM pg_db_role_setting, unnest(setconfig) AS s
          WHERE setdatabase = (SELECT oid FROM pg_database
                                WHERE datname = '${SOURCE_DB}')
-         ORDER BY 1, 2"
+         ORDER BY 1, 2)"
 }
 db_settings > "${WORKDIR}/db-settings-source.txt"
 if [ ! -s "${WORKDIR}/db-settings-source.txt" ]; then
@@ -192,6 +197,7 @@ else
         | grep " DATABASE PROPERTIES " > "${WORKDIR}/db-settings.list" || true
     psql -d postgres -q -v ON_ERROR_STOP=1 \
         -c "ALTER DATABASE ${SOURCE_DB} RESET ALL" \
+        -c "ALTER DATABASE ${SOURCE_DB} CONNECTION LIMIT -1" \
         -c "ALTER ROLE postgres IN DATABASE ${SOURCE_DB} RESET ALL"
     pg_restore --create -d "${SOURCE_DB}" --exit-on-error \
         -L "${WORKDIR}/db-settings.list" "${WORKDIR}/build.dump"
