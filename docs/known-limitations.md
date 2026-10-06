@@ -34,10 +34,6 @@ the project without these entries. See
   hand.
 - **Comments on objects that pull does not model.** Such a comment
   goes to `remaining.yaml` with its object.
-- **Column settings on an inheritance child.** `ALTER TABLE ONLY child
-  ALTER COLUMN c SET STATISTICS` (or `SET STORAGE`) on a column that
-  the child inherits puts the table entry in `remaining.yaml`. Set the
-  value by hand after the restore or the deploy.
 - **A NOT VALID domain CHECK.** `pg_dump` writes a `NOT VALID`
   domain CHECK as an `ALTER DOMAIN` entry of its own. The model has no
   place for `NOT VALID`, so `pull` stops with `1 dump entry could not

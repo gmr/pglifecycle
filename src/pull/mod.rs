@@ -1377,33 +1377,14 @@ impl Assembly {
                 column,
                 attribute,
             } => {
-                let found = self.find_table(&table).and_then(|t| {
-                    t.columns.iter_mut().flatten().find(|c| c.name == column)
+                let set = self.find_table(&table).is_some_and(|t| {
+                    set_column_attribute(t, &column, attribute)
                 });
-                match found {
-                    Some(c) => match attribute {
-                        ddl::ColumnAttribute::Storage(v) => {
-                            c.storage = Some(v)
-                        }
-                        ddl::ColumnAttribute::Compression(v) => {
-                            c.compression = Some(v);
-                        }
-                        ddl::ColumnAttribute::Statistics(v) => {
-                            c.statistics = Some(v);
-                        }
-                        ddl::ColumnAttribute::Options(v) => {
-                            c.options.get_or_insert_default().extend(v);
-                        }
-                    },
-                    // an inherited column has no entry of its own to
-                    // hold the attribute, so the entry is kept
-                    None => {
-                        log::warn!(
-                            "Column attribute on unknown column \
-                             {table}.{column}"
-                        );
-                        self.push_remaining(entry);
-                    }
+                if !set {
+                    log::warn!(
+                        "Column attribute on unknown column {table}.{column}"
+                    );
+                    self.push_remaining(entry);
                 }
             }
             Statement::SetColumnDefault {
@@ -2879,6 +2860,59 @@ fn set_column_default(
     }
 }
 
+/// Set a column attribute on a table column. A column the table does
+/// not declare locally is an inherited one, and its statistics target
+/// and storage are kept in `column_settings`. False when the model has
+/// no place for the attribute.
+fn set_column_attribute(
+    table: &mut models::Table,
+    column: &str,
+    attribute: ddl::ColumnAttribute,
+) -> bool {
+    if let Some(c) = table
+        .columns
+        .iter_mut()
+        .flatten()
+        .find(|c| c.name == column)
+    {
+        match attribute {
+            ddl::ColumnAttribute::Storage(v) => c.storage = Some(v),
+            ddl::ColumnAttribute::Compression(v) => c.compression = Some(v),
+            ddl::ColumnAttribute::Statistics(v) => c.statistics = Some(v),
+            ddl::ColumnAttribute::Options(v) => {
+                c.options.get_or_insert_default().extend(v);
+            }
+        }
+        return true;
+    }
+    if !matches!(
+        attribute,
+        ddl::ColumnAttribute::Statistics(_) | ddl::ColumnAttribute::Storage(_)
+    ) {
+        return false;
+    }
+    let settings = table.column_settings.get_or_insert_default();
+    let index = match settings.iter().position(|s| s.column == column) {
+        Some(index) => index,
+        None => {
+            settings.push(models::ColumnSetting {
+                column: column.to_string(),
+                statistics: None,
+                storage: None,
+            });
+            settings.len() - 1
+        }
+    };
+    match attribute {
+        ddl::ColumnAttribute::Statistics(v) => {
+            settings[index].statistics = Some(v);
+        }
+        ddl::ColumnAttribute::Storage(v) => settings[index].storage = Some(v),
+        _ => unreachable!("only statistics and storage reach here"),
+    }
+    true
+}
+
 /// The quoted value from a `SET name = 'value';` entry definition
 fn set_value(defn: &str) -> Option<String> {
     let start = defn.find('\'')? + 1;
@@ -3572,6 +3606,7 @@ mod tests {
             schema: "test".into(),
             owner: String::new(),
             column_defaults: None,
+            column_settings: None,
             sql: None,
             unlogged: None,
             from_type: None,
@@ -3649,6 +3684,51 @@ mod tests {
                 default: json!("CURRENT_TIMESTAMP"),
             }])
         );
+    }
+
+    /// An inheritance child has no column entry for a column it
+    /// inherits, so pg_dump's `ALTER TABLE ONLY ... SET STATISTICS`
+    /// and `SET STORAGE` on that column are kept at the table level
+    #[test]
+    fn settings_on_an_inherited_column_are_kept() {
+        let mut table: models::Table = serde_json::from_value(json!({
+            "name": "child",
+            "schema": "test",
+            "owner": "postgres",
+            "parents": ["test.parent"],
+            "columns": [{"name": "d", "data_type": "integer"}],
+        }))
+        .unwrap();
+        for (column, attribute) in [
+            ("a", ddl::ColumnAttribute::Statistics(500)),
+            ("b", ddl::ColumnAttribute::Storage("EXTERNAL".into())),
+            ("a", ddl::ColumnAttribute::Storage("MAIN".into())),
+            ("d", ddl::ColumnAttribute::Statistics(100)),
+        ] {
+            assert!(set_column_attribute(&mut table, column, attribute));
+        }
+        // compression on an inherited column has no place in the model
+        assert!(!set_column_attribute(
+            &mut table,
+            "a",
+            ddl::ColumnAttribute::Compression("lz4".into()),
+        ));
+        assert_eq!(
+            table.column_settings,
+            Some(vec![
+                models::ColumnSetting {
+                    column: String::from("a"),
+                    statistics: Some(500),
+                    storage: Some(String::from("MAIN")),
+                },
+                models::ColumnSetting {
+                    column: String::from("b"),
+                    statistics: None,
+                    storage: Some(String::from("EXTERNAL")),
+                },
+            ])
+        );
+        assert_eq!(table.columns.unwrap()[0].statistics, Some(100));
     }
 
     #[test]

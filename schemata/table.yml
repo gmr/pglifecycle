@@ -150,6 +150,38 @@ properties:
         - column
         - default
       additionalProperties: false
+  column_settings:
+    title: Column Settings
+    description: >
+      The statistics target and the storage of columns the table does not
+      declare itself. An inheritance child inherits its parent's columns, so it
+      has no column entry to carry them; pg_dump writes those as a separate
+      `ALTER TABLE ONLY <child> ALTER COLUMN <column> SET STATISTICS ...` or
+      `SET STORAGE ...`.
+
+      A setting on a column the table does declare belongs on the column
+      instead.
+    type: array
+    items:
+      title: Column Setting
+      type: object
+      properties:
+        column:
+          title: Column Name
+          type: string
+        statistics:
+          title: Statistics Target
+          description: The column's statistics target (SET STATISTICS)
+          type: integer
+        storage:
+          title: Storage
+          description: >
+            How the column's values are stored (SET STORAGE), when it differs
+            from the type's default
+          enum: [PLAIN, EXTERNAL, EXTENDED, MAIN, DEFAULT]
+      required:
+        - column
+      additionalProperties: false
   primary_key:
     title: Primary Key
     description: >

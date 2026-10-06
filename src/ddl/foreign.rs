@@ -124,6 +124,7 @@ pub(crate) fn create_foreign_table(
         like_table: None,
         columns: (!columns.is_empty()).then_some(columns),
         column_defaults: None,
+        column_settings: None,
         indexes: None,
         primary_key: None,
         check_constraints: None,

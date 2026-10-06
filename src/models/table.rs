@@ -110,6 +110,8 @@ pub struct Table {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub column_defaults: Option<Vec<ColumnDefault>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub column_settings: Option<Vec<ColumnSetting>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub indexes: Option<Vec<Index>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub primary_key: Option<ConstraintColumns>,
@@ -508,6 +510,21 @@ pub struct Column {
 pub struct ColumnDefault {
     pub column: String,
     pub default: Value,
+}
+
+/// The statistics target and the storage of a column the table does
+/// not declare locally: an inheritance child has no column entry for
+/// a column it inherits, so pg_dump writes these settings as a
+/// separate `ALTER TABLE ONLY child ALTER COLUMN col SET STATISTICS
+/// ...` or `SET STORAGE ...`
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ColumnSetting {
+    pub column: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub statistics: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub storage: Option<String>,
 }
 
 /// The parts of a column's NOT NULL constraint that `nullable: false`
