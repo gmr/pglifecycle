@@ -867,7 +867,8 @@ fn canonical_user_mapping(
 /// PostgreSQL cuts it or adds a number to it. A CHECK with no name has
 /// the name that PostgreSQL gives it (see [`Domain::with_check_names`]),
 /// because pg_dump writes the name of each CHECK, and the CHECKs come
-/// in the order of their names, as pg_dump writes them.
+/// in the order of their names, as pg_dump writes them. A CHECK has
+/// `not_valid` only when it is `true`.
 pub(crate) fn canonical_domain(domain: &Domain) -> Domain {
     let generated = domain.not_null_name();
     let mut domain = domain.with_check_names();
@@ -895,6 +896,8 @@ pub(crate) fn canonical_domain(domain: &Domain) -> Domain {
         if let Some(expression) = &mut check.expression {
             *expression = canonical_check(expression);
         }
+        // `false` is the default, the same as no value
+        check.not_valid = check.not_valid.filter(|v| *v);
     }
     domain
 }
