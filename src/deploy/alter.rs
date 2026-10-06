@@ -2009,10 +2009,10 @@ fn sequence(repo: &Sequence, db: &Sequence) -> Resolution {
     Resolution::Statements(alters)
 }
 
-/// Domain reconciliation: SET/DROP DEFAULT, ADD CONSTRAINT of a new
-/// check (see [`added_domain_checks`]), VALIDATE CONSTRAINT of a NOT
-/// VALID check that the project has as valid, the NOT NULL and a
-/// comment delta in place. A base-type, collation, or other constraint
+/// Domain reconciliation: SET/DROP DEFAULT, RENAME CONSTRAINT and ADD
+/// CONSTRAINT of the checks (see [`domain_check_changes`]), VALIDATE
+/// CONSTRAINT of a NOT VALID check that the project has as valid, the
+/// NOT NULL and a comment delta in place. A base-type, collation, or other constraint
 /// change rebuilds. The two sides compare in the form of
 /// [`canonical_domain`].
 fn domain(repo: &Domain, db: &Domain) -> Resolution {
@@ -2048,7 +2048,7 @@ fn domain(repo: &Domain, db: &Domain) -> Resolution {
     };
     let collation =
         |domain: &Domain| domain.collation.as_deref().map(canonical_collation);
-    let Some(added) = added_domain_checks(repo, db) else {
+    let Some((renames, added)) = domain_check_changes(repo, db) else {
         return Resolution::Replace;
     };
     if repo.sql != db.sql
@@ -2058,7 +2058,16 @@ fn domain(repo: &Domain, db: &Domain) -> Resolution {
         return Resolution::Replace;
     }
     let name = qualified(&repo.schema, &repo.name);
-    let mut alters = Vec::new();
+    let mut alters: Vec<Alter> = renames
+        .iter()
+        .map(|(old, new)| {
+            Alter::new(format!(
+                "ALTER DOMAIN {name} RENAME CONSTRAINT {} TO {};\n",
+                quote_ident(old),
+                quote_ident(new)
+            ))
+        })
+        .collect();
     for check in validated {
         alters.push(Alter::new(format!(
             "ALTER DOMAIN {name} VALIDATE CONSTRAINT {};\n",
@@ -2114,17 +2123,24 @@ fn domain(repo: &Domain, db: &Domain) -> Resolution {
     Resolution::Statements(alters)
 }
 
-/// The checks of `repo` that `db` does not have, when the other checks
-/// are the same, and each added one is a CHECK with a name (in the form
-/// of [`canonical_domain`], each CHECK has a name, and the checks are
-/// in the order of their names): ALTER DOMAIN ... ADD CONSTRAINT adds
-/// them in place. Any other change of the checks gives None, which
+/// The renames, in an order where each new name is free, and then the
+/// checks to add (see [`domain_check_changes`])
+type DomainCheckChanges<'a> =
+    (Vec<(String, String)>, Vec<&'a DomainConstraint>);
+
+/// The changes of the checks from `db` to `repo`, when each one is in
+/// place. In the form of [`canonical_domain`], each CHECK has a name.
+/// A check of `db` that `repo` has with another name only is renamed:
+/// a new CHECK with no name before others moves the names that
+/// PostgreSQL gives them. Each added check is a CHECK with a name, and
+/// ALTER DOMAIN ... ADD CONSTRAINT adds it. A removed or changed
+/// check, or names that no order of renames can give, give None, which
 /// rebuilds the domain. The NOT NULL is not a check here; [`domain`]
 /// changes it in place
-fn added_domain_checks<'a>(
+fn domain_check_changes<'a>(
     repo: &'a Domain,
     db: &Domain,
-) -> Option<Vec<&'a DomainConstraint>> {
+) -> Option<DomainCheckChanges<'a>> {
     fn checks(domain: &Domain) -> Vec<&DomainConstraint> {
         domain
             .check_constraints
@@ -2134,15 +2150,49 @@ fn added_domain_checks<'a>(
             .collect()
     }
     let (wanted, existing) = (checks(repo), checks(db));
-    let (kept, added): (Vec<_>, Vec<_>) = wanted
-        .into_iter()
-        .partition(|check| existing.contains(check));
+    let mut removed: Vec<&DomainConstraint> = existing
+        .iter()
+        .copied()
+        .filter(|check| !wanted.contains(check))
+        .collect();
+    let unnamed = |check: &DomainConstraint| DomainConstraint {
+        name: None,
+        ..check.clone()
+    };
+    let mut renames = Vec::new();
+    let mut added = Vec::new();
+    for check in wanted.into_iter().filter(|c| !existing.contains(c)) {
+        let same = removed.iter().position(|old| {
+            old.name.is_some() && unnamed(old) == unnamed(check)
+        });
+        match (same, &check.name) {
+            (Some(index), Some(name)) => {
+                let old = removed.remove(index).name.clone()?;
+                renames.push((old, name.clone()));
+            }
+            _ => added.push(check),
+        }
+    }
     let named = |check: &&DomainConstraint| {
         check.name.is_some()
             && check.expression.is_some()
             && check.nullable.is_none()
     };
-    (kept == existing && added.iter().all(named)).then_some(added)
+    if !removed.is_empty() || !added.iter().all(named) {
+        return None;
+    }
+    // a rename goes when no other check has its new name
+    let mut names: std::collections::BTreeSet<String> =
+        existing.iter().filter_map(|c| c.name.clone()).collect();
+    let mut ordered = Vec::new();
+    while !renames.is_empty() {
+        let next = renames.iter().position(|(_, new)| !names.contains(new))?;
+        let (old, new) = renames.remove(next);
+        names.remove(&old);
+        names.insert(new.clone());
+        ordered.push((old, new));
+    }
+    Some((ordered, added))
 }
 
 /// Enum reconciliation: append-only value additions via ALTER TYPE
@@ -4208,6 +4258,43 @@ mod tests {
         changed.check_constraints.as_mut().unwrap()[0].expression =
             Some("VALUE > 1".into());
         assert!(matches!(domain(&changed, &db), Resolution::Replace));
+    }
+
+    /// A new CHECK with no name before the others moves their names.
+    /// The checks that only have another name are renamed in place,
+    /// from the last name to the first, then the new check is added.
+    /// Two checks that change names with each other rebuild the domain
+    #[test]
+    fn domain_checks_with_new_names_are_renamed() {
+        let with = |constraints: serde_json::Value| -> Domain {
+            serde_json::from_value(serde_json::json!({
+                "name": "d", "schema": "test", "owner": "postgres",
+                "data_type": "integer", "check_constraints": constraints,
+            }))
+            .unwrap()
+        };
+        let db = with(serde_json::json!([
+            {"name": "d_check", "expression": "(VALUE > 0)"},
+            {"name": "d_check1", "expression": "(VALUE < 10)"},
+        ]));
+        let repo = with(serde_json::json!([
+            {"expression": "VALUE <> 5"},
+            {"expression": "VALUE > 0"},
+            {"expression": "VALUE < 10"},
+        ]));
+        assert_eq!(
+            sql(&statements(domain(&repo, &db))),
+            vec![
+                "ALTER DOMAIN test.d RENAME CONSTRAINT d_check1 TO d_check2;\n",
+                "ALTER DOMAIN test.d RENAME CONSTRAINT d_check TO d_check1;\n",
+                "ALTER DOMAIN test.d ADD CONSTRAINT d_check CHECK ((VALUE <> 5));\n",
+            ]
+        );
+        let swapped = with(serde_json::json!([
+            {"expression": "VALUE < 10"},
+            {"expression": "VALUE > 0"},
+        ]));
+        assert!(matches!(domain(&swapped, &db), Resolution::Replace));
     }
 
     /// The type of a cast in a domain default or CHECK constraint
