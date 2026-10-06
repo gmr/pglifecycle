@@ -380,7 +380,9 @@ impl Loader {
     /// Order each object after the objects its own definition names,
     /// which have to exist before it is created: a table's `INHERITS`
     /// parents, `LIKE` source and the relations of its columns' row
-    /// types; the functions an aggregate, cast, conversion, operator or
+    /// types; the types, domains and row types of a composite type's
+    /// attributes, a range's subtype and a domain's base type; the
+    /// functions an aggregate, cast, conversion, operator or
     /// event trigger calls; the types an aggregate or cast uses; and a
     /// publication's tables and schemas. A function field names one
     /// overload where PostgreSQL fixes its argument types (see
@@ -539,7 +541,26 @@ impl Loader {
                         c.functions.as_deref(),
                     ));
                 }
-                Definition::Type(t) => calls.extend(type_calls(t)),
+                Definition::Type(t) => {
+                    calls.extend(type_calls(t));
+                    // an attribute of a composite type and the subtype
+                    // of a range
+                    let names = t
+                        .columns
+                        .iter()
+                        .flatten()
+                        .map(|column| column.data_type.clone())
+                        .chain(t.subtype.clone());
+                    references.extend(names.flat_map(type_or_row_type));
+                }
+                Definition::Domain(d) => {
+                    references.extend(
+                        d.data_type
+                            .clone()
+                            .into_iter()
+                            .flat_map(type_or_row_type),
+                    );
+                }
                 // a function that uses the operator in a SQL-standard
                 // body can put the operator before the functions that
                 // it names in the sort, so these need edges too
@@ -1525,6 +1546,23 @@ fn type_references(data_type: String) -> Option<(ObjectType, String)> {
         .trim()
         .to_string();
     (!name.is_empty()).then_some((ObjectType::Type, name))
+}
+
+/// The objects that a type name can refer to, for ordering: a type or
+/// a domain, or the row type of a table, a view or a materialized view
+fn type_or_row_type(data_type: String) -> Vec<(ObjectType, String)> {
+    let Some((desc, name)) = type_references(data_type) else {
+        return Vec::new();
+    };
+    [
+        desc,
+        ObjectType::Table,
+        ObjectType::View,
+        ObjectType::MaterializedView,
+    ]
+    .into_iter()
+    .map(|desc| (desc, name.clone()))
+    .collect()
 }
 
 /// The names of the types of a table's columns, without an array
@@ -2714,6 +2752,62 @@ mod tests {
                 .dependencies
                 .contains(&other)
         );
+    }
+
+    /// A composite type's attribute, a range's subtype and a domain's
+    /// base type order the type, the domain or the relation of the row
+    /// type that they name first. A name with no schema is in the
+    /// schema of the object, and a built-in type orders nothing
+    #[test]
+    fn types_and_domains_order_the_types_they_use() {
+        let mut loader = Loader::new(Path::new("."));
+        let points = add(
+            &mut loader,
+            ObjectType::Table,
+            json!({"name": "z_points", "schema": "test", "owner": "postgres",
+                   "columns": [{"name": "x", "data_type": "integer"}]}),
+        );
+        let mood = add(
+            &mut loader,
+            ObjectType::Type,
+            json!({"name": "z_mood", "schema": "test", "owner": "postgres",
+                   "type": "enum", "enum": ["calm"]}),
+        );
+        let level = add(
+            &mut loader,
+            ObjectType::Domain,
+            json!({"name": "z_level", "schema": "test", "owner": "postgres",
+                   "data_type": "integer"}),
+        );
+        let reading = add(
+            &mut loader,
+            ObjectType::Type,
+            json!({"name": "a_reading", "schema": "test",
+            "owner": "postgres", "type": "composite",
+            "columns": [
+                {"name": "at", "data_type": "test.z_points"},
+                {"name": "level", "data_type": "z_level[]"},
+                {"name": "n", "data_type": "integer"},
+            ]}),
+        );
+        let range = add(
+            &mut loader,
+            ObjectType::Type,
+            json!({"name": "a_range", "schema": "test", "owner": "postgres",
+                   "type": "range", "subtype": "test.z_mood"}),
+        );
+        let row_domain = add(
+            &mut loader,
+            ObjectType::Domain,
+            json!({"name": "a_row", "schema": "test", "owner": "postgres",
+                   "data_type": "test.z_points"}),
+        );
+        loader.apply_structural_dependencies();
+        let inventory = &loader.project.inventory;
+        assert_eq!(inventory[reading].dependencies, [points, level].into());
+        assert_eq!(inventory[range].dependencies, [mood].into());
+        assert_eq!(inventory[row_domain].dependencies, [points].into());
+        assert!(inventory[level].dependencies.is_empty());
     }
 
     /// An operator entry names one overload by its left and right

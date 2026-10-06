@@ -333,6 +333,24 @@
 //!     wrote them bare, which does not parse for a name that needs
 //!     quotes. The test-project has no index with INCLUDE columns,
 //!     thus its archive does not change.
+//! 65. A composite type comes after the types, the domains and the
+//!     tables, views or materialized views of the row types of its
+//!     attributes, a range after the type or domain of its subtype,
+//!     and a domain after the type, domain or relation of its base
+//!     type. The Python did not order them, and types and domains
+//!     share one priority, so the archive had them in name order, and
+//!     `CREATE TYPE a_pair AS (p z_point)` failed when `z_point` came
+//!     later. A table comes after the types, thus the row type of a
+//!     table was always later than the type that uses it. Also, a
+//!     domain comes after each function that its CHECKs call, and a
+//!     CHECK that calls a function that takes or returns the domain
+//!     renders as its own `CHECK CONSTRAINT` entry after the domain
+//!     and the function, `ALTER DOMAIN d ADD CONSTRAINT c CHECK
+//!     (...)`, as pg_dump writes it (`repairDomainConstraintMultiLoop`
+//!     in pg_dump_sort.c). The Python wrote the CHECK in CREATE
+//!     DOMAIN, before the function. No test-project type or domain
+//!     uses another, and no test-project CHECK calls a function, thus
+//!     its archive does not change.
 
 mod acls;
 mod calls;
@@ -843,13 +861,13 @@ impl Builder {
         let entry_of = |f: &usize| self.dump_id_map.get(f).copied();
         let mut edges: Vec<(i32, Vec<i32>)> = Vec::new();
         for item in &project.inventory {
-            let (Definition::Table(table), Some(calls), Some(&table_id)) = (
-                &item.definition,
-                self.calls.get(&item.id),
-                self.dump_id_map.get(&item.id),
-            ) else {
+            let (Some(calls), Some(&table_id)) =
+                (self.calls.get(&item.id), self.dump_id_map.get(&item.id))
+            else {
                 continue;
             };
+            // a table, or a domain (deviation 65)
+            let table = item.definition.name();
             edges.push((
                 table_id,
                 calls
@@ -861,7 +879,7 @@ impl Builder {
                 if !calls.separate_checks.contains(name) {
                     continue;
                 }
-                let tag = format!("{} {name}", table.name);
+                let tag = format!("{table} {name}");
                 let check = self.dump.entries().iter().find(|entry| {
                     entry.desc == libpgdump::ObjectType::CheckConstraint
                         && entry.tag.as_deref() == Some(tag.as_str())
@@ -1245,12 +1263,30 @@ impl Builder {
             create.push("DEFAULT".into());
             create.push(render_default(&Value::String(default.clone())));
         }
-        if let Some(constraints) = &d.check_constraints {
+        // deviation 65: a CHECK that calls a function that needs the
+        // domain is its own entry after the function, by the name of
+        // `Domain::with_check_names`
+        let all_calls = Rc::clone(&self.calls);
+        let named = d.with_check_names();
+        let (separate, inline): (Vec<_>, Vec<_>) = d
+            .check_constraints
+            .iter()
+            .flatten()
+            .zip(named.check_constraints.iter().flatten())
+            .partition(|(_, named)| {
+                all_calls.get(&item.id).is_some_and(|calls| {
+                    named.name.as_ref().is_some_and(|name| {
+                        calls.separate_checks.contains(name)
+                    })
+                })
+            });
+        if !inline.is_empty() {
             // deviation 61: the NOT NULL first, then the constraints
             // with a name, then the ones with no name, which thus get
             // the names of `Domain::with_check_names`. A NOT NULL with
             // no name gets its name here when PostgreSQL adds a number
-            let mut constraints: Vec<_> = constraints.iter().collect();
+            let mut constraints: Vec<_> =
+                inline.into_iter().map(|(c, _)| c).collect();
             constraints.sort_by_key(|c| (!c.is_not_null(), c.name.is_none()));
             let not_null_name = d.not_null_name();
             let numbered =
@@ -1281,7 +1317,34 @@ impl Builder {
             create.push(rendered.join(" "));
         }
         let drop = vec!["DROP DOMAIN IF EXISTS".into(), self.item_name(item)];
-        self.add_item(item, create, drop, false)
+        self.add_item(item, create, drop, false)?;
+        let qualified = self.item_name(item);
+        let parent = self.dump_id_map[&item.id];
+        for (_, check) in separate {
+            let (Some(name), Some(expression)) =
+                (&check.name, &check.expression)
+            else {
+                continue;
+            };
+            self.add_entry(
+                "CHECK CONSTRAINT",
+                &d.schema,
+                &format!("{} {name}", d.name),
+                &d.owner,
+                &[format!(
+                    "ALTER DOMAIN {qualified} ADD CONSTRAINT {} \
+                     CHECK ({expression})",
+                    quote_ident(name)
+                )],
+                &[format!(
+                    "ALTER DOMAIN {qualified} DROP CONSTRAINT IF EXISTS {}",
+                    quote_ident(name)
+                )],
+                &[parent],
+                None,
+            )?;
+        }
+        Ok(())
     }
 
     fn dump_event_trigger(&mut self, item: &Item) -> Result<(), String> {

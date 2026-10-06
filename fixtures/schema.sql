@@ -827,6 +827,20 @@ ALTER TABLE test.quotas
     ADD CONSTRAINT quotas_n_check CHECK (test.quota_ok(n));
 COMMENT ON CONSTRAINT quotas_n_check ON test.quotas IS 'Within the quota';
 
+-- A domain CHECK that calls a function, which has to exist before the
+-- domain. When the function takes the domain, the domain also has to
+-- exist before the function, so pg_dump makes the domain without the
+-- check, then the function, then the check (TOC entry "CHECK
+-- CONSTRAINT"). The build does the same (build deviation 65).
+CREATE FUNCTION test.rating_ok(v INTEGER) RETURNS BOOLEAN LANGUAGE sql
+    RETURN v BETWEEN 1 AND 5;
+CREATE DOMAIN test.rating AS INTEGER
+    CONSTRAINT rating_check CHECK (test.rating_ok(VALUE));
+CREATE DOMAIN test.score AS INTEGER;
+CREATE FUNCTION test.score_ok(v test.score) RETURNS BOOLEAN LANGUAGE sql
+    RETURN v::INTEGER >= 0;
+ALTER DOMAIN test.score ADD CONSTRAINT score_check CHECK (test.score_ok(VALUE));
+
 -- A column whose type is the row type of another table. Name order
 -- puts `a_segments` before `z_points`, and tables share one priority,
 -- so the table of the row type has to be ordered first (build
@@ -837,6 +851,21 @@ CREATE TABLE test.a_segments (
     start_at test.z_points,
     stops    test.z_points[]
 );
+
+-- A composite type, a domain and a range of a type that is a row type,
+-- an enum or a domain of the project. Name order puts each one before
+-- the type that it uses, and types and domains share one priority, so
+-- the type that it uses has to be ordered first.
+CREATE TYPE test.z_mood AS ENUM ('calm', 'busy');
+CREATE DOMAIN test.z_level AS INTEGER;
+CREATE TYPE test.a_reading AS (
+    at    test.z_points,
+    level test.z_level,
+    mood  test.z_mood
+);
+CREATE DOMAIN test.a_point_domain AS test.z_points;
+CREATE DOMAIN test.a_mood_domain AS test.z_mood;
+CREATE TYPE test.a_mood_range AS RANGE (SUBTYPE = test.z_mood);
 
 -- Routines that set a list setting. PostgreSQL searches pg_temp first
 -- when search_path does not name it, so a SECURITY DEFINER function

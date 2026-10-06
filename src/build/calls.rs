@@ -12,6 +12,12 @@
 //! default or the check, then the function, then the default as a
 //! `DEFAULT` entry and the check as a `CHECK CONSTRAINT` entry, each
 //! after the function. The build does the same.
+//!
+//! A CHECK of a domain that calls a function that takes or returns the
+//! domain makes the same loop. pg_dump makes the domain without the
+//! check, then the function, then the check as a `CHECK CONSTRAINT`
+//! entry (`repairDomainConstraintMultiLoop`). The build does the same
+//! (deviation 65).
 
 use std::collections::{HashMap, HashSet};
 
@@ -19,22 +25,25 @@ use tree_sitter::Parser;
 
 use crate::build::render_default;
 use crate::ddl::{NodeExt, any_name};
-use crate::models::{Definition, Table};
-use crate::project::{Project, routine_base_name};
+use crate::models::{Definition, Domain, Table};
+use crate::project::{Project, routine_base_name, split_sql_name};
 
-/// The functions that the expressions of one table call, as inventory
-/// ids
+/// The functions that the expressions of one table, or the CHECKs of
+/// one domain, call, as inventory ids
 #[derive(Default)]
 pub(super) struct TableCalls {
     /// The functions of each column default, by column name
     pub defaults: HashMap<String, Vec<usize>>,
-    /// The functions of each CHECK constraint, by constraint name
+    /// The functions of each CHECK constraint, by constraint name. The
+    /// name of a domain CHECK with no name is the name that PostgreSQL
+    /// gives it (`Domain::with_check_names`)
     pub checks: HashMap<String, Vec<usize>>,
     /// The column defaults that CREATE TABLE cannot contain, because a
     /// function that they call needs the table
     pub separate_defaults: HashSet<String>,
-    /// The CHECK constraints that CREATE TABLE cannot contain, for the
-    /// same cause, and the NOT VALID ones (deviation 19)
+    /// The CHECK constraints that CREATE TABLE or CREATE DOMAIN cannot
+    /// contain, for the same cause, and the NOT VALID ones of a table
+    /// (deviation 19)
     pub separate_checks: HashSet<String>,
 }
 
@@ -56,13 +65,16 @@ impl TableCalls {
     }
 }
 
-/// The [`TableCalls`] of each table that has an expression that calls a
-/// function of the project, by inventory id.
+/// The [`TableCalls`] of each table that has an expression, and each
+/// domain that has a CHECK, that calls a function of the project, by
+/// inventory id.
 ///
 /// An expression is separate when a function that it calls depends on
-/// its table, directly or through other objects. The dependency graph
-/// for this check has the edges of the inventory and an edge from each
-/// table to each function that its expressions call. A default that
+/// its table or domain, directly or through other objects. The
+/// dependency graph for this check has the edges of the inventory, an
+/// edge from each table and domain to each function that its
+/// expressions call, and an edge from each function to each domain
+/// that its parameters or its result name. A default that
 /// CREATE TABLE cannot contain in any case (see
 /// `Builder::split_column_defaults`) and a NOT VALID check are separate
 /// already, and add no edge.
@@ -79,6 +91,16 @@ pub(super) fn table_calls(project: &Project) -> HashMap<usize, TableCalls> {
     let mut forced: HashMap<usize, (HashSet<String>, HashSet<String>)> =
         HashMap::new();
     for item in &project.inventory {
+        if let Definition::Domain(domain) = &item.definition {
+            if domain.sql.is_none() {
+                let calls = domain_calls(&mut parser, domain, &functions);
+                if !calls.checks.is_empty() {
+                    forced.entry(item.id).or_default();
+                    result.insert(item.id, calls);
+                }
+            }
+            continue;
+        }
         let Definition::Table(table) = &item.definition else {
             continue;
         };
@@ -145,6 +167,9 @@ pub(super) fn table_calls(project: &Project) -> HashMap<usize, TableCalls> {
         .iter()
         .map(|item| (item.id, item.dependencies.iter().copied().collect()))
         .collect();
+    for (function, domains) in signature_domains(project) {
+        graph.entry(function).or_default().extend(domains);
+    }
     for (table, calls) in &result {
         let (forced_defaults, forced_checks) = &forced[table];
         let defaults = calls
@@ -185,6 +210,87 @@ pub(super) fn table_calls(project: &Project) -> HashMap<usize, TableCalls> {
         calls.separate_checks.extend(checks);
     }
     result
+}
+
+/// The [`TableCalls`] of a domain: the functions of each CHECK
+fn domain_calls(
+    parser: &mut Parser,
+    domain: &Domain,
+    functions: &HashMap<(String, String), Vec<usize>>,
+) -> TableCalls {
+    let mut calls = TableCalls::default();
+    let domain = domain.with_check_names();
+    for check in domain.check_constraints.iter().flatten() {
+        let (Some(name), Some(expression)) = (&check.name, &check.expression)
+        else {
+            continue;
+        };
+        let called = called_functions(parser, expression, functions);
+        if !called.is_empty() {
+            calls.checks.insert(name.clone(), called);
+        }
+    }
+    calls
+}
+
+/// The domains of the project that the parameters or the result of
+/// each function name, by the inventory id of the function. A name
+/// without a schema is a built-in type, as `called_functions` reads a
+/// function name.
+fn signature_domains(project: &Project) -> HashMap<usize, Vec<usize>> {
+    let domains: HashMap<(String, String), usize> = project
+        .inventory
+        .iter()
+        .filter_map(|item| match &item.definition {
+            Definition::Domain(d) => {
+                Some(((d.schema.clone(), d.name.clone()), item.id))
+            }
+            _ => None,
+        })
+        .collect();
+    let mut result = HashMap::new();
+    for item in &project.inventory {
+        let Definition::Function(f) = &item.definition else {
+            continue;
+        };
+        let names = f
+            .parameters
+            .iter()
+            .flatten()
+            .map(|p| p.data_type.as_str())
+            .chain(f.returns.as_deref());
+        let found: Vec<usize> = names
+            .filter_map(|name| {
+                let name = name.trim();
+                let name = name
+                    .get(..6)
+                    .filter(|word| word.eq_ignore_ascii_case("setof "))
+                    .map_or(name, |_| &name[6..]);
+                let name = without_modifiers(name).trim();
+                let (schema, name) = split_sql_name(name);
+                domains.get(&(schema, name)).copied()
+            })
+            .collect();
+        if !found.is_empty() {
+            result.insert(item.id, found);
+        }
+    }
+    result
+}
+
+/// A type name without its modifier or its array suffix: the text
+/// before the first `(` or `[` that is not in a quoted identifier
+fn without_modifiers(name: &str) -> &str {
+    let mut quoted = false;
+    for (index, c) in name.char_indices() {
+        match c {
+            // a doubled quote in a quoted identifier toggles twice
+            '"' => quoted = !quoted,
+            '(' | '[' if !quoted => return &name[..index],
+            _ => {}
+        }
+    }
+    name
 }
 
 /// Whether the build emits a column default as its own entry whatever
@@ -426,5 +532,104 @@ mod tests {
         let calls = table_calls(&project);
         assert_eq!(calls[&0].checks["t_a_check"], [1]);
         assert!(calls[&0].separate_checks.contains("t_a_check"));
+    }
+
+    /// A domain CHECK that calls a function that takes the domain is
+    /// separate, and one that calls a function that does not is in
+    /// CREATE DOMAIN, which then comes after the function. A CHECK with
+    /// no name has the name that PostgreSQL gives it
+    #[test]
+    fn separates_a_domain_check_of_a_dependency_loop() {
+        let domain = |id, name: &str, checks: serde_json::Value| {
+            item(
+                id,
+                ObjectType::Domain,
+                Definition::Domain(
+                    serde_json::from_value(json!({
+                        "name": name, "schema": "test", "owner": "postgres",
+                        "data_type": "integer", "check_constraints": checks,
+                    }))
+                    .unwrap(),
+                ),
+                &[],
+            )
+        };
+        let takes = |id, data_type: &str| {
+            item(
+                id,
+                ObjectType::Function,
+                Definition::Function(
+                    serde_json::from_value(json!({
+                        "name": format!("takes_{id}"), "schema": "test",
+                        "owner": "postgres", "returns": "boolean",
+                        "language": "sql", "sql_body": "RETURN true",
+                        "parameters": [{"mode": "IN", "data_type": data_type}],
+                    }))
+                    .unwrap(),
+                ),
+                &[],
+            )
+        };
+        let project = project(vec![
+            domain(
+                0,
+                "d",
+                json!([
+                    {"name": "d_loop", "expression": "test.takes_1(VALUE)"},
+                    {"expression": "test.takes_2(VALUE)"},
+                ]),
+            ),
+            takes(1, "test.d[]"),
+            takes(2, "integer"),
+        ]);
+        let calls = table_calls(&project);
+        let calls = &calls[&0];
+        assert_eq!(calls.checks["d_loop"], [1]);
+        assert_eq!(calls.checks["d_check"], [2]);
+        let separate: BTreeSet<&str> =
+            calls.separate_checks.iter().map(String::as_str).collect();
+        assert_eq!(separate, ["d_loop"].into());
+        assert_eq!(calls.inline_functions().collect::<Vec<_>>(), [2]);
+    }
+
+    /// A parenthesis or a bracket in a quoted domain name is part of
+    /// the name, not a modifier or an array suffix
+    #[test]
+    fn signature_domains_keep_a_quoted_name() {
+        let domain = |id, name: &str| {
+            item(
+                id,
+                ObjectType::Domain,
+                Definition::Domain(
+                    serde_json::from_value(json!({
+                        "name": name, "schema": "test", "owner": "postgres",
+                        "data_type": "integer",
+                    }))
+                    .unwrap(),
+                ),
+                &[],
+            )
+        };
+        let project = project(vec![
+            domain(0, "d(x)"),
+            domain(1, "e[\"y\"]"),
+            item(
+                2,
+                ObjectType::Function,
+                Definition::Function(
+                    serde_json::from_value(json!({
+                        "name": "f", "schema": "test", "owner": "postgres",
+                        "returns": "test.\"e[\"\"y\"\"]\"[]",
+                        "language": "sql", "sql_body": "RETURN 1",
+                        "parameters": [
+                            {"mode": "IN", "data_type": "test.\"d(x)\""},
+                        ],
+                    }))
+                    .unwrap(),
+                ),
+                &[],
+            ),
+        ]);
+        assert_eq!(signature_domains(&project)[&2], [0, 1]);
     }
 }

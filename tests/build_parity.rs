@@ -1918,3 +1918,176 @@ fn orders_each_user_mapping_after_its_user() {
         assert!(user < mapping, "{server} comes before the user: {order:?}");
     }
 }
+
+/// Deviation 65: a composite type, a range and a domain come after the
+/// type, the domain or the relation of the row type that they use,
+/// which name order puts later
+#[test]
+fn orders_types_and_domains_after_the_types_they_use() {
+    let dir = tempfile::tempdir().unwrap();
+    let files = [
+        ("project.yaml", "name: types\n"),
+        ("schemata/test.yaml", "name: test\nowner: postgres\n"),
+        (
+            "tables/test/z_points.yaml",
+            "name: z_points\nschema: test\nowner: postgres\ncolumns:\n\
+             - name: x\n  data_type: integer\n",
+        ),
+        (
+            "types/test.yaml",
+            "schema: test\ntypes:\n\
+             - name: a_reading\n  schema: test\n  owner: postgres\n  \
+             type: composite\n  columns:\n  - name: at\n    \
+             data_type: test.z_points\n  - name: level\n    \
+             data_type: test.z_level\n\
+             - name: a_range\n  schema: test\n  owner: postgres\n  \
+             type: range\n  subtype: test.z_mood\n\
+             - name: z_mood\n  schema: test\n  owner: postgres\n  \
+             type: enum\n  enum: [calm]\n",
+        ),
+        (
+            "domains/test/a_point.yaml",
+            "name: a_point\nschema: test\nowner: postgres\n\
+             data_type: test.z_points\n",
+        ),
+        (
+            "domains/test/z_level.yaml",
+            "name: z_level\nschema: test\nowner: postgres\n\
+             data_type: integer\n",
+        ),
+    ];
+    for (file, text) in files {
+        let path = dir.path().join(file);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+    let project = project::load(dir.path()).unwrap();
+    let mut dump = build::assemble(&project).unwrap().dump;
+    dump.sort_entries();
+    let position = |desc: &str, tag: &str| {
+        dump.entries()
+            .iter()
+            .position(|e| {
+                e.desc.as_str() == desc && e.tag.as_deref() == Some(tag)
+            })
+            .unwrap_or_else(|| panic!("missing entry {desc} {tag}"))
+    };
+    for (first, then) in [
+        (("TABLE", "z_points"), ("TYPE", "a_reading")),
+        (("DOMAIN", "z_level"), ("TYPE", "a_reading")),
+        (("TYPE", "z_mood"), ("TYPE", "a_range")),
+        (("TABLE", "z_points"), ("DOMAIN", "a_point")),
+    ] {
+        assert!(
+            position(first.0, first.1) < position(then.0, then.1),
+            "{then:?} comes before {first:?}"
+        );
+    }
+}
+
+/// Deviation 65: a domain CHECK that calls a function that takes the
+/// domain is its own entry after the domain and the function, as
+/// pg_dump writes it, and a domain whose CHECK calls another function
+/// comes after that function
+#[test]
+fn separates_a_domain_check_that_calls_a_function_of_the_domain() {
+    let item = |id, desc, definition| Item {
+        id,
+        desc,
+        definition,
+        dependencies: BTreeSet::new(),
+    };
+    let domain = |id, name: &str, check: &str| {
+        item(
+            id,
+            ObjectType::Domain,
+            Definition::Domain(
+                serde_json::from_value(serde_json::json!({
+                    "name": name, "schema": "test", "owner": "postgres",
+                    "data_type": "integer",
+                    "check_constraints": [
+                        {"name": format!("{name}_check"), "expression": check},
+                    ],
+                }))
+                .unwrap(),
+            ),
+        )
+    };
+    let function = |id, name: &str, data_type: &str| {
+        item(
+            id,
+            ObjectType::Function,
+            Definition::Function(
+                serde_json::from_value(serde_json::json!({
+                    "name": name, "schema": "test", "owner": "postgres",
+                    "returns": "boolean", "language": "sql",
+                    "sql_body": "RETURN true",
+                    "parameters": [
+                        {"mode": "IN", "name": "v", "data_type": data_type},
+                    ],
+                }))
+                .unwrap(),
+            ),
+        )
+    };
+    let project = project::Project {
+        name: "domains".into(),
+        superuser: "postgres".into(),
+        default_schema: "public".into(),
+        path: std::path::PathBuf::new(),
+        settings: Default::default(),
+        inventory: vec![
+            domain(0, "score", "test.score_ok(VALUE)"),
+            function(1, "score_ok", "test.score"),
+            domain(2, "rating", "test.rating_ok(VALUE)"),
+            function(3, "rating_ok", "integer"),
+        ],
+    };
+    let output = build::assemble(&project).unwrap();
+    let entry = |desc: &str, tag: &str| {
+        output
+            .dump
+            .entries()
+            .iter()
+            .find(|e| {
+                // a function's tag has its argument types
+                let found = e.tag.as_deref().unwrap_or_default();
+                e.desc.as_str() == desc
+                    && (found == tag || found.starts_with(&format!("{tag}(")))
+            })
+            .unwrap_or_else(|| panic!("missing entry {desc} {tag}"))
+    };
+    let score = entry("DOMAIN", "score");
+    assert_eq!(
+        score.defn.as_deref(),
+        Some("CREATE DOMAIN test.score AS integer;\n")
+    );
+    let check = entry("CHECK CONSTRAINT", "score score_check");
+    assert_eq!(
+        check.defn.as_deref(),
+        Some(
+            "ALTER DOMAIN test.score ADD CONSTRAINT score_check \
+             CHECK (test.score_ok(VALUE));\n"
+        )
+    );
+    assert_eq!(
+        check.drop_stmt.as_deref(),
+        Some(
+            "ALTER DOMAIN test.score DROP CONSTRAINT IF EXISTS score_check;\n"
+        )
+    );
+    let mut deps = check.dependencies.clone();
+    deps.sort_unstable();
+    let score_ok = entry("FUNCTION", "score_ok");
+    assert_eq!(deps, [score.dump_id, score_ok.dump_id]);
+    let rating = entry("DOMAIN", "rating");
+    assert!(
+        rating
+            .defn
+            .as_deref()
+            .unwrap_or_default()
+            .contains("CHECK (test.rating_ok(VALUE))")
+    );
+    let rating_ok = entry("FUNCTION", "rating_ok");
+    assert_eq!(rating.dependencies, [rating_ok.dump_id]);
+}
