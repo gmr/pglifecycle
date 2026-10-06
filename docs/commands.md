@@ -121,8 +121,10 @@ the options of most user mappings (see the PostgreSQL documentation
 of that view). Then the plan can make again a subscription or the
 options of a user mapping that the database has already. deploy does
 not change the plan, but it writes a warning that names the role and
-those objects. Read the database as a role that can read them, for
-example a superuser. With `--dump`, deploy does not read a database,
+those objects. The plan also does not drop a subscription that only
+the database has, because the role cannot see it. deploy writes a
+warning that names those subscriptions too. Read the database as a
+role that can read them, for example a superuser. With `--dump`, deploy does not read a database,
 thus there is no warning.
 
 The script does not set the other settings that pg_restore sets.
@@ -259,9 +261,12 @@ reconciled in place where PostgreSQL can express it:
   domain has that name). PostgreSQL also adds the number when a
   constraint of another object in the schema has the name; give such
   a constraint a name in the project. The checks compare as a set, in
-  the order of their names. A base-type change, or another CHECK
-  constraint change, falls back. PostgreSQL checks the existing values
-  against a new check or NOT NULL, so the statement fails if a value
+  the order of their names. A new check with `not_valid: true` is
+  added `NOT VALID`, and a `NOT VALID` check that the project marks
+  valid is validated with `VALIDATE CONSTRAINT`. A base-type change,
+  or another CHECK constraint change, falls back. PostgreSQL checks
+  the existing values against a new check (if it is not `NOT VALID`),
+  a validated check or a NOT NULL, so the statement fails if a value
   does not satisfy it. `--allow-drop` does not gate this statement.
 - **Enum types** — `ALTER TYPE ... ADD VALUE` for appended values;
   reordering or removing values falls back.
@@ -902,7 +907,8 @@ gives `pg_dump`, `pg_dumpall`, and `psql` only the options that you
 set. For the other values, libpq uses the standard environment
 variables (`PGHOST`, `PGPORT`, `PGUSER`, `PGSERVICE`, and the other
 `PG*` variables), a service in `pg_service.conf`, and then its
-defaults. `--dbname` also uses `PGDATABASE`:
+defaults. Without `--dbname`, libpq reads `PGDATABASE` only as a
+database name, not as a connection string:
 
 | Option | Description |
 | --- | --- |

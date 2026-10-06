@@ -34,29 +34,9 @@ the project without these entries. See
   hand.
 - **Comments on objects that pull does not model.** Such a comment
   goes to `remaining.yaml` with its object.
-- **A NOT VALID domain CHECK.** `pg_dump` writes a `NOT VALID`
-  domain CHECK as an `ALTER DOMAIN` entry of its own. The model has no
-  place for `NOT VALID`, so `pull` stops with `1 dump entry could not
-  be modeled (CHECK CONSTRAINT)`. Use `--allow-unsupported`: the entry
-  goes to `remaining.yaml`. Then add the CHECK by hand after the
-  restore.
 
 ## Build
 
-- **Text search mappings that differ only in case.** A text search
-  configuration with two token types that differ only in case (for
-  example `word` and `Word`) gets two `ADD MAPPING` statements, and
-  the restore fails. Write each token type one time, in lowercase.
-- **A table CHECK with the name of a column CHECK.** A column
-  `check_constraint` on column `c` of table `t` gets the name
-  `t_c_check`. When the table also has a CHECK with that name, the
-  load accepts the project, but `CREATE TABLE` fails. Give the table
-  CHECK another name.
-- **Required fields that validation does not check.** The schemata of
-  arguments, conversions, domains, materialized views, tablespaces
-  and views do not make their required fields mandatory. Validation
-  does not report a missing field in these files, for example the
-  `location` of a tablespace. Give each field that the object needs.
 - **Settings and the database comment.** The archive restores the
   settings and the comment of the database only with `pg_restore
   --create`. See [build](commands.md#build).
@@ -102,9 +82,6 @@ These limits are new on this page:
   the expression uses no column, or more than one column, PostgreSQL
   gives it the name `<table>_check`. Write such a constraint as a
   table CHECK, with the name that PostgreSQL gives.
-- **A user mapping file named `public`.** `pull` writes the mapping
-  for `PUBLIC` in a file named `PUBLIC`. A file named `public` does
-  not match it, so `deploy` drops and makes the mapping on each run.
 - **Partitioned tables with mixed partitions.** When some partitions
   of a table are only bounds in the parent and others are files with
   `attached: true`, the parent's `ON ONLY` index is a change on each
@@ -173,18 +150,9 @@ These limits are new on this page:
   a sequence in the database, `deploy` writes `ALTER COLUMN ... TYPE
   serial`, and PostgreSQL refuses it. Make the sequence and the
   default by hand, then `pull` the database.
-- **Operator classes and implied families.** A project class that the
-  database does not have, where the database has an implied family of
-  that name with members, fails on `CREATE OPERATOR CLASS`. A class
-  member that replaces a member that an explicit family of the project
-  drops is not gated with that drop. Make such changes by hand.
 - **NO INHERIT on a parent's NOT NULL.** After `deploy` makes a NOT
   NULL of a parent `NO INHERIT`, the children keep a local copy. A
   second deploy removes it.
-- **The drop of a `PUBLIC` user mapping.** For a mapping for `PUBLIC`
-  that only the database has, `deploy` writes `DROP USER MAPPING ...
-  FOR "PUBLIC"`. In quotes, `PUBLIC` is the name of a role, so the
-  statement does not drop the mapping. Drop it by hand.
 
 ## Connection and CLI
 
@@ -194,19 +162,3 @@ These limits are already described:
   options of most user mappings. See [deploy](commands.md#deploy).
 - pglifecycle does not read `pg_service.conf` to show the connection.
   See [pull](commands.md#pull).
-
-These limits are new on this page:
-
-- **pg_dump warnings.** When `pg_dump` or `pg_dumpall` succeeds,
-  pglifecycle does not show its warnings. Run `pg_dump --schema-only`
-  by hand to see them.
-- **A connection string in `PGDATABASE`.** pglifecycle reads
-  `PGDATABASE` as the `--dbname` value, so it accepts a connection
-  string there. libpq, `psql` and `pg_dump` read `PGDATABASE` only as
-  a database name. Give a connection string with `--dbname`, not in
-  `PGDATABASE`.
-- **Subscriptions that a role cannot read.** A role that is not a
-  superuser does not see the subscriptions. `deploy` warns about a
-  subscription that the project adds or changes, but not about one
-  that only the database has. That subscription is not dropped. Run
-  `deploy` as a superuser.

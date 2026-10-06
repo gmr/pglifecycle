@@ -1512,6 +1512,27 @@ mod tests {
             ],
         }));
         assert_eq!(written.canonical(), pulled.canonical());
+        // a CHECK of the table with the name of the column CHECK: the
+        // column CHECK gets a number, thus CREATE TABLE does not fail
+        let names = |table: Table| -> Vec<String> {
+            table
+                .with_table_checks()
+                .check_constraints
+                .unwrap()
+                .into_iter()
+                .map(|c| c.name)
+                .collect()
+        };
+        let named = with_fields(serde_json::json!({
+            "columns": [
+                {"name": "ee", "data_type": "integer",
+                 "check_constraint": "ee > 0"},
+            ],
+            "check_constraints": [
+                {"name": "t_ee_check", "expression": "(ee < 100)"},
+            ],
+        }));
+        assert_eq!(names(named), ["t_ee_check", "t_ee_check1"]);
         let c40 = "c".repeat(40);
         let long: Table = serde_json::from_value(serde_json::json!({
             "name": "a".repeat(40), "schema": "s", "owner": "o",

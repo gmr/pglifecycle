@@ -31,7 +31,7 @@ use crate::ddl::{self, NodeExt};
 use crate::deploy::alter::Resolution;
 use crate::deploy::diff::{Change, Diff, ObjectKey};
 use crate::models::{Definition, Item};
-use crate::utils::quote_ident;
+use crate::utils::{quote_ident, user_mapping_subject};
 use crate::{
     build, cli, constants, diagnostics, pgdump, progress, project, pull,
 };
@@ -676,8 +676,10 @@ fn plan(
                 }
                 None => defn,
             };
+            // a CREATE that needs the DROP of a database-only object,
+            // and its child entries, are withheld with the DROP
             push(
-                false,
+                owners.iter().any(|id| diff.gated.contains(id)),
                 Statement {
                     label: label.clone(),
                     sql: format!(
@@ -1032,7 +1034,8 @@ fn sequence_owner_conflicts(
 /// Warn when the plan changes objects that the role that read the
 /// database cannot read. pg_dump does not dump them, or dumps them
 /// without their options, thus the plan can make again what the
-/// database has already
+/// database has already. Also warn about the subscriptions that only
+/// the database has, because the plan does not drop them
 fn check_reads(inventory: &[Item], diff: &Diff, conn: &cli::Connection) {
     let limits = match pgdump::read_limits(conn) {
         Ok(limits) => limits,
@@ -1055,6 +1058,38 @@ fn check_reads(inventory: &[Item], diff: &Diff, conn: &cli::Connection) {
             objects.join(", ")
         );
     }
+    let objects = unseen_subscriptions(inventory, &limits);
+    if !objects.is_empty() {
+        log::warn!(
+            "Role {} cannot read the subscriptions, thus the plan does \
+             not drop subscriptions that only the database has: {}. Read \
+             the database as a superuser",
+            quote_ident(&limits.role),
+            objects.join(", ")
+        );
+    }
+}
+
+/// The labels of the subscriptions that only the database has, when
+/// the role of `limits` cannot read them. pg_dump does not dump them,
+/// thus the diff does not see them and the plan does not drop them
+fn unseen_subscriptions(
+    inventory: &[Item],
+    limits: &pgdump::ReadLimits,
+) -> Vec<String> {
+    let project: BTreeSet<&str> = inventory
+        .iter()
+        .filter_map(|item| match &item.definition {
+            Definition::Subscription(s) => Some(s.name.as_str()),
+            _ => None,
+        })
+        .collect();
+    limits
+        .subscriptions
+        .iter()
+        .filter(|name| !project.contains(name.as_str()))
+        .map(|name| format!("SUBSCRIPTION {name}"))
+        .collect()
 }
 
 /// The labels of the added and changed items that the role of
@@ -1680,7 +1715,7 @@ fn drop_sql(key: &ObjectKey, definition: Option<&Definition>) -> String {
             .map(|server| {
                 format!(
                     "DROP USER MAPPING IF EXISTS FOR {} SERVER {};\n",
-                    quote_ident(&mapping.name),
+                    user_mapping_subject(&mapping.name),
                     quote_ident(&server.name),
                 )
             })
@@ -2082,6 +2117,7 @@ mod tests {
             removed: BTreeMap::new(),
             owned: BTreeSet::new(),
             owner_changed: BTreeSet::new(),
+            gated: BTreeSet::new(),
         };
         diff.removed
             .insert(dep_key.clone(), Definition::Function(dep_fn));
@@ -2441,6 +2477,7 @@ mod tests {
                         .collect(),
                     owned: BTreeSet::new(),
                     owner_changed: BTreeSet::new(),
+                    gated: BTreeSet::new(),
                 };
                 plan(
                     &diff,
@@ -2526,6 +2563,7 @@ mod tests {
             removed: BTreeMap::new(),
             owned: BTreeSet::new(),
             owner_changed: BTreeSet::new(),
+            gated: BTreeSet::new(),
         };
         diff.removed.insert(key.clone(), definition);
         let mut snapshot =
@@ -2600,6 +2638,7 @@ mod tests {
             removed: BTreeMap::new(),
             owned: BTreeSet::new(),
             owner_changed: BTreeSet::new(),
+            gated: BTreeSet::new(),
         };
         diff.items.insert(0, Change::Changed);
         diff.changed
@@ -2683,6 +2722,7 @@ mod tests {
             removed: BTreeMap::new(),
             owned: BTreeSet::new(),
             owner_changed: BTreeSet::new(),
+            gated: BTreeSet::new(),
         };
         diff.items.insert(0, Change::Changed);
         diff.items.insert(1, Change::Added);
@@ -2782,6 +2822,7 @@ mod tests {
             removed: BTreeMap::new(),
             owned: BTreeSet::new(),
             owner_changed: BTreeSet::new(),
+            gated: BTreeSet::new(),
         };
         diff.items.insert(0, Change::Changed);
         diff.items.insert(1, Change::Added);
@@ -3295,6 +3336,7 @@ mod tests {
             removed: BTreeMap::new(),
             owned: BTreeSet::from([0, 1]),
             owner_changed: BTreeSet::from([1]),
+            gated: BTreeSet::new(),
         };
         let snapshot =
             libpgdump::new("test", "UTF8", "18.0").expect("new dump");
@@ -3406,6 +3448,7 @@ mod tests {
                 removed: BTreeMap::new(),
                 owned: BTreeSet::from([0, 1]),
                 owner_changed: BTreeSet::from([0, 1]),
+                gated: BTreeSet::new(),
             };
             let resolutions = BTreeMap::from([(
                 0,
@@ -3511,6 +3554,7 @@ mod tests {
                 removed: BTreeMap::new(),
                 owned: BTreeSet::new(),
                 owner_changed: BTreeSet::new(),
+                gated: BTreeSet::new(),
             };
             let resolutions = BTreeMap::from([
                 (0, alter::resolve(&sequence(Some(column)), &sequence(None))),
@@ -3590,6 +3634,7 @@ mod tests {
                 removed: BTreeMap::new(),
                 owned: BTreeSet::new(),
                 owner_changed: BTreeSet::new(),
+                gated: BTreeSet::new(),
             };
             plan(
                 &diff,
@@ -3717,6 +3762,7 @@ mod tests {
             removed: BTreeMap::new(),
             owned: BTreeSet::new(),
             owner_changed: BTreeSet::new(),
+            gated: BTreeSet::new(),
         };
         diff.changed.insert(
             0,
@@ -4044,6 +4090,7 @@ mod tests {
             removed: BTreeMap::new(),
             owned: BTreeSet::new(),
             owner_changed: BTreeSet::new(),
+            gated: BTreeSet::new(),
         };
         let mut dump =
             libpgdump::new("test", "UTF8", "18.0").expect("new dump");
@@ -4100,6 +4147,7 @@ mod tests {
             removed: BTreeMap::new(),
             owned: BTreeSet::new(),
             owner_changed: BTreeSet::new(),
+            gated: BTreeSet::new(),
         };
         let mut dump =
             libpgdump::new("test", "UTF8", "18.0").expect("new dump");
@@ -4283,6 +4331,7 @@ mod tests {
             removed: BTreeMap::new(),
             owned: BTreeSet::new(),
             owner_changed: BTreeSet::new(),
+            gated: BTreeSet::new(),
         };
         let mut limits = pgdump::ReadLimits {
             role: "Gate Reader".into(),
@@ -4292,6 +4341,7 @@ mod tests {
                 ("PUBLIC".into(), "srv".into()),
                 ("app".into(), "srv".into()),
             ],
+            subscriptions: vec!["other".into(), "sub".into()],
         };
         assert_eq!(
             unreadable(&inventory, &diff, &limits),
@@ -4301,9 +4351,16 @@ mod tests {
                 "USER MAPPING PUBLIC SERVER srv",
             ]
         );
+        // only the database has "other", thus the plan does not drop it
+        assert_eq!(
+            unseen_subscriptions(&inventory, &limits),
+            vec!["SUBSCRIPTION other"]
+        );
         limits.superuser = true;
         limits.hidden_user_mappings.clear();
+        limits.subscriptions.clear();
         assert!(unreadable(&inventory, &diff, &limits).is_empty());
+        assert!(unseen_subscriptions(&inventory, &limits).is_empty());
     }
 
     /// A new table makes its index in a tablespace of the project.
@@ -4360,6 +4417,7 @@ mod tests {
             removed: BTreeMap::new(),
             owned: BTreeSet::new(),
             owner_changed: BTreeSet::new(),
+            gated: BTreeSet::new(),
         };
         let mut output = build::assemble(&project).expect("assemble");
         output.dump.sort_entries();
@@ -4443,5 +4501,24 @@ mod tests {
             let entry = output.dump.get_entry_mut(*id).expect("entry");
             assert_eq!(entry.defn.as_deref(), Some(expected));
         }
+    }
+
+    /// In quotes, `PUBLIC` is the name of a role, so the drop of a
+    /// mapping for PUBLIC writes it as the keyword
+    #[test]
+    fn removed_public_user_mapping_drops_for_the_keyword() {
+        let definition = Definition::UserMapping(
+            serde_json::from_value(serde_json::json!({
+                "name": "PUBLIC",
+                "servers": [{"name": "srv"}],
+            }))
+            .expect("user mapping"),
+        );
+        let key =
+            ObjectKey::new(constants::ObjectType::UserMapping, &definition);
+        assert_eq!(
+            drop_sql(&key, Some(&definition)),
+            "DROP USER MAPPING IF EXISTS FOR PUBLIC SERVER srv;\n"
+        );
     }
 }
