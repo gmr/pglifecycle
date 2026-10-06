@@ -61,7 +61,7 @@ fn replaceable(repo: &Procedure, db: &Procedure) -> bool {
 /// ON PROCEDURE` reads. A name that has its argument list and no
 /// `parameters` keeps its list, and a name that has the types of its
 /// parameters at its end is the name without them.
-fn signature(procedure: &Procedure) -> String {
+pub(super) fn signature(procedure: &Procedure) -> String {
     let parameters = procedure.parameters.as_deref().unwrap_or_default();
     let name = if parameters.is_empty() && procedure.name.contains('(') {
         quote_routine_name(&procedure.name)

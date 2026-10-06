@@ -55,6 +55,7 @@ pub(crate) mod cast;
 pub(crate) mod names;
 pub(crate) mod operator;
 pub(crate) mod operator_class;
+pub(crate) mod security_label;
 pub(crate) mod transform;
 
 /// One reconciliation statement
@@ -232,8 +233,41 @@ pub(crate) fn resolve(repo: &Definition, database: &Definition) -> Resolution {
 
 /// [`resolve`], with the index groups that the plan rebuilds and the
 /// members that the database keeps for each operator class in its
-/// family
+/// family. The security labels change after the other statements (see
+/// [`security_label`]); a drop and a create makes them again from the
+/// entries of the build.
 pub(crate) fn resolve_with(
+    repo: &Definition,
+    database: &Definition,
+    groups: &IndexGroups,
+    families: &operator_class::Families,
+) -> Resolution {
+    let labels = security_label::alters(repo, database);
+    if labels.is_empty() {
+        return resolve_object(repo, database, groups, families);
+    }
+    let repo = security_label::without(repo);
+    let database = security_label::without(database);
+    let resolution = if super::diff::same(&repo, &database) {
+        Resolution::Statements(Vec::new())
+    } else {
+        resolve_object(&repo, &database, groups, families)
+    };
+    match resolution {
+        Resolution::Statements(mut alters) => {
+            alters.extend(labels);
+            Resolution::Statements(alters)
+        }
+        Resolution::OrReplace { comment, mut then } => {
+            then.extend(labels);
+            Resolution::OrReplace { comment, then }
+        }
+        other => other,
+    }
+}
+
+/// [`resolve_with`] for all but the security labels
+fn resolve_object(
     repo: &Definition,
     database: &Definition,
     groups: &IndexGroups,
@@ -257,20 +291,10 @@ pub(crate) fn resolve_with(
         // function first
         (Definition::Function(repo), Definition::Function(db)) => {
             if replaceable(repo, db) {
-                // a name that carries its argument types keeps them,
-                // and a name with no argument types, such as `f(x)`
-                // with parameters, is one identifier
-                let bare = routine_base_name(&repo.name, &repo.parameters);
-                let name = if bare == repo.name {
-                    quote_ident(bare)
-                } else {
-                    quote_routine_name(&repo.name)
-                };
-                let target = format!("{}.{name}", quote_ident(&repo.schema));
                 Resolution::OrReplace {
                     comment: comment_delta(
                         "FUNCTION",
-                        &target,
+                        &function_target(repo),
                         &repo.comment,
                         &db.comment,
                     ),
@@ -338,6 +362,19 @@ pub(crate) fn resolve_with(
         }
         _ => Resolution::Replace,
     }
+}
+
+/// The name that `COMMENT ON FUNCTION` gives a function. A name that
+/// carries its argument types keeps them, and a name with no argument
+/// types, such as `f(x)` with parameters, is one identifier
+fn function_target(function: &Function) -> String {
+    let bare = routine_base_name(&function.name, &function.parameters);
+    let name = if bare == function.name {
+        quote_ident(bare)
+    } else {
+        quote_routine_name(&function.name)
+    };
+    format!("{}.{name}", quote_ident(&function.schema))
 }
 
 fn qualified(schema: &str, name: &str) -> String {
@@ -4956,6 +4993,7 @@ mod tests {
             statistics: None,
             options: None,
             comment: None,
+            security_labels: None,
         }]);
         assert!(matches!(table(&repo, &db), Resolution::Statements(_)));
     }

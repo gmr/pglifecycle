@@ -65,6 +65,7 @@ pub(crate) fn create_table(
                 for_values_with: bound.for_values_with,
                 attached: None,
                 comment: None,
+                security_labels: None,
             },
         });
     }
@@ -127,6 +128,7 @@ pub(crate) fn create_table(
         server: None,
         options: None,
         comment: None,
+        security_labels: None,
     };
     let mut columns = Vec::new();
     for element in node.find_all("TableElement") {
@@ -263,6 +265,7 @@ pub(crate) fn column(node: &Node, src: &str) -> Column {
         statistics: None,
         options: None,
         comment: None,
+        security_labels: None,
     };
     // each keyword test looks at the constraint's own children: an
     // expression below it can hold the same keywords, as a generated
@@ -607,6 +610,7 @@ pub(crate) fn alter_table(
                 for_values_with: bound.for_values_with,
                 attached: None,
                 comment: None,
+                security_labels: None,
             },
         });
     }
@@ -708,6 +712,7 @@ fn sequence_options(
         cycle: None,
         owned_by: None,
         comment: None,
+        security_labels: None,
     };
     crate::ddl::object::apply_seq_options(&mut parsed, list, src);
     let name = list

@@ -182,6 +182,9 @@ properties:
     title: Comment
     description: An optional comment about the aggregate.
     type: string
+  security_labels:
+    title: Security Labels
+    $package_schema: security_labels
   dependencies:
     title: Dependencies
     description: Database objects this object is dependent upon

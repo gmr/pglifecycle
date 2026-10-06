@@ -7,7 +7,8 @@ mod common;
 
 use clap::Parser;
 use common::{
-    fixture_archive, foreign_archive, mutated_archive, mutated_foreign_archive,
+    fixture_archive, foreign_archive, labeled_archive, mutated_archive,
+    mutated_foreign_archive,
 };
 use pglifecycle::{cli, deploy, pull};
 
@@ -326,4 +327,86 @@ fn deploy_refuses_a_dump_with_other_session_settings() {
         let error = deploy::deploy(&args).unwrap_err();
         assert!(error.contains(expected), "unexpected error: {error}");
     }
+}
+
+/// Security labels pulled from an archive give an empty plan against
+/// that archive. A label that is different, or that only the project
+/// has, is set in place. No object is made again.
+#[test]
+fn security_labels_change_in_place() {
+    let dir = tempfile::tempdir().unwrap();
+    let labeled = dir.path().join("labeled.dump");
+    labeled_archive(&labeled, Some("secret"));
+    let project = dir.path().join("project");
+    pull_project(&labeled, &project);
+    let table = std::fs::read_to_string(project.join("tables/test/t.yaml"))
+        .expect("table file");
+    assert!(
+        table.contains("security_labels:\n  dummy: secret\n"),
+        "missing table labels in:\n{table}"
+    );
+
+    let script = deploy_script(&project, &labeled, &[]);
+    assert!(
+        script.contains("-- no changes"),
+        "expected an empty plan, got:\n{script}"
+    );
+
+    let other = dir.path().join("other.dump");
+    labeled_archive(&other, Some("public"));
+    let script = deploy_script(&project, &other, &[]);
+    for statement in [
+        "SECURITY LABEL FOR dummy ON SCHEMA test IS $$secret$$;",
+        "SECURITY LABEL FOR dummy ON TABLE test.t IS $$secret$$;",
+        "SECURITY LABEL FOR dummy ON COLUMN test.t.secret IS $$secret$$;",
+        "SECURITY LABEL FOR dummy ON FUNCTION test.f IS $$secret$$;",
+        "SECURITY LABEL FOR dummy ON DATABASE labels IS $$secret$$;",
+    ] {
+        assert!(
+            script.contains(statement),
+            "missing {statement} in:\n{script}"
+        );
+    }
+    for verb in ["CREATE", "DROP"] {
+        assert!(
+            !script.contains(&format!("\n{verb} ")),
+            "unexpected {verb} statement in:\n{script}"
+        );
+    }
+}
+
+/// A project object with no `security_labels` does not manage its
+/// labels: deploy leaves the labels of the database alone. An explicit
+/// map is compared, so a label that it does not have gets IS NULL.
+#[test]
+fn security_labels_are_managed_only_when_given() {
+    let dir = tempfile::tempdir().unwrap();
+    let labeled = dir.path().join("labeled.dump");
+    labeled_archive(&labeled, Some("secret"));
+    let unlabeled = dir.path().join("unlabeled.dump");
+    labeled_archive(&unlabeled, None);
+    let project = dir.path().join("project");
+    pull_project(&unlabeled, &project);
+
+    let script = deploy_script(&project, &labeled, &[]);
+    assert!(
+        script.contains("-- no changes"),
+        "labels with no field must be left alone, got:\n{script}"
+    );
+
+    // an explicit, empty map on the table removes its labels; its
+    // column and the other objects still have no field
+    let path = project.join("tables/test/t.yaml");
+    let table = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(&path, format!("{table}security_labels: {{}}\n")).unwrap();
+    let script = deploy_script(&project, &labeled, &[]);
+    let labels: Vec<&str> = script
+        .lines()
+        .filter(|line| line.starts_with("SECURITY LABEL"))
+        .collect();
+    assert_eq!(
+        labels,
+        ["SECURITY LABEL FOR dummy ON TABLE test.t IS NULL;"],
+        "in:\n{script}"
+    );
 }

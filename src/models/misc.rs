@@ -64,6 +64,10 @@ pub struct Aggregate {
     pub sql: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
+    /// Security labels (`SECURITY LABEL FOR provider ON ...`), as
+    /// a label for each provider
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub security_labels: Option<super::SecurityLabels>,
 }
 
 /// Represents an argument to an aggregate
@@ -171,6 +175,10 @@ pub struct Domain {
     pub check_constraints: Option<Vec<DomainConstraint>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
+    /// Security labels (`SECURITY LABEL FOR provider ON ...`), as
+    /// a label for each provider
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub security_labels: Option<super::SecurityLabels>,
 }
 
 /// Represents a Check Constraint in a Domain
@@ -327,6 +335,10 @@ pub struct Language {
     pub validator: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
+    /// Security labels (`SECURITY LABEL FOR provider ON ...`), as
+    /// a label for each provider
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub security_labels: Option<super::SecurityLabels>,
 }
 
 /// Represents an operator used to compare values
@@ -490,6 +502,10 @@ pub struct Publication {
     pub parameters: Option<Map<String, Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
+    /// Security labels (`SECURITY LABEL FOR provider ON ...`), as
+    /// a label for each provider
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub security_labels: Option<super::SecurityLabels>,
 }
 
 /// The operations that a publication publishes by default, in the
@@ -557,6 +573,7 @@ impl Publication {
             all_tables: self.all_tables.filter(|all| *all),
             parameters: (!parameters.is_empty()).then_some(parameters),
             comment: self.comment.clone(),
+            security_labels: self.security_labels.clone(),
         }
     }
 }
@@ -657,6 +674,10 @@ pub struct Schema {
     pub authorization: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
+    /// Security labels (`SECURITY LABEL FOR provider ON ...`), as
+    /// a label for each provider
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub security_labels: Option<super::SecurityLabels>,
 }
 
 /// Represents a sequence
@@ -686,6 +707,10 @@ pub struct Sequence {
     pub owned_by: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
+    /// Security labels (`SECURITY LABEL FOR provider ON ...`), as
+    /// a label for each provider
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub security_labels: Option<super::SecurityLabels>,
 }
 
 /// Represents a foreign server
@@ -715,6 +740,10 @@ pub struct Subscription {
     pub parameters: Option<Map<String, Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
+    /// Security labels (`SECURITY LABEL FOR provider ON ...`), as
+    /// a label for each provider
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub security_labels: Option<super::SecurityLabels>,
 }
 
 /// The subscription options that the catalog does not keep, as only
@@ -795,6 +824,7 @@ impl Subscription {
             publications,
             parameters: (!parameters.is_empty()).then_some(parameters),
             comment: self.comment.clone(),
+            security_labels: self.security_labels.clone(),
         }
     }
 }
@@ -828,6 +858,10 @@ pub struct Tablespace {
     pub options: Option<Map<String, Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
+    /// Security labels (`SECURITY LABEL FOR provider ON ...`), as
+    /// a label for each provider
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub security_labels: Option<super::SecurityLabels>,
 }
 
 /// Represents a user mapping

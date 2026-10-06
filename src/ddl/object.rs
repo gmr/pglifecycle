@@ -25,6 +25,7 @@ pub(crate) fn create_schema(
         owner: String::new(),
         authorization,
         comment: None,
+        security_labels: None,
     }))
 }
 
@@ -49,6 +50,7 @@ pub(crate) fn create_domain(
         default: None,
         check_constraints: None,
         comment: None,
+        security_labels: None,
     };
     for constraint in node.find_all("ColConstraint") {
         let name = constraint
@@ -181,6 +183,7 @@ pub(crate) fn create_type(
         canonical: None,
         subtype_diff: None,
         comment: None,
+        security_labels: None,
     };
     if node.has("kw_enum") {
         value.type_kind = Some(String::from("enum"));
@@ -319,6 +322,7 @@ pub(crate) fn create_sequence(
         cycle: None,
         owned_by: None,
         comment: None,
+        security_labels: None,
     };
     apply_seq_options(&mut sequence, node, src);
     if node.kind() == "AlterSeqStmt" {
@@ -389,6 +393,54 @@ pub(crate) fn comment(node: &Node, src: &str) -> Result<Statement, String> {
             comment: text,
         });
     }
+    let (on, target) = comment_target(node, src, "COMMENT")?;
+    Ok(Statement::Comment {
+        on,
+        target,
+        comment: text,
+    })
+}
+
+/// SECURITY LABEL [FOR provider] ON <type> <name> IS '...'. pg_dump
+/// always names the provider. The label is `None` for IS NULL.
+pub(crate) fn security_label(
+    node: &Node,
+    src: &str,
+) -> Result<Statement, String> {
+    let provider = node
+        .child_of_kind("opt_provider")
+        .and_then(|n| n.child_of_kind("NonReservedWord_or_Sconst"))
+        .map(|n| match n.find("Sconst") {
+            Some(sconst) => string_value(&sconst, src),
+            None => unquote(n.text(src)),
+        })
+        .ok_or_else(|| {
+            format!(
+                "SECURITY LABEL without provider: {}",
+                truncate(node.text(src), 80)
+            )
+        })?;
+    let label = node
+        .child_of_kind("security_label")
+        .and_then(|n| n.find("Sconst"))
+        .map(|n| string_value(&n, src));
+    let (on, target) = comment_target(node, src, "SECURITY LABEL")?;
+    Ok(Statement::SecurityLabel {
+        on,
+        target,
+        provider,
+        label,
+    })
+}
+
+/// The object type and the name of the object of a COMMENT or a
+/// SECURITY LABEL statement (`verb`, for the warning when the name is
+/// not found)
+fn comment_target(
+    node: &Node,
+    src: &str,
+    verb: &str,
+) -> Result<(String, QualifiedName), String> {
     // the object type is the keyword sequence between ON and the name
     let mut object_type = Vec::new();
     let mut target: Option<QualifiedName> = None;
@@ -537,16 +589,12 @@ pub(crate) fn comment(node: &Node, src: &str) -> Result<Statement, String> {
     }
     if target.is_none() {
         log::warn!(
-            "Unhandled COMMENT ON {} target: {}",
+            "Unhandled {verb} ON {} target: {}",
             object_type.join(" "),
             truncate(node.text(src), 80)
         );
     }
-    Ok(Statement::Comment {
-        on: object_type.join(" "),
-        target: target.unwrap_or_default(),
-        comment: text,
-    })
+    Ok((object_type.join(" "), target.unwrap_or_default()))
 }
 
 /// Collect all `kw_*` descendants, uppercased without the prefix
@@ -1107,6 +1155,53 @@ mod tests {
         assert_eq!(on, "COLUMN");
         assert_eq!(target.schema, Some("test.users".into()));
         assert_eq!(target.name, "id");
+    }
+
+    #[test]
+    fn parses_security_labels() {
+        let Statement::SecurityLabel {
+            on,
+            target,
+            provider,
+            label,
+        } = parse_one(
+            "SECURITY LABEL FOR \"My Provider\" ON COLUMN test.users.id \
+             IS 'it''s';",
+        )
+        else {
+            panic!("expected SecurityLabel")
+        };
+        assert_eq!(on, "COLUMN");
+        assert_eq!(target.schema, Some("test.users".into()));
+        assert_eq!(target.name, "id");
+        assert_eq!(provider, "My Provider");
+        assert_eq!(label.as_deref(), Some("it's"));
+        let Statement::SecurityLabel {
+            on, target, label, ..
+        } = parse_one(
+            "SECURITY LABEL FOR selinux ON FUNCTION test.f(integer) IS NULL;",
+        )
+        else {
+            panic!("expected SecurityLabel")
+        };
+        assert_eq!(on, "FUNCTION");
+        assert_eq!(target.schema, Some("test".into()));
+        assert_eq!(target.name, "f(integer)");
+        assert_eq!(label, None);
+        let Statement::SecurityLabel { on, target, .. } =
+            parse_one("SECURITY LABEL FOR p ON ROLE app IS 'x';")
+        else {
+            panic!("expected SecurityLabel")
+        };
+        assert_eq!(on, "ROLE");
+        assert_eq!(target.name, "app");
+        // pg_dump always names the provider
+        assert!(
+            crate::ddl::Parser::new()
+                .unwrap()
+                .parse("SECURITY LABEL ON TABLE t IS 'x';")
+                .is_err()
+        );
     }
 
     #[test]

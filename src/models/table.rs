@@ -167,6 +167,10 @@ pub struct Table {
     pub options: Option<Map<String, Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
+    /// Security labels (`SECURITY LABEL FOR provider ON ...`), as
+    /// a label for each provider
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub security_labels: Option<super::SecurityLabels>,
 }
 
 impl Table {
@@ -512,6 +516,10 @@ pub struct Column {
     pub options: Option<Map<String, Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
+    /// Security labels (`SECURITY LABEL FOR provider ON ...`), as
+    /// a label for each provider
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub security_labels: Option<super::SecurityLabels>,
 }
 
 /// A default on a column the table does not declare locally: an
@@ -986,6 +994,10 @@ pub struct TablePartition {
     pub attached: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
+    /// Security labels (`SECURITY LABEL FOR provider ON ...`), as
+    /// a label for each provider
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub security_labels: Option<super::SecurityLabels>,
 }
 
 impl Table {

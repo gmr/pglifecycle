@@ -26,10 +26,11 @@ to. This page links to those descriptions and does not repeat them.
 the project without these entries. See
 [Unsupported dump entries](commands.md#unsupported-dump-entries).
 
-- **Security labels.** `pull` does not model `SECURITY LABEL` entries.
-  Use `--no-security-labels` to leave them out of the dump.
-- **Comments on objects that pull does not model.** Such a comment
-  goes to `remaining.yaml` with its object.
+- **Comments and security labels on objects that pull does not
+  model.** Such a comment or label goes to `remaining.yaml` with its
+  object. A security label on a column of a view or of a materialized
+  view also goes there. Use `--no-security-labels` to leave the labels
+  out of the dump.
 - **Column settings on an inheritance child.** `ALTER TABLE ONLY child
   ALTER COLUMN c SET STATISTICS` (or `SET STORAGE`) on a column that
   the child inherits puts the table entry in `remaining.yaml`. Set the

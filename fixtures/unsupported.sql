@@ -11,10 +11,6 @@
 -- generated columns) do not belong here: they never reach
 -- remaining.yaml. They go into fixtures/schema.sql with their fix,
 -- where the round-trip gate's schema diff is the assertion.
---
--- SECURITY LABEL is also absent: it needs a preloaded label provider,
--- and no provider ships with the standard server, so the statement
--- fails on the gate's cluster.
 
 CREATE SCHEMA unsupported;
 SET search_path = unsupported, public, pg_catalog;

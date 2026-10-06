@@ -153,6 +153,7 @@ pub(crate) fn expand(
                     cycle: None,
                     owned_by: sequence.owned_by.clone(),
                     comment: None,
+                    security_labels: None,
                 }),
                 dependencies: BTreeSet::new(),
             });
