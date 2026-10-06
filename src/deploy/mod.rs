@@ -31,7 +31,7 @@ use crate::ddl::{self, NodeExt};
 use crate::deploy::alter::Resolution;
 use crate::deploy::diff::{Change, Diff, ObjectKey};
 use crate::models::{Definition, Item};
-use crate::utils::quote_ident;
+use crate::utils::{quote_ident, user_mapping_subject};
 use crate::{
     build, cli, constants, diagnostics, pgdump, progress, project, pull,
 };
@@ -1680,7 +1680,7 @@ fn drop_sql(key: &ObjectKey, definition: Option<&Definition>) -> String {
             .map(|server| {
                 format!(
                     "DROP USER MAPPING IF EXISTS FOR {} SERVER {};\n",
-                    quote_ident(&mapping.name),
+                    user_mapping_subject(&mapping.name),
                     quote_ident(&server.name),
                 )
             })
@@ -4443,5 +4443,24 @@ mod tests {
             let entry = output.dump.get_entry_mut(*id).expect("entry");
             assert_eq!(entry.defn.as_deref(), Some(expected));
         }
+    }
+
+    /// In quotes, `PUBLIC` is the name of a role, so the drop of a
+    /// mapping for PUBLIC writes it as the keyword
+    #[test]
+    fn removed_public_user_mapping_drops_for_the_keyword() {
+        let definition = Definition::UserMapping(
+            serde_json::from_value(serde_json::json!({
+                "name": "PUBLIC",
+                "servers": [{"name": "srv"}],
+            }))
+            .expect("user mapping"),
+        );
+        let key =
+            ObjectKey::new(constants::ObjectType::UserMapping, &definition);
+        assert_eq!(
+            drop_sql(&key, Some(&definition)),
+            "DROP USER MAPPING IF EXISTS FOR PUBLIC SERVER srv;\n"
+        );
     }
 }

@@ -106,9 +106,6 @@ These limits are new on this page:
   the expression uses no column, or more than one column, PostgreSQL
   gives it the name `<table>_check`. Write such a constraint as a
   table CHECK, with the name that PostgreSQL gives.
-- **A user mapping file named `public`.** `pull` writes the mapping
-  for `PUBLIC` in a file named `PUBLIC`. A file named `public` does
-  not match it, so `deploy` drops and makes the mapping on each run.
 - **Partitioned tables with mixed partitions.** When some partitions
   of a table are only bounds in the parent and others are files with
   `attached: true`, the parent's `ON ONLY` index is a change on each
@@ -185,10 +182,6 @@ These limits are new on this page:
 - **NO INHERIT on a parent's NOT NULL.** After `deploy` makes a NOT
   NULL of a parent `NO INHERIT`, the children keep a local copy. A
   second deploy removes it.
-- **The drop of a `PUBLIC` user mapping.** For a mapping for `PUBLIC`
-  that only the database has, `deploy` writes `DROP USER MAPPING ...
-  FOR "PUBLIC"`. In quotes, `PUBLIC` is the name of a role, so the
-  statement does not drop the mapping. Drop it by hand.
 
 ## Connection and CLI
 
