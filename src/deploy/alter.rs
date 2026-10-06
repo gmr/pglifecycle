@@ -1675,8 +1675,15 @@ fn constraints(
     let db_unique = db.unique_constraints.as_deref().unwrap_or_default();
     for unique in repo.unique_constraints.iter().flatten() {
         if !db_unique.contains(unique) {
-            let replaces =
-                dropped.contains(&key_name(&repo.name, unique, "key"));
+            // a dropped constraint with the same columns is also
+            // replaced: without its drop, the add makes a duplicate
+            let replaces = dropped
+                .contains(&key_name(&repo.name, unique, "key"))
+                || db_unique.iter().any(|existing| {
+                    existing.columns() == unique.columns()
+                        && dropped
+                            .contains(&key_name(&db.name, existing, "key"))
+                });
             alters.push(add_key("UNIQUE", unique, replaces));
         }
     }
@@ -3059,6 +3066,30 @@ mod tests {
         );
         let gated: Vec<bool> = alters.iter().map(|a| a.destructive).collect();
         assert_eq!(gated, vec![true, true, false, true]);
+    }
+
+    /// A unique constraint with a new name on the same columns is gated
+    /// with the drop of the old one: without the drop, the add makes a
+    /// duplicate constraint
+    #[test]
+    fn renamed_unique_constraint_add_is_gated() {
+        let mut repo = base_table();
+        repo["unique_constraints"] = serde_json::json!([
+            {"name": "users_email_uq", "columns": ["email"]},
+        ]);
+        let mut db = base_table();
+        db["unique_constraints"] = serde_json::json!([["email"]]);
+        let alters = statements(table(&parse_table(repo), &parse_table(db)));
+        assert_eq!(
+            sql(&alters),
+            vec![
+                "ALTER TABLE test.users DROP CONSTRAINT users_email_key;\n",
+                "ALTER TABLE test.users ADD CONSTRAINT users_email_uq \
+                 UNIQUE (email);\n",
+            ]
+        );
+        let gated: Vec<bool> = alters.iter().map(|a| a.destructive).collect();
+        assert_eq!(gated, vec![true, true]);
     }
 
     #[test]
