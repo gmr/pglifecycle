@@ -669,6 +669,7 @@ fn unfold_partition(
                 statistics: None,
                 options: None,
                 comment: None,
+                security_labels: None,
             })
             .collect()
     });
