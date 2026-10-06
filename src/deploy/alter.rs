@@ -82,6 +82,9 @@ pub(crate) struct Alter {
     /// A drop of the column or of its table drops the sequence, thus
     /// deploy runs it before all other statements
     pub unlinks: bool,
+    /// The statement needs the in-place statements of other objects;
+    /// deploy runs it after all in-place statements
+    pub deferred: bool,
 }
 
 impl Alter {
@@ -95,6 +98,7 @@ impl Alter {
             schema: None,
             links: None,
             unlinks: false,
+            deferred: false,
         }
     }
 
@@ -1093,6 +1097,71 @@ fn columns(
         }
     }
     true
+}
+
+/// The DROP NOT NULL statements of an inheritance child whose parents
+/// change a NOT NULL to NO INHERIT. ALTER CONSTRAINT ... NO INHERIT
+/// keeps the inherited NOT NULL of the child as a NOT NULL of its own.
+/// Thus a child that has no NOT NULL of its own in the database and in
+/// the project drops it. While another parent still gives the NOT
+/// NULL, PostgreSQL refuses the drop, thus the child drops it only when
+/// each parent that gives it in the database changes it to NO INHERIT.
+/// `parents` holds the project table and the database table of each
+/// parent that the database has. Each statement is deferred: it must
+/// run after the statements of all of these parents.
+pub(crate) fn no_inherit_children(
+    repo: &Table,
+    db: &Table,
+    parents: &[(&Table, &Table)],
+) -> Vec<Alter> {
+    // the NOT NULL of `column` that `table` gives to its children
+    let inherited = |table: &Table, column: &str| {
+        table.columns.iter().flatten().any(|c| {
+            c.name == column
+                && c.nullable == Some(false)
+                && !no_inherit(&c.not_null_constraint)
+        })
+    };
+    let parents: Vec<(Table, Table)> = parents
+        .iter()
+        .map(|(repo, db)| (repo.canonical(), db.canonical()))
+        .collect();
+    let (wanted, existing) = (repo.not_null_names(), db.not_null_names());
+    let mut columns: Vec<&str> = parents
+        .iter()
+        .flat_map(|(_, db)| db.columns.iter().flatten())
+        .map(|column| column.name.as_str())
+        .collect();
+    columns.sort_unstable();
+    columns.dedup();
+    columns
+        .into_iter()
+        .filter(|column| {
+            !wanted.contains_key(*column) && !existing.contains_key(*column)
+        })
+        .filter(|column| {
+            let mut givers = parents
+                .iter()
+                .filter(|(_, db)| inherited(db, column))
+                .peekable();
+            givers.peek().is_some()
+                && givers.all(|(repo, _)| {
+                    repo.columns.iter().flatten().any(|c| {
+                        c.name == *column
+                            && c.nullable == Some(false)
+                            && no_inherit(&c.not_null_constraint)
+                    })
+                })
+        })
+        .map(|column| Alter {
+            deferred: true,
+            ..Alter::new(format!(
+                "ALTER TABLE {} ALTER COLUMN {} DROP NOT NULL;\n",
+                qualified(&repo.schema, &repo.name),
+                quote_ident(column)
+            ))
+        })
+        .collect()
 }
 
 /// Whether a column's NOT NULL constraint is NO INHERIT
@@ -3166,6 +3235,90 @@ mod tests {
                 "ALTER TABLE test.users ALTER CONSTRAINT email_nn NO \
                  INHERIT;\n",
             ]
+        );
+    }
+
+    /// A NOT NULL that changes to NO INHERIT stays on each child as a
+    /// NOT NULL of its own. A child drops it when it has no NOT NULL of
+    /// its own in the project and in the database, and when no other
+    /// parent still gives it
+    #[test]
+    fn no_inherit_drops_the_not_null_of_the_children() {
+        let parent = |name: &str, not_null: Option<bool>| {
+            let mut table = base_table();
+            table["name"] = serde_json::json!(name);
+            table["columns"] = match not_null {
+                Some(no_inherit) => serde_json::json!([
+                    {"name": "email", "data_type": "text",
+                     "nullable": false,
+                     "not_null_constraint": {"no_inherit": no_inherit}},
+                ]),
+                None => serde_json::json!([
+                    {"name": "email", "data_type": "text"},
+                ]),
+            };
+            parse_table(table)
+        };
+        let child = |name: &str, not_null: bool| {
+            let columns = if not_null {
+                serde_json::json!([
+                    {"name": "email", "data_type": "text",
+                     "nullable": false},
+                ])
+            } else {
+                serde_json::json!([{"name": "x", "data_type": "text"}])
+            };
+            parse_table(serde_json::json!({
+                "name": name, "schema": "test", "owner": "postgres",
+                "parents": ["test.users"], "columns": columns,
+            }))
+        };
+        let (changed, inherit) =
+            (parent("users", Some(true)), parent("users", Some(false)));
+        let drops =
+            |repo: &Table, db: &Table, parents: &[(&Table, &Table)]| {
+                no_inherit_children(repo, db, parents)
+                    .into_iter()
+                    .map(|alter| alter.sql)
+                    .collect::<Vec<_>>()
+            };
+        let (plain, own) = (child("plain", false), child("own", true));
+        assert_eq!(
+            drops(&plain, &plain, &[(&changed, &inherit)]),
+            vec!["ALTER TABLE test.plain ALTER COLUMN email DROP NOT NULL;\n"]
+        );
+        // a NOT NULL of its own in the project or in the database
+        assert!(drops(&own, &own, &[(&changed, &inherit)]).is_empty());
+        assert!(drops(&plain, &own, &[(&changed, &inherit)]).is_empty());
+        assert!(drops(&own, &plain, &[(&changed, &inherit)]).is_empty());
+        // no change, or a change to INHERIT
+        for (repo, db) in [(&changed, &changed), (&inherit, &changed)] {
+            assert!(drops(&plain, &plain, &[(repo, db)]).is_empty());
+        }
+        assert!(drops(&plain, &plain, &[(&inherit, &inherit)]).is_empty());
+        // another parent still gives the NOT NULL
+        let other = parent("other", Some(false));
+        assert!(
+            drops(&plain, &plain, &[(&changed, &inherit), (&other, &other)])
+                .is_empty()
+        );
+        // both parents change it, or the other one does not give it:
+        // one drop
+        let other_changed = parent("other", Some(true));
+        let no_not_null = parent("other", None);
+        for other in [(&other_changed, &other), (&no_not_null, &no_not_null)] {
+            assert_eq!(
+                drops(&plain, &plain, &[(&changed, &inherit), other]),
+                vec![
+                    "ALTER TABLE test.plain ALTER COLUMN email DROP NOT \
+                     NULL;\n"
+                ]
+            );
+        }
+        assert!(
+            no_inherit_children(&plain, &plain, &[(&changed, &inherit)])
+                .iter()
+                .all(|alter| alter.deferred)
         );
     }
 
