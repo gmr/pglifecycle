@@ -1095,6 +1095,53 @@ fn columns(
     true
 }
 
+/// The DROP NOT NULL statements for the inheritance children of a
+/// table whose NOT NULL changes to NO INHERIT. ALTER CONSTRAINT ... NO
+/// INHERIT keeps the inherited NOT NULL of each child as a NOT NULL of
+/// its own. Thus a child that has no NOT NULL of its own in the
+/// database and in the project drops it. `children` holds the project
+/// table and the database table of each child.
+pub(crate) fn no_inherit_children(
+    repo: &Table,
+    db: &Table,
+    children: &[(&Table, &Table)],
+) -> Vec<Alter> {
+    let (repo, db) = (repo.canonical(), db.canonical());
+    let columns: Vec<&str> = repo
+        .columns
+        .iter()
+        .flatten()
+        .filter(|column| {
+            column.nullable == Some(false)
+                && no_inherit(&column.not_null_constraint)
+        })
+        .filter(|column| {
+            db.columns.iter().flatten().any(|c| {
+                c.name == column.name
+                    && c.nullable == Some(false)
+                    && !no_inherit(&c.not_null_constraint)
+            })
+        })
+        .map(|column| column.name.as_str())
+        .collect();
+    let mut alters = Vec::new();
+    for (repo_child, db_child) in children {
+        let (wanted, existing) =
+            (repo_child.not_null_names(), db_child.not_null_names());
+        for column in &columns {
+            if !wanted.contains_key(*column) && !existing.contains_key(*column)
+            {
+                alters.push(Alter::new(format!(
+                    "ALTER TABLE {} ALTER COLUMN {} DROP NOT NULL;\n",
+                    qualified(&repo_child.schema, &repo_child.name),
+                    quote_ident(column)
+                )));
+            }
+        }
+    }
+    alters
+}
+
 /// Whether a column's NOT NULL constraint is NO INHERIT
 fn no_inherit(not_null: &Option<ColumnNotNull>) -> bool {
     not_null.as_ref().and_then(|c| c.no_inherit) == Some(true)
@@ -3088,6 +3135,64 @@ mod tests {
                  INHERIT;\n",
             ]
         );
+    }
+
+    /// A NOT NULL that changes to NO INHERIT stays on each child as a
+    /// NOT NULL of its own. A child drops it when it has no NOT NULL of
+    /// its own in the project and in the database
+    #[test]
+    fn no_inherit_drops_the_not_null_of_the_children() {
+        let parent = |no_inherit: bool| {
+            let mut table = base_table();
+            table["columns"] = serde_json::json!([
+                {"name": "email", "data_type": "text", "nullable": false,
+                 "not_null_constraint": {"no_inherit": no_inherit}},
+            ]);
+            parse_table(table)
+        };
+        let child = |name: &str, not_null: bool| {
+            let columns = if not_null {
+                serde_json::json!([
+                    {"name": "email", "data_type": "text",
+                     "nullable": false},
+                ])
+            } else {
+                serde_json::json!([{"name": "x", "data_type": "text"}])
+            };
+            parse_table(serde_json::json!({
+                "name": name, "schema": "test", "owner": "postgres",
+                "parents": ["test.users"], "columns": columns,
+            }))
+        };
+        let (plain, own, dropped, added) = (
+            child("plain", false),
+            child("own", true),
+            child("dropped", false),
+            child("added", true),
+        );
+        let own_in_db = child("dropped", true);
+        let added_in_db = child("added", false);
+        let children = [
+            (&plain, &plain),
+            (&own, &own),
+            (&dropped, &own_in_db),
+            (&added, &added_in_db),
+        ];
+        assert_eq!(
+            sql(&no_inherit_children(
+                &parent(true),
+                &parent(false),
+                &children
+            )),
+            vec!["ALTER TABLE test.plain ALTER COLUMN email DROP NOT NULL;\n"]
+        );
+        // no change, or a change to INHERIT, keeps the children
+        for (repo, db) in [(true, true), (false, true), (false, false)] {
+            assert!(
+                no_inherit_children(&parent(repo), &parent(db), &children)
+                    .is_empty()
+            );
+        }
     }
 
     /// Adding NOT NULL where the database has none still goes through

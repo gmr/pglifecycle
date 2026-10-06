@@ -294,7 +294,8 @@ fn resolutions(
         .iter()
         .map(|item| (item.id, &item.definition))
         .collect::<BTreeMap<_, _>>();
-    diff.changed
+    let mut resolutions: BTreeMap<usize, Resolution> = diff
+        .changed
         .iter()
         .map(|(id, database)| {
             let repo = inventory_by_id
@@ -302,7 +303,69 @@ fn resolutions(
                 .expect("changed item id missing from project inventory");
             (*id, alter::resolve_with(repo, database, groups, families))
         })
-        .collect()
+        .collect();
+    no_inherit_children(project, diff, &mut resolutions);
+    resolutions
+}
+
+/// Add to the in-place statements of each changed table the DROP NOT
+/// NULL statements of its inheritance children that the database has
+/// (see [`alter::no_inherit_children`])
+fn no_inherit_children(
+    project: &project::Project,
+    diff: &Diff,
+    resolutions: &mut BTreeMap<usize, Resolution>,
+) {
+    use alter::names::name;
+    let key = |table: &crate::models::Table| {
+        name(&format!(
+            "{}.{}",
+            quote_ident(&table.schema),
+            quote_ident(&table.name)
+        ))
+    };
+    // the project table and the database table of each child that the
+    // database has, by the key of each parent
+    let mut children: HashMap<String, Vec<_>> = HashMap::new();
+    for item in &project.inventory {
+        let Some(table) = as_table(&item.definition) else {
+            continue;
+        };
+        let database = match diff.items.get(&item.id) {
+            Some(Change::Unchanged) => table,
+            Some(Change::Changed) => {
+                match diff.changed.get(&item.id).and_then(as_table) {
+                    Some(database) => database,
+                    None => continue,
+                }
+            }
+            _ => continue,
+        };
+        for parent in table.parents.iter().flatten() {
+            children
+                .entry(name(parent))
+                .or_default()
+                .push((table, database));
+        }
+    }
+    for (id, database) in &diff.changed {
+        let (Some(Resolution::Statements(alters)), Some(db)) =
+            (resolutions.get_mut(id), as_table(database))
+        else {
+            continue;
+        };
+        let Some(repo) = project
+            .inventory
+            .iter()
+            .find(|item| item.id == *id)
+            .and_then(|item| as_table(&item.definition))
+        else {
+            continue;
+        };
+        if let Some(children) = children.get(&key(repo)) {
+            alters.extend(alter::no_inherit_children(repo, db, children));
+        }
+    }
 }
 
 /// One statement in the deploy plan

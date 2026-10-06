@@ -182,9 +182,6 @@ These limits are new on this page:
   that name with members, fails on `CREATE OPERATOR CLASS`. A class
   member that replaces a member that an explicit family of the project
   drops is not gated with that drop. Make such changes by hand.
-- **NO INHERIT on a parent's NOT NULL.** After `deploy` makes a NOT
-  NULL of a parent `NO INHERIT`, the children keep a local copy. A
-  second deploy removes it.
 - **The drop of a `PUBLIC` user mapping.** For a mapping for `PUBLIC`
   that only the database has, `deploy` writes `DROP USER MAPPING ...
   FOR "PUBLIC"`. In quotes, `PUBLIC` is the name of a role, so the
