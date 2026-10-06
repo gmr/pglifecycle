@@ -47,20 +47,6 @@ the project without these entries. See
 
 ## Build
 
-- **Text search mappings that differ only in case.** A text search
-  configuration with two token types that differ only in case (for
-  example `word` and `Word`) gets two `ADD MAPPING` statements, and
-  the restore fails. Write each token type one time, in lowercase.
-- **A table CHECK with the name of a column CHECK.** A column
-  `check_constraint` on column `c` of table `t` gets the name
-  `t_c_check`. When the table also has a CHECK with that name, the
-  load accepts the project, but `CREATE TABLE` fails. Give the table
-  CHECK another name.
-- **Required fields that validation does not check.** The schemata of
-  arguments, conversions, domains, materialized views, tablespaces
-  and views do not make their required fields mandatory. Validation
-  does not report a missing field in these files, for example the
-  `location` of a tablespace. Give each field that the object needs.
 - **Settings and the database comment.** The archive restores the
   settings and the comment of the database only with `pg_restore
   --create`. See [build](commands.md#build).
