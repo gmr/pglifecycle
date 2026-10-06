@@ -26,10 +26,21 @@ use crate::deploy::identity_type;
 /// example, U+00A0 stays. The space in the body stays. A body in
 /// another language stays as it is: for example, the space at the
 /// start of a PL/Python body is its indent.
+///
+/// Pull also formats a SQL body in the `pg_dump` style, which changes
+/// its layout: `SELECT a, a;` is on two lines. Thus a SQL body is also
+/// in that style, and a body in another layout is not a change. The
+/// formatter gives the same text when it formats its own text again.
+/// A body that the formatter cannot read stays as it is.
 pub(crate) fn canonical_definition(
     body: &str,
     language: Option<&str>,
 ) -> String {
+    if language.is_some_and(|language| language.eq_ignore_ascii_case("sql"))
+        && let Some(formatted) = crate::pull::format_pg_dump(body)
+    {
+        return formatted.trim_matches(scanner_space).to_string();
+    }
     let formatted = language.is_some_and(|language| {
         language.eq_ignore_ascii_case("sql")
             || language.eq_ignore_ascii_case("plpgsql")
@@ -298,6 +309,27 @@ mod tests {
         // not a body that PostgreSQL can read
         stays("SELECT 'x'::text AS text");
         assert_eq!(canonical_sql_body("RETURN 'x'::text"), "RETURN 'x'::text");
+    }
+
+    /// A SQL body in another layout than the one that pull writes is
+    /// not a change; a real change is
+    #[test]
+    fn sql_body_layout_is_not_a_change() {
+        let sql = |body: &str| canonical_definition(body, Some("sql"));
+        assert_eq!(sql("SELECT a, a;"), sql("\n SELECT a,\n    a;\n"));
+        assert_eq!(sql("SELECT a, a;"), "SELECT a,\n    a;");
+        assert_eq!(
+            sql("SELECT a FROM (SELECT 1 AS a, 2 AS b) s;"),
+            sql(" SELECT a\n   FROM ( SELECT 1 AS a,\n            2 AS b) s;")
+        );
+        assert_ne!(sql("SELECT a, a;"), sql("SELECT a, b;"));
+        assert_ne!(sql("SELECT 'a';"), sql("SELECT 'A';"));
+        // a PL/pgSQL body is not formatted
+        let plpgsql = |body: &str| canonical_definition(body, Some("plpgsql"));
+        assert_ne!(
+            plpgsql("BEGIN RETURN 1; END"),
+            plpgsql("BEGIN\nRETURN 1;\nEND")
+        );
     }
 
     /// A real change of the body is still a change

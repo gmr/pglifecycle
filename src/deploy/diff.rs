@@ -691,7 +691,9 @@ fn normalized(definition: &Definition) -> Value {
             &canonical
         }
         Definition::MaterializedView(view) => {
-            canonical = Definition::MaterializedView(view.canonical());
+            let mut view = view.canonical();
+            view.query = view.query.as_deref().map(canonical_query);
+            canonical = Definition::MaterializedView(view);
             &canonical
         }
         Definition::Function(function) => {
@@ -834,6 +836,17 @@ fn normalized(definition: &Definition) -> Value {
     let mut value = serde_json::to_value(definition).unwrap_or(Value::Null);
     normalize(&mut value);
     value
+}
+
+/// The query of a materialized view in the form that pull writes it:
+/// in the `pg_dump` style, with no `;` at the end. Thus a query in
+/// another layout, or with a `;` at the end, is not a change. The
+/// formatter gives the same text when it formats its own text again. A
+/// query that the formatter cannot read is compared with no `;` and no
+/// space at the end.
+fn canonical_query(query: &str) -> String {
+    let formatted = crate::pull::format_pg_dump(query);
+    crate::pull::strip_trailing(formatted.as_deref().unwrap_or(query))
 }
 
 /// The domain with the type of each cast in its default in the form
@@ -1835,7 +1848,12 @@ fn write_casts(node: &Node, source: &str, result: &mut String) {
         if parentheses {
             result.push('(');
         }
-        write_casts(&operand, source, result);
+        let text = operand.text(source);
+        if let Some(constant) = single_quoted(text) {
+            result.push_str(&constant);
+        } else {
+            write_casts(&operand, source, result);
+        }
         if parentheses {
             result.push(')');
         }
@@ -1850,6 +1868,18 @@ fn write_casts(node: &Node, source: &str, result: &mut String) {
         position = child.end_byte();
     }
     result.push_str(&source[position..node.end_byte()]);
+}
+
+/// A dollar-quoted string (`$$a$$` or `$tag$a$tag$`) in single quotes,
+/// the form that PostgreSQL writes (`'a'`), or none when the text is
+/// not one dollar-quoted string
+fn single_quoted(text: &str) -> Option<String> {
+    if !text.starts_with('$') || dollar_quoted_length(text)? != text.len() {
+        return None;
+    }
+    let tag = text[1..].find('$')? + 2;
+    let body = text.get(tag..text.len().checked_sub(tag)?)?;
+    Some(format!("'{}'", body.replace('\'', "''")))
 }
 
 /// Whether the operand of a cast is a string literal, a NULL, an empty
@@ -2616,6 +2646,10 @@ mod tests {
         same("(t <> 'a'::text)", "(t <> 'a'::text)");
         same("(t <> CAST('a' AS text))", "(t <> 'a'::text)");
         same("(t <> E'a'::text)", "(t <> E'a'::text)");
+        // PostgreSQL writes a dollar-quoted constant in single quotes
+        same("(t <> $$a$$::text)", "(t <> 'a'::text)");
+        same("(t <> $q$it's$q$::text)", "(t <> 'it''s'::text)");
+        same("CAST($$a$$ AS text)", "'a'::text");
         same("'x'::varchar", "'x'::character varying");
         same("CAST(NULL AS int)", "NULL::integer");
         same("ARRAY[]::int[]", "ARRAY[]::integer[]");
@@ -2695,6 +2729,36 @@ mod tests {
             normalized(&view(70.into(), "(n)::bigint")),
             normalized(&view("90".into(), "(n)::bigint"))
         );
+    }
+
+    /// A materialized view query in another layout, or with a `;` at
+    /// the end, against the form that pull writes
+    #[test]
+    fn materialized_view_query_layout_is_not_a_change() {
+        let view = |query: &str| {
+            normalized(&Definition::MaterializedView(
+                serde_json::from_value(serde_json::json!({
+                    "name": "m", "schema": "test", "owner": "postgres",
+                    "query": query,
+                }))
+                .unwrap(),
+            ))
+        };
+        let pulled = " SELECT id,\n    name\n   FROM test.a\n  \
+                      WHERE (name = 'x'::text)";
+        for written in [
+            "SELECT id, name FROM test.a WHERE (name = 'x'::text)",
+            "SELECT id, name FROM test.a WHERE (name = 'x'::text);",
+            "select id,\n  name\nfrom test.a\nwhere (name = 'x'::text) ;\n",
+        ] {
+            assert_eq!(view(written), view(pulled), "{written}");
+        }
+        assert_ne!(
+            view("SELECT id FROM test.a WHERE (name = 'x'::text)"),
+            view(pulled)
+        );
+        // a query that the formatter cannot read compares with no `;`
+        assert_eq!(view("SELECT FROM WHERE (;"), view("SELECT FROM WHERE ("));
     }
 
     #[test]
@@ -2867,20 +2931,27 @@ mod tests {
                     normalized(&routine(language, "SELECT 1;")),
                     normalized(&routine(language, " SELECT 2;"))
                 );
-                assert_ne!(
-                    normalized(&routine(language, "SELECT\n1;")),
-                    normalized(&routine(language, "SELECT 1;"))
+                // deploy formats a SQL body as pull does, thus only the
+                // layout of a PL/pgSQL body is a change
+                assert_eq!(
+                    normalized(&routine(language, "SELECT\n1;"))
+                        == normalized(&routine(language, "SELECT 1;")),
+                    language == "sql"
                 );
                 // only the space that the PostgreSQL scanner ignores
-                // ([ \t\n\r\f\v]) is not a change
+                // ([ \t\n\r\f\v]) is not a change. The formatter of a
+                // SQL body removes U+00A0 too, which PostgreSQL does
+                // not read in a body that it keeps.
                 assert_eq!(
                     normalized(&routine(language, "SELECT 1;")),
                     normalized(&routine(language, "\t\x0bSELECT 1;\x0c\r"))
                 );
-                assert_ne!(
-                    normalized(&routine(language, "SELECT 1;")),
-                    normalized(&routine(language, "SELECT 1;\u{a0}"))
-                );
+                if language != "sql" {
+                    assert_ne!(
+                        normalized(&routine(language, "SELECT 1;")),
+                        normalized(&routine(language, "SELECT 1;\u{a0}"))
+                    );
+                }
             }
             assert_ne!(
                 normalized(&routine("plpython3u", " return 1")),
