@@ -749,33 +749,44 @@ fn constraint_comments(
     let existing = db.constraint_comments.clone().unwrap_or_default();
     // a constraint that the plan adds, or drops and adds again, has no
     // comment
+    let marker = |name: &str| format!("ADD CONSTRAINT {} ", quote_ident(name));
     let added = |name: &str| {
-        let marker = format!("ADD CONSTRAINT {} ", quote_ident(name));
         alters.iter().any(|a| {
-            a.sql.contains(&marker) || a.drops_key.as_deref() == Some(name)
+            a.sql.contains(&marker(name))
+                || a.drops_key.as_deref() == Some(name)
         })
+    };
+    // the comment on a key that a gated add replaces is gated with the
+    // add: without the add, the constraint does not exist
+    let gated = |name: &str| {
+        alters
+            .iter()
+            .any(|a| a.destructive && a.sql.contains(&marker(name)))
     };
     let mut comments = Vec::new();
     for (name, comment) in &wanted {
         if existing.get(name) != Some(comment) || added(name) {
-            comments.push(comment_on(
-                "CONSTRAINT",
-                &format!("{} ON {table}", quote_ident(name)),
-                Some(comment),
-            ));
+            comments.push(Alter {
+                destructive: gated(name),
+                ..Alter::new(comment_on(
+                    "CONSTRAINT",
+                    &format!("{} ON {table}", quote_ident(name)),
+                    Some(comment),
+                ))
+            });
         }
     }
     let kept = constraint_names(repo);
     for name in existing.keys() {
         if !wanted.contains_key(name) && kept.contains(name) && !added(name) {
-            comments.push(comment_on(
+            comments.push(Alter::new(comment_on(
                 "CONSTRAINT",
                 &format!("{} ON {table}", quote_ident(name)),
                 None,
-            ));
+            )));
         }
     }
-    alters.extend(comments.into_iter().map(Alter::new));
+    alters.extend(comments);
 }
 
 /// The names of a table's primary key, unique, check, foreign key and
@@ -2922,6 +2933,33 @@ mod tests {
         );
         assert!(alters[0].destructive && alters[1].destructive);
         assert_eq!(alters[0].drops_key.as_deref(), Some("users_pkey"));
+    }
+
+    /// The comment on a replacement primary key with a new name is
+    /// gated with the add: without the add, the constraint does not
+    /// exist
+    #[test]
+    fn replacement_key_comment_is_gated_with_its_add() {
+        let mut repo = base_table();
+        repo["primary_key"] =
+            serde_json::json!({"name": "users_new_pkey", "columns": ["id"]});
+        repo["constraint_comments"] =
+            serde_json::json!({"users_new_pkey": "k"});
+        let mut db = base_table();
+        db["primary_key"] = serde_json::json!(["id"]);
+        let alters = statements(table(&parse_table(repo), &parse_table(db)));
+        assert_eq!(
+            sql(&alters),
+            vec![
+                "ALTER TABLE test.users DROP CONSTRAINT users_pkey;\n",
+                "ALTER TABLE test.users ADD CONSTRAINT users_new_pkey \
+                 PRIMARY KEY (id);\n",
+                "COMMENT ON CONSTRAINT users_new_pkey ON test.users \
+                 IS $$k$$;\n",
+            ]
+        );
+        let gated: Vec<bool> = alters.iter().map(|a| a.destructive).collect();
+        assert_eq!(gated, vec![true, true, true]);
     }
 
     /// A changed unique constraint is dropped and added again in place.
