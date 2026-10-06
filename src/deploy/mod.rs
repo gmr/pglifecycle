@@ -642,10 +642,30 @@ fn plan(
         resolutions,
         libpgdump::ObjectType::Sequence,
     );
+    // the new functions with a SQL-standard body. PostgreSQL checks such
+    // a body when it makes the function, also with
+    // check_function_bodies off
+    let bodies: HashMap<(String, String), usize> = functions
+        .iter()
+        .filter(|(_, position)| {
+            output.dump.entries()[**position]
+                .defn
+                .as_deref()
+                .and_then(|defn| parser.parse(defn, None))
+                .is_some_and(|tree| {
+                    tree.root_node().find("opt_routine_body").is_some()
+                })
+        })
+        .map(|(key, position)| (key.clone(), *position))
+        .collect();
     let shells = new_shell_types(output, diff);
     // the statements that wait for a function or a sequence, by its
     // archive position
     let mut waiting: BTreeMap<usize, Vec<(bool, Statement)>> = BTreeMap::new();
+    // the entries that the plan makes new or makes again after a later
+    // position, by dump id. An entry that depends on one of them waits
+    // for it too
+    let mut delayed: HashMap<i32, usize> = HashMap::new();
     // OWNED BY of a changed sequence, after each owner change
     let mut links = Vec::new();
     // the statements that wait for all in-place statements
@@ -667,6 +687,12 @@ fn plan(
             continue;
         }
         let direct = output.item_ids.get(&entry.dump_id);
+        let inherited = entry
+            .dependencies
+            .iter()
+            .filter_map(|dep| delayed.get(dep).copied())
+            .filter(|later| *later > position)
+            .max();
         // changed default privileges are emitted above
         if direct.is_some_and(|id| defaults.contains(id)) {
             continue;
@@ -755,18 +781,24 @@ fn plan(
             };
             // a CREATE that needs the DROP of a database-only object,
             // and its child entries, are withheld with the DROP
-            push(
-                owners.iter().any(|id| diff.gated.contains(id)),
-                Statement {
-                    label: label.clone(),
-                    sql: format!(
-                        "{defn}{}{}",
-                        owner.unwrap_or_default(),
-                        after_create(privileges, entry)
-                    ),
-                    fails_open: false,
-                },
-            );
+            let gated = owners.iter().any(|id| diff.gated.contains(id));
+            let statement = Statement {
+                label: label.clone(),
+                sql: format!(
+                    "{defn}{}{}",
+                    owner.unwrap_or_default(),
+                    after_create(privileges, entry)
+                ),
+                fails_open: false,
+            };
+            if let Some(later) = inherited {
+                delayed.insert(entry.dump_id, later);
+            }
+            if let Some((destructive, statement)) =
+                wait(&mut waiting, inherited, gated, statement)
+            {
+                push(destructive, statement);
+            }
             // the changed default privileges in a new schema
             if entry.desc == libpgdump::ObjectType::Schema {
                 let statements = entry
@@ -800,7 +832,7 @@ fn plan(
                     // a statement that calls a function that comes
                     // later waits for it, and so do the statements
                     // after it, so that they keep their order
-                    let mut after = None;
+                    let mut after = inherited;
                     for alter in alters {
                         let statement = Statement {
                             label: alter
@@ -831,6 +863,38 @@ fn plan(
                             deferred.push((alter.destructive, statement));
                             continue;
                         }
+                        // a new column whose default calls a new
+                        // function with a SQL-standard body comes
+                        // before the function, which can read the
+                        // column, and gets its default after it
+                        let statement = match &alter.default {
+                            Some((add, default))
+                                if calls_later(
+                                    &mut parser,
+                                    &alter.sql,
+                                    &bodies,
+                                    &HashMap::new(),
+                                    position,
+                                )
+                                .is_some() =>
+                            {
+                                let add = Statement {
+                                    label: statement.label.clone(),
+                                    sql: add.clone(),
+                                    fails_open: false,
+                                };
+                                if let Some((destructive, add)) =
+                                    wait(&mut waiting, after, false, add)
+                                {
+                                    push(destructive, add);
+                                }
+                                Statement {
+                                    sql: default.clone(),
+                                    ..statement
+                                }
+                            }
+                            _ => statement,
+                        };
                         after = after.max(calls_later(
                             &mut parser,
                             &alter.sql,
@@ -838,43 +902,37 @@ fn plan(
                             &sequences,
                             position,
                         ));
-                        match after {
-                            Some(function) => waiting
-                                .entry(function)
-                                .or_default()
-                                .push((alter.destructive, statement)),
-                            None => push(alter.destructive, statement),
+                        if let Some((destructive, statement)) = wait(
+                            &mut waiting,
+                            after,
+                            alter.destructive,
+                            statement,
+                        ) {
+                            push(destructive, statement);
                         }
                     }
                     false
                 }
                 Some(Resolution::OrReplace { comment, then }) => {
-                    push(
-                        false,
-                        Statement {
-                            label: label.clone(),
-                            sql: defn.replacen(
-                                "CREATE ",
-                                "CREATE OR REPLACE ",
-                                1,
-                            ),
-                            fails_open: false,
-                        },
-                    );
+                    let replace = Statement {
+                        label: label.clone(),
+                        sql: defn.replacen("CREATE ", "CREATE OR REPLACE ", 1),
+                        fails_open: false,
+                    };
                     // CREATE OR REPLACE keeps the existing comment, so a
                     // changed or removed one is reconciled separately
-                    if let Some(comment) = comment {
-                        push(
+                    let comment = comment.iter().map(|comment| {
+                        (
                             false,
                             Statement {
                                 label: label.clone(),
                                 sql: comment.clone(),
                                 fails_open: false,
                             },
-                        );
-                    }
-                    for alter in then {
-                        push(
+                        )
+                    });
+                    let then = then.iter().map(|alter| {
+                        (
                             alter.destructive,
                             Statement {
                                 label: alter
@@ -884,26 +942,61 @@ fn plan(
                                 sql: alter.sql.clone(),
                                 fails_open: alter.fails_open,
                             },
-                        );
+                        )
+                    });
+                    // a statement that calls a function that comes
+                    // later waits for it, as an in-place statement does
+                    let mut after = inherited;
+                    for (destructive, statement) in
+                        std::iter::once((false, replace))
+                            .chain(comment)
+                            .chain(then)
+                    {
+                        after = after.max(calls_later(
+                            &mut parser,
+                            &statement.sql,
+                            &functions,
+                            &sequences,
+                            position,
+                        ));
+                        if let Some((destructive, statement)) =
+                            wait(&mut waiting, after, destructive, statement)
+                        {
+                            push(destructive, statement);
+                        }
                     }
                     false
                 }
                 resolution => {
+                    // a statement that calls a function that comes
+                    // later waits for it, and so does the CREATE, as an
+                    // in-place statement does. The entries that depend
+                    // on a CREATE that waits also wait
+                    let mut after = inherited;
                     let mut sql = String::new();
                     match resolution {
                         Some(Resolution::Rebuild { before, drop }) => {
                             for alter in before {
-                                push(
-                                    true,
-                                    Statement {
-                                        label: alter
-                                            .label
-                                            .clone()
-                                            .unwrap_or_else(|| label.clone()),
-                                        sql: alter.sql.clone(),
-                                        fails_open: alter.fails_open,
-                                    },
-                                );
+                                after = after.max(calls_later(
+                                    &mut parser,
+                                    &alter.sql,
+                                    &functions,
+                                    &sequences,
+                                    position,
+                                ));
+                                let statement = Statement {
+                                    label: alter
+                                        .label
+                                        .clone()
+                                        .unwrap_or_else(|| label.clone()),
+                                    sql: alter.sql.clone(),
+                                    fails_open: alter.fails_open,
+                                };
+                                if let Some((destructive, statement)) =
+                                    wait(&mut waiting, after, true, statement)
+                                {
+                                    push(destructive, statement);
+                                }
                             }
                             sql.push_str(drop);
                         }
@@ -913,19 +1006,31 @@ fn plan(
                             }
                         }
                     }
+                    after = after.max(calls_later(
+                        &mut parser,
+                        &defn,
+                        &functions,
+                        &sequences,
+                        position,
+                    ));
+                    if let Some(later) = after {
+                        delayed.insert(entry.dump_id, later);
+                    }
                     sql.push_str(&defn);
                     if let Some(owner) = &owner {
                         sql.push_str(owner);
                     }
                     sql.push_str(&after_create(privileges, entry));
-                    push(
-                        true,
-                        Statement {
-                            label,
-                            sql,
-                            fails_open: false,
-                        },
-                    );
+                    let statement = Statement {
+                        label,
+                        sql,
+                        fails_open: false,
+                    };
+                    if let Some((destructive, statement)) =
+                        wait(&mut waiting, after, true, statement)
+                    {
+                        push(destructive, statement);
+                    }
                     true
                 }
             };
@@ -947,14 +1052,19 @@ fn plan(
                 )
         });
         if replaced {
-            push(
-                true,
-                Statement {
-                    label,
-                    sql: defn,
-                    fails_open: false,
-                },
-            );
+            if let Some(later) = inherited {
+                delayed.insert(entry.dump_id, later);
+            }
+            let statement = Statement {
+                label,
+                sql: defn,
+                fails_open: false,
+            };
+            if let Some((destructive, statement)) =
+                wait(&mut waiting, inherited, true, statement)
+            {
+                push(destructive, statement);
+            }
         }
     }
     for (destructive, statement) in waiting.into_values().flatten() {
@@ -989,6 +1099,26 @@ fn plan(
         resets: Vec::new(),
         dependents: dependents.labels.clone(),
     })
+}
+
+/// Put `statement` in `waiting` at the archive position `after`, or
+/// give it back when there is no position, to push it now
+fn wait(
+    waiting: &mut BTreeMap<usize, Vec<(bool, Statement)>>,
+    after: Option<usize>,
+    destructive: bool,
+    statement: Statement,
+) -> Option<(bool, Statement)> {
+    match after {
+        Some(later) => {
+            waiting
+                .entry(later)
+                .or_default()
+                .push((destructive, statement));
+            None
+        }
+        None => Some((destructive, statement)),
+    }
 }
 
 /// The items that own an archive entry: the entry's own item, or
@@ -3762,10 +3892,56 @@ mod tests {
         after: &[&str],
         alters: &[&str],
     ) -> Vec<String> {
+        let alters = alters
+            .iter()
+            .map(|sql| alter::Alter::new((*sql).to_string()))
+            .collect();
+        resolution_order_plan(
+            before,
+            after,
+            "CREATE TABLE test.t (id integer);\n",
+            Resolution::Statements(alters),
+        )
+    }
+
+    /// [`function_order_plan`] with `resolution` for the relation
+    /// `test.t`, which `defn` makes, and with `--allow-drop`. The
+    /// archive can also have the new function `test.a` (item 7), which
+    /// has a SQL-standard body, and a comment on the relation (named
+    /// `c`)
+    fn resolution_order_plan(
+        before: &[&str],
+        after: &[&str],
+        defn: &str,
+        resolution: Resolution,
+    ) -> Vec<String> {
         let mut dump = libpgdump::new("test", "UTF8", "18.0").expect("dump");
         let mut item_ids = HashMap::new();
-        let mut add = |dump: &mut libpgdump::Dump, name: &str| {
-            let (id, desc, tag, defn) = match name {
+        let mut add =
+            |dump: &mut libpgdump::Dump, name: &str, deps: &[i32]| {
+                if name == "c" {
+                    dump.add_entry(
+                        libpgdump::ObjectType::Comment,
+                        None,
+                        Some("TABLE t"),
+                        None,
+                        Some("COMMENT ON TABLE test.t IS 'c';\n"),
+                        None,
+                        None,
+                        deps,
+                    )
+                    .expect("add comment entry");
+                    return;
+                }
+                let (id, desc, tag, defn) = match name {
+                "a" => (
+                    7,
+                    libpgdump::ObjectType::Function,
+                    "a()".to_string(),
+                    "CREATE FUNCTION test.a() RETURNS integer LANGUAGE sql \
+                     RETURN 1;\n"
+                        .to_string(),
+                ),
                 "s" => (
                     3,
                     libpgdump::ObjectType::Sequence,
@@ -3798,22 +3974,22 @@ mod tests {
                     format!("CREATE FUNCTION test.{name}();\n"),
                 ),
             };
-            let dump_id = dump
-                .add_entry(
-                    desc,
-                    Some("test"),
-                    Some(&tag),
-                    None,
-                    Some(&defn),
-                    None,
-                    None,
-                    &[],
-                )
-                .expect("add entry");
-            item_ids.insert(dump_id, id);
-        };
+                let dump_id = dump
+                    .add_entry(
+                        desc,
+                        Some("test"),
+                        Some(&tag),
+                        None,
+                        Some(&defn),
+                        None,
+                        None,
+                        &[],
+                    )
+                    .expect("add entry");
+                item_ids.insert(dump_id, id);
+            };
         for name in before {
-            add(&mut dump, name);
+            add(&mut dump, name, &[]);
         }
         let table = dump
             .add_entry(
@@ -3821,14 +3997,14 @@ mod tests {
                 Some("test"),
                 Some("t"),
                 None,
-                Some("CREATE TABLE test.t (id integer);\n"),
+                Some(defn),
                 None,
                 None,
                 &[],
             )
             .expect("add table entry");
         for name in after {
-            add(&mut dump, name);
+            add(&mut dump, name, &[table]);
         }
         item_ids.insert(table, 0);
         let output = build::BuildOutput { dump, item_ids };
@@ -3841,6 +4017,7 @@ mod tests {
                 (4, Change::Added),
                 (5, Change::Added),
                 (6, Change::Added),
+                (7, Change::Added),
             ]),
             changed: BTreeMap::new(),
             removed: BTreeMap::new(),
@@ -3856,26 +4033,16 @@ mod tests {
             .map(Definition::Table)
             .expect("table deserializes"),
         );
-        let alters = alters
-            .iter()
-            .map(|sql| alter::Alter {
-                sql: (*sql).to_string(),
-                destructive: false,
-                label: None,
-                fails_open: false,
-                index_removal: false,
-                schema: None,
-                links: None,
-                unlinks: false,
-                deferred: false,
-            })
-            .collect();
-        let resolutions =
-            BTreeMap::from([(0, Resolution::Statements(alters))]);
+        let resolutions = BTreeMap::from([(0, resolution)]);
         let snapshot =
             libpgdump::new("test", "UTF8", "18.0").expect("new dump");
-        let args = match cli::Cli::parse_from(["pglifecycle", "deploy", "p"])
-            .action
+        let args = match cli::Cli::parse_from([
+            "pglifecycle",
+            "deploy",
+            "--allow-drop",
+            "p",
+        ])
+        .action
         {
             cli::Action::Deploy(deploy) => deploy,
             _ => unreachable!("parsed the deploy subcommand"),
@@ -4041,6 +4208,120 @@ mod tests {
                 alters[0],
                 alters[1],
                 "ALTER SEQUENCE test.o OWNED BY test.t.n;\n",
+            ]
+        );
+    }
+
+    /// A table, a view and a table with a default, which calls
+    /// `test.f()`, for [`resolution_order_plan`]
+    const TABLE: &str = "CREATE TABLE test.t (id integer);\n";
+    const VIEW: &str = "CREATE VIEW test.t AS SELECT test.f() AS id;\n";
+    const DEFAULT: &str =
+        "CREATE TABLE test.t (id integer DEFAULT test.f());\n";
+
+    /// A new column whose default calls a new function with a
+    /// SQL-standard body is added before the function, which can read
+    /// the column, and gets its default after it. A function with
+    /// another body does not need the column, thus the whole ADD
+    /// COLUMN waits for it
+    #[test]
+    fn new_column_defaults_wait_for_new_sql_body_functions() {
+        let add = |function: &str| {
+            Resolution::Statements(vec![alter::Alter {
+                default: Some((
+                    "ALTER TABLE test.t ADD COLUMN w integer;\n".into(),
+                    format!(
+                        "ALTER TABLE test.t ALTER COLUMN w SET DEFAULT \
+                         test.{function}();\n"
+                    ),
+                )),
+                ..alter::Alter::new(format!(
+                    "ALTER TABLE test.t ADD COLUMN w integer DEFAULT \
+                     test.{function}();\n"
+                ))
+            }])
+        };
+        assert_eq!(
+            resolution_order_plan(&[], &["a"], TABLE, add("a")),
+            [
+                "ALTER TABLE test.t ADD COLUMN w integer;\n",
+                "CREATE FUNCTION test.a() RETURNS integer LANGUAGE sql \
+                 RETURN 1;\n",
+                "ALTER TABLE test.t ALTER COLUMN w SET DEFAULT test.a();\n",
+            ]
+        );
+        assert_eq!(
+            resolution_order_plan(&[], &["f"], TABLE, add("f")),
+            [
+                "CREATE FUNCTION test.f();\n",
+                "ALTER TABLE test.t ADD COLUMN w integer DEFAULT \
+                 test.f();\n",
+            ]
+        );
+    }
+
+    /// A CREATE OR REPLACE, and the statements after it, wait for a
+    /// new function that they call and that comes later
+    #[test]
+    fn or_replace_statements_wait_for_new_functions() {
+        let resolution = Resolution::OrReplace {
+            comment: Some("COMMENT ON TABLE test.t IS 'x';\n".into()),
+            then: vec![alter::Alter::new(
+                "CREATE RULE r AS ON INSERT TO test.t DO INSTEAD \
+                 SELECT test.g();\n"
+                    .into(),
+            )],
+        };
+        assert_eq!(
+            resolution_order_plan(&[], &["f", "g"], VIEW, resolution),
+            [
+                "CREATE FUNCTION test.f();\n",
+                "CREATE OR REPLACE VIEW test.t AS SELECT test.f() AS id;\n",
+                "COMMENT ON TABLE test.t IS 'x';\n",
+                "CREATE FUNCTION test.g();\n",
+                "CREATE RULE r AS ON INSERT TO test.t DO INSTEAD \
+                 SELECT test.g();\n",
+            ]
+        );
+    }
+
+    /// The CREATE of a replaced object waits for a new function that
+    /// it calls and that comes later, and so do the entries that
+    /// depend on it. A statement before the drop of a rebuild waits for
+    /// the functions that it calls
+    #[test]
+    fn replaced_objects_wait_for_new_functions() {
+        assert_eq!(
+            resolution_order_plan(
+                &[],
+                &["c", "f"],
+                DEFAULT,
+                Resolution::Replace
+            ),
+            [
+                "CREATE FUNCTION test.f();\n",
+                "CREATE TABLE test.t (id integer DEFAULT test.f());\n",
+                "COMMENT ON TABLE test.t IS 'c';\n",
+            ]
+        );
+        let resolution = Resolution::Rebuild {
+            before: vec![alter::Alter::new(
+                "ALTER TABLE test.t ADD CONSTRAINT k \
+                 CHECK ((test.g() > 0));\n"
+                    .into(),
+            )],
+            drop: "DROP TABLE test.t;\n".into(),
+        };
+        assert_eq!(
+            resolution_order_plan(&["f"], &["c", "g"], DEFAULT, resolution),
+            [
+                "CREATE FUNCTION test.f();\n",
+                "CREATE FUNCTION test.g();\n",
+                "ALTER TABLE test.t ADD CONSTRAINT k \
+                 CHECK ((test.g() > 0));\n",
+                "DROP TABLE test.t;\n\
+                 CREATE TABLE test.t (id integer DEFAULT test.f());\n",
+                "COMMENT ON TABLE test.t IS 'c';\n",
             ]
         );
     }
