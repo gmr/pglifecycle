@@ -1115,9 +1115,12 @@ COMMENT ON SUBSCRIPTION gate_sub IS 'A subscription with no publisher';
 -- settings do not change what a session of the gates does: the
 -- search_path has the default schemas first, DateStyle is the default
 -- value, and the other names are custom settings or the default
--- tablespace.
+-- tablespace. The connection limit does not apply to the superuser of
+-- the gates. pg_dump writes it in the same entry as the settings.
 DO $$
 BEGIN
+    EXECUTE format('ALTER DATABASE %I CONNECTION LIMIT 50',
+                   current_database());
     EXECUTE format('ALTER DATABASE %I SET work_mem TO %L',
                    current_database(), '64MB');
     EXECUTE format('ALTER DATABASE %I SET search_path TO %L, %L, %L',
