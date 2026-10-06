@@ -82,6 +82,12 @@ pub(crate) struct Alter {
     /// A drop of the column or of its table drops the sequence, thus
     /// deploy runs it before all other statements
     pub unlinks: bool,
+    /// The statement adds a column with a default. These are the same
+    /// change as two statements: the ADD COLUMN with no default, and
+    /// the SET DEFAULT. deploy uses them when the default calls a new
+    /// function with a SQL-standard body that comes later, as that
+    /// function can read the column
+    pub default: Option<(String, String)>,
     /// The statement needs the in-place statements of other objects;
     /// deploy runs it after all in-place statements
     pub deferred: bool,
@@ -98,6 +104,7 @@ impl Alter {
             schema: None,
             links: None,
             unlinks: false,
+            default: None,
             deferred: false,
         }
     }
@@ -1143,10 +1150,7 @@ fn columns(
     let partitioned = repo.partition.is_some();
     for column in repo_columns {
         match db_columns.iter().find(|c| c.name == column.name) {
-            None => alters.push(Alter::new(format!(
-                "ALTER TABLE {table} ADD COLUMN {};\n",
-                build::render_table_column(column)
-            ))),
+            None => alters.push(add_column(table, column)),
             Some(existing) => {
                 let names = (&repo_names, &db_names);
                 if !alter_column(
@@ -1171,6 +1175,37 @@ fn columns(
         }
     }
     true
+}
+
+/// The ADD COLUMN of a new column. Its default can also come in a SET
+/// DEFAULT after the ADD COLUMN (see [`Alter::default`]). Without
+/// ONLY, the SET DEFAULT also changes the inheritance children, as the
+/// ADD COLUMN does
+fn add_column(table: &str, column: &Column) -> Alter {
+    let add = |column: &Column| {
+        format!(
+            "ALTER TABLE {table} ADD COLUMN {};\n",
+            build::render_table_column(column)
+        )
+    };
+    let default = column.default.as_ref().map(|default| {
+        let bare = Column {
+            default: None,
+            ..column.clone()
+        };
+        (
+            add(&bare),
+            format!(
+                "ALTER TABLE {table} ALTER COLUMN {} SET DEFAULT {};\n",
+                quote_ident(&column.name),
+                build::render_default(default)
+            ),
+        )
+    });
+    Alter {
+        default,
+        ..Alter::new(add(column))
+    }
 }
 
 /// The DROP NOT NULL statements of an inheritance child whose parents
@@ -2743,6 +2778,40 @@ mod tests {
             vec!["ALTER TABLE test.users ADD COLUMN nickname text;\n"]
         );
         assert!(!alters[0].destructive);
+        assert!(alters[0].default.is_none());
+    }
+
+    /// A new column with a default can also be added as two
+    /// statements: the ADD COLUMN with no default, then SET DEFAULT
+    #[test]
+    fn added_column_with_a_default_splits() {
+        let mut repo = base_table();
+        repo["columns"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "name": "n", "data_type": "integer", "nullable": false,
+                "default": "test.f()",
+            }));
+        let alters =
+            statements(table(&parse_table(repo), &parse_table(base_table())));
+        assert_eq!(
+            sql(&alters),
+            vec![
+                "ALTER TABLE test.users ADD COLUMN n integer NOT NULL \
+                 DEFAULT test.f();\n"
+            ]
+        );
+        assert_eq!(
+            alters[0].default,
+            Some((
+                "ALTER TABLE test.users ADD COLUMN n integer NOT NULL;\n"
+                    .to_string(),
+                "ALTER TABLE test.users ALTER COLUMN n SET DEFAULT \
+                 test.f();\n"
+                    .to_string(),
+            ))
+        );
     }
 
     #[test]
