@@ -262,9 +262,12 @@ reconciled in place where PostgreSQL can express it:
   domain has that name). PostgreSQL also adds the number when a
   constraint of another object in the schema has the name; give such
   a constraint a name in the project. The checks compare as a set, in
-  the order of their names. A base-type change, or another CHECK
-  constraint change, falls back. PostgreSQL checks the existing values
-  against a new check or NOT NULL, so the statement fails if a value
+  the order of their names. A new check with `not_valid: true` is
+  added `NOT VALID`, and a `NOT VALID` check that the project marks
+  valid is validated with `VALIDATE CONSTRAINT`. A base-type change,
+  or another CHECK constraint change, falls back. PostgreSQL checks
+  the existing values against a new check (if it is not `NOT VALID`),
+  a validated check or a NOT NULL, so the statement fails if a value
   does not satisfy it. `--allow-drop` does not gate this statement.
 - **Enum types** — `ALTER TYPE ... ADD VALUE` for appended values;
   reordering or removing values falls back.

@@ -2063,12 +2063,29 @@ fn sequence(repo: &Sequence, db: &Sequence) -> Resolution {
 }
 
 /// Domain reconciliation: SET/DROP DEFAULT, ADD CONSTRAINT of a new
-/// check (see [`added_domain_checks`]), the NOT NULL and a
+/// check (see [`added_domain_checks`]), VALIDATE CONSTRAINT of a NOT
+/// VALID check that the project has as valid, the NOT NULL and a
 /// comment delta in place. A base-type, collation, or other constraint
 /// change rebuilds. The two sides compare in the form of
 /// [`canonical_domain`].
 fn domain(repo: &Domain, db: &Domain) -> Resolution {
-    let (repo, db) = (&canonical_domain(repo), &canonical_domain(db));
+    let (repo, mut db) = (&canonical_domain(repo), canonical_domain(db));
+    // a NOT VALID check that the project has as valid, and otherwise
+    // the same, is validated, and then it is the same on the two sides
+    let mut validated = Vec::new();
+    for check in db.check_constraints.iter_mut().flatten() {
+        let valid = DomainConstraint {
+            not_valid: None,
+            ..check.clone()
+        };
+        if check.not_valid == Some(true)
+            && repo.check_constraints.iter().flatten().any(|c| *c == valid)
+        {
+            validated.extend(check.name.clone());
+            *check = valid;
+        }
+    }
+    let db = &db;
     // the name of the NOT NULL, if the domain has one
     let not_null = |domain: &Domain| {
         domain
@@ -2095,12 +2112,24 @@ fn domain(repo: &Domain, db: &Domain) -> Resolution {
     }
     let name = qualified(&repo.schema, &repo.name);
     let mut alters = Vec::new();
+    for check in validated {
+        alters.push(Alter::new(format!(
+            "ALTER DOMAIN {name} VALIDATE CONSTRAINT {};\n",
+            quote_ident(&check)
+        )));
+    }
     for check in added {
         if let (Some(check_name), Some(expression)) =
             (&check.name, &check.expression)
         {
+            let not_valid = if check.not_valid == Some(true) {
+                " NOT VALID"
+            } else {
+                ""
+            };
             alters.push(Alter::new(format!(
-                "ALTER DOMAIN {name} ADD CONSTRAINT {} CHECK ({expression});\n",
+                "ALTER DOMAIN {name} ADD CONSTRAINT {} \
+                 CHECK ({expression}){not_valid};\n",
                 quote_ident(check_name)
             )));
         }
@@ -4165,6 +4194,7 @@ mod tests {
             name: name.map(String::from),
             nullable: None,
             expression: Some(expression.to_string()),
+            not_valid: None,
         };
         let db: Domain = serde_json::from_value(serde_json::json!({
             "name": "d", "schema": "test", "owner": "postgres",
@@ -4202,6 +4232,44 @@ mod tests {
             Some(vec![check(Some("d_a"), "(VALUE > 1)")]);
         assert!(matches!(domain(&changed, &db), Resolution::Replace));
         assert!(matches!(domain(&db, &repo), Resolution::Replace));
+    }
+
+    /// A NOT VALID check that only the project has is added NOT VALID.
+    /// A check that is NOT VALID in the database and valid in the
+    /// project is validated in place. `not_valid: false` is the same as
+    /// no `not_valid`
+    #[test]
+    fn domain_not_valid_checks() {
+        let with = |constraints: serde_json::Value| -> Domain {
+            serde_json::from_value(serde_json::json!({
+                "name": "d", "schema": "test", "owner": "postgres",
+                "data_type": "integer", "check_constraints": constraints,
+            }))
+            .unwrap()
+        };
+        let none = with(serde_json::json!([]));
+        let not_valid = with(serde_json::json!([
+            {"name": "d_a", "expression": "(VALUE > 0)", "not_valid": true},
+        ]));
+        let valid = with(serde_json::json!([
+            {"name": "d_a", "expression": "(VALUE > 0)", "not_valid": false},
+        ]));
+        assert_eq!(
+            sql(&statements(domain(&not_valid, &none))),
+            vec![
+                "ALTER DOMAIN test.d ADD CONSTRAINT d_a CHECK ((VALUE > 0)) \
+                 NOT VALID;\n"
+            ]
+        );
+        assert_eq!(
+            sql(&statements(domain(&valid, &not_valid))),
+            vec!["ALTER DOMAIN test.d VALIDATE CONSTRAINT d_a;\n"]
+        );
+        assert!(matches!(
+            domain(&not_valid, &not_valid),
+            Resolution::Statements(ref alters) if alters.is_empty()
+        ));
+        assert!(matches!(domain(&not_valid, &valid), Resolution::Replace));
     }
 
     /// A CHECK with no name compares with the name that PostgreSQL
