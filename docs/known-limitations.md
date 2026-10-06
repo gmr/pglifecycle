@@ -121,12 +121,18 @@ These limits are new on this page:
   `--allow-drop`, the rebuild loses the data of the parent and of the
   partitions that are only bounds. Make the partition by hand, then
   `pull` the database.
-- **A statement that calls a function that the script makes later.**
-  Only the in-place statements of a table wait for a new function.
-  Other statements do not, for example a `CREATE OR REPLACE` or a
-  statement of a rebuild. Also, a new column with a default that calls
-  a new function, which uses that column, makes a loop. The script
-  then fails on apply. Deploy the function first, then the rest.
+- **A new column with a default that calls a new function.** When the
+  function has a SQL-standard body (`sql_body`), it can read the new
+  column, so `deploy` adds the column with no default, then makes the
+  function, then sets the default. Thus the rows that the table has
+  get NULL in the new column, not the default. With `nullable: false`,
+  the ADD COLUMN fails on a table that has rows. To give the rows a
+  value, add the column by hand and fill it, then deploy.
+- **A rebuild that calls a new function that reads the object.** The
+  drop and create of an object wait for a new function that they
+  call. When that function has a SQL-standard body that reads the
+  object, the function and the object need each other first, and the
+  script fails on apply. Deploy the function first, then the rest.
 - **An attached partition without the parent's NOT NULL.** When a
   hand-written partition file with `attached: true` does not have the
   NOT NULL of a parent column, `ATTACH PARTITION` fails. Give the
