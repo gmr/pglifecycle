@@ -114,6 +114,9 @@ fn object_identity(definition: &Definition) -> (String, String) {
                 identity_type(cast.target_type.as_deref().unwrap_or_default())
             ),
         ),
+        Definition::UserMapping(mapping) => {
+            (String::new(), canonical_user_mapping(mapping).name)
+        }
         // deploy splits a container into one for each object, which is
         // keyed by its kind and name (`alter::text_search::split`)
         Definition::TextSearch(container) => (
@@ -228,6 +231,10 @@ pub struct Diff {
     /// type. A sequence that a column owns is not in the set: its
     /// table's owner change changes it
     pub owner_changed: BTreeSet<usize>,
+    /// Added inventory item ids whose CREATE needs the DROP of an
+    /// object that only the database has: the plan gates the CREATE
+    /// with the DROP
+    pub gated: BTreeSet<usize>,
 }
 
 /// How deploy compares the objects of one type
@@ -384,12 +391,27 @@ pub fn diff(project: &Project, assembly: &Assembly) -> Diff {
         };
         items.insert(item.id, change);
     }
+    let gated = project
+        .inventory
+        .iter()
+        .filter(|item| items.get(&item.id) == Some(&Change::Added))
+        .filter(|item| match &item.definition {
+            Definition::OperatorClass(class) => {
+                super::alter::operator_class::needs_family_drop(
+                    class, &database,
+                )
+            }
+            _ => false,
+        })
+        .map(|item| item.id)
+        .collect();
     Diff {
         items,
         changed,
         removed: database,
         owned,
         owner_changed,
+        gated,
     }
 }
 
@@ -822,6 +844,11 @@ fn normalized(definition: &Definition) -> Value {
             );
             &canonical
         }
+        Definition::UserMapping(mapping) => {
+            canonical =
+                Definition::UserMapping(canonical_user_mapping(mapping));
+            &canonical
+        }
         // default privileges compare by the privileges they give, so
         // the same privileges declared two ways are not a change
         Definition::DefaultPrivileges(defaults) => {
@@ -849,6 +876,19 @@ fn canonical_query(query: &str) -> String {
     crate::pull::strip_trailing(formatted.as_deref().unwrap_or(query))
 }
 
+/// The user mapping with `PUBLIC` in upper case, as pull writes it.
+/// `PUBLIC` is a keyword in USER MAPPING, so `public` is the same
+/// mapping (see [`crate::utils::user_mapping_subject`]).
+fn canonical_user_mapping(
+    mapping: &crate::models::UserMapping,
+) -> crate::models::UserMapping {
+    let mut mapping = mapping.clone();
+    if mapping.name.eq_ignore_ascii_case("public") {
+        mapping.name = String::from("PUBLIC");
+    }
+    mapping
+}
+
 /// The domain with the type of each cast in its default in the form
 /// that PostgreSQL writes (see [`canonical_casts`]), and its CHECK
 /// constraints in the form of [`canonical_check`]. A NULL default is
@@ -859,7 +899,8 @@ fn canonical_query(query: &str) -> String {
 /// PostgreSQL cuts it or adds a number to it. A CHECK with no name has
 /// the name that PostgreSQL gives it (see [`Domain::with_check_names`]),
 /// because pg_dump writes the name of each CHECK, and the CHECKs come
-/// in the order of their names, as pg_dump writes them.
+/// in the order of their names, as pg_dump writes them. A CHECK has
+/// `not_valid` only when it is `true`.
 pub(crate) fn canonical_domain(domain: &Domain) -> Domain {
     let generated = domain.not_null_name();
     let mut domain = domain.with_check_names();
@@ -887,6 +928,8 @@ pub(crate) fn canonical_domain(domain: &Domain) -> Domain {
         if let Some(expression) = &mut check.expression {
             *expression = canonical_check(expression);
         }
+        // `false` is the default, the same as no value
+        check.not_valid = check.not_valid.filter(|v| *v);
     }
     domain
 }
@@ -4036,5 +4079,37 @@ mod tests {
         let project = tables_project(vec![repo_parent, repo_child]);
         let result = diff(&project, &assembly);
         assert_eq!(result.items[&1], Change::Changed);
+    }
+
+    /// pull writes the mapping for PUBLIC with the name `PUBLIC`. A
+    /// project that writes `public` gives the same mapping, so deploy
+    /// does not drop and make it again
+    #[test]
+    fn public_user_mapping_matches_in_any_case() {
+        let mapping = |name: &str| {
+            serde_json::from_value::<models::UserMapping>(serde_json::json!({
+                "name": name,
+                "servers": [{"name": "srv", "options": {"user": "u"}}],
+            }))
+            .expect("user mapping deserializes")
+        };
+        let project = Project {
+            name: String::from("test"),
+            superuser: String::from("postgres"),
+            default_schema: String::from("public"),
+            path: std::path::PathBuf::new(),
+            settings: Default::default(),
+            inventory: vec![models::Item {
+                id: 0,
+                desc: ObjectType::UserMapping,
+                definition: Definition::UserMapping(mapping("public")),
+                dependencies: BTreeSet::new(),
+            }],
+        };
+        let mut assembly = Assembly::default();
+        assembly.user_mappings = vec![mapping("PUBLIC")];
+        let result = diff(&project, &assembly);
+        assert_eq!(result.items[&0], Change::Unchanged);
+        assert!(result.removed.is_empty(), "{:?}", result.removed);
     }
 }
