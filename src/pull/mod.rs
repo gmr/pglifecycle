@@ -2920,8 +2920,22 @@ fn unwrap_body(body: &str) -> String {
         .to_string()
 }
 
-fn strip_trailing(formatted: &str) -> String {
-    formatted.trim_end_matches(';').trim_end().to_string()
+pub(crate) fn strip_trailing(formatted: &str) -> String {
+    formatted
+        .trim_end_matches(|c: char| c == ';' || c.is_whitespace())
+        .to_string()
+}
+
+/// The SQL (not PL/pgSQL) in the `pg_dump` style, as [`format_one`]
+/// formats it for deploy, or none on a formatting error or a
+/// [`FORMAT_TIMEOUT`] overrun. This writes no log record and no
+/// diagnostics: deploy then compares the text as it is.
+pub(crate) fn format_pg_dump(sql: &str) -> Option<String> {
+    let owned = sql.to_string();
+    run_with_timeout(FORMAT_TIMEOUT, move || {
+        libpgfmt::format(&owned, libpgfmt::style::Style::PgDump).ok()
+    })
+    .flatten()
 }
 
 /// Per-statement formatting budget. libpgfmt occasionally loops forever
@@ -3131,6 +3145,13 @@ mod tests {
             &[],
         )
         .expect("add_entry failed");
+    }
+
+    #[test]
+    fn strip_trailing_removes_space_before_and_after_semicolons() {
+        assert_eq!(strip_trailing("SELECT 1;\n"), "SELECT 1");
+        assert_eq!(strip_trailing("SELECT 1 ;\n ; "), "SELECT 1");
+        assert_eq!(strip_trailing("SELECT 1"), "SELECT 1");
     }
 
     fn fixture_dump() -> libpgdump::Dump {

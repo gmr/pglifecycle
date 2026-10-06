@@ -351,6 +351,11 @@
 //!     DOMAIN, before the function. No test-project type or domain
 //!     uses another, and no test-project CHECK calls a function, thus
 //!     its archive does not change.
+//! 86. A materialized view query that ends with `;` renders with no
+//!     `;` at the end, because the entry adds one. The Python wrote the
+//!     query as it is, thus the entry had `;;`, an empty statement
+//!     after the view. The test-project materialized view query ends
+//!     with `;`, thus its entry has one `;` less.
 //! 89. The `security_labels` of an object render as a `SECURITY
 //!     LABEL` entry after the object, with one `SECURITY LABEL FOR
 //!     provider ON ...` statement for each provider. The entry of the
@@ -1889,7 +1894,12 @@ impl Builder {
             create.push(tablespace.clone());
         }
         create.push("AS".into());
-        create.push(d.query.clone().unwrap_or_default());
+        // the entry adds the `;` (deviation 86)
+        let query = d.query.as_deref().unwrap_or_default();
+        create.push(match query.trim_end().strip_suffix(';') {
+            Some(query) => query.trim_end_matches(';').to_string(),
+            None => query.to_string(),
+        });
         let drop = vec![
             "DROP MATERIALIZED VIEW IF EXISTS".into(),
             self.item_name(item),

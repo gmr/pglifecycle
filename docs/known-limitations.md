@@ -68,16 +68,12 @@ These limits are already described:
 
 These limits are new on this page:
 
-- **The layout of a SQL function body.** `pull` formats a function
-  body with libpgfmt: `SELECT a, a;` becomes `SELECT a,` and `a;` on
-  two lines. A body with another layout gets a `CREATE OR REPLACE` on
-  each deploy.
-- **Materialized view queries.** `deploy` compares the `query` of a
-  materialized view as text. Write the query as `pull` writes it, with
-  no `;` at the end: with a `;`, the build writes `;;`.
-- **Dollar-quoted constants in expressions.** PostgreSQL writes
-  `$$a$$::text` as `'a'::text`. Write a string constant in single
-  quotes.
+- **Materialized view queries.** `deploy` formats the `query` of a
+  materialized view as `pull` does, so its layout and a `;` at the end
+  are not a change. But PostgreSQL also adds casts and parentheses to
+  the query (`name = 'x'` becomes `(name = 'x'::text)`). A query
+  without them is a change on each deploy. Write them as `pull` writes
+  them.
 - **Partitioned tables with mixed partitions.** When some partitions
   of a table are only bounds in the parent and others are files with
   `attached: true`, the parent's `ON ONLY` index is a change on each

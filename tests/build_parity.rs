@@ -103,6 +103,9 @@ const DEVIATIONS: &[(&str, &str, &str)] = &[
     // deviation 54: a domain CHECK with no name has no CONSTRAINT
     ("DOMAIN", "test", "bcp47_locale"),
     ("DOMAIN", "test", "email_address"),
+    // deviation 86: the query ends with `;`, which Python rendered as
+    // `;;`
+    ("MATERIALIZED VIEW", "test", "user_addresses"),
 ];
 
 /// Deviation 17: entries whose *drop* statement was corrected, with
@@ -306,6 +309,13 @@ const CORRECTED: &[(&str, &str, &str, &str)] = &[
         "test",
         "email_address",
         "CREATE DOMAIN test.email_address AS citext CHECK (value ~",
+    ),
+    // deviation 86: one `;` at the end, also asserted below
+    (
+        "MATERIALIZED VIEW",
+        "test",
+        "user_addresses",
+        "ON b.user_id = a.id;\n",
     ),
 ];
 
@@ -840,6 +850,20 @@ fn outside_items() -> Vec<Item> {
                 .unwrap(),
             ),
         ),
+        // deviation 86: a materialized view query with a `;` at the end
+        item(
+            29,
+            ObjectType::MaterializedView,
+            Definition::MaterializedView(
+                serde_json::from_value(serde_json::json!({
+                    "name": "ended_totals",
+                    "schema": "test",
+                    "owner": "postgres",
+                    "query": "SELECT 1 AS n;\n",
+                }))
+                .unwrap(),
+            ),
+        ),
     ]
 }
 
@@ -1202,6 +1226,16 @@ const OUTSIDE_CORRECTED: &[(&str, &str, &str, &str, &str)] = &[
          Space\");\n",
         "DROP INDEX IF EXISTS test.covered_w;\n",
     ),
+    // deviation 86: a materialized view query has no `;` at the end.
+    // The Python wrote the query as it is, thus a query with a `;`
+    // rendered `;;`, which is an empty statement after the view
+    (
+        "MATERIALIZED VIEW",
+        "test",
+        "ended_totals",
+        "CREATE MATERIALIZED VIEW test.ended_totals AS SELECT 1 AS n;\n",
+        "DROP MATERIALIZED VIEW IF EXISTS test.ended_totals;\n",
+    ),
 ];
 
 /// The settings of the database for deviation 48, its comment for
@@ -1395,6 +1429,15 @@ fn matches_python_build_output() {
             "{key:?} defn missing {fragment:?}: {defn}"
         );
     }
+
+    // deviation 86: the materialized view query has one `;` at the end
+    let key = entry_key("MATERIALIZED VIEW", "test", "user_addresses");
+    let defn = rust_tuples
+        .iter()
+        .find(|(k, ..)| k == &key)
+        .map(|(_, _, defn, ..)| defn.as_str())
+        .unwrap();
+    assert!(defn.ends_with("ON b.user_id = a.id;\n"), "{defn}");
 
     // comments Python lost to the text search tag bug
     for (tag, comment) in RECOVERED_COMMENTS {
