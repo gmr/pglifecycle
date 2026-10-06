@@ -228,6 +228,10 @@ pub struct Diff {
     /// type. A sequence that a column owns is not in the set: its
     /// table's owner change changes it
     pub owner_changed: BTreeSet<usize>,
+    /// Added inventory item ids whose CREATE needs the DROP of an
+    /// object that only the database has: the plan gates the CREATE
+    /// with the DROP
+    pub gated: BTreeSet<usize>,
 }
 
 /// How deploy compares the objects of one type
@@ -384,12 +388,27 @@ pub fn diff(project: &Project, assembly: &Assembly) -> Diff {
         };
         items.insert(item.id, change);
     }
+    let gated = project
+        .inventory
+        .iter()
+        .filter(|item| items.get(&item.id) == Some(&Change::Added))
+        .filter(|item| match &item.definition {
+            Definition::OperatorClass(class) => {
+                super::alter::operator_class::needs_family_drop(
+                    class, &database,
+                )
+            }
+            _ => false,
+        })
+        .map(|item| item.id)
+        .collect();
     Diff {
         items,
         changed,
         removed: database,
         owned,
         owner_changed,
+        gated,
     }
 }
 

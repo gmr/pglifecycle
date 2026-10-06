@@ -23,7 +23,8 @@
 //! from the family in place, gated by `--allow-drop`. When no project
 //! class that the database has is in the implied family, the create of
 //! a class uses the family, and fails on a member in its slots. Thus
-//! the plan drops such a family when it has members.
+//! the plan drops such a family when it has members, and gates the
+//! create of the class with that drop.
 //!
 //! An ADD of a class member in the slot of a member that the project
 //! family of the class drops is gated with that DROP.
@@ -470,6 +471,16 @@ fn family_key(class: &OperatorClass) -> ObjectKey {
         schema,
         name: format!("{family} USING {}", class.method),
     }
+}
+
+/// The create of `class` needs the drop of its implied family: [`align`]
+/// keeps that family in `removed` only when it has members and no
+/// project class that the database has is in it
+pub(crate) fn needs_family_drop(
+    class: &OperatorClass,
+    removed: &BTreeMap<ObjectKey, Definition>,
+) -> bool {
+    removed.contains_key(&family_key(&canonical_class(class)))
 }
 
 /// The key of a class, from the class
@@ -1303,8 +1314,11 @@ mod tests {
         );
         align(&project, &mut database);
         assert!(database.contains_key(&family_key));
+        // the create of the class is gated with the drop
+        assert!(needs_family_drop(&repo, &database));
         align(&project, &mut empty);
         assert!(empty.is_empty());
+        assert!(!needs_family_drop(&repo, &empty));
     }
 
     /// The project family drops a member, and the class adds a member

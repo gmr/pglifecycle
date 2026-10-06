@@ -676,8 +676,10 @@ fn plan(
                 }
                 None => defn,
             };
+            // a CREATE that needs the DROP of a database-only object,
+            // and its child entries, are withheld with the DROP
             push(
-                false,
+                owners.iter().any(|id| diff.gated.contains(id)),
                 Statement {
                     label: label.clone(),
                     sql: format!(
@@ -2082,6 +2084,7 @@ mod tests {
             removed: BTreeMap::new(),
             owned: BTreeSet::new(),
             owner_changed: BTreeSet::new(),
+            gated: BTreeSet::new(),
         };
         diff.removed
             .insert(dep_key.clone(), Definition::Function(dep_fn));
@@ -2441,6 +2444,7 @@ mod tests {
                         .collect(),
                     owned: BTreeSet::new(),
                     owner_changed: BTreeSet::new(),
+                    gated: BTreeSet::new(),
                 };
                 plan(
                     &diff,
@@ -2526,6 +2530,7 @@ mod tests {
             removed: BTreeMap::new(),
             owned: BTreeSet::new(),
             owner_changed: BTreeSet::new(),
+            gated: BTreeSet::new(),
         };
         diff.removed.insert(key.clone(), definition);
         let mut snapshot =
@@ -2600,6 +2605,7 @@ mod tests {
             removed: BTreeMap::new(),
             owned: BTreeSet::new(),
             owner_changed: BTreeSet::new(),
+            gated: BTreeSet::new(),
         };
         diff.items.insert(0, Change::Changed);
         diff.changed
@@ -2683,6 +2689,7 @@ mod tests {
             removed: BTreeMap::new(),
             owned: BTreeSet::new(),
             owner_changed: BTreeSet::new(),
+            gated: BTreeSet::new(),
         };
         diff.items.insert(0, Change::Changed);
         diff.items.insert(1, Change::Added);
@@ -2782,6 +2789,7 @@ mod tests {
             removed: BTreeMap::new(),
             owned: BTreeSet::new(),
             owner_changed: BTreeSet::new(),
+            gated: BTreeSet::new(),
         };
         diff.items.insert(0, Change::Changed);
         diff.items.insert(1, Change::Added);
@@ -3295,6 +3303,7 @@ mod tests {
             removed: BTreeMap::new(),
             owned: BTreeSet::from([0, 1]),
             owner_changed: BTreeSet::from([1]),
+            gated: BTreeSet::new(),
         };
         let snapshot =
             libpgdump::new("test", "UTF8", "18.0").expect("new dump");
@@ -3406,6 +3415,7 @@ mod tests {
                 removed: BTreeMap::new(),
                 owned: BTreeSet::from([0, 1]),
                 owner_changed: BTreeSet::from([0, 1]),
+                gated: BTreeSet::new(),
             };
             let resolutions = BTreeMap::from([(
                 0,
@@ -3511,6 +3521,7 @@ mod tests {
                 removed: BTreeMap::new(),
                 owned: BTreeSet::new(),
                 owner_changed: BTreeSet::new(),
+                gated: BTreeSet::new(),
             };
             let resolutions = BTreeMap::from([
                 (0, alter::resolve(&sequence(Some(column)), &sequence(None))),
@@ -3590,6 +3601,7 @@ mod tests {
                 removed: BTreeMap::new(),
                 owned: BTreeSet::new(),
                 owner_changed: BTreeSet::new(),
+                gated: BTreeSet::new(),
             };
             plan(
                 &diff,
@@ -3717,6 +3729,7 @@ mod tests {
             removed: BTreeMap::new(),
             owned: BTreeSet::new(),
             owner_changed: BTreeSet::new(),
+            gated: BTreeSet::new(),
         };
         diff.changed.insert(
             0,
@@ -4044,6 +4057,7 @@ mod tests {
             removed: BTreeMap::new(),
             owned: BTreeSet::new(),
             owner_changed: BTreeSet::new(),
+            gated: BTreeSet::new(),
         };
         let mut dump =
             libpgdump::new("test", "UTF8", "18.0").expect("new dump");
@@ -4100,6 +4114,7 @@ mod tests {
             removed: BTreeMap::new(),
             owned: BTreeSet::new(),
             owner_changed: BTreeSet::new(),
+            gated: BTreeSet::new(),
         };
         let mut dump =
             libpgdump::new("test", "UTF8", "18.0").expect("new dump");
@@ -4283,6 +4298,7 @@ mod tests {
             removed: BTreeMap::new(),
             owned: BTreeSet::new(),
             owner_changed: BTreeSet::new(),
+            gated: BTreeSet::new(),
         };
         let mut limits = pgdump::ReadLimits {
             role: "Gate Reader".into(),
@@ -4360,6 +4376,7 @@ mod tests {
             removed: BTreeMap::new(),
             owned: BTreeSet::new(),
             owner_changed: BTreeSet::new(),
+            gated: BTreeSet::new(),
         };
         let mut output = build::assemble(&project).expect("assemble");
         output.dump.sort_entries();

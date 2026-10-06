@@ -27,7 +27,8 @@
 # 8. An ADD of a class member in the slot of a member that the project
 #    family of the class drops is withheld with the drop.
 # 9. A new class whose implied family the database has, with a member
-#    and no class: the family is dropped first, only with --allow-drop.
+#    and no class: the family is dropped first, and the class is made,
+#    only with --allow-drop.
 
 # $1 is a query that must return t, $2 says what the step checks
 expect_opclass() {
@@ -413,7 +414,8 @@ converges"
 
 # a new class with no family, where the database has its implied family
 # with a member and no class: the create of the class fails on the
-# member, so the plan drops the family first, only with --allow-drop
+# member, so the plan drops the family first, and makes the class, only
+# with --allow-drop
 psql -d "${TARGET_DB}" -q -v ON_ERROR_STOP=1 <<'SQL'
 CREATE OPERATOR FAMILY test.gate_new_ops USING hash;
 ALTER OPERATOR FAMILY test.gate_new_ops USING hash
@@ -429,7 +431,14 @@ cat >> "${WORKDIR}/project/operator_classes/test.yaml" <<'YAML'
   functions:
   - {support: 1, function: hashint4(integer)}
 YAML
-expect_opclass_withheld 1 "the drop of the implied family was not withheld"
+expect_opclass_withheld 2 "the drop of the implied family was not withheld \
+with the create of the class"
+if ! psql -d "${TARGET_DB}" -q -v ON_ERROR_STOP=1 \
+        -f "${WORKDIR}/withheld.sql"; then
+    echo "Convergence gate FAILED: the script without --allow-drop" \
+        "does not run" >&2
+    exit 1
+fi
 ./target/debug/pglifecycle deploy --apply --allow-drop -d "${TARGET_DB}" \
     "${WORKDIR}/project"
 expect_opclass "SELECT EXISTS (SELECT FROM pg_opclass
