@@ -110,6 +110,8 @@ pub struct Table {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub column_defaults: Option<Vec<ColumnDefault>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub column_settings: Option<Vec<ColumnSetting>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub indexes: Option<Vec<Index>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub primary_key: Option<ConstraintColumns>,
@@ -532,6 +534,21 @@ pub struct Column {
 pub struct ColumnDefault {
     pub column: String,
     pub default: Value,
+}
+
+/// The statistics target and the storage of a column the table does
+/// not declare locally: an inheritance child has no column entry for
+/// a column it inherits, so pg_dump writes these settings as a
+/// separate `ALTER TABLE ONLY child ALTER COLUMN col SET STATISTICS
+/// ...` or `SET STORAGE ...`
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ColumnSetting {
+    pub column: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub statistics: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub storage: Option<String>,
 }
 
 /// The parts of a column's NOT NULL constraint that `nullable: false`
@@ -1030,6 +1047,7 @@ impl Table {
             || self.partition.is_some()
             || self.partitions.is_some()
             || self.storage_parameters.is_some()
+            || self.column_settings.is_some()
             || self.tablespace.is_some()
             || self.access_method.is_some()
     }
@@ -1348,6 +1366,23 @@ pub struct Trigger {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A partition with only settings of inherited columns keeps them:
+    /// it stays a table of its own and does not fold into its parent
+    #[test]
+    fn column_settings_are_own_partition_properties() {
+        let mut table: Table = serde_json::from_value(serde_json::json!({
+            "name": "p1", "schema": "s", "owner": "o",
+        }))
+        .unwrap();
+        assert!(!table.has_own_partition_properties());
+        table.column_settings = Some(vec![ColumnSetting {
+            column: "v".into(),
+            statistics: Some(300),
+            storage: None,
+        }]);
+        assert!(table.has_own_partition_properties());
+    }
 
     /// PostgreSQL makes a column of the primary key and an identity
     /// column NOT NULL, and pull records `nullable: false` for each. A

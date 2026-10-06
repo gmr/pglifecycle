@@ -36,8 +36,8 @@ use crate::deploy::diff::{
 };
 use crate::models::{
     CheckConstraint, Column, ColumnDefault, ColumnGenerated, ColumnNotNull,
-    Definition, Domain, DomainConstraint, ExcludeConstraint, Extension,
-    ForeignDataWrapper, ForeignKey, Function, GeneratedKind, Index,
+    ColumnSetting, Definition, Domain, DomainConstraint, ExcludeConstraint,
+    Extension, ForeignDataWrapper, ForeignKey, Function, GeneratedKind, Index,
     NotNullConstraint, Policy, ReplicaIdentity, Rule, Schema, Sequence,
     SequenceOptions, Server, Table, Trigger, Type, UserMapping, View,
     ViewColumn,
@@ -662,6 +662,7 @@ fn table_in(repo: &Table, db: &Table, groups: &IndexGroups) -> Resolution {
     {
         return Resolution::Replace;
     }
+    column_settings(&name, repo, db, &mut alters);
     indexes(&name, repo, db, groups, &mut alters);
     rules(
         &name,
@@ -1426,6 +1427,62 @@ fn alter_column(
         &db.comment,
     );
     true
+}
+
+/// The statistics target and the storage of inherited columns, keyed
+/// on the column and set in place with `ALTER TABLE ONLY`, as pg_dump
+/// writes them. A setting the repo no longer states goes back to its
+/// default: -1 for the statistics target, and DEFAULT, the storage of
+/// the column's type, for the storage.
+fn column_settings(
+    table: &str,
+    repo: &Table,
+    db: &Table,
+    alters: &mut Vec<Alter>,
+) {
+    let wanted = repo.column_settings.as_deref().unwrap_or_default();
+    let existing = db.column_settings.as_deref().unwrap_or_default();
+    let find = |settings: &[ColumnSetting], column: &str| {
+        settings.iter().find(|s| s.column == column).cloned()
+    };
+    let columns = existing.iter().chain(wanted).map(|s| s.column.as_str());
+    let mut seen = std::collections::BTreeSet::new();
+    for column in columns.filter(|column| seen.insert(*column)) {
+        let empty = ColumnSetting {
+            column: column.to_string(),
+            statistics: None,
+            storage: None,
+        };
+        let repo = find(wanted, column).unwrap_or_else(|| empty.clone());
+        let db = find(existing, column).unwrap_or(empty);
+        let prefix = format!(
+            "ALTER TABLE ONLY {table} ALTER COLUMN {}",
+            quote_ident(column)
+        );
+        // compare the effective values: an absent setting is the
+        // default, as an explicit -1 or DEFAULT is
+        let statistics = repo.statistics.unwrap_or(-1);
+        if statistics != db.statistics.unwrap_or(-1) {
+            alters.push(Alter::new(format!(
+                "{prefix} SET STATISTICS {statistics};\n"
+            )));
+        }
+        let storage = repo.storage.as_deref().unwrap_or("DEFAULT");
+        if storage != db.storage.as_deref().unwrap_or("DEFAULT") {
+            alters.push(Alter::new(format!(
+                "{prefix} SET STORAGE {storage};\n"
+            )));
+        }
+    }
+}
+
+/// Whether the settings of the inherited columns differ, compared by
+/// column as [`column_settings`] compares them: the order of the
+/// entries is not a difference
+fn column_settings_differ(repo: &Table, db: &Table) -> bool {
+    let mut alters = Vec::new();
+    column_settings("", repo, db, &mut alters);
+    !alters.is_empty()
 }
 
 /// Whether a column's generation is absent or an identity, the two
@@ -2418,6 +2475,7 @@ fn foreign_table(repo: &Table, db: &Table) -> Resolution {
         || repo.check_constraints != db.check_constraints
         || repo.not_null_constraints != db.not_null_constraints
         || repo.column_defaults != db.column_defaults
+        || column_settings_differ(repo, db)
     {
         return Resolution::Replace;
     }
@@ -4999,6 +5057,25 @@ mod tests {
     }
 
     #[test]
+    fn foreign_table_column_settings_order_is_not_replace() {
+        let mut repo =
+            foreign_table_value(serde_json::json!({"table_name": "t"}), None);
+        let mut db = repo.clone();
+        repo["column_settings"] = serde_json::json!([
+            {"column": "a", "statistics": 500},
+            {"column": "b", "storage": "EXTERNAL"},
+        ]);
+        db["column_settings"] = serde_json::json!([
+            {"column": "b", "storage": "EXTERNAL"},
+            {"column": "a", "statistics": 500},
+        ]);
+        let (repo, mut db) = (parse_table(repo), parse_table(db));
+        assert!(matches!(table(&repo, &db), Resolution::Statements(_)));
+        db.column_settings.as_mut().unwrap()[1].statistics = Some(100);
+        assert!(matches!(table(&repo, &db), Resolution::Replace));
+    }
+
+    #[test]
     fn foreign_table_server_change_replaces() {
         let repo = parse_table(foreign_table_value(
             serde_json::json!({"table_name": "t"}),
@@ -5416,6 +5493,41 @@ mod tests {
                  (n_distinct_inherited);\n",
                 "ALTER TABLE ONLY test.users ALTER COLUMN email SET \
                  (n_distinct=100);\n",
+            ]
+        );
+        assert!(alters.iter().all(|a| !a.destructive));
+    }
+
+    /// The settings of an inherited column reconcile per column through
+    /// `ALTER TABLE ONLY`; a setting the repo removed goes back to its
+    /// default, and a setting with no value, or with the default value,
+    /// is the same as none
+    #[test]
+    fn column_settings_reconcile_by_column() {
+        let mut repo = base_table();
+        repo["column_settings"] = serde_json::json!([
+            {"column": "a", "statistics": 500},
+            {"column": "b", "storage": "EXTERNAL"},
+            {"column": "c"},
+            {"column": "e", "statistics": -1, "storage": "DEFAULT"},
+        ]);
+        let mut db = base_table();
+        db["column_settings"] = serde_json::json!([
+            {"column": "a", "statistics": 100, "storage": "MAIN"},
+            {"column": "d", "statistics": 50},
+        ]);
+        let alters = statements(table(&parse_table(repo), &parse_table(db)));
+        assert_eq!(
+            sql(&alters),
+            vec![
+                "ALTER TABLE ONLY test.users ALTER COLUMN a SET \
+                 STATISTICS 500;\n",
+                "ALTER TABLE ONLY test.users ALTER COLUMN a SET STORAGE \
+                 DEFAULT;\n",
+                "ALTER TABLE ONLY test.users ALTER COLUMN d SET \
+                 STATISTICS -1;\n",
+                "ALTER TABLE ONLY test.users ALTER COLUMN b SET STORAGE \
+                 EXTERNAL;\n",
             ]
         );
         assert!(alters.iter().all(|a| !a.destructive));

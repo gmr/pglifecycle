@@ -31,10 +31,6 @@ the project without these entries. See
   object. A security label on a column of a view or of a materialized
   view also goes there. Use `--no-security-labels` to leave the labels
   out of the dump.
-- **Column settings on an inheritance child.** `ALTER TABLE ONLY child
-  ALTER COLUMN c SET STATISTICS` (or `SET STORAGE`) on a column that
-  the child inherits puts the table entry in `remaining.yaml`. Set the
-  value by hand after the restore or the deploy.
 
 ## Build
 

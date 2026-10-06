@@ -169,6 +169,26 @@ column_defaults:
     default: CURRENT_TIMESTAMP
 ```
 
+- A column's statistics target and storage belong on the column
+  (`statistics:` and `storage:`). For an inherited column, they live at
+  the table level under `column_settings:`, which `build` emits as
+  `ALTER TABLE ONLY <table> ALTER COLUMN <column> SET STATISTICS ...`
+  and `SET STORAGE ...` the way `pg_dump` writes them. When you remove
+  a setting, `deploy` sets the statistics target to `-1` and the
+  storage to `DEFAULT`, the storage of the column's type:
+
+```yaml
+---
+name: audit_events_archive
+schema: test
+parents:
+  - test.audit_events
+column_settings:
+  - column: detail
+    statistics: 500
+    storage: EXTERNAL
+```
+
 - Row-level security lives on the table. `row_level_security` states
   whether it is enabled and forced, and `policies` lists the policies.
   Each policy keeps only what differs from `CREATE POLICY`'s defaults:
