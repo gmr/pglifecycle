@@ -55,6 +55,7 @@ pub(crate) mod cast;
 pub(crate) mod names;
 pub(crate) mod operator;
 pub(crate) mod operator_class;
+pub(crate) mod security_label;
 pub(crate) mod transform;
 
 /// One reconciliation statement
@@ -82,6 +83,12 @@ pub(crate) struct Alter {
     /// A drop of the column or of its table drops the sequence, thus
     /// deploy runs it before all other statements
     pub unlinks: bool,
+    /// The statement adds a column with a default. These are the same
+    /// change as two statements: the ADD COLUMN with no default, and
+    /// the SET DEFAULT. deploy uses them when the default calls a new
+    /// function with a SQL-standard body that comes later, as that
+    /// function can read the column
+    pub default: Option<(String, String)>,
     /// The statement needs the in-place statements of other objects;
     /// deploy runs it after all in-place statements
     pub deferred: bool,
@@ -98,6 +105,7 @@ impl Alter {
             schema: None,
             links: None,
             unlinks: false,
+            default: None,
             deferred: false,
         }
     }
@@ -225,8 +233,41 @@ pub(crate) fn resolve(repo: &Definition, database: &Definition) -> Resolution {
 
 /// [`resolve`], with the index groups that the plan rebuilds and the
 /// members that the database keeps for each operator class in its
-/// family
+/// family. The security labels change after the other statements (see
+/// [`security_label`]); a drop and a create makes them again from the
+/// entries of the build.
 pub(crate) fn resolve_with(
+    repo: &Definition,
+    database: &Definition,
+    groups: &IndexGroups,
+    families: &operator_class::Families,
+) -> Resolution {
+    let labels = security_label::alters(repo, database);
+    if labels.is_empty() {
+        return resolve_object(repo, database, groups, families);
+    }
+    let repo = security_label::without(repo);
+    let database = security_label::without(database);
+    let resolution = if super::diff::same(&repo, &database) {
+        Resolution::Statements(Vec::new())
+    } else {
+        resolve_object(&repo, &database, groups, families)
+    };
+    match resolution {
+        Resolution::Statements(mut alters) => {
+            alters.extend(labels);
+            Resolution::Statements(alters)
+        }
+        Resolution::OrReplace { comment, mut then } => {
+            then.extend(labels);
+            Resolution::OrReplace { comment, then }
+        }
+        other => other,
+    }
+}
+
+/// [`resolve_with`] for all but the security labels
+fn resolve_object(
     repo: &Definition,
     database: &Definition,
     groups: &IndexGroups,
@@ -250,20 +291,10 @@ pub(crate) fn resolve_with(
         // function first
         (Definition::Function(repo), Definition::Function(db)) => {
             if replaceable(repo, db) {
-                // a name that carries its argument types keeps them,
-                // and a name with no argument types, such as `f(x)`
-                // with parameters, is one identifier
-                let bare = routine_base_name(&repo.name, &repo.parameters);
-                let name = if bare == repo.name {
-                    quote_ident(bare)
-                } else {
-                    quote_routine_name(&repo.name)
-                };
-                let target = format!("{}.{name}", quote_ident(&repo.schema));
                 Resolution::OrReplace {
                     comment: comment_delta(
                         "FUNCTION",
-                        &target,
+                        &function_target(repo),
                         &repo.comment,
                         &db.comment,
                     ),
@@ -331,6 +362,19 @@ pub(crate) fn resolve_with(
         }
         _ => Resolution::Replace,
     }
+}
+
+/// The name that `COMMENT ON FUNCTION` gives a function. A name that
+/// carries its argument types keeps them, and a name with no argument
+/// types, such as `f(x)` with parameters, is one identifier
+fn function_target(function: &Function) -> String {
+    let bare = routine_base_name(&function.name, &function.parameters);
+    let name = if bare == function.name {
+        quote_ident(bare)
+    } else {
+        quote_routine_name(&function.name)
+    };
+    format!("{}.{name}", quote_ident(&function.schema))
 }
 
 fn qualified(schema: &str, name: &str) -> String {
@@ -1069,10 +1113,7 @@ fn columns(
     let partitioned = repo.partition.is_some();
     for column in repo_columns {
         match db_columns.iter().find(|c| c.name == column.name) {
-            None => alters.push(Alter::new(format!(
-                "ALTER TABLE {table} ADD COLUMN {};\n",
-                build::render_table_column(column)
-            ))),
+            None => alters.push(add_column(table, column)),
             Some(existing) => {
                 let names = (&repo_names, &db_names);
                 if !alter_column(
@@ -1097,6 +1138,37 @@ fn columns(
         }
     }
     true
+}
+
+/// The ADD COLUMN of a new column. Its default can also come in a SET
+/// DEFAULT after the ADD COLUMN (see [`Alter::default`]). Without
+/// ONLY, the SET DEFAULT also changes the inheritance children, as the
+/// ADD COLUMN does
+fn add_column(table: &str, column: &Column) -> Alter {
+    let add = |column: &Column| {
+        format!(
+            "ALTER TABLE {table} ADD COLUMN {};\n",
+            build::render_table_column(column)
+        )
+    };
+    let default = column.default.as_ref().map(|default| {
+        let bare = Column {
+            default: None,
+            ..column.clone()
+        };
+        (
+            add(&bare),
+            format!(
+                "ALTER TABLE {table} ALTER COLUMN {} SET DEFAULT {};\n",
+                quote_ident(&column.name),
+                build::render_default(default)
+            ),
+        )
+    });
+    Alter {
+        default,
+        ..Alter::new(add(column))
+    }
 }
 
 /// The DROP NOT NULL statements of an inheritance child whose parents
@@ -2669,6 +2741,40 @@ mod tests {
             vec!["ALTER TABLE test.users ADD COLUMN nickname text;\n"]
         );
         assert!(!alters[0].destructive);
+        assert!(alters[0].default.is_none());
+    }
+
+    /// A new column with a default can also be added as two
+    /// statements: the ADD COLUMN with no default, then SET DEFAULT
+    #[test]
+    fn added_column_with_a_default_splits() {
+        let mut repo = base_table();
+        repo["columns"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "name": "n", "data_type": "integer", "nullable": false,
+                "default": "test.f()",
+            }));
+        let alters =
+            statements(table(&parse_table(repo), &parse_table(base_table())));
+        assert_eq!(
+            sql(&alters),
+            vec![
+                "ALTER TABLE test.users ADD COLUMN n integer NOT NULL \
+                 DEFAULT test.f();\n"
+            ]
+        );
+        assert_eq!(
+            alters[0].default,
+            Some((
+                "ALTER TABLE test.users ADD COLUMN n integer NOT NULL;\n"
+                    .to_string(),
+                "ALTER TABLE test.users ALTER COLUMN n SET DEFAULT \
+                 test.f();\n"
+                    .to_string(),
+            ))
+        );
     }
 
     #[test]
@@ -4887,6 +4993,7 @@ mod tests {
             statistics: None,
             options: None,
             comment: None,
+            security_labels: None,
         }]);
         assert!(matches!(table(&repo, &db), Resolution::Statements(_)));
     }

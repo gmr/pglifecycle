@@ -102,6 +102,10 @@ pub struct Function {
     pub link_symbol: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
+    /// Security labels (`SECURITY LABEL FOR provider ON ...`), as
+    /// a label for each provider
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub security_labels: Option<super::SecurityLabels>,
 }
 
 impl Function {
@@ -176,6 +180,10 @@ pub struct Procedure {
     pub link_symbol: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
+    /// Security labels (`SECURITY LABEL FOR provider ON ...`), as
+    /// a label for each provider
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub security_labels: Option<super::SecurityLabels>,
 }
 
 impl Procedure {
@@ -209,6 +217,7 @@ impl Procedure {
             object_file: self.object_file.clone(),
             link_symbol: self.link_symbol.clone(),
             comment: self.comment.clone(),
+            security_labels: self.security_labels.clone(),
         }
     }
 
@@ -230,6 +239,7 @@ impl Procedure {
             object_file: function.object_file,
             link_symbol: function.link_symbol,
             comment: function.comment,
+            security_labels: function.security_labels,
         }
     }
 

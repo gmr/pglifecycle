@@ -356,6 +356,15 @@
 //!     query as it is, thus the entry had `;;`, an empty statement
 //!     after the view. The test-project materialized view query ends
 //!     with `;`, thus its entry has one `;` less.
+//! 89. The `security_labels` of an object render as a `SECURITY
+//!     LABEL` entry after the object, with one `SECURITY LABEL FOR
+//!     provider ON ...` statement for each provider. The entry of the
+//!     database has the tag `DATABASE name`, as pg_dump writes it, and
+//!     pg_restore restores it only with `--create` (see 58). A user or
+//!     a group is named as a `ROLE`, because the statement has no
+//!     `USER` or `GROUP` form. The Python had no place for security
+//!     labels. The test-project has none, thus its archive does not
+//!     change.
 //! 92. A domain CHECK with `not_valid: true` renders as its own `CHECK
 //!     CONSTRAINT` entry after the domain, `ALTER DOMAIN d ADD
 //!     CONSTRAINT c CHECK (...) NOT VALID`, as pg_dump writes it. Only
@@ -662,6 +671,28 @@ impl Builder {
         no_owner: bool,
         comment_target: Option<String>,
     ) -> Result<(), String> {
+        let label_target = comment_target.clone();
+        self.add_item_with_targets(
+            item,
+            defn,
+            drop_stmt,
+            no_owner,
+            comment_target,
+            label_target,
+        )
+    }
+
+    /// Like [`add_item_with_comment_target`], but with a different
+    /// object reference for the `SECURITY LABEL` statements
+    fn add_item_with_targets(
+        &mut self,
+        item: &Item,
+        defn: Vec<String>,
+        drop_stmt: Vec<String>,
+        no_owner: bool,
+        comment_target: Option<String>,
+        label_target: Option<String>,
+    ) -> Result<(), String> {
         let namespace =
             item.definition.schema().unwrap_or_default().to_string();
         let tag = item.definition.name();
@@ -693,6 +724,17 @@ impl Builder {
                 comment_target,
             )?;
         }
+        if let Some(labels) = item.definition.security_labels() {
+            self.add_security_labels(
+                item.desc.as_str(),
+                &namespace,
+                &tag,
+                &owner,
+                dump_id,
+                labels,
+                label_target,
+            )?;
+        }
         Ok(())
     }
 
@@ -711,30 +753,8 @@ impl Builder {
         comment: &str,
         target: Option<String>,
     ) -> Result<(), String> {
-        // extensions record the schema they install into as their
-        // namespace, but COMMENT ON EXTENSION takes an unqualified name.
-        // FUNCTION and PROCEDURE tags already carry their own
-        // (argtypes) signature, so they pass through unquoted rather
-        // than as a plain ident.
-        let name = target.unwrap_or_else(|| {
-            if desc == "EXTENSION" {
-                quote_ident(tag)
-            } else if desc == "FUNCTION" || desc == "PROCEDURE" {
-                if namespace.is_empty() {
-                    crate::utils::quote_routine_name(tag)
-                } else {
-                    format!(
-                        "{}.{}",
-                        quote_ident(namespace),
-                        crate::utils::quote_routine_name(tag)
-                    )
-                }
-            } else if namespace.is_empty() {
-                quote_ident(tag)
-            } else {
-                format!("{}.{}", quote_ident(namespace), quote_ident(tag))
-            }
-        });
+        let name =
+            target.unwrap_or_else(|| object_reference(desc, namespace, tag));
         let defn = vec![
             String::from("COMMENT"),
             String::from("ON"),
@@ -756,6 +776,46 @@ impl Builder {
             &tag,
             owner,
             &defn,
+            &[],
+            &[parent_dump_id],
+            None,
+        )?;
+        Ok(())
+    }
+
+    /// Add the SECURITY LABEL entry of an object, tied to its parent,
+    /// with one statement for each provider. `target` is as for
+    /// [`Self::add_comment`]. `SECURITY LABEL` has no `USER` or `GROUP`
+    /// form, thus a user or a group is named as a `ROLE`.
+    #[allow(clippy::too_many_arguments)]
+    fn add_security_labels(
+        &mut self,
+        desc: &str,
+        namespace: &str,
+        tag: &str,
+        owner: &str,
+        parent_dump_id: i32,
+        labels: &crate::models::SecurityLabels,
+        target: Option<String>,
+    ) -> Result<(), String> {
+        if labels.is_empty() {
+            return Ok(());
+        }
+        let name =
+            target.unwrap_or_else(|| object_reference(desc, namespace, tag));
+        let kind = match desc {
+            "USER" | "GROUP" => "ROLE",
+            _ => desc,
+        };
+        let defn = security_label_sql(kind, &name, labels);
+        // add_entry ends the definition with the last `;`
+        let defn = defn.trim_end().trim_end_matches(';').to_string();
+        self.add_entry(
+            "SECURITY LABEL",
+            namespace,
+            tag,
+            owner,
+            &[defn],
             &[],
             &[parent_dump_id],
             None,
@@ -1514,9 +1574,6 @@ impl Builder {
         procedure: bool,
     ) -> Result<(), String> {
         let kind = if procedure { "PROCEDURE" } else { "FUNCTION" };
-        if let Some(sql) = &d.sql {
-            return self.add_item(item, vec![sql.clone()], vec![], false);
-        }
         // `comment_target` is only set when `func_name` diverges from the
         // default comment target (`namespace.d.name`) computed in
         // `add_comment` — i.e. for the bare, unparenthesized
@@ -1611,6 +1668,26 @@ impl Builder {
             Some(_) if procedure => Some(drop_target.clone()),
             _ => comment_target,
         };
+        // a security label names the full signature, so that it
+        // identifies one overload: PostgreSQL refuses a bare name when
+        // the schema has more than one routine of that name
+        let label_target = match &drop_name {
+            Some(_) => Some(drop_target.clone()),
+            None => comment_target.clone(),
+        };
+        // raw SQL keeps the bare comment target for parity. Its security
+        // labels name the signature when `parameters` gives one; without
+        // `parameters`, `()` can be wrong, thus they keep the bare name
+        if let Some(sql) = &d.sql {
+            return self.add_item_with_targets(
+                item,
+                vec![sql.clone()],
+                vec![],
+                false,
+                None,
+                drop_name.and(label_target),
+            );
+        }
         let drop = vec![format!("DROP {kind}"), drop_target];
         if let Some(transform_types) = &d.transform_types {
             let tts: Vec<String> = transform_types
@@ -1674,12 +1751,13 @@ impl Builder {
         // AS and its string
         if let Some(body) = &d.sql_body {
             create.push(body.clone());
-            return self.add_item_with_comment_target(
+            return self.add_item_with_targets(
                 item,
                 create,
                 drop,
                 false,
                 comment_target,
+                label_target,
             );
         }
         create.push("AS".into());
@@ -1691,23 +1769,25 @@ impl Builder {
                 .is_some_and(|l| l.eq_ignore_ascii_case("internal"))
         {
             create.push(postgres_value(&Value::String(definition.clone())));
-            return self.add_item_with_comment_target(
+            return self.add_item_with_targets(
                 item,
                 create,
                 drop,
                 false,
                 comment_target,
+                label_target,
             );
         }
         if let Some(definition) = &d.definition {
             let create_sql =
                 vec![format!("{} $$\n{}\n$$", create.join(" "), definition)];
-            return self.add_item_with_comment_target(
+            return self.add_item_with_targets(
                 item,
                 create_sql,
                 drop,
                 false,
                 comment_target,
+                label_target,
             );
         }
         if let (Some(object_file), Some(link_symbol)) =
@@ -1719,12 +1799,13 @@ impl Builder {
                 postgres_value(&Value::String(link_symbol.clone()))
             ));
         }
-        self.add_item_with_comment_target(
+        self.add_item_with_targets(
             item,
             create,
             drop,
             false,
             comment_target,
+            label_target,
         )
     }
 
@@ -2090,7 +2171,8 @@ impl Builder {
         Ok(())
     }
 
-    /// Emit the comment of the database as a `COMMENT` entry with the
+    /// Emit the security labels of the database (deviation 89) and the
+    /// comment of the database as a `COMMENT` entry with the
     /// tag `DATABASE name`, as pg_dump writes it (deviation 58). As for
     /// the settings, the statement names the database of the project,
     /// and pg_restore restores the entry only with `--create`
@@ -2098,10 +2180,31 @@ impl Builder {
         &mut self,
         project: &Project,
     ) -> Result<(), String> {
+        let name = quote_ident(&project.name);
+        if let Some(labels) = project
+            .settings
+            .security_labels
+            .as_ref()
+            .filter(|l| !l.is_empty())
+        {
+            self.dump
+                .add_entry(
+                    libpgdump::ObjectType::SecurityLabel,
+                    Some(""),
+                    Some(&format!("DATABASE {name}")),
+                    Some(&self.superuser),
+                    Some(&security_label_sql("DATABASE", &name, labels)),
+                    None,
+                    None,
+                    &[],
+                )
+                .map_err(|e| {
+                    format!("failed to add SECURITY LABEL ON DATABASE: {e}")
+                })?;
+        }
         let Some(comment) = &project.settings.comment else {
             return Ok(());
         };
-        let name = quote_ident(&project.name);
         self.dump
             .add_entry(
                 libpgdump::ObjectType::Comment,
@@ -2478,6 +2581,23 @@ impl Builder {
                     Some(target),
                 )?;
             }
+            if let Some(labels) = &column.security_labels {
+                let target = format!(
+                    "{}.{}.{}",
+                    quote_ident(&d.schema),
+                    quote_ident(&d.name),
+                    quote_ident(&column.name)
+                );
+                self.add_security_labels(
+                    "COLUMN",
+                    &d.schema,
+                    &format!("{}.{}", d.name, column.name),
+                    &d.owner,
+                    dump_id,
+                    labels,
+                    Some(target),
+                )?;
+            }
         }
         for index in d.indexes.as_deref().unwrap_or_default() {
             let replica = match &d.replica_identity {
@@ -2644,6 +2764,17 @@ impl Builder {
                 None,
             )?;
         }
+        if let Some(labels) = &partition.security_labels {
+            self.add_security_labels(
+                "TABLE",
+                &partition.schema,
+                &partition.name,
+                &table.owner,
+                dump_id,
+                labels,
+                None,
+            )?;
+        }
         Ok(())
     }
 
@@ -2709,6 +2840,17 @@ impl Builder {
                 &table.owner,
                 dump_id,
                 comment,
+                None,
+            )?;
+        }
+        if let Some(labels) = &table.security_labels {
+            self.add_security_labels(
+                "FOREIGN TABLE",
+                &table.schema,
+                &table.name,
+                &table.owner,
+                dump_id,
+                labels,
                 None,
             )?;
         }
@@ -4775,6 +4917,51 @@ fn string_literal(value: &str) -> String {
     postgres_value(&Value::String(value.to_string()))
 }
 
+/// The name of an object in a `COMMENT ON` or `SECURITY LABEL ON`
+/// statement, from the namespace and the tag of its entry. Extensions
+/// record the schema they install into as their namespace, but `COMMENT
+/// ON EXTENSION` takes an unqualified name. FUNCTION and PROCEDURE tags
+/// already carry their own (argtypes) signature, so they pass through
+/// unquoted rather than as a plain ident.
+fn object_reference(desc: &str, namespace: &str, tag: &str) -> String {
+    if desc == "EXTENSION" {
+        quote_ident(tag)
+    } else if desc == "FUNCTION" || desc == "PROCEDURE" {
+        if namespace.is_empty() {
+            crate::utils::quote_routine_name(tag)
+        } else {
+            format!(
+                "{}.{}",
+                quote_ident(namespace),
+                crate::utils::quote_routine_name(tag)
+            )
+        }
+    } else if namespace.is_empty() {
+        quote_ident(tag)
+    } else {
+        format!("{}.{}", quote_ident(namespace), quote_ident(tag))
+    }
+}
+
+/// `SECURITY LABEL FOR provider ON kind name IS label;`, one line for
+/// each provider, in the order of the providers
+pub(crate) fn security_label_sql(
+    kind: &str,
+    name: &str,
+    labels: &crate::models::SecurityLabels,
+) -> String {
+    labels
+        .iter()
+        .map(|(provider, label)| {
+            format!(
+                "SECURITY LABEL FOR {} ON {kind} {name} IS {};\n",
+                quote_ident(provider),
+                dollar_quote(label)
+            )
+        })
+        .collect()
+}
+
 /// `(args)` for CREATE, DROP and COMMENT ON AGGREGATE: the direct
 /// arguments, then ORDER BY and the aggregated ones for an
 /// ordered-set aggregate, or `*` for one that takes none
@@ -4876,6 +5063,7 @@ mod tests {
             statistics: None,
             options: None,
             comment: None,
+            security_labels: None,
         }
     }
 
@@ -4937,6 +5125,7 @@ mod tests {
                 server: Some("warehouse".into()),
                 options,
                 comment: None,
+                security_labels: None,
             }),
             dependencies: BTreeSet::new(),
         }
@@ -5417,6 +5606,7 @@ mod tests {
             server: None,
             options: None,
             comment: None,
+            security_labels: None,
         }
     }
 
@@ -5798,6 +5988,7 @@ mod tests {
                 security_barrier: Some(true),
                 query: Some("SELECT 1".into()),
                 comment: None,
+                security_labels: None,
                 rules: None,
             }),
             dependencies: BTreeSet::new(),
@@ -5850,6 +6041,7 @@ mod tests {
                 security_barrier: None,
                 query: Some("SELECT 1, 2".into()),
                 comment: None,
+                security_labels: None,
                 rules: None,
             }),
             dependencies: BTreeSet::new(),
@@ -5900,6 +6092,7 @@ mod tests {
                 security_barrier: None,
                 query: None,
                 comment: None,
+                security_labels: None,
                 rules: Some(vec![crate::models::Rule {
                     name: "no_delete".into(),
                     event: "DELETE".into(),
@@ -6163,6 +6356,7 @@ mod tests {
             for_values_with: None,
             attached: None,
             comment: None,
+            security_labels: None,
         }]);
         let item = table_item(1, table);
         assert_eq!(
@@ -6186,6 +6380,7 @@ mod tests {
             for_values_with: None,
             attached: None,
             comment: None,
+            security_labels: None,
         }]);
         let item = table_item(1, table);
         assert_eq!(
@@ -6209,6 +6404,7 @@ mod tests {
             for_values_with: None,
             attached: None,
             comment: None,
+            security_labels: None,
         }]);
         let item = table_item(1, table);
         assert_eq!(
@@ -6249,6 +6445,7 @@ mod tests {
                 object_file: None,
                 link_symbol: None,
                 comment: comment.map(String::from),
+                security_labels: None,
             }),
             dependencies: BTreeSet::new(),
         }
@@ -6477,6 +6674,7 @@ mod tests {
             cycle: None,
             owned_by: Some("test.widgets.id".into()),
             comment: None,
+            security_labels: None,
         };
         let seq_item = Item {
             id: 2,
@@ -6570,6 +6768,60 @@ mod tests {
                 "COMMENT ON PROCEDURE test.archive(IN days integer) IS \
                  $$archives rows$$;\n;\n"
             ]
+        );
+    }
+
+    #[test]
+    fn raw_sql_function_labels_name_the_signature() {
+        let function: crate::models::Function =
+            serde_json::from_value(json!({
+                "name": "f",
+                "schema": "test",
+                "owner": "app",
+                "parameters": [
+                    {"mode": "IN", "name": "a", "data_type": "integer"},
+                ],
+                "sql": "CREATE FUNCTION test.f(a integer) RETURNS integer \
+                        LANGUAGE sql AS $$SELECT a$$;",
+                "comment": "raw",
+                "security_labels": {"dummy": "classified"},
+            }))
+            .unwrap();
+        let item = Item {
+            id: 1,
+            desc: ObjectType::Function,
+            definition: Definition::Function(function),
+            dependencies: BTreeSet::new(),
+        };
+        // the comment keeps the bare name for parity
+        assert_eq!(
+            comment_defns(&item),
+            vec!["COMMENT ON FUNCTION test.f IS $$raw$$;\n;\n"]
+        );
+        let dump = libpgdump::new("t", "UTF-8", "18.0").unwrap();
+        let mut builder = Builder {
+            dump,
+            dump_id_map: HashMap::new(),
+            text_search_last: HashMap::new(),
+            pending_attaches: Vec::new(),
+            index_attaches: IndexAttaches::default(),
+            text_search_ids: HashMap::new(),
+            text_search_refs: Vec::new(),
+            partition_ids: HashMap::new(),
+            superuser: "postgres".into(),
+            calls: Rc::default(),
+        };
+        builder.dump_item(&item).unwrap();
+        let label = builder
+            .dump
+            .entries()
+            .iter()
+            .find(|e| e.desc == libpgdump::ObjectType::SecurityLabel)
+            .and_then(|e| e.defn.clone())
+            .expect("a SECURITY LABEL entry");
+        assert!(
+            label.contains("ON FUNCTION test.f(IN a integer) IS"),
+            "unexpected label: {label}"
         );
     }
 

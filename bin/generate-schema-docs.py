@@ -87,6 +87,7 @@ GROUPS: dict[str, list[str]] = {
         'operator_class_operator',
         'policy',
         'rule',
+        'security_labels',
         'trigger',
     ],
     'Per-schema container files': [
