@@ -256,6 +256,8 @@ reconciled in place where PostgreSQL can express it:
   `data_type: bigint` (or an alias, such as `int8`) is the same as no
   type, as pg_dump writes no `AS` for a bigint sequence.
 - **Domains** — set/drop default; `ADD CONSTRAINT` for a new check;
+  `RENAME CONSTRAINT` for a check that only has a new name, for
+  example when a new CHECK with no name comes before the others;
   add (`SET NOT NULL` or `ADD CONSTRAINT name NOT NULL`), rename or
   drop the NOT NULL. A NOT NULL or a CHECK with no name has the name
   that PostgreSQL makes for it (`<domain>_not_null` or
