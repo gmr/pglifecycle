@@ -76,7 +76,7 @@ properties:
     title: Dependencies
     description: Database objects this object is dependent upon
     $package_schema: dependencies
-requires:
+required:
   - name
   - schema
 additionalProperties: false

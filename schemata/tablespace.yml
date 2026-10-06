@@ -37,7 +37,7 @@ properties:
     title: Comment
     description: An optional comment about the tablespace.
     type: string
-requires:
+required:
   - name
   - location
 additionalProperties: false

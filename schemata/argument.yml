@@ -20,5 +20,5 @@ properties:
       create a zero-argument aggregate function, write * in place of the
       list of argument specifications.
     type: string
-requires:
+required:
   - data_type
