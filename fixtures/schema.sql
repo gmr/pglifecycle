@@ -841,6 +841,13 @@ CREATE FUNCTION test.score_ok(v test.score) RETURNS BOOLEAN LANGUAGE sql
     RETURN v::INTEGER >= 0;
 ALTER DOMAIN test.score ADD CONSTRAINT score_check CHECK (test.score_ok(VALUE));
 
+-- A NOT VALID domain CHECK. pg_dump writes it as its own entry (TOC
+-- entry "CHECK CONSTRAINT"), and the build does the same (build
+-- deviation 92).
+CREATE DOMAIN test.percent AS INTEGER CONSTRAINT percent_low CHECK (VALUE >= 0);
+ALTER DOMAIN test.percent
+    ADD CONSTRAINT percent_high CHECK (VALUE <= 100) NOT VALID;
+
 -- A column whose type is the row type of another table. Name order
 -- puts `a_segments` before `z_points`, and tables share one priority,
 -- so the table of the row type has to be ordered first (build

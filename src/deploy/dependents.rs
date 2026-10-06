@@ -1251,6 +1251,7 @@ mod tests {
             removed: BTreeMap::new(),
             owned: BTreeSet::new(),
             owner_changed: BTreeSet::new(),
+            gated: BTreeSet::new(),
         };
         for item in &project.inventory {
             diff.items.insert(item.id, Change::Unchanged);
@@ -1637,6 +1638,7 @@ mod tests {
             removed: BTreeMap::new(),
             owned: BTreeSet::new(),
             owner_changed: BTreeSet::new(),
+            gated: BTreeSet::new(),
         };
         let mut resolutions = BTreeMap::new();
         for item in &project.inventory {

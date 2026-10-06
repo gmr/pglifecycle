@@ -48,9 +48,10 @@ properties:
     title: Dependencies
     description: Database objects this object is dependent upon
     $package_schema: dependencies
-requires:
+# an entry of a conversions file gets its schema from the file, so the
+# schema is not required here
+required:
   - name
-  - schema
 oneOf:
   - required: [sql]
     not:
