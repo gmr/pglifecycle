@@ -13,8 +13,8 @@ Most limits are in two areas:
 - A form that you write by hand, which PostgreSQL keeps in another
   form. `deploy` then finds a change on each run. Write the form that
   `pull` writes.
-- Rare shapes of objects, for example a partitioned table that gets a
-  new partition, or an object type that `pull` does not model.
+- Rare shapes of objects, or an object type that `pull` does not
+  model.
 
 Some limits are already described with the command that they apply
 to. This page links to those descriptions and does not repeat them.
@@ -157,22 +157,12 @@ These limits are new on this page:
   error. See
   [Destructive statements and limits](commands.md#destructive-statements-and-limits).
   To keep the data, make the change by hand, then `pull` the database.
-- **A new partition of an existing partitioned table.** `deploy`
-  plans a rebuild of the parent table, not `CREATE TABLE ... PARTITION
-  OF`. Without `--allow-drop`, the rebuild is withheld. With
-  `--allow-drop`, the rebuild loses the data of the parent and of the
-  partitions that are only bounds. Make the partition by hand, then
-  `pull` the database.
 - **A statement that calls a function that the script makes later.**
   Only the in-place statements of a table wait for a new function.
   Other statements do not, for example a `CREATE OR REPLACE` or a
   statement of a rebuild. Also, a new column with a default that calls
   a new function, which uses that column, makes a loop. The script
   then fails on apply. Deploy the function first, then the rest.
-- **An attached partition without the parent's NOT NULL.** When a
-  hand-written partition file with `attached: true` does not have the
-  NOT NULL of a parent column, `ATTACH PARTITION` fails. Give the
-  column `nullable: false`, as the parent has it.
 - **A change from integer to serial.** For a column that does not own
   a sequence in the database, `deploy` writes `ALTER COLUMN ... TYPE
   serial`, and PostgreSQL refuses it. Make the sequence and the

@@ -290,6 +290,7 @@ pub fn diff(project: &Project, assembly: &Assembly) -> Diff {
     super::alter::operator::align(project, &mut database);
     super::alter::operator_class::align(project, &mut database);
     fold_implied_partitions(project, &mut database);
+    without_dropped_partitions(project, &mut database);
     let partition_parents = partition_parents(project);
     let mut items = BTreeMap::new();
     let mut changed = BTreeMap::new();
@@ -516,6 +517,46 @@ fn fold_implied_partitions(
             {
                 index.recurse = None;
             }
+        }
+    }
+}
+
+/// Remove from each partitioned table of the database the partitions
+/// that are tables of their own (`attached: true`) and that the project
+/// does not have: neither as a table nor as a partition of the table.
+/// The plan drops such a table, and the drop detaches it. Thus a
+/// partitioned table detaches only a partition whose table the project
+/// keeps.
+fn without_dropped_partitions(
+    project: &Project,
+    database: &mut BTreeMap<ObjectKey, Definition>,
+) {
+    let tables: BTreeSet<ObjectKey> = project
+        .inventory
+        .iter()
+        .filter(|item| item.desc == ObjectType::Table)
+        .map(|item| ObjectKey::new(item.desc, &item.definition))
+        .collect();
+    for item in &project.inventory {
+        let Definition::Table(repo) = &item.definition else {
+            continue;
+        };
+        let key = ObjectKey::new(item.desc, &item.definition);
+        let Some(Definition::Table(db)) = database.get_mut(&key) else {
+            continue;
+        };
+        let Some(partitions) = db.partitions.as_mut() else {
+            continue;
+        };
+        partitions.retain(|partition| {
+            let listed = repo.partitions.iter().flatten().any(|p| {
+                p.schema == partition.schema && p.name == partition.name
+            });
+            let key = table_object_key(&partition.schema, &partition.name);
+            partition.attached != Some(true) || listed || tables.contains(&key)
+        });
+        if partitions.is_empty() {
+            db.partitions = None;
         }
     }
 }
@@ -958,6 +999,34 @@ fn user_types(project: &Project) -> UserTypes {
         );
     }
     types
+}
+
+/// Each attached partition of the project with the NOT NULL of its
+/// parent (see [`crate::models::Table::with_parent_not_nulls`]).
+/// Deploy changes the project before it builds and compares it, thus
+/// ATTACH PARTITION does not fail, and the partition compares equal
+/// to the database.
+pub(crate) fn inherit_partition_not_nulls(project: &mut Project) {
+    let mut parents = BTreeMap::new();
+    for item in &project.inventory {
+        let Definition::Table(table) = &item.definition else {
+            continue;
+        };
+        for partition in table.partitions.iter().flatten() {
+            if partition.attached == Some(true) {
+                let key = table_object_key(&partition.schema, &partition.name);
+                parents.insert(key, table.clone());
+            }
+        }
+    }
+    for item in &mut project.inventory {
+        let key = ObjectKey::new(item.desc, &item.definition);
+        if let (Definition::Table(table), Some(parent)) =
+            (&mut item.definition, parents.get(&key))
+        {
+            *table = table.with_parent_not_nulls(parent);
+        }
+    }
 }
 
 /// Each NULL default of the project's tables and domains in the form
@@ -3965,5 +4034,84 @@ mod tests {
         let project = tables_project(vec![repo_parent, repo_child]);
         let result = diff(&project, &assembly);
         assert_eq!(result.items[&1], Change::Changed);
+    }
+
+    /// A partition that is a table of its own and that the project does
+    /// not have is dropped with its table, thus the partitioned table
+    /// does not detach it. A partition whose table the project keeps is
+    /// detached
+    #[test]
+    fn dropped_partition_is_not_detached() {
+        let (parent, child) = pulled_partitions();
+        let mut repo = parent.clone();
+        repo.partitions = None;
+        let project = tables_project(vec![repo.clone()]);
+        let mut assembly = Assembly::default();
+        assembly.tables = vec![parent.clone(), child.clone()];
+        let result = diff(&project, &assembly);
+        assert_eq!(result.items[&0], Change::Unchanged);
+        assert!(result.removed.keys().any(|key| key.name == "parted_1"));
+
+        let project = tables_project(vec![repo, child.clone()]);
+        let result = diff(&project, &assembly);
+        assert_eq!(result.items[&0], Change::Changed);
+        let Definition::Table(db) = &result.changed[&0] else {
+            panic!("expected a table");
+        };
+        assert_eq!(db.partitions, parent.partitions);
+    }
+
+    /// An attached partition gets each NOT NULL of its parent that it
+    /// does not give, which ATTACH PARTITION needs. A NOT NULL that is
+    /// NO INHERIT is not inherited
+    #[test]
+    fn attached_partition_inherits_not_null() {
+        let parent = json_table(serde_json::json!({
+            "name": "p", "schema": "test", "owner": "postgres",
+            "columns": [
+                {"name": "id", "data_type": "integer"},
+                {"name": "k", "data_type": "integer", "nullable": false},
+                {"name": "w", "data_type": "integer", "nullable": false},
+                {"name": "x", "data_type": "integer", "nullable": false,
+                 "not_null_constraint": {"no_inherit": true}},
+                {"name": "y", "data_type": "integer"},
+            ],
+            "primary_key": ["id"],
+            "partition": {"type": "LIST", "columns": ["k"]},
+            "partitions": [{"name": "p_1", "schema": "test",
+                            "for_values_in": [1], "attached": true}],
+        }));
+        let child = json_table(serde_json::json!({
+            "name": "p_1", "schema": "test", "owner": "postgres",
+            "columns": [
+                {"name": "id", "data_type": "integer"},
+                {"name": "k", "data_type": "integer"},
+                {"name": "w", "data_type": "integer"},
+                {"name": "x", "data_type": "integer"},
+                {"name": "y", "data_type": "integer"},
+            ],
+            "not_null_constraints": [{"column": "w"}],
+        }));
+        let mut project = tables_project(vec![parent, child]);
+        inherit_partition_not_nulls(&mut project);
+        let Definition::Table(table) = &project.inventory[1].definition else {
+            panic!("expected a table");
+        };
+        let nullable: Vec<_> = table
+            .columns
+            .iter()
+            .flatten()
+            .map(|c| (c.name.as_str(), c.nullable))
+            .collect();
+        assert_eq!(
+            nullable,
+            vec![
+                ("id", Some(false)),
+                ("k", Some(false)),
+                ("w", None),
+                ("x", None),
+                ("y", None),
+            ]
+        );
     }
 }
