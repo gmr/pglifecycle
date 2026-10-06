@@ -28,10 +28,6 @@ the project without these entries. See
 
 - **Security labels.** `pull` does not model `SECURITY LABEL` entries.
   Use `--no-security-labels` to leave them out of the dump.
-- **Database properties other than settings.** `CONNECTION LIMIT`,
-  `IS_TEMPLATE` and `ALLOW_CONNECTIONS` go to `remaining.yaml`. `pull`
-  keeps the settings of the database. Set the other properties by
-  hand.
 - **Comments on objects that pull does not model.** Such a comment
   goes to `remaining.yaml` with its object.
 
