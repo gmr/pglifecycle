@@ -6,14 +6,18 @@
 //! serial column of the project to that form, and it adds the sequence
 //! to the project. deploy finds the sequence in the database by its
 //! OWNED BY, not by its name: PostgreSQL cuts a long name and adds a
-//! number to a name that is in use. A column that the database does
-//! not have stays serial, thus a new table or a new column is made with
-//! the serial type, as build writes it.
+//! number to a name that is in use. When the database column owns no
+//! sequence (an `integer` column that becomes `serial`), deploy adds a
+//! new sequence with the name that PostgreSQL would give it, thus the
+//! plan makes the sequence, sets the default and links the sequence to
+//! the column. A column that the database does not have stays serial,
+//! thus a new table or a new column is made with the serial type, as
+//! build writes it.
 //!
 //! New in the Rust implementation: the Python implementation had no
 //! `deploy` command, so no Python file ports to this module.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
 
@@ -23,7 +27,7 @@ use crate::constants::ObjectType;
 use crate::models::{Definition, Item, Sequence};
 use crate::project::Project;
 use crate::pull::Assembly;
-use crate::utils::quote_ident;
+use crate::utils::{make_object_name, quote_ident};
 
 /// The integer type of a serial type, as PostgreSQL reads the name: in
 /// any case, or quoted in lowercase
@@ -36,11 +40,13 @@ pub(crate) fn integer_type(data_type: &str) -> Option<&'static str> {
     }
 }
 
-/// Change each serial column of the project that the database has, and
-/// that owns a sequence in the database, to the form that PostgreSQL
-/// stores. Add the sequence that a serial column makes, with the name
-/// of the database sequence, unless the project has a sequence of that
-/// name. Return the ids of the added sequences.
+/// Change each serial column of the project that the database has to
+/// the form that PostgreSQL stores. Add the sequence that a serial
+/// column makes, with the name of the database sequence that the
+/// column owns, unless the project has a sequence of that name. When
+/// the column owns no sequence in the database, use the project
+/// sequence that the column owns, else add a new sequence. Return the
+/// ids of the added sequences.
 pub(crate) fn expand(
     project: &mut Project,
     assembly: &Assembly,
@@ -54,6 +60,46 @@ pub(crate) fn expand(
             }
             _ => None,
         })
+        .collect();
+    // the sequence of the project that each column owns, by the column
+    let listed_owned: BTreeMap<String, (String, String)> = project
+        .inventory
+        .iter()
+        .filter_map(|item| match &item.definition {
+            Definition::Sequence(s) => s.owned_by.as_deref().map(|owner| {
+                (names::name(owner), (s.schema.clone(), s.name.clone()))
+            }),
+            _ => None,
+        })
+        .collect();
+    // the relations of the database, which a new sequence must not
+    // have the name of
+    let taken: BTreeSet<(String, String)> = assembly
+        .tables
+        .iter()
+        .flat_map(|t| {
+            std::iter::once(t.name.clone())
+                .chain(t.indexes.iter().flatten().map(|i| i.name.clone()))
+                .map(|name| (t.schema.clone(), name))
+        })
+        .chain(
+            assembly
+                .sequences
+                .iter()
+                .map(|s| (s.schema.clone(), s.name.clone())),
+        )
+        .chain(
+            assembly
+                .views
+                .iter()
+                .map(|v| (v.schema.clone(), v.name.clone())),
+        )
+        .chain(
+            assembly
+                .materialized_views
+                .iter()
+                .map(|v| (v.schema.clone(), v.name.clone())),
+        )
         .collect();
     let mut next = project.inventory.len();
     let mut added = Vec::new();
@@ -97,16 +143,47 @@ pub(crate) fn expand(
                 Some(Value::String(text)) => build::nextval_target(text),
                 _ => None,
             };
-            let Some(sequence) = owned
+            // the sequence, as (schema, name, owner, OWNED BY)
+            let (schema, name, sequence_owner, owned_by) = match owned
                 .iter()
                 .find(|s| {
                     used.as_ref() == Some(&(s.schema.clone(), s.name.clone()))
                 })
                 .or(owned.first())
-            else {
-                continue;
+            {
+                Some(s) => (
+                    s.schema.clone(),
+                    s.name.clone(),
+                    s.owner.clone(),
+                    s.owned_by.clone(),
+                ),
+                // the column owns no sequence in the database: use the
+                // sequence of the project that the column owns, else
+                // make the sequence that PostgreSQL makes for a serial
+                // column
+                None => match listed_owned.get(&owner) {
+                    Some((schema, name)) => {
+                        column.data_type = data_type.to_string();
+                        column.nullable = Some(false);
+                        column.default =
+                            Some(Value::String(nextval(schema, name)));
+                        continue;
+                    }
+                    None => (
+                        table.schema.clone(),
+                        free_name(
+                            &taken,
+                            &listed,
+                            &table.schema,
+                            &table.name,
+                            &column.name,
+                        ),
+                        table.owner.clone(),
+                        Some(owner.clone()),
+                    ),
+                },
             };
-            let target = (sequence.schema.clone(), sequence.name.clone());
+            let target = (schema.clone(), name.clone());
             column.data_type = data_type.to_string();
             column.nullable = Some(false);
             column.default = Some(Value::String(match &existing.default {
@@ -116,17 +193,7 @@ pub(crate) fn expand(
                 {
                     text.clone()
                 }
-                _ => {
-                    let name = format!(
-                        "{}.{}",
-                        quote_ident(&sequence.schema),
-                        quote_ident(&sequence.name)
-                    );
-                    format!(
-                        "nextval('{}'::regclass)",
-                        name.replace('\'', "''")
-                    )
-                }
+                _ => nextval(&schema, &name),
             }));
             if !listed.insert(target) {
                 continue;
@@ -135,12 +202,12 @@ pub(crate) fn expand(
                 id: next,
                 desc: ObjectType::Sequence,
                 definition: Definition::Sequence(Sequence {
-                    name: sequence.name.clone(),
-                    schema: sequence.schema.clone(),
+                    name,
+                    schema,
                     // PostgreSQL refuses an owner change of a sequence
                     // that a column owns: ALTER TABLE ... OWNER TO
                     // changes it with the table
-                    owner: sequence.owner.clone(),
+                    owner: sequence_owner,
                     sql: None,
                     // pg_dump writes no AS for bigint
                     data_type: (data_type != "bigint")
@@ -151,7 +218,7 @@ pub(crate) fn expand(
                     start_with: Some(1),
                     cache: Some(1),
                     cycle: None,
-                    owned_by: sequence.owned_by.clone(),
+                    owned_by,
                     comment: None,
                 }),
                 dependencies: BTreeSet::new(),
@@ -162,6 +229,38 @@ pub(crate) fn expand(
     let ids = added.iter().map(|item| item.id).collect();
     project.inventory.extend(added);
     ids
+}
+
+/// The default that calls nextval() of the sequence `schema.name`
+fn nextval(schema: &str, name: &str) -> String {
+    let name = format!("{}.{}", quote_ident(schema), quote_ident(name));
+    format!("nextval('{}'::regclass)", name.replace('\'', "''"))
+}
+
+/// The name that PostgreSQL gives the sequence of a serial column (see
+/// ChooseRelationName): `<table>_<column>_seq`, cut to fit, with a
+/// number after `seq` when a relation of the database or a sequence of
+/// the project has the name
+fn free_name(
+    taken: &BTreeSet<(String, String)>,
+    listed: &BTreeSet<(String, String)>,
+    schema: &str,
+    table: &str,
+    column: &str,
+) -> String {
+    let mut number = 0;
+    loop {
+        let label = match number {
+            0 => String::from("seq"),
+            _ => format!("seq{number}"),
+        };
+        let name = make_object_name(table, Some(column), &label);
+        let key = (schema.to_string(), name.clone());
+        if !taken.contains(&key) && !listed.contains(&key) {
+            return name;
+        }
+        number += 1;
+    }
 }
 
 #[cfg(test)]
@@ -403,5 +502,65 @@ mod tests {
             unreachable!()
         };
         assert_eq!(new.columns.as_ref().unwrap()[0].data_type, "serial");
+    }
+
+    /// A serial column that owns no sequence in the database gets a
+    /// new sequence, as PostgreSQL makes it for a serial column: with
+    /// the name that PostgreSQL chooses, the owner of the table, and
+    /// OWNED BY the column. A name that is in use gets a number.
+    #[test]
+    fn new_sequence_for_a_column_with_none() {
+        let mut assembly = database();
+        let mut taken = assembly.sequences[1].clone();
+        taken.name = String::from("t_x_seq");
+        taken.owned_by = None;
+        assembly.sequences.push(taken);
+        let mut project = project(
+            vec![serde_json::json!({
+                "name": "t", "schema": "test", "owner": "o",
+                "columns": [{"name": "x", "data_type": "serial"}],
+            })],
+            vec![],
+        );
+        let implied = expand(&mut project, &assembly);
+        assert_eq!(implied, BTreeSet::from([1]));
+        assert_eq!(
+            columns(&project),
+            serde_json::json!([
+                {"name": "x", "data_type": "integer", "nullable": false,
+                 "default": "nextval('test.t_x_seq1'::regclass)"},
+            ])
+        );
+        assert_eq!(
+            serde_json::to_value(&project.inventory[1].definition).unwrap(),
+            serde_json::json!({
+                "name": "t_x_seq1", "schema": "test", "owner": "o",
+                "data_type": "integer", "increment_by": 1,
+                "start_with": 1, "cache": 1, "owned_by": "test.t.x",
+            })
+        );
+    }
+
+    /// A sequence of the project that the column owns is used, and is
+    /// not added again
+    #[test]
+    fn listed_sequence_for_a_column_with_none() {
+        let mut project = project(
+            vec![serde_json::json!({
+                "name": "t", "schema": "test", "owner": "o",
+                "columns": [{"name": "x", "data_type": "serial"}],
+            })],
+            vec![serde_json::json!({
+                "name": "mine", "schema": "test", "owner": "o",
+                "owned_by": "test.t.x",
+            })],
+        );
+        let implied = expand(&mut project, &database());
+        assert!(implied.is_empty());
+        assert_eq!(project.inventory.len(), 2);
+        assert_eq!(
+            columns(&project)[0]["default"],
+            "nextval('test.mine'::regclass)"
+        );
     }
 }

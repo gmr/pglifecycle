@@ -174,9 +174,10 @@ These limits are new on this page:
   NOT NULL of a parent column, `ATTACH PARTITION` fails. Give the
   column `nullable: false`, as the parent has it.
 - **A change from integer to serial.** For a column that does not own
-  a sequence in the database, `deploy` writes `ALTER COLUMN ... TYPE
-  serial`, and PostgreSQL refuses it. Make the sequence and the
-  default by hand, then `pull` the database.
+  a sequence in the database, `deploy` makes a new sequence that
+  starts at 1, sets the default and links the sequence to the column.
+  It does not move the sequence past the values that the column has.
+  Before you add rows, set the sequence with `setval()`.
 - **Operator classes and implied families.** A project class that the
   database does not have, where the database has an implied family of
   that name with members, fails on `CREATE OPERATOR CLASS`. A class

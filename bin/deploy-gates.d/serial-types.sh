@@ -144,8 +144,37 @@ fi
     -d "${TARGET_DB}" "${WORKDIR}/project"
 expect_empty_plan "bigserial to serial converges"
 
-rm "${table}" "${collides}" "${taken}"
+# integer to serial on a column that owns no sequence: deploy makes the
+# sequence, sets the default and links the sequence to the column, as
+# PostgreSQL does for a serial column. It is not destructive
+plain="${WORKDIR}/project/tables/test/gate_serial_i.yaml"
+cat > "${plain}" <<'YAML'
+---
+name: gate_serial_i
+schema: test
+owner: postgres
+columns:
+- name: id
+  data_type: integer
+YAML
+./target/debug/pglifecycle deploy --apply -d "${TARGET_DB}" \
+    "${WORKDIR}/project"
+perl -pi -e 's/data_type: integer/data_type: serial/' "${plain}"
+./target/debug/pglifecycle deploy --apply -d "${TARGET_DB}" \
+    "${WORKDIR}/project"
+if [ "$(psql -d "${TARGET_DB}" -tAc "SELECT count(*) FROM pg_depend d
+        JOIN pg_class s ON s.oid = d.objid
+        WHERE s.relname = 'gate_serial_i_id_seq' AND d.deptype = 'a'
+          AND d.refobjid = 'test.gate_serial_i'::regclass")" != 1 ]; then
+    echo "Convergence gate FAILED: integer to serial makes no owned" \
+        "sequence" >&2
+    exit 1
+fi
+expect_empty_plan "integer to serial converges"
+
+rm "${table}" "${collides}" "${taken}" "${plain}"
 psql -d "${TARGET_DB}" -q -v ON_ERROR_STOP=1 \
-    -c "DROP TABLE test.gate_serial, test.gate_serial_c;" \
+    -c "DROP TABLE test.gate_serial, test.gate_serial_c, \
+        test.gate_serial_i;" \
     -c "DROP SEQUENCE test.gate_serial_c_id_seq;"
 expect_empty_plan "the serial-types step leaves the database unchanged"
