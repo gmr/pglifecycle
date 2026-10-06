@@ -435,8 +435,10 @@ revocations:
   no storage parameters.
 
 - A `check_constraint` on a column is a CHECK of the table with the
-  name `<table>_<column>_check` (with a number when a CHECK of the
-  table has the name). `build` and `deploy` write it with that name,
+  name that PostgreSQL gives it: `<table>_<column>_check` when the
+  expression uses one column, else `<table>_check` (with a number
+  when a CHECK of the table has the name). `build` and `deploy` write
+  it with that name,
   and `pull` writes it in
   `check_constraints` of the table with that name. `deploy` compares
   the column CHECK with that table CHECK, so `check_constraint: ee > 0`
