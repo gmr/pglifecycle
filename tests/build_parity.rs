@@ -1051,12 +1051,15 @@ const OUTSIDE_CORRECTED: &[(&str, &str, &str, &str, &str)] = &[
     ),
     // deviation 48: the settings of the database and of a role in the
     // database are one DATABASE PROPERTIES entry, as pg_dump writes
-    // it. The Python had no place for them
+    // it. The Python had no place for them. Deviation 93: the
+    // connection limit and IS_TEMPLATE come first
     (
         "DATABASE PROPERTIES",
         "",
         "outside",
-        "ALTER DATABASE outside SET search_path TO '$user', 'my schema';\n\
+        "ALTER DATABASE outside CONNECTION LIMIT = 5;\n\
+         ALTER DATABASE outside IS_TEMPLATE = true;\n\
+         ALTER DATABASE outside SET search_path TO '$user', 'my schema';\n\
          ALTER DATABASE outside SET work_mem TO '64MB';\n\
          ALTER DATABASE outside SET \"app.user\" TO 'a';\n\
          ALTER DATABASE outside SET \"app.\"\"q\" TO 'b';\n\
@@ -1202,7 +1205,8 @@ const OUTSIDE_CORRECTED: &[(&str, &str, &str, &str, &str)] = &[
 ];
 
 /// The settings of the database for deviation 48, its comment for
-/// deviation 58, and its security labels for deviation 89
+/// deviation 58, its security labels for deviation 89, and its
+/// properties for deviation 93
 fn outside_settings() -> project::DatabaseSettings {
     let setting =
         |value: serde_json::Value| serde_json::from_value(value).unwrap();
@@ -1211,6 +1215,8 @@ fn outside_settings() -> project::DatabaseSettings {
         security_labels: Some(
             [(String::from("My Provider"), String::from("secret"))].into(),
         ),
+        connection_limit: Some(5),
+        is_template: Some(true),
         database: vec![
             setting(
                 serde_json::json!({"search_path": ["$user", "my schema"]}),

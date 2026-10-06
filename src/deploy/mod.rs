@@ -1036,7 +1036,8 @@ fn sequence_owner_conflicts(
 /// Warn when the plan changes objects that the role that read the
 /// database cannot read. pg_dump does not dump them, or dumps them
 /// without their options, thus the plan can make again what the
-/// database has already
+/// database has already. Also warn about the subscriptions that only
+/// the database has, because the plan does not drop them
 fn check_reads(inventory: &[Item], diff: &Diff, conn: &cli::Connection) {
     let limits = match pgdump::read_limits(conn) {
         Ok(limits) => limits,
@@ -1059,6 +1060,38 @@ fn check_reads(inventory: &[Item], diff: &Diff, conn: &cli::Connection) {
             objects.join(", ")
         );
     }
+    let objects = unseen_subscriptions(inventory, &limits);
+    if !objects.is_empty() {
+        log::warn!(
+            "Role {} cannot read the subscriptions, thus the plan does \
+             not drop subscriptions that only the database has: {}. Read \
+             the database as a superuser",
+            quote_ident(&limits.role),
+            objects.join(", ")
+        );
+    }
+}
+
+/// The labels of the subscriptions that only the database has, when
+/// the role of `limits` cannot read them. pg_dump does not dump them,
+/// thus the diff does not see them and the plan does not drop them
+fn unseen_subscriptions(
+    inventory: &[Item],
+    limits: &pgdump::ReadLimits,
+) -> Vec<String> {
+    let project: BTreeSet<&str> = inventory
+        .iter()
+        .filter_map(|item| match &item.definition {
+            Definition::Subscription(s) => Some(s.name.as_str()),
+            _ => None,
+        })
+        .collect();
+    limits
+        .subscriptions
+        .iter()
+        .filter(|name| !project.contains(name.as_str()))
+        .map(|name| format!("SUBSCRIPTION {name}"))
+        .collect()
 }
 
 /// The labels of the added and changed items that the role of
@@ -1333,8 +1366,8 @@ fn calls_later(
 
 /// The warnings for the entries of the snapshot that pull could not
 /// model. The DATABASE PROPERTIES entry can have properties that pull
-/// does not model, as CONNECTION LIMIT, but the plan still changes the
-/// settings of the entry, thus it gets its own warning
+/// does not model, but the plan still changes the settings of the
+/// entry, thus it gets its own warning
 fn unmodeled_warnings(assembly: &pull::Assembly) -> Vec<String> {
     let properties = "DATABASE PROPERTIES";
     let mut warnings = Vec::new();
@@ -1363,10 +1396,10 @@ fn unmodeled_warnings(assembly: &pull::Assembly) -> Vec<String> {
         .any(|entry| entry.desc == properties)
     {
         warnings.push(format!(
-            "{properties}: the database has properties, as CONNECTION \
-             LIMIT, that this version cannot model; they were left \
-             untouched, but the plan changes the settings of the database \
-             and of its roles as the project gives them"
+            "{properties}: the database has properties that this version \
+             cannot model; they were left untouched, but the plan changes \
+             the modeled properties and the settings of the database and \
+             of its roles as the project gives them"
         ));
     }
     warnings
@@ -3069,7 +3102,7 @@ mod tests {
         let warnings = unmodeled_warnings(&assembly);
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert!(warnings[0].starts_with("DATABASE PROPERTIES: "));
-        assert!(warnings[0].contains("the plan changes the settings"));
+        assert!(warnings[0].contains("the plan changes the modeled"));
         assembly.remaining.push(remaining("EVENT TRIGGER"));
         let warnings = unmodeled_warnings(&assembly);
         assert_eq!(
@@ -4310,6 +4343,7 @@ mod tests {
                 ("PUBLIC".into(), "srv".into()),
                 ("app".into(), "srv".into()),
             ],
+            subscriptions: vec!["other".into(), "sub".into()],
         };
         assert_eq!(
             unreadable(&inventory, &diff, &limits),
@@ -4319,9 +4353,16 @@ mod tests {
                 "USER MAPPING PUBLIC SERVER srv",
             ]
         );
+        // only the database has "other", thus the plan does not drop it
+        assert_eq!(
+            unseen_subscriptions(&inventory, &limits),
+            vec!["SUBSCRIPTION other"]
+        );
         limits.superuser = true;
         limits.hidden_user_mappings.clear();
+        limits.subscriptions.clear();
         assert!(unreadable(&inventory, &diff, &limits).is_empty());
+        assert!(unseen_subscriptions(&inventory, &limits).is_empty());
     }
 
     /// A new table makes its index in a tablespace of the project.

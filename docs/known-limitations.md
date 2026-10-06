@@ -26,10 +26,6 @@ to. This page links to those descriptions and does not repeat them.
 the project without these entries. See
 [Unsupported dump entries](commands.md#unsupported-dump-entries).
 
-- **Database properties other than settings.** `CONNECTION LIMIT`,
-  `IS_TEMPLATE` and `ALLOW_CONNECTIONS` go to `remaining.yaml`. `pull`
-  keeps the settings of the database. Set the other properties by
-  hand.
 - **Comments and security labels on objects that pull does not
   model.** Such a comment or label goes to `remaining.yaml` with its
   object. A security label on a column of a view or of a materialized
@@ -167,19 +163,3 @@ These limits are already described:
   options of most user mappings. See [deploy](commands.md#deploy).
 - pglifecycle does not read `pg_service.conf` to show the connection.
   See [pull](commands.md#pull).
-
-These limits are new on this page:
-
-- **pg_dump warnings.** When `pg_dump` or `pg_dumpall` succeeds,
-  pglifecycle does not show its warnings. Run `pg_dump --schema-only`
-  by hand to see them.
-- **A connection string in `PGDATABASE`.** pglifecycle reads
-  `PGDATABASE` as the `--dbname` value, so it accepts a connection
-  string there. libpq, `psql` and `pg_dump` read `PGDATABASE` only as
-  a database name. Give a connection string with `--dbname`, not in
-  `PGDATABASE`.
-- **Subscriptions that a role cannot read.** A role that is not a
-  superuser does not see the subscriptions. `deploy` warns about a
-  subscription that the project adds or changes, but not about one
-  that only the database has. That subscription is not dropped. Run
-  `deploy` as a superuser.

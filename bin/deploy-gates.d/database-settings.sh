@@ -1,11 +1,14 @@
-# Sourced by bin/deploy-gates (gate 2). The settings of the database,
-# and of a role in the database (fixtures/schema.sql), are in the
-# project.yaml of the project. Gate 1 made them in the target.
+# Sourced by bin/deploy-gates (gate 2). The connection limit and the
+# settings of the database, and the settings of a role in the database
+# (fixtures/schema.sql), are in the project.yaml of the project. Gate 1
+# made them in the target.
 #
-# 1. Drift in the database: a changed value, a removed setting and a
-#    setting that the project does not have, for the database and for
-#    the role. deploy sets the values again and resets the setting that
-#    the project does not have. A RESET is not destructive, thus the
+# 1. Drift in the database: a changed connection limit, a template
+#    state, a changed value, a removed setting and a setting that the
+#    project does not have, for the database and for the role. deploy
+#    sets the connection limit and the values again, makes the database
+#    not a template, and resets the setting that the project does not
+#    have. A RESET is not destructive, thus the
 #    plan without --allow-drop has it, but the header of the script and
 #    the log name each setting that it resets.
 # 2. A setting that the project adds as a YAML boolean is set, and
@@ -14,14 +17,19 @@
 # Each time, the settings of the target must be the settings of the
 # source.
 
-# the settings of the database $1, one line for each
+# the connection limit, the template state and the settings of the
+# database $1, one line for each
 database_settings() {
     psql -d postgres -tA -v ON_ERROR_STOP=1 -c "
-        SELECT setrole::regrole::text, s
+        SELECT 'CONNECTION LIMIT', datconnlimit::text || ' ' ||
+               'IS_TEMPLATE ' || datistemplate::text
+          FROM pg_database WHERE datname = '$1'
+        UNION ALL
+        (SELECT setrole::regrole::text, s
           FROM pg_db_role_setting, unnest(setconfig) AS s
          WHERE setdatabase = (SELECT oid FROM pg_database
                                WHERE datname = '$1')
-         ORDER BY 1, 2"
+         ORDER BY 1, 2)"
 }
 
 # the target has the settings of the source, and the plan is empty; $1
@@ -41,6 +49,8 @@ expect_source_settings() {
 expect_source_settings "deploy made the database settings"
 
 psql -d postgres -q -v ON_ERROR_STOP=1 <<SQL
+ALTER DATABASE ${TARGET_DB} CONNECTION LIMIT 7;
+ALTER DATABASE ${TARGET_DB} IS_TEMPLATE true;
 ALTER DATABASE ${TARGET_DB} SET work_mem TO '32MB';
 ALTER DATABASE ${TARGET_DB} RESET gate.note;
 ALTER DATABASE ${TARGET_DB} SET gate.stray TO 'x';
@@ -50,6 +60,8 @@ SQL
 ./target/debug/pglifecycle deploy -o "${WORKDIR}/settings.sql" \
     -d "${TARGET_DB}" "${WORKDIR}/project" 2> "${WORKDIR}/settings.log"
 for statement in \
+    "ALTER DATABASE ${TARGET_DB} CONNECTION LIMIT 50;" \
+    "ALTER DATABASE ${TARGET_DB} IS_TEMPLATE false;" \
     "ALTER DATABASE ${TARGET_DB} SET work_mem TO '64MB';" \
     "ALTER DATABASE ${TARGET_DB} SET \"gate.note\" TO \$\$it's\$\$;" \
     "ALTER DATABASE ${TARGET_DB} RESET \"gate.stray\";" \

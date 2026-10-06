@@ -250,6 +250,13 @@ pub enum Statement {
         name: String,
         value: serde_json::Value,
     },
+    /// ALTER DATABASE db CONNECTION LIMIT n IS_TEMPLATE b, with the
+    /// properties that the statement has. As for a setting, the
+    /// database name is not kept
+    DatabaseProperties {
+        connection_limit: Option<i64>,
+        is_template: Option<bool>,
+    },
     /// Parsed successfully but not (yet) a supported statement type
     Unsupported(String),
 }
@@ -479,6 +486,7 @@ fn dispatch(node: &Node, src: &str) -> Result<Vec<Statement>, String> {
         "CreateRoleStmt" | "AlterRoleStmt" => Ok(vec![acl::role(node, src)?]),
         "AlterRoleSetStmt" => Ok(vec![acl::role_setting(node, src)?]),
         "AlterDatabaseSetStmt" => Ok(vec![acl::database_setting(node, src)?]),
+        "AlterDatabaseStmt" => Ok(vec![acl::database_properties(node, src)]),
         other => Ok(vec![Statement::Unsupported(other.to_string())]),
     }
 }

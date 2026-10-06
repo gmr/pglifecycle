@@ -174,6 +174,9 @@ impl Loader {
             serde_json::from_value(project["security_labels"].clone())
                 .ok()
                 .flatten();
+        self.project.settings.connection_limit =
+            project["connection_limit"].as_i64();
+        self.project.settings.is_template = project["is_template"].as_bool();
         if let Ok(settings) =
             serde_json::from_value(project["settings"].clone())
         {

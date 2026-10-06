@@ -366,6 +366,16 @@
 //!     ALTER DOMAIN can add a NOT VALID CHECK. The Python had no field
 //!     for it. No test-project domain CHECK is NOT VALID, thus its
 //!     archive does not change.
+//! 93. The `connection_limit` and `is_template` of `project.yaml`
+//!     render in the `DATABASE PROPERTIES` entry (see 48) before the
+//!     settings, as pg_dump writes them: `ALTER DATABASE name
+//!     CONNECTION LIMIT = n` when the limit is not -1, and `ALTER
+//!     DATABASE name IS_TEMPLATE = true` when it is true. pg_dump also
+//!     writes a drop statement that clears `datistemplate` before its
+//!     DROP DATABASE. The build has no DATABASE entry to drop, thus
+//!     the entry still has no drop statement (see 48). The Python had
+//!     no place for these properties. The test-project has none, thus
+//!     its archive does not change.
 
 mod acls;
 mod calls;
@@ -2165,13 +2175,28 @@ impl Builder {
     /// them (deviation 48). A statement must name the database, so it
     /// names the database of the project, and pg_restore restores the
     /// entry only with `--create`. The entry has no drop statement, thus
-    /// pg_restore does not set its owner
+    /// pg_restore does not set its owner. The connection limit and
+    /// `IS_TEMPLATE` come first, as pg_dump writes them (deviation 93)
     fn dump_database_settings(
         &mut self,
         project: &Project,
     ) -> Result<(), String> {
         let name = quote_ident(&project.name);
         let mut defn = String::new();
+        if let Some(limit) = project
+            .settings
+            .connection_limit
+            .filter(|limit| *limit != -1)
+        {
+            defn.push_str(&format!(
+                "ALTER DATABASE {name} CONNECTION LIMIT = {limit};\n"
+            ));
+        }
+        if project.settings.is_template == Some(true) {
+            defn.push_str(&format!(
+                "ALTER DATABASE {name} IS_TEMPLATE = true;\n"
+            ));
+        }
         for object in &project.settings.database {
             for (setting, value) in object {
                 defn.push_str(&format!(

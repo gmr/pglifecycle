@@ -14,13 +14,3 @@
 
 CREATE SCHEMA unsupported;
 SET search_path = unsupported, public, pg_catalog;
-
--- pull models the settings of the DATABASE PROPERTIES entry, but not
--- the other properties of the database (CONNECTION LIMIT, IS_TEMPLATE,
--- ALLOW_CONNECTIONS) that pg_dump writes in the same entry
-DO $$
-BEGIN
-    EXECUTE format('ALTER DATABASE %I CONNECTION LIMIT 50',
-                   current_database());
-END
-$$;

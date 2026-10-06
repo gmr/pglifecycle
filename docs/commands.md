@@ -36,9 +36,11 @@ setting. pg_restore converts the text to the encoding of the database,
 thus the same archive restores into a UTF8 and into a LATIN1 database.
 Create the database with the encoding before the restore.
 
-The `settings` and `role_settings` of `project.yaml` go in one
-`DATABASE PROPERTIES` entry, as `pg_dump` writes them: `ALTER DATABASE
-name SET ...` and `ALTER ROLE role IN DATABASE name SET ...`, where
+The `connection_limit`, `is_template`, `settings` and `role_settings`
+of `project.yaml` go in one `DATABASE PROPERTIES` entry, as `pg_dump`
+writes them: `ALTER DATABASE name CONNECTION LIMIT = ...`, `ALTER
+DATABASE name IS_TEMPLATE = true`, `ALTER DATABASE name SET ...` and
+`ALTER ROLE role IN DATABASE name SET ...`, where
 `name` is the `name` of the project. PostgreSQL has no statement that
 sets a setting of the current database without its name, thus the
 archive cannot use the name of the database that you restore into.
@@ -123,8 +125,10 @@ the options of most user mappings (see the PostgreSQL documentation
 of that view). Then the plan can make again a subscription or the
 options of a user mapping that the database has already. deploy does
 not change the plan, but it writes a warning that names the role and
-those objects. Read the database as a role that can read them, for
-example a superuser. With `--dump`, deploy does not read a database,
+those objects. The plan also does not drop a subscription that only
+the database has, because the role cannot see it. deploy writes a
+warning that names those subscriptions too. Read the database as a
+role that can read them, for example a superuser. With `--dump`, deploy does not read a database,
 thus there is no warning.
 
 The script does not set the other settings that pg_restore sets.
@@ -303,6 +307,12 @@ reconciled in place where PostgreSQL can express it:
   `SECURITY LABEL FOR provider ON DATABASE name IS ...`, but only when
   `project.yaml` has the field: with no field, deploy leaves the labels
   of the database as they are.
+- **Database properties** — the `connection_limit` and `is_template`
+  of `project.yaml`. A different connection limit gets `ALTER DATABASE
+  name CONNECTION LIMIT n`, and a different template state gets `ALTER
+  DATABASE name IS_TEMPLATE true` (or `false`). No value is the
+  default: -1 (no limit) and `false`. The statements come with the
+  settings, after all other statements.
 - Everything else falls back to drop+recreate.
 
 ### Destructive statements and limits
@@ -829,9 +839,9 @@ The entry was preserved in ./project/remaining.yaml; re-run with
 A `COMMENT` entry counts as unmodeled when the model has no place for
 it, such as a comment on an object type that `pull` does not model.
 A `DATABASE PROPERTIES` entry counts as unmodeled when it has a
-property of the database other than a setting (`CONNECTION LIMIT`,
-`IS_TEMPLATE` or `ALLOW_CONNECTIONS`). `pull` keeps the settings in the
-entry, and the entry also goes to `remaining.yaml`.
+statement other than a setting, `CONNECTION LIMIT` or `IS_TEMPLATE`.
+`pull` keeps the settings and the properties in the entry, and the
+entry also goes to `remaining.yaml`.
 
 The project directory is written either way, so `remaining.yaml` is
 there to inspect. `--allow-unsupported` downgrades the failure to a
@@ -919,7 +929,8 @@ gives `pg_dump`, `pg_dumpall`, and `psql` only the options that you
 set. For the other values, libpq uses the standard environment
 variables (`PGHOST`, `PGPORT`, `PGUSER`, `PGSERVICE`, and the other
 `PG*` variables), a service in `pg_service.conf`, and then its
-defaults. `--dbname` also uses `PGDATABASE`:
+defaults. Without `--dbname`, libpq reads `PGDATABASE` only as a
+database name, not as a connection string:
 
 | Option | Description |
 | --- | --- |
