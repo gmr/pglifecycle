@@ -114,6 +114,9 @@ fn object_identity(definition: &Definition) -> (String, String) {
                 identity_type(cast.target_type.as_deref().unwrap_or_default())
             ),
         ),
+        Definition::UserMapping(mapping) => {
+            (String::new(), canonical_user_mapping(mapping).name)
+        }
         // deploy splits a container into one for each object, which is
         // keyed by its kind and name (`alter::text_search::split`)
         Definition::TextSearch(container) => (
@@ -820,6 +823,11 @@ fn normalized(definition: &Definition) -> Value {
             );
             &canonical
         }
+        Definition::UserMapping(mapping) => {
+            canonical =
+                Definition::UserMapping(canonical_user_mapping(mapping));
+            &canonical
+        }
         // default privileges compare by the privileges they give, so
         // the same privileges declared two ways are not a change
         Definition::DefaultPrivileges(defaults) => {
@@ -834,6 +842,19 @@ fn normalized(definition: &Definition) -> Value {
     let mut value = serde_json::to_value(definition).unwrap_or(Value::Null);
     normalize(&mut value);
     value
+}
+
+/// The user mapping with `PUBLIC` in upper case, as pull writes it.
+/// `PUBLIC` is a keyword in USER MAPPING, so `public` is the same
+/// mapping (see [`crate::utils::user_mapping_subject`]).
+fn canonical_user_mapping(
+    mapping: &crate::models::UserMapping,
+) -> crate::models::UserMapping {
+    let mut mapping = mapping.clone();
+    if mapping.name.eq_ignore_ascii_case("public") {
+        mapping.name = String::from("PUBLIC");
+    }
+    mapping
 }
 
 /// The domain with the type of each cast in its default in the form
@@ -3965,5 +3986,37 @@ mod tests {
         let project = tables_project(vec![repo_parent, repo_child]);
         let result = diff(&project, &assembly);
         assert_eq!(result.items[&1], Change::Changed);
+    }
+
+    /// pull writes the mapping for PUBLIC with the name `PUBLIC`. A
+    /// project that writes `public` gives the same mapping, so deploy
+    /// does not drop and make it again
+    #[test]
+    fn public_user_mapping_matches_in_any_case() {
+        let mapping = |name: &str| {
+            serde_json::from_value::<models::UserMapping>(serde_json::json!({
+                "name": name,
+                "servers": [{"name": "srv", "options": {"user": "u"}}],
+            }))
+            .expect("user mapping deserializes")
+        };
+        let project = Project {
+            name: String::from("test"),
+            superuser: String::from("postgres"),
+            default_schema: String::from("public"),
+            path: std::path::PathBuf::new(),
+            settings: Default::default(),
+            inventory: vec![models::Item {
+                id: 0,
+                desc: ObjectType::UserMapping,
+                definition: Definition::UserMapping(mapping("public")),
+                dependencies: BTreeSet::new(),
+            }],
+        };
+        let mut assembly = Assembly::default();
+        assembly.user_mappings = vec![mapping("PUBLIC")];
+        let result = diff(&project, &assembly);
+        assert_eq!(result.items[&0], Change::Unchanged);
+        assert!(result.removed.is_empty(), "{:?}", result.removed);
     }
 }
