@@ -121,9 +121,11 @@ These limits are new on this page:
   a sequence in the database, `deploy` writes `ALTER COLUMN ... TYPE
   serial`, and PostgreSQL refuses it. Make the sequence and the
   default by hand, then `pull` the database.
-- **NO INHERIT on a parent's NOT NULL.** After `deploy` makes a NOT
-  NULL of a parent `NO INHERIT`, the children keep a local copy. A
-  second deploy removes it.
+- **NO INHERIT on one of two parents.** When a child has a NOT NULL
+  from two parents, and only one parent changes it to `NO INHERIT`,
+  the child keeps a NOT NULL of its own. PostgreSQL cannot remove it
+  while the other parent gives the NOT NULL. Give the child that NOT
+  NULL in the project, as `pull` writes it.
 
 ## Connection and CLI
 
