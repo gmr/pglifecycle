@@ -141,6 +141,10 @@ pub struct Group {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
+    /// Security labels (`SECURITY LABEL FOR provider ON ...`), as
+    /// a label for each provider
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub security_labels: Option<super::SecurityLabels>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub environments: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -172,6 +176,10 @@ pub struct Role {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
+    /// Security labels (`SECURITY LABEL FOR provider ON ...`), as
+    /// a label for each provider
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub security_labels: Option<super::SecurityLabels>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub create: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -217,6 +225,10 @@ pub struct User {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
+    /// Security labels (`SECURITY LABEL FOR provider ON ...`), as
+    /// a label for each provider
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub security_labels: Option<super::SecurityLabels>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub environments: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]

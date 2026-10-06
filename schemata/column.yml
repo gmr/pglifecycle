@@ -176,6 +176,9 @@ properties:
     title: Comment
     description: An optional comment about the column
     type: string
+  security_labels:
+    title: Security Labels
+    $package_schema: security_labels
 required:
   - name
   - data_type

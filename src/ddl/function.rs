@@ -51,6 +51,7 @@ pub(crate) fn create_function(
         object_file: None,
         link_symbol: None,
         comment: None,
+        security_labels: None,
     };
     let parameters: Vec<FunctionParameter> = node
         .find_all("func_arg_with_default")

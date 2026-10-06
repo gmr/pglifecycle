@@ -155,6 +155,7 @@ fn create_aggregate(node: &Node, src: &str) -> Result<Statement, String> {
         hypothetical: None,
         sql: None,
         comment: None,
+        security_labels: None,
     };
     let definition = node
         .child_of_kind("definition")
@@ -516,6 +517,7 @@ pub(crate) fn create_language(
         inline_handler: handler(node.child_of_kind("opt_inline_handler")),
         validator: handler(node.child_of_kind("opt_validator")),
         comment: None,
+        security_labels: None,
     }))
 }
 
@@ -560,6 +562,7 @@ pub(crate) fn create_tablespace(
         location: string_value(&location, src),
         options: tablespace_options(node, src),
         comment: None,
+        security_labels: None,
     }))
 }
 
@@ -972,6 +975,7 @@ pub(crate) fn create_publication(
         all_tables,
         parameters: (!parameters.is_empty()).then_some(parameters),
         comment: None,
+        security_labels: None,
     }))
 }
 
@@ -1052,6 +1056,7 @@ pub(crate) fn create_subscription(
         publications,
         parameters: (!parameters.is_empty()).then_some(parameters),
         comment: None,
+        security_labels: None,
     }))
 }
 
@@ -1295,6 +1300,7 @@ mod tests {
                 location: String::from("/srv/it's\\x"),
                 options: None,
                 comment: None,
+                security_labels: None,
             }
         );
         let Statement::CreateTablespace(tablespace) = parse_one(

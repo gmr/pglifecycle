@@ -369,7 +369,8 @@ fn pull_refuses_existing_destination() {
 }
 
 /// An archive carrying one entry `pull` cannot model (a security
-/// label), on top of the otherwise fully-supported fixture archive
+/// label on a large object), on top of the otherwise fully-supported
+/// fixture archive
 fn archive_with_security_label(path: &std::path::Path) {
     fixture_archive(path);
     let mut dump = libpgdump::load(path).expect("load archive");
@@ -377,8 +378,8 @@ fn archive_with_security_label(path: &std::path::Path) {
         &mut dump,
         libpgdump::ObjectType::SecurityLabel,
         "",
-        "SCHEMA test",
-        "SECURITY LABEL FOR dummy ON SCHEMA test IS 'unclassified';",
+        "LARGE OBJECT 1",
+        "SECURITY LABEL FOR dummy ON LARGE OBJECT 1 IS 'unclassified';",
     );
     dump.save(path).expect("save archive");
 }

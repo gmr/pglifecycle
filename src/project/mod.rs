@@ -33,6 +33,8 @@ pub struct Project {
 pub struct DatabaseSettings {
     /// `comment`: `COMMENT ON DATABASE`
     pub comment: Option<String>,
+    /// `security_labels`: `SECURITY LABEL ON DATABASE`
+    pub security_labels: Option<models::SecurityLabels>,
     /// `connection_limit`: `ALTER DATABASE ... CONNECTION LIMIT`
     pub connection_limit: Option<i64>,
     /// `is_template`: `ALTER DATABASE ... IS_TEMPLATE`

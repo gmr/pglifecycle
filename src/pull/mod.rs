@@ -81,6 +81,7 @@ pub const MODELED_DESCS: &[libpgdump::ObjectType] = {
         OT::Server,
         OT::UserMapping,
         OT::Comment,
+        OT::SecurityLabel,
         OT::Acl,
         OT::DatabaseProperties,
     ]
@@ -575,6 +576,7 @@ pub struct RoleState {
     /// (e.g. PUBLIC) are written with `create: false`
     pub created: bool,
     pub comment: Option<String>,
+    pub security_labels: Option<models::SecurityLabels>,
     pub options: models::RoleOptions,
     pub password: Option<String>,
     pub valid_until: Option<String>,
@@ -702,6 +704,9 @@ pub struct Assembly {
     pub roles: BTreeMap<String, RoleState>,
     /// The comment of the database (`COMMENT ON DATABASE`)
     pub comment: Option<String>,
+    /// The security labels of the database (`SECURITY LABEL ON
+    /// DATABASE`)
+    pub security_labels: Option<models::SecurityLabels>,
     /// The connection limit of the database (`ALTER DATABASE ...
     /// CONNECTION LIMIT`), when pg_dump writes it
     pub connection_limit: Option<i64>,
@@ -1065,6 +1070,11 @@ impl Assembly {
                 Some(child) => {
                     if partition.comment.is_none() {
                         partition.comment = child.comment.clone();
+                    }
+                    if partition.security_labels.is_none() {
+                        partition
+                            .security_labels
+                            .clone_from(&child.security_labels);
                     }
                     removed.insert(key);
                 }
@@ -1681,6 +1691,22 @@ impl Assembly {
                     self.push_remaining(entry);
                 }
             }
+            Statement::SecurityLabel {
+                on,
+                target,
+                provider,
+                label,
+            } => match self.security_labels_of(&on, &target) {
+                Some(labels) => set_security_label(labels, provider, label),
+                // as for a comment, a label with nowhere to go keeps
+                // its entry
+                None => {
+                    log::warn!(
+                        "Security label on unmatched object: {on} {target}"
+                    );
+                    self.push_remaining(entry);
+                }
+            },
             Statement::Acl(acl) => self.apply_acl(&acl),
             Statement::RoleMembership { .. }
             | Statement::CreateRole(_)
@@ -1773,6 +1799,34 @@ impl Assembly {
             } if on == "ROLE" => {
                 self.role(&target.name).comment = Some(comment);
             }
+            Statement::SecurityLabel {
+                on,
+                target,
+                provider,
+                label,
+            } if on == "ROLE" => set_security_label(
+                &mut self.role(&target.name).security_labels,
+                provider,
+                label,
+            ),
+            Statement::SecurityLabel {
+                on,
+                target,
+                provider,
+                label,
+            } if on == "TABLESPACE" => match self.tablespace(&target.name) {
+                Some(tablespace) => set_security_label(
+                    &mut tablespace.security_labels,
+                    provider,
+                    label,
+                ),
+                None => {
+                    log::warn!(
+                        "Security label on unknown tablespace {target}"
+                    );
+                    self.push_role_remaining(source);
+                }
+            },
             Statement::CreateTablespace(tablespace) => {
                 self.tablespaces.push(tablespace);
             }
@@ -2090,6 +2144,87 @@ impl Assembly {
         found
     }
 
+    /// The security labels of the object that a `SECURITY LABEL`
+    /// statement names; `None` when no modeled object has that name.
+    /// pg_dump writes the labels of the database that it dumps, and the
+    /// globals dump the labels of roles and tablespaces.
+    fn security_labels_of(
+        &mut self,
+        on: &str,
+        target: &QualifiedName,
+    ) -> Option<&mut Option<models::SecurityLabels>> {
+        let schema = target.schema.clone().unwrap_or_default();
+        let name = &target.name;
+        match on {
+            "DATABASE" => Some(&mut self.security_labels),
+            "SCHEMA" => self
+                .schemas
+                .iter_mut()
+                .find(|s| s.name == *name)
+                .map(|s| &mut s.security_labels),
+            "LANGUAGE" => self
+                .languages
+                .iter_mut()
+                .find(|l| l.name == *name)
+                .map(|l| &mut l.security_labels),
+            "TABLE" | "FOREIGN TABLE" => {
+                self.find_table(target).map(|t| &mut t.security_labels)
+            }
+            "COLUMN" => self.column(target).map(|c| &mut c.security_labels),
+            "DOMAIN" => self
+                .domains
+                .iter_mut()
+                .find(|d| d.schema == schema && d.name == *name)
+                .map(|d| &mut d.security_labels),
+            "TYPE" => self
+                .types
+                .iter_mut()
+                .find(|t| t.schema == schema && t.name == *name)
+                .map(|t| &mut t.security_labels),
+            "SEQUENCE" => self
+                .sequences
+                .iter_mut()
+                .find(|s| s.schema == schema && s.name == *name)
+                .map(|s| &mut s.security_labels),
+            "VIEW" => self
+                .views
+                .iter_mut()
+                .find(|v| v.schema == schema && v.name == *name)
+                .map(|v| &mut v.security_labels),
+            "MATERIALIZED VIEW" => self
+                .materialized_views
+                .iter_mut()
+                .find(|v| v.schema == schema && v.name == *name)
+                .map(|v| &mut v.security_labels),
+            "FUNCTION" => {
+                self.function(&schema, name).map(|f| &mut f.security_labels)
+            }
+            "PROCEDURE" => self
+                .procedure(&schema, name)
+                .map(|p| &mut p.security_labels),
+            "AGGREGATE" => self
+                .aggregates
+                .iter_mut()
+                .find(|a| {
+                    a.schema == schema
+                        && format!("{}{}", a.name, aggregate_signature(a))
+                            == *name
+                })
+                .map(|a| &mut a.security_labels),
+            "PUBLICATION" => self
+                .publications
+                .iter_mut()
+                .find(|p| p.name == *name)
+                .map(|p| &mut p.security_labels),
+            "SUBSCRIPTION" => self
+                .subscriptions
+                .iter_mut()
+                .find(|s| s.name == *name)
+                .map(|s| &mut s.security_labels),
+            _ => None,
+        }
+    }
+
     /// `COMMENT ON FUNCTION schema.fn(args)` — match the full identity
     /// signature so overloaded functions are not conflated; fall back
     /// to the base name only when it is unambiguous
@@ -2099,26 +2234,38 @@ impl Assembly {
         name: &str,
         comment: &str,
     ) -> bool {
-        if let Some(function) = self
-            .functions
-            .iter_mut()
-            .find(|f| f.schema == schema && f.identity() == name)
-        {
-            function.comment = Some(comment.to_string());
-            return true;
-        }
-        let base = split_signature(name).map_or(name, |(base, _)| base);
-        let mut candidates = self
-            .functions
-            .iter_mut()
-            .filter(|f| f.schema == schema && f.name == base);
-        let first = candidates.next();
-        if candidates.next().is_some() {
-            return false;
-        }
-        first
+        self.function(schema, name)
             .map(|f| f.comment = Some(comment.to_string()))
             .is_some()
+    }
+
+    /// The function that `COMMENT ON FUNCTION` or `SECURITY LABEL ON
+    /// FUNCTION` names (see [`Self::apply_function_comment`])
+    fn function(
+        &mut self,
+        schema: &str,
+        name: &str,
+    ) -> Option<&mut models::Function> {
+        let base = split_signature(name).map_or(name, |(base, _)| base);
+        let exact = self
+            .functions
+            .iter()
+            .position(|f| f.schema == schema && f.identity() == name);
+        let index = exact.or_else(|| {
+            let mut candidates = self
+                .functions
+                .iter()
+                .enumerate()
+                .filter(|(_, f)| f.schema == schema && f.name == base);
+            let first = candidates.next();
+            candidates
+                .next()
+                .is_none()
+                .then_some(first)
+                .flatten()
+                .map(|(i, _)| i)
+        })?;
+        self.functions.get_mut(index)
     }
 
     /// As [`Self::apply_function_comment`], for a procedure. pg_dump
@@ -2130,27 +2277,39 @@ impl Assembly {
         name: &str,
         comment: &str,
     ) -> bool {
-        let signature = name.replace("(IN ", "(").replace(", IN ", ", ");
-        if let Some(procedure) = self
-            .procedures
-            .iter_mut()
-            .find(|p| p.schema == schema && p.identity() == signature)
-        {
-            procedure.comment = Some(comment.to_string());
-            return true;
-        }
-        let base = split_signature(name).map_or(name, |(base, _)| base);
-        let mut candidates = self
-            .procedures
-            .iter_mut()
-            .filter(|p| p.schema == schema && p.name == base);
-        let first = candidates.next();
-        if candidates.next().is_some() {
-            return false;
-        }
-        first
+        self.procedure(schema, name)
             .map(|p| p.comment = Some(comment.to_string()))
             .is_some()
+    }
+
+    /// The procedure that `COMMENT ON PROCEDURE` or `SECURITY LABEL ON
+    /// PROCEDURE` names (see [`Self::apply_procedure_comment`])
+    fn procedure(
+        &mut self,
+        schema: &str,
+        name: &str,
+    ) -> Option<&mut models::Procedure> {
+        let signature = name.replace("(IN ", "(").replace(", IN ", ", ");
+        let base = split_signature(name).map_or(name, |(base, _)| base);
+        let exact = self
+            .procedures
+            .iter()
+            .position(|p| p.schema == schema && p.identity() == signature);
+        let index = exact.or_else(|| {
+            let mut candidates = self
+                .procedures
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| p.schema == schema && p.name == base);
+            let first = candidates.next();
+            candidates
+                .next()
+                .is_none()
+                .then_some(first)
+                .flatten()
+                .map(|(i, _)| i)
+        })?;
+        self.procedures.get_mut(index)
     }
 
     /// `COMMENT ON COLUMN schema.table.column` — the ddl layer puts
@@ -2160,9 +2319,18 @@ impl Assembly {
         target: &QualifiedName,
         comment: &str,
     ) -> bool {
-        let Some(relation) = &target.schema else {
-            return false;
-        };
+        self.column(target)
+            .map(|c| c.comment = Some(comment.to_string()))
+            .is_some()
+    }
+
+    /// The table column that `COMMENT ON COLUMN` or `SECURITY LABEL ON
+    /// COLUMN` names (see [`Self::apply_column_comment`])
+    fn column(
+        &mut self,
+        target: &QualifiedName,
+    ) -> Option<&mut models::Column> {
+        let relation = target.schema.as_ref()?;
         let (schema, table) = match relation.split_once('.') {
             Some((schema, table)) => (Some(schema.to_string()), table),
             None => (None, relation.as_str()),
@@ -2171,19 +2339,11 @@ impl Assembly {
             schema,
             name: table.to_string(),
         };
-        let Some(table) = self.find_table(&relation) else {
-            return false;
-        };
-        let Some(column) = table
+        self.find_table(&relation)?
             .columns
             .iter_mut()
             .flatten()
             .find(|c| c.name == target.name)
-        else {
-            return false;
-        };
-        column.comment = Some(comment.to_string());
-        true
     }
 
     /// `COMMENT ON TRIGGER trg ON schema.table` — the ddl layer puts
@@ -2655,6 +2815,24 @@ impl Assembly {
         };
         if self.remaining.last() != Some(&remaining) {
             self.remaining.push(remaining);
+        }
+    }
+}
+
+/// Set the label of `provider` in `labels`, or remove it for IS NULL
+fn set_security_label(
+    labels: &mut Option<models::SecurityLabels>,
+    provider: String,
+    label: Option<String>,
+) {
+    match label {
+        Some(label) => {
+            labels.get_or_insert_default().insert(provider, label);
+        }
+        None => {
+            if let Some(map) = labels.as_mut() {
+                map.remove(&provider);
+            }
         }
     }
 }
@@ -3643,6 +3821,7 @@ mod tests {
                 statistics: None,
                 options: None,
                 comment: None,
+                security_labels: None,
             }]),
             indexes: None,
             primary_key: None,
@@ -3666,6 +3845,7 @@ mod tests {
             server: None,
             options: None,
             comment: None,
+            security_labels: None,
         });
         assembly.table_index.insert(("test".into(), "t".into()), 0);
         assembly.apply_deferred_defaults();
@@ -4240,6 +4420,7 @@ mod tests {
                     .as_object()
                     .cloned(),
                     comment: Some(String::from("it's fast\nC:\\x")),
+                    security_labels: None,
                 },
                 models::Tablespace {
                     name: String::from("plain"),
@@ -4247,6 +4428,7 @@ mod tests {
                     location: String::from("/srv/p"),
                     options: None,
                     comment: None,
+                    security_labels: None,
                 },
             ]
         );
@@ -4635,6 +4817,165 @@ mod tests {
             entry.defn.as_deref(),
             Some("COMMENT ON DATABASE \"App DB\" IS $$it's\nhere$$;\n")
         );
+    }
+
+    /// Security labels survive pull → write → load → build: each
+    /// SECURITY LABEL entry goes to the `security_labels` of its
+    /// object, and build writes it back as a SECURITY LABEL entry
+    #[test]
+    fn security_labels_round_trip_through_build() {
+        use clap::Parser;
+        let mut dump = libpgdump::new("App DB", "UTF8", "18.0").unwrap();
+        add(&mut dump, OT::Schema, "", "s", "CREATE SCHEMA s;");
+        add(
+            &mut dump,
+            OT::Table,
+            "s",
+            "t",
+            "CREATE TABLE s.t (id integer, secret text);",
+        );
+        add(
+            &mut dump,
+            OT::Function,
+            "s",
+            "f(integer)",
+            "CREATE FUNCTION s.f(a integer) RETURNS integer LANGUAGE sql \
+             AS $$SELECT a$$;",
+        );
+        let labels = [
+            ("DATABASE \"App DB\"", "", "DATABASE \"App DB\""),
+            ("SCHEMA s", "", "SCHEMA s"),
+            ("TABLE t", "s", "TABLE s.t"),
+            ("COLUMN t.secret", "s", "COLUMN s.t.secret"),
+            ("FUNCTION f(integer)", "s", "FUNCTION s.f(integer)"),
+        ];
+        for (tag, namespace, on) in labels {
+            add(
+                &mut dump,
+                OT::SecurityLabel,
+                namespace,
+                tag,
+                &format!(
+                    "SECURITY LABEL FOR dummy ON {on} IS 'classified';\n\
+                     SECURITY LABEL FOR \"Other\" ON {on} IS 'it''s';\n"
+                ),
+            );
+        }
+        let mut assembly = Assembly::default();
+        assembly.ingest(&dump).unwrap();
+        assembly
+            .ingest_roles(
+                "CREATE ROLE app;\n\
+                 ALTER ROLE app WITH LOGIN;\n\
+                 SECURITY LABEL FOR dummy ON ROLE app IS 'classified';\n",
+            )
+            .unwrap();
+        assert!(assembly.remaining.is_empty());
+        let expected: models::SecurityLabels = [
+            ("Other".to_string(), "it's".to_string()),
+            ("dummy".to_string(), "classified".to_string()),
+        ]
+        .into();
+        assert_eq!(assembly.security_labels.as_ref(), Some(&expected));
+        assert_eq!(
+            assembly.schemas[0].security_labels,
+            Some(expected.clone())
+        );
+        let table = &assembly.tables[0];
+        assert_eq!(table.security_labels, Some(expected.clone()));
+        let columns = table.columns.as_deref().unwrap();
+        assert_eq!(columns[0].security_labels, None);
+        assert_eq!(columns[1].security_labels, Some(expected.clone()));
+        assert_eq!(
+            assembly.functions[0].security_labels,
+            Some(expected.clone())
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("project");
+        let unused = dir.path().join("unused.dump");
+        let args = match cli::Cli::try_parse_from([
+            "pglifecycle",
+            "pull",
+            "--dump",
+            unused.to_str().unwrap(),
+            dest.to_str().unwrap(),
+        ])
+        .unwrap()
+        .action
+        {
+            cli::Action::Pull(args) => args,
+            _ => unreachable!(),
+        };
+        let files = writer::render(&assembly, &args).unwrap();
+        let user = files.get(Path::new("users/app.yaml")).unwrap();
+        assert!(user.contains("security_labels:\n  dummy: classified\n"));
+        writer::write_bootstrap(&files, &args).unwrap();
+
+        // load validates each file against its schema
+        let project = crate::project::load(&dest).unwrap();
+        assert_eq!(project.settings.security_labels, Some(expected.clone()));
+        let archive = dir.path().join("app.dump");
+        crate::build::build(&project, &archive).unwrap();
+        let built = libpgdump::load(&archive).unwrap();
+        let mut defns: Vec<(String, String)> = built
+            .entries()
+            .iter()
+            .filter(|e| e.desc == OT::SecurityLabel)
+            .map(|e| {
+                (
+                    e.tag.clone().unwrap_or_default(),
+                    e.defn.clone().unwrap_or_default(),
+                )
+            })
+            .collect();
+        defns.sort();
+        let entry = |tag: &str, on: &str| {
+            (
+                tag.to_string(),
+                format!(
+                    "SECURITY LABEL FOR \"Other\" ON {on} IS $$it's$$;\n\
+                     SECURITY LABEL FOR dummy ON {on} IS $$classified$$;\n"
+                ),
+            )
+        };
+        assert_eq!(
+            defns,
+            vec![
+                entry("DATABASE \"App DB\"", "DATABASE \"App DB\""),
+                (
+                    String::from("app"),
+                    String::from(
+                        "SECURITY LABEL FOR dummy ON ROLE app IS \
+                         $$classified$$;\n"
+                    )
+                ),
+                // the label names the function by its signature, so
+                // that it identifies one overload
+                entry("f", "FUNCTION s.f(IN a integer)"),
+                entry("s", "SCHEMA s"),
+                entry("t", "TABLE s.t"),
+                entry("t.secret", "COLUMN s.t.secret"),
+            ]
+        );
+    }
+
+    /// A security label on an object that the model has no place for
+    /// keeps its entry, as a comment does
+    #[test]
+    fn unmatched_security_label_is_kept_as_remaining() {
+        let mut dump = libpgdump::new("fixtures", "UTF8", "18.0").unwrap();
+        add(
+            &mut dump,
+            OT::SecurityLabel,
+            "",
+            "LARGE OBJECT 1",
+            "SECURITY LABEL FOR dummy ON LARGE OBJECT 1 IS 'x';",
+        );
+        let mut assembly = Assembly::default();
+        assembly.ingest(&dump).unwrap();
+        assert_eq!(assembly.remaining.len(), 1);
+        assert_eq!(assembly.remaining[0].desc, "SECURITY LABEL");
     }
 
     /// Role membership grants survive the full pull → write → load →

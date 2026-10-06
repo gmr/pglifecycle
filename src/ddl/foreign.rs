@@ -154,6 +154,7 @@ pub(crate) fn create_foreign_table(
         ),
         options: generic_options(node, src),
         comment: None,
+        security_labels: None,
     };
     // a foreign table takes the same INHERITS clause and table
     // constraints as an ordinary one; pg_dump writes a child's CHECK
