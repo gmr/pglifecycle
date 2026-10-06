@@ -530,8 +530,187 @@ pub(crate) fn rebuild(
         }
         dependents.labels.push(label);
     }
+    referenced_keys(
+        project,
+        diff,
+        resolutions,
+        entries,
+        (&by_id, &item, &is_removed),
+        &mut dependents,
+    );
     dependents.labels.sort();
     dependents
+}
+
+/// The lookups of [`rebuild`]: the entries by dump id, the project item
+/// of an entry, and true when the plan drops the object of an entry as
+/// a removed object
+type Lookups<'a, 'b> = (
+    &'b HashMap<i32, &'a libpgdump::Entry>,
+    &'b dyn Fn(&libpgdump::Entry) -> Option<usize>,
+    &'b dyn Fn(&libpgdump::Entry) -> bool,
+);
+
+/// The foreign keys that reference a primary key or unique constraint
+/// that a table drops and adds again in place (see
+/// [`alter::Alter::drops_key`]). PostgreSQL refuses to drop the
+/// constraint while a foreign key references it, thus the plan drops
+/// each such foreign key first, and adds it again after the statements
+/// of the table, gated with the drop. When the project changes or
+/// removes the foreign key, or rebuilds its table, the plan cannot do
+/// this, and deploy refuses it. An object of another type that depends
+/// on the constraint is refused too.
+fn referenced_keys(
+    project: &crate::project::Project,
+    diff: &Diff,
+    resolutions: &mut BTreeMap<usize, Resolution>,
+    entries: &[libpgdump::Entry],
+    (by_id, item, is_removed): Lookups,
+    dependents: &mut Dependents,
+) {
+    let definition = |id: usize| {
+        project
+            .inventory
+            .iter()
+            .find(|item| item.id == id)
+            .map(|item| &item.definition)
+    };
+    let mut seen = BTreeSet::new();
+    for table in entries.iter().filter(|entry| entry.desc == OT::Table) {
+        let Some(id) = item(table)
+            .filter(|id| diff.items.get(id) == Some(&Change::Changed))
+        else {
+            continue;
+        };
+        let Some(Resolution::Statements(alters)) = resolutions.get(&id) else {
+            continue;
+        };
+        let names: Vec<String> = alters
+            .iter()
+            .filter_map(|alter| alter.drops_key.clone())
+            .collect();
+        let tag = table.tag.as_deref().unwrap_or_default();
+        let mut again = Vec::new();
+        for name in names {
+            let Some(key) = entries.iter().find(|entry| {
+                entry.desc == OT::Constraint
+                    && entry.namespace == table.namespace
+                    && entry.tag.as_deref() == Some(&format!("{tag} {name}"))
+            }) else {
+                continue;
+            };
+            for entry in entries {
+                if !entry.dependencies.contains(&key.dump_id)
+                    || matches!(entry.desc, OT::Comment | OT::SecurityLabel)
+                    || !seen.insert(entry.dump_id)
+                {
+                    continue;
+                }
+                let label = entry_label(entry);
+                if entry.desc != OT::FkConstraint {
+                    dependents.refused.push(format!(
+                        "{label}: it depends on {}, which deploy drops \
+                         and adds again, and deploy cannot drop and make \
+                         it again",
+                        entry_label(key)
+                    ));
+                    continue;
+                }
+                let Some(owner) = relation(entry, by_id) else {
+                    continue;
+                };
+                // the plan drops the table of the foreign key, and the
+                // foreign key with it, before the table changes
+                if is_removed(owner) {
+                    continue;
+                }
+                match foreign_key(
+                    diff,
+                    resolutions,
+                    (owner, entry),
+                    item,
+                    definition,
+                ) {
+                    Ok(sql) => {
+                        if let Some(drop) = entry.drop_stmt.clone() {
+                            dependents
+                                .drops
+                                .entry(entry.dump_id)
+                                .or_default()
+                                .push(
+                                    alter::Alter::destructive(drop)
+                                        .labeled(&label),
+                                );
+                        }
+                        again.push(
+                            alter::Alter::destructive(sql).labeled(&label),
+                        );
+                        dependents.labels.push(label);
+                    }
+                    Err(reason) => dependents.refused.push(format!(
+                        "{label}: it references {}, which deploy drops \
+                         and adds again, and {reason}",
+                        entry_label(key)
+                    )),
+                }
+            }
+        }
+        if let Some(Resolution::Statements(alters)) = resolutions.get_mut(&id)
+        {
+            alters.extend(again);
+        }
+    }
+}
+
+/// The statement that adds again the foreign key `entry` of the table
+/// `owner`, when the project keeps the foreign key as the database has
+/// it, and the plan changes its table in place or not at all
+fn foreign_key<'a>(
+    diff: &Diff,
+    resolutions: &BTreeMap<usize, Resolution>,
+    (owner, entry): (&libpgdump::Entry, &libpgdump::Entry),
+    item: &dyn Fn(&libpgdump::Entry) -> Option<usize>,
+    definition: impl Fn(usize) -> Option<&'a Definition>,
+) -> Result<String, String> {
+    let Some(id) = item(owner) else {
+        return Err(String::from("the project does not have its table"));
+    };
+    if diff.items.get(&id) == Some(&Change::Changed)
+        && !matches!(resolutions.get(&id), Some(Resolution::Statements(_)))
+    {
+        return Err(String::from("deploy drops and makes its table again"));
+    }
+    let name = owner.tag.as_deref().and_then(|table| {
+        entry
+            .tag
+            .as_deref()
+            .and_then(|tag| tag.strip_prefix(&format!("{table} ")))
+    });
+    let Some(Definition::Table(repo)) = definition(id) else {
+        return Err(String::from("the project does not have its table"));
+    };
+    let database = match diff.changed.get(&id) {
+        Some(Definition::Table(table)) => table,
+        _ => repo,
+    };
+    let find = |table: &Table| {
+        table
+            .foreign_keys
+            .iter()
+            .flatten()
+            .find(|fk| Some(fk.name.as_str()) == name)
+            .cloned()
+    };
+    match (find(repo), find(database)) {
+        (Some(wanted), Some(existing)) if wanted == existing => Ok(format!(
+            "ALTER TABLE {}.{} ADD CONSTRAINT {} {};\n",
+            quote_ident(&repo.schema),
+            quote_ident(&repo.name),
+            quote_ident(&wanted.name),
+            crate::build::render_foreign_key(&wanted)
+        )),
+        _ => Err(String::from("the project changes or removes it")),
+    }
 }
 
 /// True when a SEQUENCE OWNED BY entry links the sequence `entry` to a
@@ -2046,6 +2225,155 @@ mod tests {
         );
         assert!(dependents.labels.is_empty());
         assert!(rebuilt(&resolutions[&0]));
+    }
+
+    /// A table with a foreign key on `test.k (a)`, as `name`
+    fn referencing(name: &str, column: &str) -> serde_json::Value {
+        serde_json::json!({
+            "name": name,
+            "schema": "test",
+            "owner": "postgres",
+            "columns": [{"name": "x", "data_type": "integer"}],
+            "foreign_keys": [{
+                "name": format!("{name}_fkey"),
+                "columns": ["x"],
+                "references": {"name": "test.k", "columns": [column]},
+            }],
+        })
+    }
+
+    /// A primary key that changes in place: the foreign keys that
+    /// reference it are dropped first and added again after the
+    /// statements of its table, gated with the drop. A foreign key
+    /// that the project changes, and a view that depends on the key,
+    /// are refused
+    #[test]
+    fn a_key_change_drops_and_adds_its_foreign_keys() {
+        let key = |column: &str| {
+            serde_json::json!({
+                "name": "k",
+                "schema": "test",
+                "owner": "postgres",
+                "columns": [
+                    {"name": "a", "data_type": "integer", "nullable": false},
+                ],
+                "primary_key": [column],
+            })
+        };
+        let project = project(vec![
+            item(0, ObjectType::Table, key("a")),
+            item(1, ObjectType::Table, referencing("b", "a")),
+            item(2, ObjectType::Table, referencing("c", "a")),
+        ]);
+        let mut snapshot =
+            libpgdump::new("test", "UTF8", "18.0").expect("new dump");
+        let k = entry(&mut snapshot, OT::Table, "k", None, &[]);
+        let b = entry(&mut snapshot, OT::Table, "b", None, &[]);
+        let c = entry(&mut snapshot, OT::Table, "c", None, &[]);
+        let pk = entry(
+            &mut snapshot,
+            OT::Constraint,
+            "k k_pk",
+            Some("ALTER TABLE ONLY test.k DROP CONSTRAINT k_pk;\n"),
+            &[k],
+        );
+        let b_fkey = entry(
+            &mut snapshot,
+            OT::FkConstraint,
+            "b b_fkey",
+            Some("ALTER TABLE ONLY test.b DROP CONSTRAINT b_fkey;\n"),
+            &[b, k, pk],
+        );
+        entry(
+            &mut snapshot,
+            OT::FkConstraint,
+            "c c_fkey",
+            Some("ALTER TABLE ONLY test.c DROP CONSTRAINT c_fkey;\n"),
+            &[c, k, pk],
+        );
+        entry(&mut snapshot, OT::View, "v", None, &[k, pk]);
+        let mut database = key("a");
+        database["primary_key"] =
+            serde_json::json!({"name": "k_pk", "columns": ["a"]});
+        let database: Definition =
+            Definition::Table(serde_json::from_value(database).unwrap());
+        let mut c_database = referencing("c", "a");
+        c_database["foreign_keys"][0]["on_delete"] =
+            serde_json::json!("CASCADE");
+        let mut diff = Diff {
+            items: BTreeMap::from([
+                (0, Change::Changed),
+                (1, Change::Unchanged),
+                (2, Change::Changed),
+            ]),
+            changed: BTreeMap::from([
+                (0, database.clone()),
+                (
+                    2,
+                    Definition::Table(
+                        serde_json::from_value(c_database).unwrap(),
+                    ),
+                ),
+            ]),
+            removed: BTreeMap::new(),
+            owned: BTreeSet::new(),
+            owner_changed: BTreeSet::new(),
+        };
+        let mut resolutions = BTreeMap::new();
+        for id in [0, 2] {
+            resolutions.insert(
+                id,
+                alter::resolve(
+                    &project.inventory[id].definition,
+                    &diff.changed[&id],
+                ),
+            );
+        }
+        let mut dependents = rebuild(
+            &project,
+            &mut diff,
+            &mut resolutions,
+            &snapshot,
+            &alter::IndexGroups::new(),
+            &alter::operator_class::Families::new(),
+            false,
+        );
+        assert_eq!(
+            drops(&dependents, b_fkey),
+            vec!["ALTER TABLE ONLY test.b DROP CONSTRAINT b_fkey;\n"]
+        );
+        let Resolution::Statements(alters) = &resolutions[&0] else {
+            panic!("expected in-place statements");
+        };
+        let sql: Vec<(&str, bool)> = alters
+            .iter()
+            .map(|alter| (alter.sql.as_str(), alter.destructive))
+            .collect();
+        assert_eq!(
+            sql,
+            vec![
+                ("ALTER TABLE test.k DROP CONSTRAINT k_pk;\n", true),
+                ("ALTER TABLE test.k ADD PRIMARY KEY (a);\n", true),
+                (
+                    "ALTER TABLE test.b ADD CONSTRAINT b_fkey FOREIGN KEY \
+                     (x) REFERENCES test.k (a);\n",
+                    true
+                ),
+            ]
+        );
+        assert_eq!(dependents.labels, vec!["FK CONSTRAINT test.b b_fkey"]);
+        dependents.refused.sort();
+        assert_eq!(
+            dependents.refused,
+            vec![
+                "FK CONSTRAINT test.c c_fkey: it references CONSTRAINT \
+                 test.k k_pk, which deploy drops and adds again, and the \
+                 project changes or removes it",
+                "VIEW test.v: it depends on CONSTRAINT test.k k_pk, which \
+                 deploy drops and adds again, and deploy cannot drop and \
+                 make it again",
+            ]
+        );
     }
 
     /// A replaced view that depends on another replaced view: both are

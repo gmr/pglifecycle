@@ -3737,6 +3737,7 @@ mod tests {
                 schema: None,
                 links: None,
                 unlinks: false,
+                drops_key: None,
             })
             .collect();
         let resolutions =

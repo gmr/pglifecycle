@@ -133,7 +133,7 @@ printf 'primary_key:\n- id\n' >> "${tables}/pk_not_null.yaml"
 expect_empty_plan "a primary key that ALTER TABLE adds is NOT NULL"
 
 # without the primary key the column can be null again: deploy
-# rebuilds the table, which needs --allow-drop
+# drops the primary key, which needs --allow-drop, and then the NOT NULL
 perl -0pi -e 's/\nprimary_key:\n- id\n/\n/' "${tables}/pk_not_null.yaml"
 ./target/debug/pglifecycle deploy --apply --allow-drop -d "${TARGET_DB}" \
     "${WORKDIR}/project"

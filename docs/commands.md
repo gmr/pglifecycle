@@ -172,6 +172,9 @@ reconciled in place where PostgreSQL can express it:
 - **Tables** — add column, set/drop default, set/drop not-null,
   add/drop check constraints, foreign keys and exclusion constraints,
   primary-key and unique additions, index and trigger create/drop,
+  primary-key and unique changes and removals (`DROP CONSTRAINT`, then
+  `ADD`; the drop is destructive, and a foreign key that references
+  the constraint is dropped first and added again after it),
   `REPLICA IDENTITY`, column storage, compression, statistics target
   and options, rules (`CREATE OR REPLACE RULE`, their state and
   comment), and comment changes, including comments on constraints. A

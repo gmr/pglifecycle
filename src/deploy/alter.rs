@@ -82,6 +82,11 @@ pub(crate) struct Alter {
     /// A drop of the column or of its table drops the sequence, thus
     /// deploy runs it before all other statements
     pub unlinks: bool,
+    /// The primary key or unique constraint that the statement drops.
+    /// A foreign key of another table can reference it, thus deploy
+    /// drops such a foreign key first and adds it again after the
+    /// statements of the table
+    pub drops_key: Option<String>,
 }
 
 impl Alter {
@@ -95,6 +100,7 @@ impl Alter {
             schema: None,
             links: None,
             unlinks: false,
+            drops_key: None,
         }
     }
 
@@ -608,6 +614,7 @@ fn table_in(repo: &Table, db: &Table, groups: &IndexGroups) -> Resolution {
         return Resolution::Replace;
     }
     let mut alters = validations;
+    key_drops(&name, repo, db, &mut alters);
     if !columns(&name, repo, db, &mut alters)
         || !constraints(&name, repo, db, &mut alters)
         || !triggers(&name, repo, db, &mut alters)
@@ -736,9 +743,13 @@ fn constraint_comments(
 ) {
     let wanted = repo.constraint_comments.clone().unwrap_or_default();
     let existing = db.constraint_comments.clone().unwrap_or_default();
+    // a constraint that the plan adds, or drops and adds again, has no
+    // comment
     let added = |name: &str| {
         let marker = format!("ADD CONSTRAINT {} ", quote_ident(name));
-        alters.iter().any(|a| a.sql.contains(&marker))
+        alters.iter().any(|a| {
+            a.sql.contains(&marker) || a.drops_key.as_deref() == Some(name)
+        })
     };
     let mut comments = Vec::new();
     for (name, comment) in &wanted {
@@ -767,39 +778,12 @@ fn constraint_comments(
 /// NOT NULL constraints, with the ones PostgreSQL generates where the
 /// model records none
 fn constraint_names(table: &Table) -> std::collections::BTreeSet<String> {
-    use crate::models::ConstraintColumns;
     let mut names = std::collections::BTreeSet::new();
-    let generated = |columns: &[String], suffix: &str| {
-        make_object_name(&table.name, Some(&columns.join("_")), suffix)
-    };
-    let mut columns_constraint = |c: &ConstraintColumns, suffix: &str| {
-        let name = match c {
-            ConstraintColumns::Detailed {
-                name: Some(name), ..
-            } => name.clone(),
-            _ if suffix == "pkey" => {
-                make_object_name(&table.name, None, suffix)
-            }
-            ConstraintColumns::Name(column) => {
-                generated(std::slice::from_ref(column), suffix)
-            }
-            ConstraintColumns::Columns(columns) => generated(columns, suffix),
-            // the key columns and then the INCLUDE columns
-            ConstraintColumns::Detailed {
-                columns, include, ..
-            } => {
-                let mut columns = columns.clone();
-                columns.extend(include.iter().flatten().cloned());
-                generated(&columns, suffix)
-            }
-        };
-        names.insert(name);
-    };
     if let Some(pk) = &table.primary_key {
-        columns_constraint(pk, "pkey");
+        names.insert(key_name(&table.name, pk, "pkey"));
     }
     for unique in table.unique_constraints.iter().flatten() {
-        columns_constraint(unique, "key");
+        names.insert(key_name(&table.name, unique, "key"));
     }
     names.extend(
         table
@@ -811,6 +795,72 @@ fn constraint_names(table: &Table) -> std::collections::BTreeSet<String> {
     names.extend(table.foreign_keys.iter().flatten().map(|f| f.name.clone()));
     names.extend(table.not_null_names().into_values());
     names
+}
+
+/// The names of the primary key and unique constraints of the database
+/// table that the project changes or removes
+fn dropped_keys(repo: &Table, db: &Table) -> Vec<String> {
+    let mut names = Vec::new();
+    if repo.primary_key != db.primary_key
+        && let Some(pk) = &db.primary_key
+    {
+        names.push(key_name(&db.name, pk, "pkey"));
+    }
+    let repo_unique = repo.unique_constraints.as_deref().unwrap_or_default();
+    for unique in db.unique_constraints.iter().flatten() {
+        if !repo_unique.contains(unique) {
+            names.push(key_name(&db.name, unique, "key"));
+        }
+    }
+    names
+}
+
+/// Drop each primary key and unique constraint that the project changes
+/// or removes, before the statements of the columns: PostgreSQL refuses
+/// DROP NOT NULL on a column of a primary key. [`constraints`] adds a
+/// changed constraint again in place. The drop is destructive.
+fn key_drops(table: &str, repo: &Table, db: &Table, alters: &mut Vec<Alter>) {
+    for name in dropped_keys(repo, db) {
+        alters.push(Alter {
+            drops_key: Some(name.clone()),
+            ..Alter::destructive(format!(
+                "ALTER TABLE {table} DROP CONSTRAINT {};\n",
+                quote_ident(&name)
+            ))
+        });
+    }
+}
+
+/// The name of a primary key (`suffix` "pkey") or unique constraint
+/// (`suffix` "key") of the table `table`: the name that the model
+/// records, else the name that PostgreSQL generates
+fn key_name(
+    table: &str,
+    constraint: &crate::models::ConstraintColumns,
+    suffix: &str,
+) -> String {
+    use crate::models::ConstraintColumns;
+    let generated = |columns: &[String]| {
+        make_object_name(table, Some(&columns.join("_")), suffix)
+    };
+    match constraint {
+        ConstraintColumns::Detailed {
+            name: Some(name), ..
+        } => name.clone(),
+        _ if suffix == "pkey" => make_object_name(table, None, suffix),
+        ConstraintColumns::Name(column) => {
+            generated(std::slice::from_ref(column))
+        }
+        ConstraintColumns::Columns(columns) => generated(columns),
+        // the key columns and then the INCLUDE columns
+        ConstraintColumns::Detailed {
+            columns, include, ..
+        } => {
+            let mut columns = columns.clone();
+            columns.extend(include.iter().flatten().cloned());
+            generated(&columns)
+        }
+    }
 }
 
 /// Row security reconciliation. A statement that turns protection on
@@ -1477,25 +1527,28 @@ fn constraints(
     db: &Table,
     alters: &mut Vec<Alter>,
 ) -> bool {
-    match (&repo.primary_key, &db.primary_key) {
-        (repo_pk, db_pk) if repo_pk == db_pk => {}
-        (Some(pk), None) => alters.push(Alter::new(format!(
+    // The add of a primary key or unique constraint that replaces one
+    // that [`key_drops`] drops is gated with the drop: without the drop
+    // it fails
+    let dropped = dropped_keys(repo, db);
+    let add_key = |kind: &str, key, replaces: bool| Alter {
+        destructive: replaces,
+        ..Alter::new(format!(
             "ALTER TABLE {table} ADD {};\n",
-            build::render_constraint("PRIMARY KEY", pk)
-        ))),
-        _ => return false,
+            build::render_constraint(kind, key)
+        ))
+    };
+    if repo.primary_key != db.primary_key
+        && let Some(pk) = &repo.primary_key
+    {
+        alters.push(add_key("PRIMARY KEY", pk, db.primary_key.is_some()));
     }
-    let repo_unique = repo.unique_constraints.as_deref().unwrap_or_default();
     let db_unique = db.unique_constraints.as_deref().unwrap_or_default();
-    if db_unique.iter().any(|u| !repo_unique.contains(u)) {
-        return false;
-    }
-    for unique in repo_unique {
+    for unique in repo.unique_constraints.iter().flatten() {
         if !db_unique.contains(unique) {
-            alters.push(Alter::new(format!(
-                "ALTER TABLE {table} ADD {};\n",
-                build::render_constraint("UNIQUE", unique)
-            )));
+            let replaces =
+                dropped.contains(&key_name(&repo.name, unique, "key"));
+            alters.push(add_key("UNIQUE", unique, replaces));
         }
     }
     let repo_checks = repo.check_constraints.as_deref().unwrap_or_default();
@@ -2650,13 +2703,91 @@ mod tests {
             sql(&alters),
             vec!["ALTER TABLE test.users ADD PRIMARY KEY (id);\n"]
         );
-        // removal cannot name the constraint → rebuild
+        // a removal drops the constraint by the name that PostgreSQL
+        // generates; the drop is destructive
         let mut db = base_table();
         db["primary_key"] = serde_json::json!(["id"]);
-        assert!(matches!(
-            table(&parse_table(base_table()), &parse_table(db)),
-            Resolution::Replace
-        ));
+        let alters =
+            statements(table(&parse_table(base_table()), &parse_table(db)));
+        assert_eq!(
+            sql(&alters),
+            vec!["ALTER TABLE test.users DROP CONSTRAINT users_pkey;\n"]
+        );
+        assert!(alters[0].destructive);
+        assert_eq!(alters[0].drops_key.as_deref(), Some("users_pkey"));
+    }
+
+    /// The primary key is dropped before the DROP NOT NULL of its
+    /// column, which PostgreSQL refuses while the key has the column
+    #[test]
+    fn primary_key_drop_precedes_drop_not_null() {
+        let mut repo = base_table();
+        repo["columns"][0] = serde_json::json!(
+            {"name": "id", "data_type": "uuid"});
+        let mut db = base_table();
+        db["primary_key"] = serde_json::json!(["id"]);
+        let alters = statements(table(&parse_table(repo), &parse_table(db)));
+        assert_eq!(
+            sql(&alters),
+            vec![
+                "ALTER TABLE test.users DROP CONSTRAINT users_pkey;\n",
+                "ALTER TABLE test.users ALTER COLUMN id DROP NOT NULL;\n",
+            ]
+        );
+    }
+
+    /// A changed primary key is dropped and added again in place, not
+    /// by a rebuild of the table. The add is gated with the drop, and
+    /// the comment of the constraint is set again
+    #[test]
+    fn primary_key_change_in_place() {
+        let mut repo = base_table();
+        repo["primary_key"] = serde_json::json!(["id", "email"]);
+        repo["constraint_comments"] = serde_json::json!({"users_pkey": "k"});
+        let mut db = base_table();
+        db["primary_key"] = serde_json::json!(["id"]);
+        db["constraint_comments"] = serde_json::json!({"users_pkey": "k"});
+        let alters = statements(table(&parse_table(repo), &parse_table(db)));
+        assert_eq!(
+            sql(&alters),
+            vec![
+                "ALTER TABLE test.users DROP CONSTRAINT users_pkey;\n",
+                "ALTER TABLE test.users ADD PRIMARY KEY (id, email);\n",
+                "COMMENT ON CONSTRAINT users_pkey ON test.users IS $$k$$;\n",
+            ]
+        );
+        assert!(alters[0].destructive && alters[1].destructive);
+        assert_eq!(alters[0].drops_key.as_deref(), Some("users_pkey"));
+    }
+
+    /// A changed unique constraint is dropped and added again in place.
+    /// An add with a new name does not need the drop, thus it is not
+    /// gated; an add with the name of the dropped one is
+    #[test]
+    fn unique_constraint_change_in_place() {
+        let mut repo = base_table();
+        repo["unique_constraints"] = serde_json::json!([
+            ["email", "id"],
+            {"columns": ["id"], "include": ["email"]},
+        ]);
+        let mut db = base_table();
+        db["unique_constraints"] = serde_json::json!([
+            ["email"],
+            {"name": "users_id_email_key", "columns": ["id"]},
+        ]);
+        let alters = statements(table(&parse_table(repo), &parse_table(db)));
+        assert_eq!(
+            sql(&alters),
+            vec![
+                "ALTER TABLE test.users DROP CONSTRAINT users_email_key;\n",
+                "ALTER TABLE test.users DROP CONSTRAINT \
+                 users_id_email_key;\n",
+                "ALTER TABLE test.users ADD UNIQUE (email, id);\n",
+                "ALTER TABLE test.users ADD UNIQUE (id) INCLUDE (email);\n",
+            ]
+        );
+        let gated: Vec<bool> = alters.iter().map(|a| a.destructive).collect();
+        assert_eq!(gated, vec![true, true, false, true]);
     }
 
     #[test]
