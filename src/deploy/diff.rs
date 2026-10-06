@@ -350,6 +350,13 @@ pub fn diff(project: &Project, assembly: &Assembly) -> Diff {
                             }
                             (_, db) => db,
                         };
+                        // labels that the project does not manage are
+                        // not a change
+                        let db =
+                            super::alter::security_label::without_unmanaged(
+                                &item.definition,
+                                db,
+                            );
                         // a dump made without owners gives none to
                         // compare
                         if db.owner().is_some_and(|owner| !owner.is_empty())
@@ -551,6 +558,7 @@ fn fold_implied_partitions(
                 continue;
             }
             let comment = child.comment.clone();
+            let labels = child.security_labels.clone();
             let indexes = child.indexes.iter().flatten();
             implied.push(
                 indexes
@@ -567,6 +575,9 @@ fn fold_implied_partitions(
                     partition.attached = None;
                     if partition.comment.is_none() {
                         partition.comment.clone_from(&comment);
+                    }
+                    if partition.security_labels.is_none() {
+                        partition.security_labels.clone_from(&labels);
                     }
                 }
             }
@@ -870,6 +881,11 @@ fn database_index(assembly: &Assembly) -> BTreeMap<ObjectKey, Definition> {
             (ObjectKey::new(desc, &definition), definition)
         })
         .collect()
+}
+
+/// Whether deploy compares the two definitions as the same
+pub(crate) fn same(a: &Definition, b: &Definition) -> bool {
+    normalized(a) == normalized(b)
 }
 
 /// A definition as a JSON value with the fields deploy does not

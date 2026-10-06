@@ -1,13 +1,16 @@
-//! The comment, the properties and the settings of the database, and
-//! the settings of each role in the database: the `comment`,
-//! `connection_limit`, `is_template`, `settings` and `role_settings` of
-//! `project.yaml` compared with the COMMENT and DATABASE PROPERTIES
-//! entries of the snapshot.
+//! The comment, the security labels, the properties and the settings
+//! of the database, and the settings of each role in the database: the
+//! `comment`, `security_labels`, `connection_limit`, `is_template`,
+//! `settings` and `role_settings` of `project.yaml` compared with the
+//! COMMENT, SECURITY LABEL and DATABASE PROPERTIES entries of the
+//! snapshot.
 //!
 //! A comment that is different or that only the project has gets
 //! `COMMENT ON DATABASE`, and a comment that only the database has
 //! gets `IS NULL`, as for the comment of an object. The removal is not
-//! destructive: it loses no data.
+//! destructive: it loses no data. The security labels change in the
+//! same way, but only when `project.yaml` has `security_labels`: with
+//! no field, the project does not manage them.
 //!
 //! A different connection limit gets `CONNECTION LIMIT`, and a
 //! different template state gets `IS_TEMPLATE`. No value is the
@@ -26,13 +29,14 @@ use serde_json::{Map, Value};
 
 use super::Statement;
 use super::alter::comment_on;
+use super::alter::security_label;
 use crate::models::canonical_settings;
 use crate::project::DatabaseSettings;
 use crate::pull::Assembly;
 use crate::utils::{quote_ident, setting_value};
 
-/// The statements that make the comment and the settings of the
-/// database `assembly` those of the project, and each setting that
+/// The statements that make the comment, the security labels and the
+/// settings of the database `assembly` those of the project, and each setting that
 /// they reset, as `name of label`
 pub(super) fn statements(
     project: &DatabaseSettings,
@@ -49,6 +53,27 @@ pub(super) fn statements(
             fails_open: false,
         });
     }
+    // with no `security_labels`, the project does not manage them
+    statements.extend(
+        project
+            .security_labels
+            .as_ref()
+            .map(|labels| {
+                security_label::changes(
+                    "DATABASE",
+                    &database,
+                    Some(labels),
+                    assembly.security_labels.as_ref(),
+                )
+            })
+            .unwrap_or_default()
+            .into_iter()
+            .map(|sql| Statement {
+                label: label.clone(),
+                sql,
+                fails_open: false,
+            }),
+    );
     // no value is the default: no limit, and not a template
     let limit = |limit: Option<i64>| limit.unwrap_or(-1);
     if limit(project.connection_limit) != limit(assembly.connection_limit) {
@@ -160,6 +185,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::models::SecurityLabels;
 
     fn settings(value: Value) -> Map<String, Value> {
         value.as_object().unwrap().clone()
@@ -270,6 +296,52 @@ mod tests {
         );
         assert!(comment(Some("same"), Some("same")).is_empty());
         assert!(comment(None, None).is_empty());
+    }
+
+    /// The security labels of the database change as its comment does,
+    /// but only when `project.yaml` has `security_labels`
+    #[test]
+    fn database_security_labels_set_and_removed() {
+        let map = |pairs: &[(&str, &str)]| -> SecurityLabels {
+            pairs
+                .iter()
+                .map(|(p, l)| (p.to_string(), l.to_string()))
+                .collect()
+        };
+        let labels = |project: Option<&[(&str, &str)]>,
+                      database: &[(&str, &str)]| {
+            let project = DatabaseSettings {
+                security_labels: project.map(map),
+                ..Default::default()
+            };
+            let mut assembly = assembly("App DB");
+            assembly.security_labels =
+                (!database.is_empty()).then(|| map(database));
+            let (statements, _) = statements(&project, &assembly);
+            assert!(statements.iter().all(|s| s.label == "DATABASE App DB"));
+            statements.into_iter().map(|s| s.sql).collect::<Vec<_>>()
+        };
+        assert_eq!(
+            labels(
+                Some(&[("dummy", "new")]),
+                &[("dummy", "old"), ("gone", "x")]
+            ),
+            [
+                "SECURITY LABEL FOR dummy ON DATABASE \"App DB\" IS $$new$$;\n",
+                "SECURITY LABEL FOR gone ON DATABASE \"App DB\" IS NULL;\n",
+            ]
+        );
+        assert!(
+            labels(Some(&[("dummy", "same")]), &[("dummy", "same")])
+                .is_empty()
+        );
+        // an empty map removes each label
+        assert_eq!(
+            labels(Some(&[]), &[("dummy", "old")]),
+            ["SECURITY LABEL FOR dummy ON DATABASE \"App DB\" IS NULL;\n"]
+        );
+        // with no field, the project does not manage the labels
+        assert!(labels(None, &[("dummy", "old")]).is_empty());
     }
 
     /// A different connection limit or template state gets ALTER

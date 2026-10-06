@@ -112,7 +112,7 @@ fn arguments(arguments: &[Argument]) -> Vec<Argument> {
 
 /// The qualified name and the signature, which COMMENT ON AGGREGATE
 /// and DROP AGGREGATE read
-fn target(aggregate: &Aggregate) -> String {
+pub(super) fn target(aggregate: &Aggregate) -> String {
     format!(
         "{}.{} {}",
         quote_ident(&aggregate.schema),

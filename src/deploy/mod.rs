@@ -720,14 +720,16 @@ fn plan(
         }
         let owners = entry_owners(entry, output, &entries_by_id);
         if owners.is_empty() {
-            // the statements of `database` change the comment of the
-            // database
-            let database_comment = entry.desc
-                == libpgdump::ObjectType::Comment
-                && entry
-                    .tag
-                    .as_deref()
-                    .is_some_and(|tag| tag.starts_with("DATABASE "));
+            // the statements of `database` change the comment and the
+            // security labels of the database
+            let database_comment = matches!(
+                entry.desc,
+                libpgdump::ObjectType::Comment
+                    | libpgdump::ObjectType::SecurityLabel
+            ) && entry
+                .tag
+                .as_deref()
+                .is_some_and(|tag| tag.starts_with("DATABASE "));
             if !database_comment
                 && matches!(
                     entry.desc,

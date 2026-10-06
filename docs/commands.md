@@ -58,7 +58,9 @@ pg_restore --create -d app app.dump
 The `comment` of `project.yaml` goes in a `COMMENT` entry with the tag
 `DATABASE name`, as `pg_dump` writes it: `COMMENT ON DATABASE name IS
 ...`. The entry names the database of the project, and `pg_restore`
-restores it only with `--create`, as for the settings.
+restores it only with `--create`, as for the settings. The
+`security_labels` of `project.yaml` go in a `SECURITY LABEL` entry with
+the same tag, which `pg_restore` also restores only with `--create`.
 
 ## deploy
 
@@ -309,7 +311,11 @@ reconciled in place where PostgreSQL can express it:
   DATABASE name IS ...`, and a comment that only the database has gets
   `COMMENT ON DATABASE name IS NULL`, as for the comment of an object.
   `name` is the name of the database that deploy reads. The statement
-  comes with the settings, after all other statements.
+  comes with the settings, after all other statements. The
+  `security_labels` of `project.yaml` change in the same way, with
+  `SECURITY LABEL FOR provider ON DATABASE name IS ...`, but only when
+  `project.yaml` has the field: with no field, deploy leaves the labels
+  of the database as they are.
 - **Database properties** — the `connection_limit` and `is_template`
   of `project.yaml`. A different connection limit gets `ALTER DATABASE
   name CONNECTION LIMIT n`, and a different template state gets `ALTER
@@ -527,6 +533,14 @@ the roles of the database with `pg_dumpall --globals-only`; with
 roles. PUBLIC, `CURRENT_USER` and the reserved `pg_` roles are not
 checked.
 
+A security label changes in place: a label that is different or that
+only the project has gets `SECURITY LABEL FOR provider ON ... IS
+label`. An object, a column or a partition with no `security_labels`
+does not manage its labels, and deploy leaves the labels of the
+database as they are. With the field, a label that only the database
+has gets `IS NULL`. A change to the labels only does not make the
+object again.
+
 A grant, comment or security label on an object that is not in the
 project, for example a grant on the `public` schema or on a
 `pg_catalog` function, is not in the plan. deploy gives a warning for
@@ -675,7 +689,7 @@ and the transaction rolls back. The comment of each of
 these types changes in place. An aggregate, an operator, a class
 and a family have an owner; a cast and a transform do not.
 
-An object of a type that `pull` does not yet model (security labels,
+An object of a type that `pull` does not yet model (a large object,
 …) is left as the database has it. An object that the project writes
 as a raw `sql` statement is only checked for existence, whatever its
 type: `pull` writes the structured fields, so the two never compare
@@ -825,7 +839,7 @@ went missing.
 ```console
 $ pglifecycle pull ./project -d mydb
 ...
-error: 1 dump entry could not be modeled (SECURITY LABEL), so the
+error: 1 dump entry could not be modeled (DATABASE PROPERTIES), so the
 generated project would not reproduce the source database.
 The entry was preserved in ./project/remaining.yaml; re-run with
 --allow-unsupported to accept the project as it is.

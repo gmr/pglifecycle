@@ -7,8 +7,8 @@ database object, validated against the JSON-Schema definitions in
 ```text
 my-project/
 ├── project.yaml          # name, superuser, extensions, languages,
-│                         # access methods, database comment
-│                         # and settings
+│                         # access methods, database comment,
+│                         # security labels and settings
 ├── schemata/             # one file per schema
 │   └── test.yaml
 ├── tables/               # <schema>/<table>.yaml
@@ -534,10 +534,11 @@ settings:
   thus also with `--no-roles` and `--dump`. `build` writes them as
   `pg_dump` does (see [build](commands.md#build)), and `deploy` makes
   them the settings of the database. `comment` is the comment of the
-  database (`COMMENT ON DATABASE`). `connection_limit` is the number of
-  connections that the database allows (`ALTER DATABASE ... CONNECTION
-  LIMIT`; -1, the default, is no limit), and `is_template: true` makes
-  the database a template (`ALTER DATABASE ... IS_TEMPLATE`). `pull`,
+  database (`COMMENT ON DATABASE`), and `security_labels` its security
+  labels. `connection_limit` is the number of connections that the
+  database allows (`ALTER DATABASE ... CONNECTION LIMIT`; -1, the
+  default, is no limit), and `is_template: true` makes the database a
+  template (`ALTER DATABASE ... IS_TEMPLATE`). `pull`,
   `build` and `deploy` use them as they use the settings. `pg_dump`
   cannot connect to a database with `ALLOW_CONNECTIONS false`, thus a
   project has no field for it:
@@ -546,6 +547,8 @@ settings:
 ---
 name: app
 comment: The application database
+security_labels:
+  sepgsql: system_u:object_r:sepgsql_db_t:s0
 connection_limit: 50
 settings:
 - search_path: [$user, public]
@@ -553,6 +556,39 @@ settings:
 role_settings:
   app_user:
   - statement_timeout: 5s
+```
+
+- An object that can have a security label has `security_labels`,
+  next to its `comment`: a schema, a table and each of its columns
+  and partitions, a view, a materialized view, a sequence, a domain,
+  a type, a function, a procedure, an aggregate, a language, a
+  publication, a subscription, a role, a user, a group, a tablespace
+  and the database. The key is the name of the label provider, and
+  the value is the label (`SECURITY LABEL FOR provider ON ... IS
+  'label'`). `pull` reads the labels, `build` writes a `SECURITY
+  LABEL` entry after the object, and `deploy` changes them in place.
+  An object with no `security_labels` does not manage its labels:
+  `deploy` leaves the labels of the database as they are, as it does
+  for `row_level_security`. An object with the field has exactly the
+  labels that it lists: a label that only the database has gets `IS
+  NULL`, and `security_labels: {}` removes all of them. A label
+  applies only when its provider is loaded in the server, for example
+  with `shared_preload_libraries`. `pull` writes the field only for an
+  object that has labels, thus `pull --no-security-labels` gives a
+  project that does not manage labels.
+
+```yaml
+---
+name: customers
+schema: app
+owner: postgres
+columns:
+  - name: email
+    data_type: text
+    security_labels:
+      anon: MASKED WITH FUNCTION anon.fake_email()
+security_labels:
+  sepgsql: system_u:object_r:sepgsql_table_t:s0
 ```
 
 - A foreign key can leave out its `name`. The project then uses the

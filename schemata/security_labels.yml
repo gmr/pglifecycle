@@ -1,0 +1,18 @@
+---
+$schema: https://json-schema.org/draft/2020-12/schema
+$id: https://gmr.github.io/pglifecycle/schemata/security_labels.json
+title: Security Labels
+description: >
+  The security labels of an object (`SECURITY LABEL FOR provider ON ...
+  IS 'label'`), as the label of each provider: the key is the name of
+  the label provider, and the value is the label. A label applies only
+  when its provider is loaded in the server, for example with
+  `shared_preload_libraries`.
+
+  With no `security_labels`, the project does not manage the labels of
+  the object, and deploy leaves them as the database has them. With the
+  field, the object has exactly the labels that it lists, thus an empty
+  map removes all of them.
+type: object
+additionalProperties:
+  type: string

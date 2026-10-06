@@ -24,6 +24,9 @@ pub use text_search::*;
 pub use types::*;
 pub use views::*;
 
+/// The security labels of an object: the label of each provider
+pub type SecurityLabels = std::collections::BTreeMap<String, String>;
+
 /// One database object definition of any supported type
 #[derive(Clone, Debug, PartialEq, serde::Serialize)]
 #[serde(untagged)]
@@ -172,6 +175,30 @@ impl Definition {
             Definition::DefaultPrivileges(_)
             | Definition::TextSearch(_)
             | Definition::UserMapping(_) => None,
+        }
+    }
+
+    /// The security labels of the object, where the type can have them
+    pub fn security_labels(&self) -> Option<&SecurityLabels> {
+        match self {
+            Definition::Aggregate(d) => d.security_labels.as_ref(),
+            Definition::Domain(d) => d.security_labels.as_ref(),
+            Definition::Function(d) => d.security_labels.as_ref(),
+            Definition::Group(d) => d.security_labels.as_ref(),
+            Definition::Language(d) => d.security_labels.as_ref(),
+            Definition::MaterializedView(d) => d.security_labels.as_ref(),
+            Definition::Procedure(d) => d.security_labels.as_ref(),
+            Definition::Publication(d) => d.security_labels.as_ref(),
+            Definition::Role(d) => d.security_labels.as_ref(),
+            Definition::Schema(d) => d.security_labels.as_ref(),
+            Definition::Sequence(d) => d.security_labels.as_ref(),
+            Definition::Subscription(d) => d.security_labels.as_ref(),
+            Definition::Table(d) => d.security_labels.as_ref(),
+            Definition::Tablespace(d) => d.security_labels.as_ref(),
+            Definition::Type(d) => d.security_labels.as_ref(),
+            Definition::User(d) => d.security_labels.as_ref(),
+            Definition::View(d) => d.security_labels.as_ref(),
+            _ => None,
         }
     }
 
