@@ -26,14 +26,15 @@ to. This page links to those descriptions and does not repeat them.
 the project without these entries. See
 [Unsupported dump entries](commands.md#unsupported-dump-entries).
 
-- **Security labels.** `pull` does not model `SECURITY LABEL` entries.
-  Use `--no-security-labels` to leave them out of the dump.
 - **Database properties other than settings.** `CONNECTION LIMIT`,
   `IS_TEMPLATE` and `ALLOW_CONNECTIONS` go to `remaining.yaml`. `pull`
   keeps the settings of the database. Set the other properties by
   hand.
-- **Comments on objects that pull does not model.** Such a comment
-  goes to `remaining.yaml` with its object.
+- **Comments and security labels on objects that pull does not
+  model.** Such a comment or label goes to `remaining.yaml` with its
+  object. A security label on a column of a view or of a materialized
+  view also goes there. Use `--no-security-labels` to leave the labels
+  out of the dump.
 - **Column settings on an inheritance child.** `ALTER TABLE ONLY child
   ALTER COLUMN c SET STATISTICS` (or `SET STORAGE`) on a column that
   the child inherits puts the table entry in `remaining.yaml`. Set the

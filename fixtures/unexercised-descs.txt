@@ -4,3 +4,10 @@
 # pg_dump 18 writes a foreign server as SERVER, so no archive that it
 # writes has this type. libpgdump defines the type, and pull accepts it.
 UNEXERCISED FOREIGN SERVER
+#
+# A security label needs a label provider loaded in the server, and the
+# postgres:18 image of the gates has none (dummy_seclabel is a test
+# module that the image does not ship). Thus no fixture can hold a
+# SECURITY LABEL. Unit and integration tests on archives cover it:
+# ddl::object, pull, deploy::alter::security_label and tests/deploy.rs.
+UNEXERCISED SECURITY LABEL

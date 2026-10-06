@@ -202,6 +202,14 @@ pub enum Statement {
         target: QualifiedName,
         comment: String,
     },
+    /// SECURITY LABEL FOR `provider` ON `on` `target` IS `label`; no
+    /// `label` is IS NULL, which removes the label
+    SecurityLabel {
+        on: String,
+        target: QualifiedName,
+        provider: String,
+        label: Option<String>,
+    },
     /// ALTER DEFAULT PRIVILEGES. An empty `roles` means the role running
     /// the statement, and an empty `schemas` every schema.
     DefaultPrivileges {
@@ -460,6 +468,7 @@ fn dispatch(node: &Node, src: &str) -> Result<Vec<Statement>, String> {
         "RuleStmt" => Ok(vec![misc::create_rule(node, src)?]),
         "CreatePolicyStmt" => Ok(vec![policy::create_policy(node, src)?]),
         "CommentStmt" => Ok(vec![object::comment(node, src)?]),
+        "SecLabelStmt" => Ok(vec![object::security_label(node, src)?]),
         "GrantStmt" => Ok(vec![acl::grant(node, src, false)?]),
         "AlterDefaultPrivilegesStmt" => {
             Ok(vec![acl::default_privileges(node, src)?])

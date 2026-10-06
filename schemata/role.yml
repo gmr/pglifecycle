@@ -13,6 +13,9 @@ properties:
     title: Comment
     description: An optional comment about the role
     type: string
+  security_labels:
+    title: Security Labels
+    $package_schema: security_labels
   create:
     title: Create Role
     description: >

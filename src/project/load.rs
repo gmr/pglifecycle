@@ -170,6 +170,10 @@ impl Loader {
         }
         self.project.settings.comment =
             project["comment"].as_str().map(String::from);
+        self.project.settings.security_labels =
+            serde_json::from_value(project["security_labels"].clone())
+                .ok()
+                .flatten();
         if let Ok(settings) =
             serde_json::from_value(project["settings"].clone())
         {

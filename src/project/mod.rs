@@ -33,6 +33,8 @@ pub struct Project {
 pub struct DatabaseSettings {
     /// `comment`: `COMMENT ON DATABASE`
     pub comment: Option<String>,
+    /// `security_labels`: `SECURITY LABEL ON DATABASE`
+    pub security_labels: Option<models::SecurityLabels>,
     /// `settings`: `ALTER DATABASE ... SET`
     pub database: Vec<Map<String, Value>>,
     /// `role_settings`: `ALTER ROLE ... IN DATABASE ... SET`, by role

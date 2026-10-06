@@ -30,6 +30,9 @@ properties:
     description: >
       An optional comment about the database (`COMMENT ON DATABASE`)
     type: string
+  security_labels:
+    title: Security Labels
+    $package_schema: security_labels
   superuser:
     description: The PostgreSQL super user
     type: string
@@ -93,6 +96,9 @@ properties:
           title: Comment
           description: An optional comment about the language
           type: string
+        security_labels:
+          title: Security Labels
+          $package_schema: security_labels
         trusted:
           description: >
             Specifies if the language grants access to data that the user would not

@@ -483,6 +483,7 @@ fn fold_implied_partitions(
                 continue;
             }
             let comment = child.comment.clone();
+            let labels = child.security_labels.clone();
             let indexes = child.indexes.iter().flatten();
             let indexes: BTreeSet<String> =
                 indexes.filter_map(|i| i.parent.clone()).collect();
@@ -496,6 +497,9 @@ fn fold_implied_partitions(
                     partition.attached = None;
                     if partition.comment.is_none() {
                         partition.comment.clone_from(&comment);
+                    }
+                    if partition.security_labels.is_none() {
+                        partition.security_labels.clone_from(&labels);
                     }
                 }
             }
@@ -676,6 +680,11 @@ fn database_index(assembly: &Assembly) -> BTreeMap<ObjectKey, Definition> {
             (ObjectKey::new(desc, &definition), definition)
         })
         .collect()
+}
+
+/// Whether deploy compares the two definitions as the same
+pub(crate) fn same(a: &Definition, b: &Definition) -> bool {
+    normalized(a) == normalized(b)
 }
 
 /// A definition as a JSON value with the fields deploy does not

@@ -339,3 +339,44 @@ pub fn mutated_foreign_archive(path: &std::path::Path) {
     );
     dump.save(path).expect("failed to save archive");
 }
+
+/// A small archive with security labels: `label` is the label of the
+/// `dummy` provider on the database, the schema, a table, a column and
+/// a function, or there are no labels when it is `None`
+pub fn labeled_archive(path: &std::path::Path, label: Option<&str>) {
+    let mut dump = libpgdump::new("labels", "UTF8", "18.0").unwrap();
+    add(&mut dump, OT::Schema, "", "test", "CREATE SCHEMA test;");
+    add(
+        &mut dump,
+        OT::Table,
+        "test",
+        "t",
+        "CREATE TABLE test.t (id integer, secret text);",
+    );
+    add(
+        &mut dump,
+        OT::Function,
+        "test",
+        "f(integer)",
+        "CREATE FUNCTION test.f(a integer) RETURNS integer LANGUAGE sql \
+         AS $$SELECT a$$;",
+    );
+    if let Some(label) = label {
+        for (namespace, tag, on) in [
+            ("", "DATABASE labels", "DATABASE labels"),
+            ("", "SCHEMA test", "SCHEMA test"),
+            ("test", "TABLE t", "TABLE test.t"),
+            ("test", "COLUMN t.secret", "COLUMN test.t.secret"),
+            ("test", "FUNCTION f(integer)", "FUNCTION test.f(integer)"),
+        ] {
+            add(
+                &mut dump,
+                OT::SecurityLabel,
+                namespace,
+                tag,
+                &format!("SECURITY LABEL FOR dummy ON {on} IS '{label}';\n"),
+            );
+        }
+    }
+    dump.save(path).expect("failed to save archive");
+}

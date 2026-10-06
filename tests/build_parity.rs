@@ -459,6 +459,8 @@ fn outside_items() -> Vec<Item> {
             Definition::User(
                 serde_json::from_value(serde_json::json!({
                     "name": "App User",
+                    // deviation 89
+                    "security_labels": {"dummy": "it's"},
                     "settings": [
                         {"temp_tablespaces": ["a,b"]},
                         {"app.user": "x"},
@@ -1112,6 +1114,25 @@ const OUTSIDE_CORRECTED: &[(&str, &str, &str, &str, &str)] = &[
         "COMMENT ON DATABASE outside IS $$it's outside$$;\n",
         "",
     ),
+    // deviation 89: the security labels of an object are a SECURITY
+    // LABEL entry after it, and a user is named as a ROLE. The entry of
+    // the database has the tag `DATABASE name`, as pg_dump writes it.
+    // The Python had no place for them
+    (
+        "SECURITY LABEL",
+        "",
+        "App User",
+        "SECURITY LABEL FOR dummy ON ROLE \"App User\" IS $$it's$$;\n",
+        "",
+    ),
+    (
+        "SECURITY LABEL",
+        "",
+        "DATABASE outside",
+        "SECURITY LABEL FOR \"My Provider\" ON DATABASE outside IS \
+         $$secret$$;\n",
+        "",
+    ),
     // deviation 60: a CHECK on a column is a CHECK of the table with
     // its name, in parentheses, as the grammar needs them, and an empty
     // list of storage parameters, options or parameters is no list.
@@ -1180,13 +1201,16 @@ const OUTSIDE_CORRECTED: &[(&str, &str, &str, &str, &str)] = &[
     ),
 ];
 
-/// The settings of the database for deviation 48, and its comment for
-/// deviation 58
+/// The settings of the database for deviation 48, its comment for
+/// deviation 58, and its security labels for deviation 89
 fn outside_settings() -> project::DatabaseSettings {
     let setting =
         |value: serde_json::Value| serde_json::from_value(value).unwrap();
     project::DatabaseSettings {
         comment: Some(String::from("it's outside")),
+        security_labels: Some(
+            [(String::from("My Provider"), String::from("secret"))].into(),
+        ),
         database: vec![
             setting(
                 serde_json::json!({"search_path": ["$user", "my schema"]}),

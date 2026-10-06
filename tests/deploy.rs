@@ -7,7 +7,8 @@ mod common;
 
 use clap::Parser;
 use common::{
-    fixture_archive, foreign_archive, mutated_archive, mutated_foreign_archive,
+    fixture_archive, foreign_archive, labeled_archive, mutated_archive,
+    mutated_foreign_archive,
 };
 use pglifecycle::{cli, deploy, pull};
 
@@ -325,5 +326,68 @@ fn deploy_refuses_a_dump_with_other_session_settings() {
         };
         let error = deploy::deploy(&args).unwrap_err();
         assert!(error.contains(expected), "unexpected error: {error}");
+    }
+}
+
+/// Security labels pulled from an archive give an empty plan against
+/// that archive. A label that is different, or that only the project
+/// has, is set in place, and a label that only the database has gets
+/// IS NULL. No object is made again.
+#[test]
+fn security_labels_change_in_place() {
+    let dir = tempfile::tempdir().unwrap();
+    let labeled = dir.path().join("labeled.dump");
+    labeled_archive(&labeled, Some("secret"));
+    let project = dir.path().join("project");
+    pull_project(&labeled, &project);
+    let table = std::fs::read_to_string(project.join("tables/test/t.yaml"))
+        .expect("table file");
+    assert!(
+        table.contains("security_labels:\n  dummy: secret\n"),
+        "missing table labels in:\n{table}"
+    );
+
+    let script = deploy_script(&project, &labeled, &[]);
+    assert!(
+        script.contains("-- no changes"),
+        "expected an empty plan, got:\n{script}"
+    );
+
+    let other = dir.path().join("other.dump");
+    labeled_archive(&other, Some("public"));
+    let script = deploy_script(&project, &other, &[]);
+    for statement in [
+        "SECURITY LABEL FOR dummy ON SCHEMA test IS $$secret$$;",
+        "SECURITY LABEL FOR dummy ON TABLE test.t IS $$secret$$;",
+        "SECURITY LABEL FOR dummy ON COLUMN test.t.secret IS $$secret$$;",
+        "SECURITY LABEL FOR dummy ON FUNCTION test.f IS $$secret$$;",
+        "SECURITY LABEL FOR dummy ON DATABASE labels IS $$secret$$;",
+    ] {
+        assert!(
+            script.contains(statement),
+            "missing {statement} in:\n{script}"
+        );
+    }
+    for verb in ["CREATE", "DROP"] {
+        assert!(
+            !script.contains(&format!("\n{verb} ")),
+            "unexpected {verb} statement in:\n{script}"
+        );
+    }
+
+    let plain = dir.path().join("plain.project");
+    let unlabeled = dir.path().join("unlabeled.dump");
+    labeled_archive(&unlabeled, None);
+    pull_project(&unlabeled, &plain);
+    let script = deploy_script(&plain, &labeled, &[]);
+    for statement in [
+        "SECURITY LABEL FOR dummy ON TABLE test.t IS NULL;",
+        "SECURITY LABEL FOR dummy ON COLUMN test.t.secret IS NULL;",
+        "SECURITY LABEL FOR dummy ON DATABASE labels IS NULL;",
+    ] {
+        assert!(
+            script.contains(statement),
+            "missing {statement} in:\n{script}"
+        );
     }
 }

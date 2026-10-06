@@ -1,12 +1,14 @@
-//! The comment and the settings of the database, and the settings of
-//! each role in the database: the `comment`, `settings` and
-//! `role_settings` of `project.yaml` compared with the COMMENT and
-//! DATABASE PROPERTIES entries of the snapshot.
+//! The comment, the security labels and the settings of the database,
+//! and the settings of each role in the database: the `comment`,
+//! `security_labels`, `settings` and `role_settings` of `project.yaml`
+//! compared with the COMMENT, SECURITY LABEL and DATABASE PROPERTIES
+//! entries of the snapshot.
 //!
 //! A comment that is different or that only the project has gets
 //! `COMMENT ON DATABASE`, and a comment that only the database has
 //! gets `IS NULL`, as for the comment of an object. The removal is not
-//! destructive: it loses no data.
+//! destructive: it loses no data. The security labels change in the
+//! same way.
 //!
 //! A setting that is different or that only the project has gets
 //! `SET`, and a setting that only the database has gets `RESET`. A
@@ -21,13 +23,14 @@ use serde_json::{Map, Value};
 
 use super::Statement;
 use super::alter::comment_on;
+use super::alter::security_label;
 use crate::models::canonical_settings;
 use crate::project::DatabaseSettings;
 use crate::pull::Assembly;
 use crate::utils::{quote_ident, setting_value};
 
-/// The statements that make the comment and the settings of the
-/// database `assembly` those of the project, and each setting that
+/// The statements that make the comment, the security labels and the
+/// settings of the database `assembly` those of the project, and each setting that
 /// they reset, as `name of label`
 pub(super) fn statements(
     project: &DatabaseSettings,
@@ -44,6 +47,20 @@ pub(super) fn statements(
             fails_open: false,
         });
     }
+    statements.extend(
+        security_label::changes(
+            "DATABASE",
+            &database,
+            project.security_labels.as_ref(),
+            assembly.security_labels.as_ref(),
+        )
+        .into_iter()
+        .map(|sql| Statement {
+            label: label.clone(),
+            sql,
+            fails_open: false,
+        }),
+    );
     statements.extend(changes(
         &label,
         &format!("ALTER DATABASE {database}"),
@@ -242,6 +259,39 @@ mod tests {
         );
         assert!(comment(Some("same"), Some("same")).is_empty());
         assert!(comment(None, None).is_empty());
+    }
+
+    /// The security labels of the database change as its comment does
+    #[test]
+    fn database_security_labels_set_and_removed() {
+        let labels = |project: &[(&str, &str)], database: &[(&str, &str)]| {
+            let map = |pairs: &[(&str, &str)]| {
+                (!pairs.is_empty()).then(|| {
+                    pairs
+                        .iter()
+                        .map(|(p, l)| (p.to_string(), l.to_string()))
+                        .collect()
+                })
+            };
+            let project = DatabaseSettings {
+                security_labels: map(project),
+                ..Default::default()
+            };
+            let mut assembly = assembly("App DB");
+            assembly.security_labels = map(database);
+            let (statements, _) = statements(&project, &assembly);
+            assert!(statements.iter().all(|s| s.label == "DATABASE App DB"));
+            statements.into_iter().map(|s| s.sql).collect::<Vec<_>>()
+        };
+        assert_eq!(
+            labels(&[("dummy", "new")], &[("dummy", "old"), ("gone", "x")]),
+            [
+                "SECURITY LABEL FOR dummy ON DATABASE \"App DB\" IS $$new$$;\n",
+                "SECURITY LABEL FOR gone ON DATABASE \"App DB\" IS NULL;\n",
+            ]
+        );
+        assert!(labels(&[("dummy", "same")], &[("dummy", "same")]).is_empty());
+        assert!(labels(&[], &[]).is_empty());
     }
 
     #[test]

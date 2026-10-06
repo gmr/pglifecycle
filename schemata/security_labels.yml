@@ -1,0 +1,13 @@
+---
+$schema: https://json-schema.org/draft/2020-12/schema
+$id: https://gmr.github.io/pglifecycle/schemata/security_labels.json
+title: Security Labels
+description: >
+  The security labels of an object (`SECURITY LABEL FOR provider ON ...
+  IS 'label'`), as the label of each provider: the key is the name of
+  the label provider, and the value is the label. A label applies only
+  when its provider is loaded in the server, for example with
+  `shared_preload_libraries`.
+type: object
+additionalProperties:
+  type: string

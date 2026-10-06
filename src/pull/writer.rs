@@ -187,6 +187,10 @@ impl Writer {
                 Value::String(comment.clone()),
             );
         }
+        if let Some(labels) = &assembly.security_labels {
+            project
+                .insert(String::from("security_labels"), serialize(labels)?);
+        }
         if !assembly.extensions.is_empty() {
             project.insert(
                 String::from("extensions"),
@@ -458,6 +462,7 @@ impl Writer {
                 let user = models::User {
                     name: name.clone(),
                     comment: state.comment.clone(),
+                    security_labels: state.security_labels.clone(),
                     environments: None,
                     password: state.password.clone(),
                     valid_until: state.valid_until.clone(),
@@ -471,6 +476,7 @@ impl Writer {
                 let role = models::Role {
                     name: name.clone(),
                     comment: state.comment.clone(),
+                    security_labels: state.security_labels.clone(),
                     create: (!state.created).then_some(false),
                     environments: None,
                     grants: state.grants.to_acls(),
@@ -1142,6 +1148,7 @@ mod tests {
                 publications: vec![String::from("p")],
                 parameters: None,
                 comment: None,
+                security_labels: None,
             }],
             ..Assembly::default()
         };
@@ -1224,6 +1231,7 @@ mod tests {
             object_file: None,
             link_symbol: None,
             comment: None,
+            security_labels: None,
         }
     }
 
