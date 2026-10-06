@@ -5,6 +5,9 @@
 # does not change the plan, but it warns: the warning names the role
 # and the objects. The script is the same as without the warning. The
 # step does not apply the script, thus the target stays converged.
+# The role also cannot see a subscription that only the database has,
+# thus the plan does not drop it. deploy warns about it too. The step
+# drops that subscription at the end.
 
 # a role is a cluster object, so an earlier run can have made it. The
 # cleanup of bin/deploy-gates removes it. pg_dump locks each table,
@@ -21,13 +24,21 @@ BEGIN
 END
 $$;
 SQL
+# no slot, thus DROP SUBSCRIPTION does not connect to a publisher
+psql -d "${TARGET_DB}" -q -v ON_ERROR_STOP=1 <<'SQL'
+SET client_min_messages = error;
+CREATE SUBSCRIPTION gate_read_stray
+    CONNECTION 'dbname=pglifecycle_nowhere' PUBLICATION gate_pub
+    WITH (connect = false, slot_name = NONE);
+SQL
 
 ./target/debug/pglifecycle deploy --role 'Gate Reader' \
     -d "${TARGET_DB}" "${WORKDIR}/project" \
     >"${WORKDIR}/read-role.sql" 2>"${WORKDIR}/read-role.err"
 grep 'WARN' "${WORKDIR}/read-role.err" >"${WORKDIR}/read-role.warn" || true
 for text in 'Gate Reader' 'SUBSCRIPTION gate_sub' \
-        'USER MAPPING postgres SERVER gate_srv'; do
+        'USER MAPPING postgres SERVER gate_srv' \
+        'does not drop subscriptions that only the database has: SUBSCRIPTION gate_read_stray'; do
     if ! grep -qF "${text}" "${WORKDIR}/read-role.warn"; then
         echo "Convergence gate FAILED: no warning names ${text} when" \
             "--role cannot read all of the database" >&2
@@ -54,5 +65,7 @@ if grep -qi 'cannot read' "${WORKDIR}/read-role.err"; then
     cat "${WORKDIR}/read-role.err" >&2
     exit 1
 fi
+psql -d "${TARGET_DB}" -q -v ON_ERROR_STOP=1 \
+    -c 'DROP SUBSCRIPTION gate_read_stray'
 echo "Convergence gate passed: deploy warns when --role cannot read" \
     "all of the database"
