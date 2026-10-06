@@ -532,13 +532,19 @@ settings:
   thus also with `--no-roles` and `--dump`. `build` writes them as
   `pg_dump` does (see [build](commands.md#build)), and `deploy` makes
   them the settings of the database. `comment` is the comment of the
-  database (`COMMENT ON DATABASE`). `pull`, `build` and `deploy` use it
-  as they use the settings:
+  database (`COMMENT ON DATABASE`). `connection_limit` is the number of
+  connections that the database allows (`ALTER DATABASE ... CONNECTION
+  LIMIT`; -1, the default, is no limit), and `is_template: true` makes
+  the database a template (`ALTER DATABASE ... IS_TEMPLATE`). `pull`,
+  `build` and `deploy` use them as they use the settings. `pg_dump`
+  cannot connect to a database with `ALLOW_CONNECTIONS false`, thus a
+  project has no field for it:
 
 ```yaml
 ---
 name: app
 comment: The application database
+connection_limit: 50
 settings:
 - search_path: [$user, public]
 - work_mem: 64MB

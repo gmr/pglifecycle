@@ -37,6 +37,10 @@ BEGIN
 END
 $$;
 SQL
+    # PostgreSQL does not drop a template database, and a gate can stop
+    # while its database is one
+    psql -d postgres -q -v ON_ERROR_STOP=1 -v db="${DB}" \
+        <<<'ALTER DATABASE :"db" IS_TEMPLATE false'
 fi
 psql -d postgres -q -v ON_ERROR_STOP=1 -v db="${DB}" \
     <<<'DROP DATABASE IF EXISTS :"db"'
