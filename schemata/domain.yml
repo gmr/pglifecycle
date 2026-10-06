@@ -61,6 +61,14 @@ properties:
         expression:
           title: Constraint Expression
           type: string
+        not_valid:
+          title: Not Valid
+          description: >
+            true renders NOT VALID: values already in columns of the domain
+            were never checked, only new ones are. Only a CHECK can be NOT
+            VALID, and only ALTER DOMAIN can add it, so the build writes it
+            that way. Absent means valid, the default.
+          type: boolean
       oneOf:
         - required: [expression]
           not: {required: [nullable]}
@@ -76,7 +84,7 @@ properties:
     title: Dependencies
     description: Database objects this object is dependent upon
     $package_schema: dependencies
-requires:
+required:
   - name
   - schema
 additionalProperties: false
