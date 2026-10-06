@@ -226,9 +226,10 @@ reconciled in place where PostgreSQL can express it:
   `TABLE(...)` with one column returns `SETOF` the type of that
   column, so a new name for that column uses `CREATE OR REPLACE`.
   A function is matched by its name and its input parameters. The
-  space at the start and end of a SQL or PL/pgSQL `definition` or of
-  a `sql_body` is not a change; the space in it is. Deploy formats a
-  SQL `definition` as `pull` does, so its layout is not a change. A type
+  space at the start and end of a `definition` or of a `sql_body` is
+  not a change. The space in a PL/pgSQL `definition` or in a
+  `sql_body` is a change. Deploy formats a SQL `definition` as `pull`
+  does, so its layout is not a change. A type
   alias or a type modifier in a parameter, the return type or a `TABLE(...)`
   column is not a change, as PostgreSQL keeps no typmod there (see
   [Project format](project-format.md)). PostgreSQL does not let

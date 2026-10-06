@@ -2743,7 +2743,9 @@ fn unwrap_body(body: &str) -> String {
 }
 
 pub(crate) fn strip_trailing(formatted: &str) -> String {
-    formatted.trim_end_matches(';').trim_end().to_string()
+    formatted
+        .trim_end_matches(|c: char| c == ';' || c.is_whitespace())
+        .to_string()
 }
 
 /// The SQL (not PL/pgSQL) in the `pg_dump` style, as [`format_one`]
@@ -2965,6 +2967,13 @@ mod tests {
             &[],
         )
         .expect("add_entry failed");
+    }
+
+    #[test]
+    fn strip_trailing_removes_space_before_and_after_semicolons() {
+        assert_eq!(strip_trailing("SELECT 1;\n"), "SELECT 1");
+        assert_eq!(strip_trailing("SELECT 1 ;\n ; "), "SELECT 1");
+        assert_eq!(strip_trailing("SELECT 1"), "SELECT 1");
     }
 
     fn fixture_dump() -> libpgdump::Dump {
