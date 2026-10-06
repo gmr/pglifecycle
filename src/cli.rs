@@ -177,13 +177,9 @@ pub struct Deploy {
 /// values from its environment variables, a service and its defaults
 #[derive(Args)]
 pub struct Connection {
-    /// database name to connect to
-    #[arg(
-        short,
-        long,
-        env = "PGDATABASE",
-        help_heading = "Connection Options"
-    )]
+    /// database name to connect to (default: libpq selects it from
+    /// PGDATABASE, a service or its default)
+    #[arg(short, long, help_heading = "Connection Options")]
     pub dbname: Option<String>,
 
     /// database server host or socket directory (default: libpq
