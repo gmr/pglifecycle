@@ -33,6 +33,10 @@ pub struct Project {
 pub struct DatabaseSettings {
     /// `comment`: `COMMENT ON DATABASE`
     pub comment: Option<String>,
+    /// `connection_limit`: `ALTER DATABASE ... CONNECTION LIMIT`
+    pub connection_limit: Option<i64>,
+    /// `is_template`: `ALTER DATABASE ... IS_TEMPLATE`
+    pub is_template: Option<bool>,
     /// `settings`: `ALTER DATABASE ... SET`
     pub database: Vec<Map<String, Value>>,
     /// `role_settings`: `ALTER ROLE ... IN DATABASE ... SET`, by role
