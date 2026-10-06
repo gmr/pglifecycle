@@ -278,12 +278,17 @@ pub struct ReadLimits {
     /// The (user, server) pairs of the user mappings whose options the
     /// role cannot read. The user of a PUBLIC mapping is `PUBLIC`
     pub hidden_user_mappings: Vec<(String, String)>,
+    /// The names of the subscriptions of the database that pg_dump
+    /// does not dump, because the role is not a superuser
+    pub subscriptions: Vec<String>,
 }
 
 /// One JSON object: the role, whether it is a superuser (the check of
-/// pg_dump), and the user mappings whose options pg_user_mappings does
-/// not show to the role. The conditions are the inverse of the
-/// conditions of the view in PostgreSQL 18
+/// pg_dump), the user mappings whose options pg_user_mappings does
+/// not show to the role, and the subscriptions of the database when
+/// the role is not a superuser. The conditions of the user mappings
+/// are the inverse of the conditions of the view in PostgreSQL 18.
+/// All roles can read the names of the subscriptions
 const READ_LIMITS_QUERY: &str = "SELECT json_build_object(
     'role', current_user,
     'superuser', current_setting('is_superuser')::bool,
@@ -299,7 +304,13 @@ const READ_LIMITS_QUERY: &str = "SELECT json_build_object(
                           OR pg_catalog.has_server_privilege(
                                  s.oid, 'USAGE')))
                     OR (m.umuser = 0
-                        AND pg_catalog.pg_has_role(s.srvowner, 'USAGE')))))";
+                        AND pg_catalog.pg_has_role(s.srvowner, 'USAGE')))),
+    'subscriptions', (
+        SELECT coalesce(json_agg(s.subname ORDER BY s.subname), '[]')
+          FROM pg_catalog.pg_subscription s
+         WHERE NOT current_setting('is_superuser')::bool
+           AND s.subdbid = (SELECT oid FROM pg_catalog.pg_database
+                             WHERE datname = current_database())))";
 
 /// Read [`ReadLimits`] with psql, as the role of `--role` when it is
 /// given
@@ -335,10 +346,11 @@ fn read_limits_args(conn: &cli::Connection) -> Vec<OsString> {
 fn parse_read_limits(text: &str) -> Result<ReadLimits, String> {
     let value: serde_json::Value = serde_json::from_str(text.trim())
         .map_err(|e| format!("cannot read the query result: {e}"))?;
-    let (Some(role), Some(superuser), Some(mappings)) = (
+    let (Some(role), Some(superuser), Some(mappings), Some(subscriptions)) = (
         value["role"].as_str(),
         value["superuser"].as_bool(),
         value["hidden_user_mappings"].as_array(),
+        value["subscriptions"].as_array(),
     ) else {
         return Err(format!("unexpected query result: {value}"));
     };
@@ -355,6 +367,10 @@ fn parse_read_limits(text: &str) -> Result<ReadLimits, String> {
         role: role.to_string(),
         superuser,
         hidden_user_mappings,
+        subscriptions: subscriptions
+            .iter()
+            .filter_map(|name| Some(name.as_str()?.to_string()))
+            .collect(),
     })
 }
 
@@ -508,15 +524,30 @@ fn dump_options(caller: Option<OsString>) -> OsString {
     options
 }
 
+/// Run a dump command with [`run_dump`], and log the warnings of the
+/// command when it succeeds
+fn execute(
+    program: &str,
+    args: Vec<OsString>,
+    env: Vec<(&'static str, OsString)>,
+    conn: &cli::Connection,
+) -> Result<(), String> {
+    for warning in run_dump(program, args, env, conn)? {
+        log::warn!("{warning}");
+    }
+    Ok(())
+}
+
 /// Run a dump command, reporting a non-zero exit as an error and
 /// naming the ways to supply a password when that was the cause and
-/// no prompt was possible
-fn execute(
+/// no prompt was possible. When the command succeeds, return the
+/// lines of its stderr that are not empty: its warnings
+fn run_dump(
     program: &str,
     args: Vec<OsString>,
     mut env: Vec<(&'static str, OsString)>,
     conn: &cli::Connection,
-) -> Result<(), String> {
+) -> Result<Vec<String>, String> {
     env.insert(
         0,
         ("PGOPTIONS", dump_options(std::env::var_os("PGOPTIONS"))),
@@ -535,7 +566,11 @@ fn execute(
             output.status.code().unwrap_or(-1),
         ));
     }
-    Ok(())
+    Ok(stderr_of(&output)
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(String::from)
+        .collect())
 }
 
 /// The label of a connection for the banners, the logs and the header
@@ -560,7 +595,9 @@ const DEFAULT_HOST: &str = match cfg!(windows) {
 /// PGHOST, PGHOSTADDR and PGPORT, and then the defaults of libpq.
 /// pg_service.conf is not read, thus when a service is named and the
 /// host is not known, the label shows `service NAME` in place of
-/// `host:port`. The label does not show the user.
+/// `host:port`. Without a database name in `--dbname`, the name comes
+/// from PGDATABASE when no service is named. The label does not show
+/// the user.
 pub fn label(conn: &cli::Connection) -> String {
     label_in(conn, |name| std::env::var(name).ok())
 }
@@ -593,6 +630,13 @@ fn label_in(
         .or_else(|| conn.port.map(|port| port.to_string()))
         .or_else(|| env("PGPORT"));
     let service = target.service.or_else(|| env("PGSERVICE"));
+    // libpq reads PGDATABASE only as a name, and a service has
+    // priority over it. A connection string can have a password
+    let dbname = target.dbname.or_else(|| {
+        env("PGDATABASE")
+            .filter(|_| service.is_none())
+            .filter(|dbname| !is_connection_string(dbname))
+    });
     let server = match (host, port, service) {
         (Some(host), Some(port), _) => format!("{host}:{port}"),
         // the service can set the port
@@ -604,7 +648,7 @@ fn label_in(
             port.as_deref().unwrap_or("5432")
         ),
     };
-    match target.dbname {
+    match dbname {
         Some(dbname) => format!("{dbname}@{server}"),
         None => server,
     }
@@ -910,7 +954,8 @@ mod tests {
         let limits = parse_read_limits(
             "{\"role\" : \"Gate Reader\", \"superuser\" : false, \
              \"hidden_user_mappings\" : [[\"postgres\", \"srv\"], \
-             [\"PUBLIC\", \"srv\"]]}\n",
+             [\"PUBLIC\", \"srv\"]], \
+             \"subscriptions\" : [\"sub\"]}\n",
         )
         .expect("limits");
         assert_eq!(
@@ -922,6 +967,7 @@ mod tests {
                     ("postgres".into(), "srv".into()),
                     ("PUBLIC".into(), "srv".into()),
                 ],
+                subscriptions: vec!["sub".into()],
             }
         );
         assert!(parse_read_limits("{\"role\" : \"x\"}").is_err());
@@ -1044,6 +1090,32 @@ mod tests {
         assert!(!should_retry_without_passwords(true, error));
     }
 
+    /// A dump that succeeds gives the lines of its stderr as warnings
+    #[test]
+    fn a_dump_that_succeeds_gives_its_warnings() {
+        let script = "echo 'pg_dump: warning: one' >&2; echo >&2; \
+                      echo 'pg_dump: warning: two' >&2";
+        let warnings = run_dump(
+            "sh",
+            vec!["-c".into(), script.into()],
+            Vec::new(),
+            &connection(false),
+        )
+        .expect("dump");
+        assert_eq!(
+            warnings,
+            vec!["pg_dump: warning: one", "pg_dump: warning: two"]
+        );
+        let warnings = run_dump(
+            "sh",
+            vec!["-c".into(), "true".into()],
+            Vec::new(),
+            &connection(false),
+        )
+        .expect("dump");
+        assert!(warnings.is_empty());
+    }
+
     /// A connection with `dbname` as its --dbname value
     fn connection_to(dbname: Option<&str>) -> cli::Connection {
         cli::Connection {
@@ -1136,6 +1208,41 @@ mod tests {
         );
         let conn = unset_server(Some("host=other dbname=app"));
         assert_eq!(label_with(&conn, &env), "app@other:6543");
+    }
+
+    /// Without --dbname, libpq reads PGDATABASE only as a database
+    /// name. A service has priority over PGDATABASE, and pglifecycle
+    /// does not read the service, thus the label has no name then
+    #[test]
+    fn label_without_dbname_uses_pgdatabase() {
+        let conn = unset_server(None);
+        let env = [("PGDATABASE", "app"), ("PGHOST", "db")];
+        assert_eq!(label_with(&conn, &env), "app@db:5432");
+        let conn = unset_server(Some("host=other"));
+        assert_eq!(label_with(&conn, &env), "app@other:5432");
+        let env = [("PGDATABASE", "app"), ("PGSERVICE", "prod")];
+        assert_eq!(label_with(&conn, &env), "other");
+        // a connection string is not a name, and can have a password
+        let env = [("PGDATABASE", "host=db password=s3cret")];
+        assert_eq!(label_with(&conn, &env), "other:5432");
+    }
+
+    /// clap does not read PGDATABASE as --dbname: libpq reads it only
+    /// as a database name, not as a connection string
+    #[test]
+    fn dbname_does_not_read_pgdatabase() {
+        use clap::CommandFactory;
+        let cli = cli::Cli::command();
+        let mut found = false;
+        for command in cli.get_subcommands() {
+            for arg in command.get_arguments() {
+                if arg.get_id() == "dbname" {
+                    found = true;
+                    assert_eq!(arg.get_env(), None, "{}", command.get_name());
+                }
+            }
+        }
+        assert!(found);
     }
 
     #[test]
