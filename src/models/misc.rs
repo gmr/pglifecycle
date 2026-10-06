@@ -573,7 +573,7 @@ impl Publication {
             all_tables: self.all_tables.filter(|all| *all),
             parameters: (!parameters.is_empty()).then_some(parameters),
             comment: self.comment.clone(),
-            security_labels: None,
+            security_labels: self.security_labels.clone(),
         }
     }
 }
@@ -824,7 +824,7 @@ impl Subscription {
             publications,
             parameters: (!parameters.is_empty()).then_some(parameters),
             comment: self.comment.clone(),
-            security_labels: None,
+            security_labels: self.security_labels.clone(),
         }
     }
 }

@@ -330,6 +330,47 @@ mod tests {
         );
     }
 
+    /// A publication or a subscription compares in its canonical form,
+    /// and a change to its labels only is a change
+    #[test]
+    fn publication_and_subscription_label_change_is_a_change() {
+        let publication = |label: &str| {
+            Definition::Publication(
+                serde_json::from_value(json!({
+                    "name": "p", "all_tables": true,
+                    "security_labels": {"dummy": label},
+                }))
+                .unwrap(),
+            )
+        };
+        let subscription = |label: &str| {
+            Definition::Subscription(
+                serde_json::from_value(json!({
+                    "name": "s", "connection": "dbname=x",
+                    "publications": ["p"],
+                    "security_labels": {"dummy": label},
+                }))
+                .unwrap(),
+            )
+        };
+        assert!(!crate::deploy::diff::same(
+            &publication("new"),
+            &publication("old")
+        ));
+        assert_eq!(
+            sql(resolve(&publication("new"), &publication("old"))),
+            ["SECURITY LABEL FOR dummy ON PUBLICATION p IS $$new$$;\n"]
+        );
+        assert!(!crate::deploy::diff::same(
+            &subscription("new"),
+            &subscription("old")
+        ));
+        assert_eq!(
+            sql(resolve(&subscription("new"), &subscription("old"))),
+            ["SECURITY LABEL FOR dummy ON SUBSCRIPTION s IS $$new$$;\n"]
+        );
+    }
+
     fn view(labels: Option<serde_json::Value>) -> Definition {
         let mut value = json!({
             "name": "v", "schema": "s", "owner": "postgres",
