@@ -80,4 +80,6 @@ pub struct TypeColumn {
     pub data_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub collation: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
 }

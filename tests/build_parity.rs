@@ -864,6 +864,25 @@ fn outside_items() -> Vec<Item> {
                 .unwrap(),
             ),
         ),
+        // deviation 107: a comment on a composite type attribute
+        item(
+            107,
+            ObjectType::Type,
+            Definition::Type(
+                serde_json::from_value(serde_json::json!({
+                    "name": "pair",
+                    "schema": "test",
+                    "owner": "postgres",
+                    "type": "composite",
+                    "columns": [
+                        {"name": "a", "data_type": "integer"},
+                        {"name": "b", "data_type": "text",
+                         "comment": "The second"},
+                    ],
+                }))
+                .unwrap(),
+            ),
+        ),
     ]
 }
 
@@ -1235,6 +1254,15 @@ const OUTSIDE_CORRECTED: &[(&str, &str, &str, &str, &str)] = &[
         "ended_totals",
         "CREATE MATERIALIZED VIEW test.ended_totals AS SELECT 1 AS n;\n",
         "DROP MATERIALIZED VIEW IF EXISTS test.ended_totals;\n",
+    ),
+    // deviation 107: a composite type attribute comment is a COMMENT
+    // entry. The Python had no field for it
+    (
+        "COMMENT",
+        "test",
+        "pair.b",
+        "COMMENT ON COLUMN test.pair.b IS $$The second$$;\n;\n",
+        "",
     ),
 ];
 

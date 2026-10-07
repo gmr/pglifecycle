@@ -381,6 +381,11 @@
 //!     the entry still has no drop statement (see 48). The Python had
 //!     no place for these properties. The test-project has none, thus
 //!     its archive does not change.
+//! 107. The `comment` of a composite type attribute renders as a
+//!      `COMMENT ON COLUMN schema.type.attribute` entry that depends
+//!      on the type, as pg_dump writes it. The Python had no field for
+//!      it. No test-project attribute has a comment, thus its archive
+//!      does not change.
 
 mod acls;
 mod calls;
@@ -3733,6 +3738,24 @@ impl Builder {
         }
         let drop = vec!["DROP TYPE IF EXISTS".into(), self.item_name(item)];
         self.add_item(item, create, drop, false)?;
+        // deviation 107
+        for column in d.columns.iter().flatten() {
+            if let Some(comment) = &column.comment {
+                self.add_comment(
+                    "COLUMN",
+                    &d.schema,
+                    &format!("{}.{}", d.name, column.name),
+                    &d.owner,
+                    self.dump_id_map[&item.id],
+                    comment,
+                    Some(format!(
+                        "{}.{}",
+                        self.item_name(item),
+                        quote_ident(&column.name)
+                    )),
+                )?;
+            }
+        }
         if let Some(shell) = shell
             && let Some(dump_id) = self.dump_id_map.get(&item.id)
             && let Some(entry) = self.dump.get_entry_mut(*dump_id)

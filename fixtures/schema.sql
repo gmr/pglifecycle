@@ -685,6 +685,7 @@ CREATE TABLE test.quoted_parts_1 PARTITION OF test.quoted_parts
 CREATE VIEW test.quoted_view ("Out Col") AS
     SELECT "Name" FROM test.quoted_cols;
 CREATE TYPE test."Quoted Type" AS ("Field One" INTEGER);
+COMMENT ON COLUMN test."Quoted Type"."Field One" IS 'A quoted attribute';
 CREATE STATISTICS test.quoted_stats ON "select", "Id" FROM test.quoted_cols;
 CREATE PUBLICATION quoted_pub FOR TABLE test.quoted_cols ("Id", "Name");
 

@@ -170,6 +170,10 @@ properties:
           title: Collation
           description: The name of an existing collation to use for the column.
           type: string
+        comment:
+          title: Comment
+          description: An optional comment about the column.
+          type: string
       additionalProperties: false
       required:
         - name

@@ -2322,6 +2322,28 @@ impl Assembly {
         self.column(target)
             .map(|c| c.comment = Some(comment.to_string()))
             .is_some()
+            || self.apply_type_attribute_comment(target, comment)
+    }
+
+    /// pg_dump writes the comment of a composite type attribute as
+    /// `COMMENT ON COLUMN schema.type.attribute`
+    fn apply_type_attribute_comment(
+        &mut self,
+        target: &QualifiedName,
+        comment: &str,
+    ) -> bool {
+        let Some((schema, name)) =
+            target.schema.as_ref().and_then(|r| r.split_once('.'))
+        else {
+            return false;
+        };
+        self.types
+            .iter_mut()
+            .filter(|t| t.schema == schema && t.name == name)
+            .flat_map(|t| t.columns.iter_mut().flatten())
+            .find(|c| c.name == target.name)
+            .map(|c| c.comment = Some(comment.to_string()))
+            .is_some()
     }
 
     /// The table column that `COMMENT ON COLUMN` or `SECURITY LABEL ON
@@ -3755,6 +3777,32 @@ mod tests {
         assembly.ingest(&dump).unwrap();
         assert_eq!(assembly.remaining.len(), 1);
         assert_eq!(assembly.remaining[0].desc, "COMMENT");
+    }
+
+    #[test]
+    fn type_attribute_comment_attaches_to_attribute() {
+        let mut dump = libpgdump::new("fixtures", "UTF8", "18.0").unwrap();
+        add(&mut dump, OT::Schema, "", "s", "CREATE SCHEMA s;");
+        add(
+            &mut dump,
+            OT::Type,
+            "s",
+            "pair",
+            "CREATE TYPE s.pair AS (a integer, b text);",
+        );
+        add(
+            &mut dump,
+            OT::Comment,
+            "s",
+            "COLUMN pair.b",
+            "COMMENT ON COLUMN s.pair.b IS 'the second';",
+        );
+        let mut assembly = Assembly::default();
+        assembly.ingest(&dump).unwrap();
+        assert!(assembly.remaining.is_empty(), "{:?}", assembly.remaining);
+        let columns = assembly.types[0].columns.as_ref().unwrap();
+        assert_eq!(columns[0].comment, None);
+        assert_eq!(columns[1].comment.as_deref(), Some("the second"));
     }
 
     #[test]

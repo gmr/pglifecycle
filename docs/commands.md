@@ -291,6 +291,9 @@ reconciled in place where PostgreSQL can express it:
   does not satisfy it. `--allow-drop` does not gate this statement.
 - **Enum types** — `ALTER TYPE ... ADD VALUE` for appended values;
   reordering or removing values falls back.
+- **Composite types** — a changed comment on the type or on an
+  attribute is set with `COMMENT ON TYPE` or `COMMENT ON COLUMN`;
+  another change falls back.
 - **Extensions** — `ALTER EXTENSION ... UPDATE` / `SET SCHEMA`.
 - **Foreign data wrappers** — handler, validator, and `OPTIONS`
   (`ADD`/`SET`/`DROP`) changes, plus comments.
