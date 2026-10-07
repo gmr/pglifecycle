@@ -581,9 +581,9 @@ role_settings:
 - An object that can have a security label has `security_labels`,
   next to its `comment`: a schema, a table and each of its columns
   and partitions, a view, a materialized view, a sequence, a domain,
-  a type, a function, a procedure, an aggregate, a language, a
-  publication, a subscription, a role, a user, a group, a tablespace
-  and the database. The key is the name of the label provider, and
+  a type, a function, a procedure, an aggregate, a language, an event
+  trigger, a publication, a subscription, a role, a user, a group, a
+  tablespace and the database. The key is the name of the label provider, and
   the value is the label (`SECURITY LABEL FOR provider ON ... IS
   'label'`). `pull` reads the labels, `build` writes a `SECURITY
   LABEL` entry after the object, and `deploy` changes them in place.
