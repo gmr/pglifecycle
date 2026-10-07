@@ -249,6 +249,10 @@ replica_identity: FULL
   foreign key and NOT NULL constraints live in `constraint_comments`,
   keyed by constraint name.
 
+- Tables and views carry `triggers`, with the same fields. A view can
+  have an `INSTEAD OF` trigger. A materialized view cannot have
+  triggers.
+
 - Tables and views carry `rules`. A rule's `commands` are absent for
   `DO INSTEAD NOTHING`. A view's internal `_RETURN` rule is its query,
   never a rule.

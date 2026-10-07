@@ -1436,11 +1436,14 @@ impl Assembly {
                 }
             }
             Statement::CreateTrigger { table, trigger } => {
-                match self.find_table(&table) {
-                    Some(table) => {
-                        table.triggers.get_or_insert_default().push(trigger);
+                match self.triggers_of(&table) {
+                    Some(triggers) => {
+                        triggers.get_or_insert_default().push(trigger);
                     }
-                    None => log::warn!("Trigger on unknown table {table}"),
+                    None => {
+                        log::warn!("Trigger on unknown relation {table}");
+                        self.push_remaining(entry);
+                    }
                 }
             }
             Statement::CreateAggregate(mut aggregate) => {
@@ -2410,12 +2413,10 @@ impl Assembly {
             schema,
             name: table.to_string(),
         };
-        let Some(table) = self.find_table(&relation) else {
-            return false;
-        };
-        let Some(trigger) = table
-            .triggers
-            .iter_mut()
+        let Some(trigger) = self
+            .triggers_of(&relation)
+            .and_then(|triggers| triggers.as_mut())
+            .into_iter()
             .flatten()
             .find(|t| t.name.as_deref() == Some(target.name.as_str()))
         else {
@@ -2477,6 +2478,21 @@ impl Assembly {
             .iter_mut()
             .find(|v| v.schema == schema && v.name == relation.name)
             .map(|v| v.rules.get_or_insert_default())
+    }
+
+    /// The triggers of a table or view
+    fn triggers_of(
+        &mut self,
+        relation: &QualifiedName,
+    ) -> Option<&mut Option<Vec<models::Trigger>>> {
+        let schema = relation.schema.clone().unwrap_or_default();
+        if self.find_table(relation).is_some() {
+            return self.find_table(relation).map(|t| &mut t.triggers);
+        }
+        self.views
+            .iter_mut()
+            .find(|v| v.schema == schema && v.name == relation.name)
+            .map(|v| &mut v.triggers)
     }
 
     /// File a text search object under its schema's container
@@ -3600,6 +3616,54 @@ mod tests {
             trigger.comment.as_deref(),
             Some("keeps last_modified_at fresh")
         );
+    }
+
+    /// A trigger on a view (an INSTEAD OF trigger) and its comment
+    /// attach to the view. A trigger on a relation that pull does not
+    /// know goes to remaining.yaml.
+    #[test]
+    fn view_triggers_attach_to_the_view() {
+        let mut dump = libpgdump::new("fixtures", "UTF8", "18.0").unwrap();
+        add(&mut dump, OT::Schema, "", "test", "CREATE SCHEMA test;");
+        add(
+            &mut dump,
+            OT::View,
+            "test",
+            "v",
+            "CREATE VIEW test.v AS SELECT 1 AS id;",
+        );
+        add(
+            &mut dump,
+            OT::Trigger,
+            "test",
+            "v v_ins",
+            "CREATE TRIGGER v_ins INSTEAD OF INSERT ON test.v \
+             FOR EACH ROW EXECUTE FUNCTION test.f();",
+        );
+        add(
+            &mut dump,
+            OT::Comment,
+            "test",
+            "TRIGGER v_ins ON v",
+            "COMMENT ON TRIGGER v_ins ON test.v IS 'redirects inserts';",
+        );
+        add(
+            &mut dump,
+            OT::Trigger,
+            "test",
+            "missing t",
+            "CREATE TRIGGER t AFTER INSERT ON test.missing \
+             FOR EACH ROW EXECUTE FUNCTION test.f();",
+        );
+        let mut assembly = Assembly::default();
+        assembly.ingest(&dump).unwrap();
+        let triggers = assembly.views[0].triggers.as_deref().unwrap();
+        assert_eq!(triggers.len(), 1);
+        assert_eq!(triggers[0].name.as_deref(), Some("v_ins"));
+        assert_eq!(triggers[0].when.as_deref(), Some("INSTEAD OF"));
+        assert_eq!(triggers[0].comment.as_deref(), Some("redirects inserts"));
+        assert_eq!(assembly.remaining.len(), 1);
+        assert_eq!(assembly.remaining[0].tag.as_deref(), Some("missing t"));
     }
 
     #[test]
