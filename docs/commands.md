@@ -543,11 +543,11 @@ checked.
 
 A security label changes in place: a label that is different or that
 only the project has gets `SECURITY LABEL FOR provider ON ... IS
-label`. An object, a column or a partition with no `security_labels`
-does not manage its labels, and deploy leaves the labels of the
-database as they are. With the field, a label that only the database
-has gets `IS NULL`. A change to the labels only does not make the
-object again.
+label`. An object, a column or a partition with no `security_labels`,
+or a view column that is not in `column_security_labels`, does not
+manage its labels, and deploy leaves the labels of the database as
+they are. With the field, a label that only the database has gets `IS
+NULL`. A change to the labels only does not make the object again.
 
 A grant, comment or security label on an object that is not in the
 project, for example a grant on the `public` schema or on a

@@ -45,6 +45,7 @@ pub(crate) fn create_view(
         query,
         rules: None,
         comment: None,
+        column_security_labels: None,
         security_labels: None,
     }))
 }
@@ -85,6 +86,7 @@ pub(crate) fn create_materialized_view(
         query,
         indexes: None,
         comment: None,
+        column_security_labels: None,
         security_labels: None,
     }))
 }

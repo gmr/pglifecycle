@@ -776,6 +776,8 @@ fn outside_items() -> Vec<Item> {
                     "owner": "postgres",
                     "storage_parameters": {},
                     "query": "SELECT 1 AS n",
+                    // deviation 116
+                    "column_security_labels": {"n": {"dummy": "it's"}},
                 }))
                 .unwrap(),
             ),
@@ -1158,6 +1160,17 @@ const OUTSIDE_CORRECTED: &[(&str, &str, &str, &str, &str)] = &[
         "DATABASE outside",
         "SECURITY LABEL FOR \"My Provider\" ON DATABASE outside IS \
          $$secret$$;\n",
+        "",
+    ),
+    // deviation 116: the labels of a column of a view or of a
+    // materialized view are a SECURITY LABEL entry after the view, as
+    // those of a table column. The Python had no place for them
+    (
+        "SECURITY LABEL",
+        "test",
+        "gauge_totals.n",
+        "SECURITY LABEL FOR dummy ON COLUMN test.gauge_totals.n IS \
+         $$it's$$;\n",
         "",
     ),
     // deviation 60: a CHECK on a column is a CHECK of the table with

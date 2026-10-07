@@ -596,6 +596,22 @@ role_settings:
   with `shared_preload_libraries`. `pull` writes the field only for an
   object that has labels, thus `pull --no-security-labels` gives a
   project that does not manage labels.
+- A view and a materialized view keep the labels of their columns in
+  `column_security_labels`: the key is the column name, and the value
+  is the labels of that column, as in `security_labels`. A column
+  that is not in the map does not manage its labels, and a column
+  with `{}` has no labels.
+
+```yaml
+---
+name: customer_emails
+schema: app
+owner: postgres
+query: SELECT email FROM app.customers
+column_security_labels:
+  email:
+    anon: MASKED WITH VALUE NULL
+```
 
 ```yaml
 ---

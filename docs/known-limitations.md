@@ -28,9 +28,12 @@ the project without these entries. See
 
 - **Comments and security labels on objects that pull does not
   model.** Such a comment or label goes to `remaining.yaml` with its
-  object. A security label on a column of a view or of a materialized
-  view also goes there. Use `--no-security-labels` to leave the labels
-  out of the dump.
+  object. Use `--no-security-labels` to leave the labels out of the
+  dump.
+- **Security labels on the attributes of a composite type.** The
+  project does not manage them. pg_dump does not dump them, thus
+  `pull` cannot read them and `deploy` cannot see them in the
+  database.
 
 ## Build
 

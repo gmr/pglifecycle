@@ -1696,17 +1696,28 @@ impl Assembly {
                 target,
                 provider,
                 label,
-            } => match self.security_labels_of(&on, &target) {
-                Some(labels) => set_security_label(labels, provider, label),
+            } => {
+                let applied = match self.security_labels_of(&on, &target) {
+                    Some(labels) => {
+                        set_security_label(labels, provider, label);
+                        true
+                    }
+                    None => {
+                        on == "COLUMN"
+                            && self.set_view_column_label(
+                                &target, provider, label,
+                            )
+                    }
+                };
                 // as for a comment, a label with nowhere to go keeps
                 // its entry
-                None => {
+                if !applied {
                     log::warn!(
                         "Security label on unmatched object: {on} {target}"
                     );
                     self.push_remaining(entry);
                 }
-            },
+            }
             Statement::Acl(acl) => self.apply_acl(&acl),
             Statement::RoleMembership { .. }
             | Statement::CreateRole(_)
@@ -2223,6 +2234,46 @@ impl Assembly {
                 .map(|s| &mut s.security_labels),
             _ => None,
         }
+    }
+
+    /// Set the label of `provider` on the column of a view or of a
+    /// materialized view that `SECURITY LABEL ON COLUMN` names, as
+    /// [`Self::column`] reads the target. False when no view has that
+    /// name.
+    fn set_view_column_label(
+        &mut self,
+        target: &QualifiedName,
+        provider: String,
+        label: Option<String>,
+    ) -> bool {
+        let Some(relation) = target.schema.as_deref() else {
+            return false;
+        };
+        let (schema, view) =
+            relation.split_once('.').unwrap_or(("", relation));
+        let columns = match self
+            .views
+            .iter_mut()
+            .find(|v| v.schema == schema && v.name == view)
+        {
+            Some(v) => &mut v.column_security_labels,
+            None => match self
+                .materialized_views
+                .iter_mut()
+                .find(|v| v.schema == schema && v.name == view)
+            {
+                Some(v) => &mut v.column_security_labels,
+                None => return false,
+            },
+        };
+        let mut labels = columns.as_mut().and_then(|c| c.remove(&target.name));
+        set_security_label(&mut labels, provider, label);
+        if let Some(labels) = labels {
+            columns
+                .get_or_insert_default()
+                .insert(target.name.clone(), labels);
+        }
+        true
     }
 
     /// `COMMENT ON FUNCTION schema.fn(args)` — match the full identity
@@ -4863,12 +4914,28 @@ mod tests {
             "CREATE FUNCTION s.f(a integer) RETURNS integer LANGUAGE sql \
              AS $$SELECT a$$;",
         );
+        add(
+            &mut dump,
+            OT::View,
+            "s",
+            "v",
+            "CREATE VIEW s.v AS SELECT 1 AS c;",
+        );
+        add(
+            &mut dump,
+            OT::MaterializedView,
+            "s",
+            "m",
+            "CREATE MATERIALIZED VIEW s.m AS SELECT 1 AS c WITH NO DATA;",
+        );
         let labels = [
             ("DATABASE \"App DB\"", "", "DATABASE \"App DB\""),
             ("SCHEMA s", "", "SCHEMA s"),
             ("TABLE t", "s", "TABLE s.t"),
             ("COLUMN t.secret", "s", "COLUMN s.t.secret"),
             ("FUNCTION f(integer)", "s", "FUNCTION s.f(integer)"),
+            ("VIEW v", "s", "COLUMN s.v.c"),
+            ("MATERIALIZED VIEW m", "s", "COLUMN s.m.c"),
         ];
         for (tag, namespace, on) in labels {
             add(
@@ -4910,6 +4977,16 @@ mod tests {
         assert_eq!(
             assembly.functions[0].security_labels,
             Some(expected.clone())
+        );
+        let columns: models::ColumnSecurityLabels =
+            [("c".to_string(), expected.clone())].into();
+        assert_eq!(
+            assembly.views[0].column_security_labels,
+            Some(columns.clone())
+        );
+        assert_eq!(
+            assembly.materialized_views[0].column_security_labels,
+            Some(columns)
         );
 
         let dir = tempfile::tempdir().unwrap();
@@ -4974,9 +5051,11 @@ mod tests {
                 // the label names the function by its signature, so
                 // that it identifies one overload
                 entry("f", "FUNCTION s.f(IN a integer)"),
+                entry("m.c", "COLUMN s.m.c"),
                 entry("s", "SCHEMA s"),
                 entry("t", "TABLE s.t"),
                 entry("t.secret", "COLUMN s.t.secret"),
+                entry("v.c", "COLUMN s.v.c"),
             ]
         );
     }

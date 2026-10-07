@@ -26,6 +26,10 @@ pub struct View {
     pub rules: Option<Vec<crate::models::Rule>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
+    /// The security labels of the columns (`SECURITY LABEL FOR
+    /// provider ON COLUMN ...`), as the labels of each column name
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub column_security_labels: Option<super::ColumnSecurityLabels>,
     /// Security labels (`SECURITY LABEL FOR provider ON ...`), as
     /// a label for each provider
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -68,6 +72,10 @@ pub struct MaterializedView {
     pub indexes: Option<Vec<super::Index>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
+    /// The security labels of the columns (`SECURITY LABEL FOR
+    /// provider ON COLUMN ...`), as the labels of each column name
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub column_security_labels: Option<super::ColumnSecurityLabels>,
     /// Security labels (`SECURITY LABEL FOR provider ON ...`), as
     /// a label for each provider
     #[serde(skip_serializing_if = "Option::is_none")]

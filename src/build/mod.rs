@@ -381,6 +381,13 @@
 //!     the entry still has no drop statement (see 48). The Python had
 //!     no place for these properties. The test-project has none, thus
 //!     its archive does not change.
+//! 116. The `column_security_labels` of a view or a materialized view
+//!      render as one `SECURITY LABEL` entry for each column after the
+//!      view, with the tag `view.column` and `ON COLUMN
+//!      schema.view.column`, as for a table column (see 89). pg_dump
+//!      writes the labels of all columns in the entry of the view. The
+//!      Python had no place for them. The test-project has none, thus
+//!      its archive does not change.
 
 mod acls;
 mod calls;
@@ -820,6 +827,37 @@ impl Builder {
             &[parent_dump_id],
             None,
         )?;
+        Ok(())
+    }
+
+    /// Add the SECURITY LABEL entry of each column of a view or of a
+    /// materialized view, tied to the view, as a table column has it
+    fn add_column_security_labels(
+        &mut self,
+        item: &Item,
+        schema: &str,
+        name: &str,
+        owner: &str,
+        columns: Option<&crate::models::ColumnSecurityLabels>,
+    ) -> Result<(), String> {
+        let dump_id = self.dump_id_map[&item.id];
+        for (column, labels) in columns.into_iter().flatten() {
+            let target = format!(
+                "{}.{}.{}",
+                quote_ident(schema),
+                quote_ident(name),
+                quote_ident(column)
+            );
+            self.add_security_labels(
+                "COLUMN",
+                schema,
+                &format!("{name}.{column}"),
+                owner,
+                dump_id,
+                labels,
+                Some(target),
+            )?;
+        }
         Ok(())
     }
 
@@ -1861,7 +1899,14 @@ impl Builder {
             unreachable!()
         };
         if let Some(sql) = &d.sql {
-            return self.add_item(item, vec![sql.clone()], vec![], false);
+            self.add_item(item, vec![sql.clone()], vec![], false)?;
+            return self.add_column_security_labels(
+                item,
+                &d.schema,
+                &d.name,
+                &d.owner,
+                d.column_security_labels.as_ref(),
+            );
         }
         let mut create = vec![
             "CREATE".into(),
@@ -1905,6 +1950,13 @@ impl Builder {
             self.item_name(item),
         ];
         self.add_item(item, create, drop, false)?;
+        self.add_column_security_labels(
+            item,
+            &d.schema,
+            &d.name,
+            &d.owner,
+            d.column_security_labels.as_ref(),
+        )?;
         for index in d.indexes.as_deref().unwrap_or_default() {
             self.dump_index(index, item, &d.schema, &d.owner, None)?;
         }
@@ -3830,6 +3882,13 @@ impl Builder {
         };
         if let Some(sql) = &d.sql {
             self.add_item(item, vec![sql.clone()], vec![], false)?;
+            self.add_column_security_labels(
+                item,
+                &d.schema,
+                &d.name,
+                &d.owner,
+                d.column_security_labels.as_ref(),
+            )?;
             for rule in d.rules.as_deref().unwrap_or_default() {
                 self.dump_rule(rule, item, &d.schema, &d.name, &d.owner)?;
             }
@@ -3862,6 +3921,13 @@ impl Builder {
         create.push(d.query.clone().unwrap_or_default());
         let drop = vec!["DROP VIEW IF EXISTS".into(), self.item_name(item)];
         self.add_item(item, create, drop, false)?;
+        self.add_column_security_labels(
+            item,
+            &d.schema,
+            &d.name,
+            &d.owner,
+            d.column_security_labels.as_ref(),
+        )?;
         for rule in d.rules.as_deref().unwrap_or_default() {
             self.dump_rule(rule, item, &d.schema, &d.name, &d.owner)?;
         }
@@ -6039,6 +6105,7 @@ mod tests {
                 security_barrier: Some(true),
                 query: Some("SELECT 1".into()),
                 comment: None,
+                column_security_labels: None,
                 security_labels: None,
                 rules: None,
             }),
@@ -6092,6 +6159,7 @@ mod tests {
                 security_barrier: None,
                 query: Some("SELECT 1, 2".into()),
                 comment: None,
+                column_security_labels: None,
                 security_labels: None,
                 rules: None,
             }),
@@ -6143,6 +6211,7 @@ mod tests {
                 security_barrier: None,
                 query: None,
                 comment: None,
+                column_security_labels: None,
                 security_labels: None,
                 rules: Some(vec![crate::models::Rule {
                     name: "no_delete".into(),

@@ -27,6 +27,11 @@ pub use views::*;
 /// The security labels of an object: the label of each provider
 pub type SecurityLabels = std::collections::BTreeMap<String, String>;
 
+/// The security labels of the columns of a view or a materialized
+/// view: the labels of each column name
+pub type ColumnSecurityLabels =
+    std::collections::BTreeMap<String, SecurityLabels>;
+
 /// One database object definition of any supported type
 #[derive(Clone, Debug, PartialEq, serde::Serialize)]
 #[serde(untagged)]

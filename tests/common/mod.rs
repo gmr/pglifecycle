@@ -341,8 +341,9 @@ pub fn mutated_foreign_archive(path: &std::path::Path) {
 }
 
 /// A small archive with security labels: `label` is the label of the
-/// `dummy` provider on the database, the schema, a table, a column and
-/// a function, or there are no labels when it is `None`
+/// `dummy` provider on the database, the schema, a table, a column, a
+/// function and a column of a view and of a materialized view, or there
+/// are no labels when it is `None`
 pub fn labeled_archive(path: &std::path::Path, label: Option<&str>) {
     let mut dump = libpgdump::new("labels", "UTF8", "18.0").unwrap();
     add(&mut dump, OT::Schema, "", "test", "CREATE SCHEMA test;");
@@ -361,6 +362,20 @@ pub fn labeled_archive(path: &std::path::Path, label: Option<&str>) {
         "CREATE FUNCTION test.f(a integer) RETURNS integer LANGUAGE sql \
          AS $$SELECT a$$;",
     );
+    add(
+        &mut dump,
+        OT::View,
+        "test",
+        "v",
+        "CREATE VIEW test.v AS SELECT 1 AS c;",
+    );
+    add(
+        &mut dump,
+        OT::MaterializedView,
+        "test",
+        "m",
+        "CREATE MATERIALIZED VIEW test.m AS SELECT 1 AS c WITH NO DATA;",
+    );
     if let Some(label) = label {
         for (namespace, tag, on) in [
             ("", "DATABASE labels", "DATABASE labels"),
@@ -368,6 +383,9 @@ pub fn labeled_archive(path: &std::path::Path, label: Option<&str>) {
             ("test", "TABLE t", "TABLE test.t"),
             ("test", "COLUMN t.secret", "COLUMN test.t.secret"),
             ("test", "FUNCTION f(integer)", "FUNCTION test.f(integer)"),
+            // pg_dump puts the column labels in the entry of the view
+            ("test", "VIEW v", "COLUMN test.v.c"),
+            ("test", "MATERIALIZED VIEW m", "COLUMN test.m.c"),
         ] {
             add(
                 &mut dump,
