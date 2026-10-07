@@ -30,7 +30,8 @@ the project without these entries. See
   comment on a column of a view or of a materialized view, on an
   attribute of a composite type, on a constraint of a domain, or on a
   trigger on a view goes to `remaining.yaml`. A security label on a
-  column of a view or of a materialized view also goes there. Use
+  column of a view or of a materialized view, or on an attribute of a
+  composite type, also goes there. Use
   `--no-security-labels` to leave the labels out of the dump.
 
 ## Build
