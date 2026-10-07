@@ -26,10 +26,6 @@ pub struct View {
     pub rules: Option<Vec<crate::models::Rule>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
-    /// The security labels of the columns (`SECURITY LABEL FOR
-    /// provider ON COLUMN ...`), as the labels of each column name
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub column_security_labels: Option<super::ColumnSecurityLabels>,
     /// Security labels (`SECURITY LABEL FOR provider ON ...`), as
     /// a label for each provider
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -37,7 +33,7 @@ pub struct View {
 }
 
 /// A column in a view or materialized view: a bare name or a mapping
-/// with a name and comment
+/// with a name, a comment and security labels
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ViewColumn {
@@ -46,6 +42,10 @@ pub enum ViewColumn {
         name: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         comment: Option<String>,
+        /// Security labels (`SECURITY LABEL FOR provider ON COLUMN
+        /// ...`), as a label for each provider
+        #[serde(skip_serializing_if = "Option::is_none")]
+        security_labels: Option<super::SecurityLabels>,
     },
 }
 
@@ -72,10 +72,6 @@ pub struct MaterializedView {
     pub indexes: Option<Vec<super::Index>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
-    /// The security labels of the columns (`SECURITY LABEL FOR
-    /// provider ON COLUMN ...`), as the labels of each column name
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub column_security_labels: Option<super::ColumnSecurityLabels>,
     /// Security labels (`SECURITY LABEL FOR provider ON ...`), as
     /// a label for each provider
     #[serde(skip_serializing_if = "Option::is_none")]

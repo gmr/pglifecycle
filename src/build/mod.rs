@@ -840,37 +840,6 @@ impl Builder {
         Ok(())
     }
 
-    /// Add the SECURITY LABEL entry of each column of a view or of a
-    /// materialized view, tied to the view, as a table column has it
-    fn add_column_security_labels(
-        &mut self,
-        item: &Item,
-        schema: &str,
-        name: &str,
-        owner: &str,
-        columns: Option<&crate::models::ColumnSecurityLabels>,
-    ) -> Result<(), String> {
-        let dump_id = self.dump_id_map[&item.id];
-        for (column, labels) in columns.into_iter().flatten() {
-            let target = format!(
-                "{}.{}.{}",
-                quote_ident(schema),
-                quote_ident(name),
-                quote_ident(column)
-            );
-            self.add_security_labels(
-                "COLUMN",
-                schema,
-                &format!("{name}.{column}"),
-                owner,
-                dump_id,
-                labels,
-                Some(target),
-            )?;
-        }
-        Ok(())
-    }
-
     /// Emit the standalone `DEFAULT` entries: the
     /// `SET DEFAULT nextval(...)` ones held out of their `CREATE TABLE`
     /// by [`sequence_backed_default`], the ones that call a function
@@ -1910,7 +1879,7 @@ impl Builder {
         };
         if let Some(sql) = &d.sql {
             self.add_item(item, vec![sql.clone()], vec![], false)?;
-            return self.dump_column_comments(
+            return self.dump_view_columns(
                 item,
                 &d.schema,
                 &d.name,
@@ -1960,7 +1929,7 @@ impl Builder {
             self.item_name(item),
         ];
         self.add_item(item, create, drop, false)?;
-        self.dump_column_comments(
+        self.dump_view_columns(
             item,
             &d.schema,
             &d.name,
@@ -1973,10 +1942,10 @@ impl Builder {
         Ok(())
     }
 
-    /// The COMMENT entry of each comment in the `columns` of a view or
-    /// a materialized view, after the view, as pg_dump writes them
-    /// (deviation 104)
-    fn dump_column_comments(
+    /// The COMMENT entry and the SECURITY LABEL entry of each column in
+    /// the `columns` of a view or a materialized view, after the view,
+    /// tied to it as a table column has them (deviations 104 and 116)
+    fn dump_view_columns(
         &mut self,
         item: &Item,
         schema: &str,
@@ -1988,7 +1957,8 @@ impl Builder {
         for column in columns.unwrap_or_default() {
             let ViewColumn::Detailed {
                 name: column,
-                comment: Some(comment),
+                comment,
+                security_labels,
             } = column
             else {
                 continue;
@@ -1999,15 +1969,29 @@ impl Builder {
                 quote_ident(name),
                 quote_ident(column)
             );
-            self.add_comment(
-                "COLUMN",
-                schema,
-                &format!("{name}.{column}"),
-                owner,
-                dump_id,
-                comment,
-                Some(target),
-            )?;
+            let tag = format!("{name}.{column}");
+            if let Some(comment) = comment {
+                self.add_comment(
+                    "COLUMN",
+                    schema,
+                    &tag,
+                    owner,
+                    dump_id,
+                    comment,
+                    Some(target.clone()),
+                )?;
+            }
+            if let Some(labels) = security_labels {
+                self.add_security_labels(
+                    "COLUMN",
+                    schema,
+                    &tag,
+                    owner,
+                    dump_id,
+                    labels,
+                    Some(target),
+                )?;
+            }
         }
         Ok(())
     }
@@ -3931,7 +3915,7 @@ impl Builder {
         };
         if let Some(sql) = &d.sql {
             self.add_item(item, vec![sql.clone()], vec![], false)?;
-            self.dump_column_comments(
+            self.dump_view_columns(
                 item,
                 &d.schema,
                 &d.name,
@@ -3975,7 +3959,7 @@ impl Builder {
         });
         let drop = vec!["DROP VIEW IF EXISTS".into(), self.item_name(item)];
         self.add_item(item, create, drop, false)?;
-        self.dump_column_comments(
+        self.dump_view_columns(
             item,
             &d.schema,
             &d.name,
@@ -6159,7 +6143,6 @@ mod tests {
                 security_barrier: Some(true),
                 query: Some("SELECT 1".into()),
                 comment: None,
-                column_security_labels: None,
                 security_labels: None,
                 rules: None,
             }),
@@ -6213,7 +6196,6 @@ mod tests {
                 security_barrier: None,
                 query: Some("SELECT 1, 2".into()),
                 comment: None,
-                column_security_labels: None,
                 security_labels: None,
                 rules: None,
             }),
@@ -6265,7 +6247,6 @@ mod tests {
                 security_barrier: None,
                 query: None,
                 comment: None,
-                column_security_labels: None,
                 security_labels: None,
                 rules: Some(vec![crate::models::Rule {
                     name: "no_delete".into(),

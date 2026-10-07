@@ -42,6 +42,9 @@ properties:
             comment:
               title: Comment
               type: string
+            security_labels:
+              title: Security Labels
+              $package_schema: security_labels
           required:
             - name
   check_option:
@@ -86,16 +89,6 @@ properties:
     title: Comment
     description: An optional comment about the view.
     type: string
-  column_security_labels:
-    title: Column Security Labels
-    description: |
-      The security labels of the columns of the view: the key is the
-      column name, and the value is the labels of that column. With no
-      field, the project does not manage the labels of the columns. A
-      column that is not in the map is also not managed.
-    type: object
-    additionalProperties:
-      $package_schema: security_labels
   security_labels:
     title: Security Labels
     $package_schema: security_labels

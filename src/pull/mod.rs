@@ -2249,42 +2249,18 @@ impl Assembly {
     }
 
     /// Set the label of `provider` on the column of a view or of a
-    /// materialized view that `SECURITY LABEL ON COLUMN` names, as
-    /// [`Self::column`] reads the target. False when no view has that
-    /// name.
+    /// materialized view that `SECURITY LABEL ON COLUMN` names (see
+    /// [`Self::view_column`]). False when no view column has that name.
     fn set_view_column_label(
         &mut self,
         target: &QualifiedName,
         provider: String,
         label: Option<String>,
     ) -> bool {
-        let Some(relation) = target.schema.as_deref() else {
+        let Some((_, labels)) = self.view_column(target) else {
             return false;
         };
-        let (schema, view) =
-            relation.split_once('.').unwrap_or(("", relation));
-        let columns = match self
-            .views
-            .iter_mut()
-            .find(|v| v.schema == schema && v.name == view)
-        {
-            Some(v) => &mut v.column_security_labels,
-            None => match self
-                .materialized_views
-                .iter_mut()
-                .find(|v| v.schema == schema && v.name == view)
-            {
-                Some(v) => &mut v.column_security_labels,
-                None => return false,
-            },
-        };
-        let mut labels = columns.as_mut().and_then(|c| c.remove(&target.name));
-        set_security_label(&mut labels, provider, label);
-        if let Some(labels) = labels {
-            columns
-                .get_or_insert_default()
-                .insert(target.name.clone(), labels);
-        }
+        set_security_label(labels, provider, label);
         true
     }
 
@@ -2388,20 +2364,16 @@ impl Assembly {
             column.comment = Some(comment.to_string());
             return true;
         }
-        let Some(column) = self.view_column(target) else {
+        let Some((column, _)) = self.view_column(target) else {
             return false;
         };
-        let (models::ViewColumn::Name(name)
-        | models::ViewColumn::Detailed { name, .. }) = column.clone();
-        *column = models::ViewColumn::Detailed {
-            name,
-            comment: Some(comment.to_string()),
-        };
+        *column = Some(comment.to_string());
         true
     }
 
-    /// The entry in the `columns` of the view or the materialized view
-    /// that `COMMENT ON COLUMN` names. The list must name each column,
+    /// The comment and the labels of the entry in the `columns` of the
+    /// view or the materialized view that `COMMENT ON COLUMN` or
+    /// `SECURITY LABEL ON COLUMN` names. The list must name each column,
     /// else it renames the columns, thus a view with no list gets the
     /// names that its query gives (`pg_get_viewdef` writes `AS` for
     /// each name that a column reference does not give). None when the
@@ -2409,7 +2381,8 @@ impl Assembly {
     fn view_column(
         &mut self,
         target: &QualifiedName,
-    ) -> Option<&mut models::ViewColumn> {
+    ) -> Option<(&mut Option<String>, &mut Option<models::SecurityLabels>)>
+    {
         let relation = target.schema.as_ref()?;
         let (schema, name) =
             relation.split_once('.').unwrap_or(("", relation));
@@ -2443,11 +2416,26 @@ impl Assembly {
                 names.into_iter().map(models::ViewColumn::Name).collect(),
             );
         }
-        columns.as_mut()?.iter_mut().find(|column| {
+        let column = columns.as_mut()?.iter_mut().find(|column| {
             let (models::ViewColumn::Name(name)
             | models::ViewColumn::Detailed { name, .. }) = column;
             *name == target.name
-        })
+        })?;
+        if let models::ViewColumn::Name(name) = column {
+            *column = models::ViewColumn::Detailed {
+                name: std::mem::take(name),
+                comment: None,
+                security_labels: None,
+            };
+        }
+        match column {
+            models::ViewColumn::Detailed {
+                comment,
+                security_labels,
+                ..
+            } => Some((comment, security_labels)),
+            models::ViewColumn::Name(_) => None,
+        }
     }
 
     /// The table column that `COMMENT ON COLUMN` or `SECURITY LABEL ON
@@ -3932,6 +3920,7 @@ mod tests {
             |name: &str, comment: &str| models::ViewColumn::Detailed {
                 name: name.into(),
                 comment: Some(comment.into()),
+                security_labels: None,
             };
         assert_eq!(
             assembly.views[0].columns,
@@ -5201,16 +5190,13 @@ mod tests {
             assembly.functions[0].security_labels,
             Some(expected.clone())
         );
-        let columns: models::ColumnSecurityLabels =
-            [("c".to_string(), expected.clone())].into();
-        assert_eq!(
-            assembly.views[0].column_security_labels,
-            Some(columns.clone())
-        );
-        assert_eq!(
-            assembly.materialized_views[0].column_security_labels,
-            Some(columns)
-        );
+        let columns = Some(vec![models::ViewColumn::Detailed {
+            name: "c".into(),
+            comment: None,
+            security_labels: Some(expected.clone()),
+        }]);
+        assert_eq!(assembly.views[0].columns, columns);
+        assert_eq!(assembly.materialized_views[0].columns, columns);
 
         let dir = tempfile::tempdir().unwrap();
         let dest = dir.path().join("project");
