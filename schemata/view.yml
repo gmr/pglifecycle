@@ -47,6 +47,7 @@ properties:
               $package_schema: security_labels
           required:
             - name
+          additionalProperties: false
   check_option:
     title: Check Option
     description: |

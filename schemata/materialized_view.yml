@@ -43,6 +43,7 @@ properties:
               $package_schema: security_labels
           required:
             - name
+          additionalProperties: false
   table_access_method:
     title: Table Access Method
     description: Define the table access method
