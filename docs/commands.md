@@ -178,6 +178,11 @@ reconciled in place where PostgreSQL can express it:
 - **Tables** — add column, set/drop default, set/drop not-null,
   add/drop check constraints, foreign keys and exclusion constraints,
   primary-key and unique additions, index and trigger create/drop,
+  primary-key and unique changes (`DROP CONSTRAINT`, then `ADD`) and
+  removals (`DROP CONSTRAINT` only); each drop is destructive. For a
+  changed key, deploy drops a foreign key that references it first and
+  adds it again after it, but only if the foreign key does not change
+  and its table is not rebuilt; else deploy refuses the key change,
   `REPLICA IDENTITY`, column storage, compression, statistics target
   and options, rules (`CREATE OR REPLACE RULE`, their state and
   comment), and comment changes, including comments on constraints. A
