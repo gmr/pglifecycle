@@ -479,9 +479,16 @@ fn out_parameters(function: &Function) -> Vec<(String, String, String)> {
 /// carry view column types, so only the name-level guard is applied
 /// here.
 fn view(repo: &View, db: &View) -> Resolution {
-    if view_columns_compatible(repo, db) {
-        let name = qualified(&repo.schema, &repo.name);
-        let mut then = Vec::new();
+    let name = qualified(&repo.schema, &repo.name);
+    let mut then = Vec::new();
+    if view_columns_compatible(repo, db)
+        && triggers(
+            &name,
+            repo.triggers.as_deref().unwrap_or_default(),
+            db.triggers.as_deref().unwrap_or_default(),
+            &mut then,
+        )
+    {
         rules(
             &name,
             repo.rules.as_deref().unwrap_or_default(),
@@ -704,7 +711,12 @@ fn table_in(repo: &Table, db: &Table, groups: &IndexGroups) -> Resolution {
     key_drops(&name, repo, db, &mut alters);
     if !columns(&name, repo, db, &mut alters)
         || !constraints(&name, repo, db, &mut alters)
-        || !triggers(&name, repo, db, &mut alters)
+        || !triggers(
+            &name,
+            repo.triggers.as_deref().unwrap_or_default(),
+            db.triggers.as_deref().unwrap_or_default(),
+            &mut alters,
+        )
     {
         return Resolution::Replace;
     }
@@ -2239,16 +2251,15 @@ fn indexes(
     }
 }
 
-/// Trigger reconciliation; triggers without names cannot be matched
-/// or dropped, so a difference involving one falls back to a rebuild
+/// Trigger reconciliation for a table or view; triggers without names
+/// cannot be matched or dropped, so a difference involving one falls
+/// back to a rebuild
 fn triggers(
     table: &str,
-    repo: &Table,
-    db: &Table,
+    repo_triggers: &[Trigger],
+    db_triggers: &[Trigger],
     alters: &mut Vec<Alter>,
 ) -> bool {
-    let repo_triggers = repo.triggers.as_deref().unwrap_or_default();
-    let db_triggers = db.triggers.as_deref().unwrap_or_default();
     if repo_triggers == db_triggers {
         return true;
     }
@@ -4633,6 +4644,39 @@ mod tests {
         };
         let sql: Vec<_> = alters.iter().map(|a| a.sql.as_str()).collect();
         assert_eq!(sql, ["COMMENT ON COLUMN test.m.b IS $$new$$;\n"]);
+    }
+
+    /// The triggers of a view reconcile by name, as a table's do
+    #[test]
+    fn view_triggers_reconcile_by_name() {
+        let v = |events: serde_json::Value| -> Definition {
+            Definition::View(
+                serde_json::from_value(serde_json::json!({
+                    "name": "v", "schema": "test", "owner": "postgres",
+                    "query": "SELECT 1",
+                    "triggers": [{
+                        "name": "v_ins", "when": "INSTEAD OF",
+                        "events": events, "for_each": "ROW",
+                        "function": "test.v_ins",
+                    }],
+                }))
+                .unwrap(),
+            )
+        };
+        let Resolution::OrReplace { then, .. } = resolve(
+            &v(serde_json::json!(["INSERT"])),
+            &v(serde_json::json!(["UPDATE"])),
+        ) else {
+            panic!("expected OR REPLACE");
+        };
+        assert_eq!(
+            sql(&then),
+            vec![
+                "DROP TRIGGER IF EXISTS v_ins ON test.v;\n",
+                "CREATE TRIGGER v_ins INSTEAD OF INSERT ON test.v FOR EACH \
+                 ROW EXECUTE FUNCTION test.v_ins();\n",
+            ]
+        );
     }
 
     fn view_with_columns(columns: serde_json::Value) -> Definition {

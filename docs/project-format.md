@@ -257,6 +257,10 @@ replica_identity: FULL
   the list only for a view that has a comment or a label on a column.
   It gives each column the name that the query gives it.
 
+- Tables and views carry `triggers`, with the same fields. A view can
+  have an `INSTEAD OF` trigger. A materialized view cannot have
+  triggers.
+
 - Tables and views carry `rules`. A rule's `commands` are absent for
   `DO INSTEAD NOTHING`. A view's internal `_RETURN` rule is its query,
   never a rule.

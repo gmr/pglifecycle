@@ -80,6 +80,12 @@ properties:
     description: |
       A SELECT or VALUES command which will provide the columns and rows of the view.
     type: string
+  triggers:
+    title: Triggers
+    description: An array of triggers on the view
+    type: array
+    items:
+      $package_schema: trigger
   rules:
     title: Rules
     description: An array of rewrite rules on the view
