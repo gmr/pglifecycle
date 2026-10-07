@@ -178,6 +178,11 @@ reconciled in place where PostgreSQL can express it:
 - **Tables** — add column, set/drop default, set/drop not-null,
   add/drop check constraints, foreign keys and exclusion constraints,
   primary-key and unique additions, index and trigger create/drop,
+  primary-key and unique changes (`DROP CONSTRAINT`, then `ADD`) and
+  removals (`DROP CONSTRAINT` only); each drop is destructive. For a
+  changed key, deploy drops a foreign key that references it first and
+  adds it again after it, but only if the foreign key does not change
+  and its table is not rebuilt; else deploy refuses the key change,
   `REPLICA IDENTITY`, column storage, compression, statistics target
   and options, rules (`CREATE OR REPLACE RULE`, their state and
   comment), and comment changes, including comments on constraints. A
@@ -236,8 +241,11 @@ reconciled in place where PostgreSQL can express it:
   column, so a new name for that column uses `CREATE OR REPLACE`.
   A function is matched by its name and its input parameters. The
   space at the start and end of a SQL or PL/pgSQL `definition` or of
-  a `sql_body` is not a change; the space in it is. A type alias or a
-  type modifier in a parameter, the return type or a `TABLE(...)`
+  a `sql_body` is not a change. In a `definition` in another language,
+  such as PL/Python, that space is a change. Other space in a PL/pgSQL
+  `definition` or in a `sql_body` is a change. Deploy formats a SQL `definition` as `pull`
+  does, so its layout is not a change. A type
+  alias or a type modifier in a parameter, the return type or a `TABLE(...)`
   column is not a change, as PostgreSQL keeps no typmod there (see
   [Project format](project-format.md)). PostgreSQL does not let
   `CREATE OR REPLACE VIEW` rename, remove or reorder a column, so such

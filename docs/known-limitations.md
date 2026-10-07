@@ -31,10 +31,6 @@ the project without these entries. See
   object. A security label on a column of a view or of a materialized
   view also goes there. Use `--no-security-labels` to leave the labels
   out of the dump.
-- **Column settings on an inheritance child.** `ALTER TABLE ONLY child
-  ALTER COLUMN c SET STATISTICS` (or `SET STORAGE`) on a column that
-  the child inherits puts the table entry in `remaining.yaml`. Set the
-  value by hand after the restore or the deploy.
 
 ## Build
 
@@ -68,16 +64,12 @@ These limits are already described:
 
 These limits are new on this page:
 
-- **The layout of a SQL function body.** `pull` formats a function
-  body with libpgfmt: `SELECT a, a;` becomes `SELECT a,` and `a;` on
-  two lines. A body with another layout gets a `CREATE OR REPLACE` on
-  each deploy.
-- **Materialized view queries.** `deploy` compares the `query` of a
-  materialized view as text. Write the query as `pull` writes it, with
-  no `;` at the end: with a `;`, the build writes `;;`.
-- **Dollar-quoted constants in expressions.** PostgreSQL writes
-  `$$a$$::text` as `'a'::text`. Write a string constant in single
-  quotes.
+- **Materialized view queries.** `deploy` formats the `query` of a
+  materialized view as `pull` does, so its layout and a `;` at the end
+  are not a change. But PostgreSQL also adds casts and parentheses to
+  the query (`name = 'x'` becomes `(name = 'x'::text)`). A query
+  without them is a change on each deploy. Write them as `pull` writes
+  them.
 
 ## Deploy: order and rebuild limits
 
@@ -104,14 +96,14 @@ These limits are already described:
 
 These limits are new on this page:
 
-- **A change to a primary key or a unique constraint.** A change to
-  the columns or the `INCLUDE` columns of a primary key or a unique
-  constraint drops the table and makes it again. Without
-  `--allow-drop`, the change is withheld. When a foreign key of
-  another table references the constraint, `deploy` stops with an
-  error. See
-  [Destructive statements and limits](commands.md#destructive-statements-and-limits).
-  To keep the data, make the change by hand, then `pull` the database.
+- **A change to a primary key or a unique constraint that other
+  objects use.** `deploy` drops the constraint and adds it again in
+  place. It drops a foreign key that references the constraint first,
+  and adds it again after the constraint. When the project also
+  changes or removes that foreign key, or `deploy` rebuilds its table,
+  or an object of another type (a view, for example) depends on the
+  constraint, `deploy` stops with an error (with `--allow-drop`).
+  Make such a change by hand, then `pull` the database.
 - **A new column with a default that calls a new function.** When the
   function has a SQL-standard body (`sql_body`), it can read the new
   column, so `deploy` adds the column with no default, then makes the
@@ -125,9 +117,10 @@ These limits are new on this page:
   object, the function and the object need each other first, and the
   script fails on apply. Deploy the function first, then the rest.
 - **A change from integer to serial.** For a column that does not own
-  a sequence in the database, `deploy` writes `ALTER COLUMN ... TYPE
-  serial`, and PostgreSQL refuses it. Make the sequence and the
-  default by hand, then `pull` the database.
+  a sequence in the database, `deploy` makes a new sequence that
+  starts at 1, sets the default and links the sequence to the column.
+  It does not move the sequence past the values that the column has.
+  Before you add rows, set the sequence with `setval()`.
 - **NO INHERIT on one of two parents.** When a child has a NOT NULL
   from two parents, and only one parent changes it to `NO INHERIT`,
   the child keeps a NOT NULL of its own. PostgreSQL cannot remove it

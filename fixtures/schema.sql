@@ -287,6 +287,17 @@ CREATE TABLE audit_events_archive (
 ALTER TABLE audit_events_archive
     ALTER COLUMN recorded_at SET DEFAULT CURRENT_TIMESTAMP;
 
+-- The statistics target and the storage of inherited columns. pg_dump
+-- writes them in the child's TABLE entry as `ALTER TABLE ONLY ...
+-- SET STATISTICS` and `SET STORAGE`; they are kept in the child's
+-- `column_settings`, since there is no local column to hold them.
+ALTER TABLE ONLY audit_events_archive
+    ALTER COLUMN detail SET STATISTICS 500;
+ALTER TABLE ONLY audit_events_archive
+    ALTER COLUMN detail SET STORAGE EXTERNAL;
+ALTER TABLE ONLY audit_events_archive
+    ALTER COLUMN recorded_at SET STATISTICS 200;
+
 -- Two tables that reference each other. No creation order satisfies
 -- both, so a foreign key rendered inline in CREATE TABLE cannot
 -- restore; the build emits every foreign key as its own entry after

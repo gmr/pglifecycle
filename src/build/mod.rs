@@ -351,6 +351,11 @@
 //!     DOMAIN, before the function. No test-project type or domain
 //!     uses another, and no test-project CHECK calls a function, thus
 //!     its archive does not change.
+//! 86. A materialized view query that ends with `;` renders with no
+//!     `;` at the end, because the entry adds one. The Python wrote the
+//!     query as it is, thus the entry had `;;`, an empty statement
+//!     after the view. The test-project materialized view query ends
+//!     with `;`, thus its entry has one `;` less.
 //! 89. The `security_labels` of an object render as a `SECURITY
 //!     LABEL` entry after the object, with one `SECURITY LABEL FOR
 //!     provider ON ...` statement for each provider. The entry of the
@@ -1889,7 +1894,12 @@ impl Builder {
             create.push(tablespace.clone());
         }
         create.push("AS".into());
-        create.push(d.query.clone().unwrap_or_default());
+        // the entry adds the `;` (deviation 86)
+        let query = d.query.as_deref().unwrap_or_default();
+        create.push(match query.trim_end().strip_suffix(';') {
+            Some(query) => query.trim_end_matches(';').to_string(),
+            None => query.to_string(),
+        });
         let drop = vec![
             "DROP MATERIALIZED VIEW IF EXISTS".into(),
             self.item_name(item),
@@ -4255,7 +4265,9 @@ fn render_index_column(column: &crate::models::IndexColumn) -> String {
 /// `ALTER [FOREIGN] TABLE ONLY ... ALTER COLUMN ... SET ...` for each
 /// column attribute the table's columns set, in pg_dump's order:
 /// statistics, storage, compression, options. A foreign table takes
-/// no compression, so its compression is not written.
+/// no compression, so its compression is not written. The settings of
+/// inherited columns come first, as the inherited columns come first
+/// in the table.
 pub(crate) fn render_column_attributes(
     table: &Table,
     table_name: &str,
@@ -4263,6 +4275,18 @@ pub(crate) fn render_column_attributes(
     let foreign = table.server.is_some();
     let kind = if foreign { "FOREIGN TABLE" } else { "TABLE" };
     let mut statements = Vec::new();
+    for setting in table.column_settings.iter().flatten() {
+        let prefix = format!(
+            "ALTER {kind} ONLY {table_name} ALTER COLUMN {}",
+            quote_ident(&setting.column)
+        );
+        if let Some(statistics) = setting.statistics {
+            statements.push(format!("{prefix} SET STATISTICS {statistics}"));
+        }
+        if let Some(storage) = &setting.storage {
+            statements.push(format!("{prefix} SET STORAGE {storage}"));
+        }
+    }
     for column in table.columns.iter().flatten() {
         let prefix = format!(
             "ALTER {kind} ONLY {table_name} ALTER COLUMN {}",
@@ -5086,6 +5110,7 @@ mod tests {
                 schema: "fdw_warehouse".into(),
                 owner: "app".into(),
                 column_defaults: None,
+                column_settings: None,
                 sql: None,
                 unlogged: None,
                 from_type: None,
@@ -5570,6 +5595,7 @@ mod tests {
             schema: "test".into(),
             owner: "app".into(),
             column_defaults: None,
+            column_settings: None,
             sql: None,
             unlogged: None,
             from_type: None,
@@ -5874,6 +5900,39 @@ mod tests {
                 "ALTER TABLE ONLY test.orders ALTER COLUMN recorded_at \
                  SET DEFAULT CURRENT_TIMESTAMP;\n"
             )
+        );
+    }
+
+    /// The settings of an inherited column follow the CREATE TABLE in
+    /// the TABLE entry, before the settings of the local columns, as
+    /// pg_dump writes them
+    #[test]
+    fn renders_inherited_column_settings() {
+        let mut table = base_table("orders");
+        table.parents = Some(vec!["test.parent".into()]);
+        table.columns = Some(vec![
+            serde_json::from_value(json!({
+                "name": "qty", "data_type": "integer", "statistics": 100,
+            }))
+            .unwrap(),
+        ]);
+        table.column_settings = Some(vec![crate::models::ColumnSetting {
+            column: "recorded at".into(),
+            statistics: Some(500),
+            storage: Some("EXTERNAL".into()),
+        }]);
+        assert_eq!(
+            table_defn(
+                &table_item(1, table),
+                libpgdump::ObjectType::Table,
+                "orders"
+            ),
+            "CREATE TABLE test.orders ( qty integer ) INHERITS \
+             (test.parent); ALTER TABLE ONLY test.orders ALTER COLUMN \
+             \"recorded at\" SET STATISTICS 500; ALTER TABLE ONLY \
+             test.orders ALTER COLUMN \"recorded at\" SET STORAGE \
+             EXTERNAL; ALTER TABLE ONLY test.orders ALTER COLUMN qty SET \
+             STATISTICS 100;\n"
         );
     }
 

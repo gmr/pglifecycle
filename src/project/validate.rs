@@ -93,6 +93,42 @@ fn validation_errors(obj_type: &str, name: &str, data: &Value) -> Vec<String> {
             ));
         }
     }
+    if obj_type == "table" {
+        // build and deploy apply a local column and its column_settings
+        // entry in different orders, thus the final value can differ
+        let declared: std::collections::HashSet<_> = data["columns"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|column| column["name"].as_str())
+            .collect();
+        // deploy reconciles the first entry of a column only
+        let mut seen = std::collections::HashSet::new();
+        for (i, setting) in data["column_settings"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .enumerate()
+        {
+            let Some(column) = setting["column"].as_str() else {
+                continue;
+            };
+            if declared.contains(column) {
+                errors.push(format!(
+                    "Validation error for {obj_type} {name}: column \
+                     {column:?} is declared in columns: put its settings \
+                     on that column at /column_settings/{i}"
+                ));
+            }
+            if !seen.insert(column) {
+                errors.push(format!(
+                    "Validation error for {obj_type} {name}: column \
+                     {column:?} has more than one entry: write all its \
+                     settings in one entry at /column_settings/{i}"
+                ));
+            }
+        }
+    }
     errors
 }
 
@@ -305,6 +341,58 @@ mod tests {
             text_search(json!({"word": ["simple"], "Word": ["english"]}));
         assert_eq!(errors.len(), 1, "{errors:?}");
         assert!(errors[0].contains("/configurations/0/mappings"));
+    }
+
+    /// Deploy reconciles the first entry of a column only, so a
+    /// second entry for the same column is not valid
+    #[test]
+    fn column_settings_name_each_column_once() {
+        let table = |settings| {
+            let data = json!({
+                "schema": "public",
+                "name": "child",
+                "column_settings": settings,
+            });
+            validation_errors("table", "public.child", &data)
+        };
+        assert!(
+            table(json!([
+                {"column": "a", "statistics": 100, "storage": "EXTERNAL"},
+                {"column": "b", "statistics": 50},
+            ]))
+            .iter()
+            .all(|e| !e.contains("more than one entry"))
+        );
+        let errors = table(json!([
+            {"column": "a", "statistics": 100},
+            {"column": "a", "storage": "EXTERNAL"},
+        ]));
+        assert!(
+            errors.iter().any(|e| e.contains("/column_settings/1")),
+            "{errors:?}"
+        );
+    }
+
+    /// A column the table declares carries its own settings, so a
+    /// column_settings entry for it is not valid
+    #[test]
+    fn column_settings_reject_a_declared_column() {
+        let data = json!({
+            "schema": "public",
+            "name": "child",
+            "columns": [{"name": "a", "data_type": "integer"}],
+            "column_settings": [
+                {"column": "a", "statistics": 100},
+                {"column": "b", "statistics": 50},
+            ],
+        });
+        let errors = validation_errors("table", "public.child", &data);
+        let declared: Vec<_> = errors
+            .iter()
+            .filter(|e| e.contains("is declared in columns"))
+            .collect();
+        assert_eq!(declared.len(), 1, "{errors:?}");
+        assert!(declared[0].contains("/column_settings/0"));
     }
 
     /// JSON Schema ignores a keyword it does not know. A schema that
