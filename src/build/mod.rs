@@ -391,6 +391,15 @@
 //!      INSTEAD OF trigger can only be on a view. The Python had no
 //!      place for the triggers of a view. The test-project has none,
 //!      thus its archive does not change.
+//! 110. The `comment` of a domain constraint renders as a `COMMENT`
+//!      entry, `COMMENT ON CONSTRAINT c ON DOMAIN d IS ...`, with the
+//!      tag `CONSTRAINT c ON DOMAIN d`, as pg_dump writes it. A
+//!      constraint with no name has the name that PostgreSQL gives it
+//!      (`Domain::with_check_names`, `Domain::not_null_name`). The
+//!      comment on a CHECK that is its own entry (see 65 and 92)
+//!      comes after that entry. The Python had no place for the
+//!      comment. The test-project has none, thus its archive does not
+//!      change.
 //! 113. The `security_labels` of an event trigger render as a
 //!      `SECURITY LABEL` entry (see 89) with the tag `EVENT TRIGGER
 //!      name`, as pg_dump tags it. pg_restore creates event triggers
@@ -1389,21 +1398,27 @@ impl Builder {
             // deviation 61: the NOT NULL first, then the constraints
             // with a name, then the ones with no name, which thus get
             // the names of `Domain::with_check_names`. A NOT NULL with
-            // no name gets its name here when PostgreSQL adds a number
-            let mut constraints: Vec<_> =
-                inline.into_iter().map(|(c, _)| c).collect();
-            constraints.sort_by_key(|c| (!c.is_not_null(), c.name.is_none()));
+            // no name gets its name here when PostgreSQL adds a number.
+            // A constraint with no name and with a comment also gets its
+            // name here, because PostgreSQL can give it a different name
+            // when another constraint in the schema has that name
+            // (deviation 110)
+            let mut constraints = inline;
+            constraints
+                .sort_by_key(|(c, _)| (!c.is_not_null(), c.name.is_none()));
             let not_null_name = d.not_null_name();
             let numbered =
                 not_null_name != make_object_name(&d.name, None, "not_null");
             let mut rendered = Vec::new();
-            for c in constraints {
+            for (c, n) in constraints {
                 // deviation 54: CONSTRAINT only with a name
                 let mut value = Vec::new();
+                let commented = c.comment.is_some();
                 let name = match &c.name {
-                    None if numbered && c.is_not_null() => {
+                    None if (numbered || commented) && c.is_not_null() => {
                         Some(&not_null_name)
                     }
+                    None if commented => n.name.as_ref(),
                     name => name.as_ref(),
                 };
                 if let Some(name) = name {
@@ -1425,6 +1440,9 @@ impl Builder {
         self.add_item(item, create, drop, false)?;
         let qualified = self.item_name(item);
         let parent = self.dump_id_map[&item.id];
+        // the entry that makes each CHECK outside CREATE DOMAIN, which
+        // its comment has to follow
+        let mut check_entries: HashMap<&str, i32> = HashMap::new();
         for (_, check) in separate {
             let (Some(name), Some(expression)) =
                 (&check.name, &check.expression)
@@ -1437,7 +1455,7 @@ impl Builder {
             } else {
                 ""
             };
-            self.add_entry(
+            let id = self.add_entry(
                 "CHECK CONSTRAINT",
                 &d.schema,
                 &format!("{} {name}", d.name),
@@ -1453,6 +1471,26 @@ impl Builder {
                 )],
                 &[parent],
                 None,
+            )?;
+            check_entries.insert(name, id);
+        }
+        // deviation 110: a NOT NULL with no name has the name that
+        // PostgreSQL makes for it, and a CHECK the name of
+        // `Domain::with_check_names`
+        let not_null_name = d.not_null_name();
+        for c in named.check_constraints.iter().flatten() {
+            let Some(comment) = &c.comment else {
+                continue;
+            };
+            let name = c.name.as_deref().unwrap_or(&not_null_name);
+            self.add_comment(
+                "CONSTRAINT",
+                &d.schema,
+                &format!("CONSTRAINT {name} ON DOMAIN {}", d.name),
+                &d.owner,
+                check_entries.get(name).copied().unwrap_or(parent),
+                comment,
+                Some(format!("{} ON DOMAIN {qualified}", quote_ident(name))),
             )?;
         }
         Ok(())
