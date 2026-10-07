@@ -2179,6 +2179,11 @@ impl Assembly {
                 .iter_mut()
                 .find(|l| l.name == *name)
                 .map(|l| &mut l.security_labels),
+            "EVENT TRIGGER" => self
+                .event_triggers
+                .iter_mut()
+                .find(|t| t.name == *name)
+                .map(|t| &mut t.security_labels),
             "TABLE" | "FOREIGN TABLE" => {
                 self.find_table(target).map(|t| &mut t.security_labels)
             }
@@ -5086,12 +5091,20 @@ mod tests {
             "CREATE FUNCTION s.f(a integer) RETURNS integer LANGUAGE sql \
              AS $$SELECT a$$;",
         );
+        add(
+            &mut dump,
+            OT::EventTrigger,
+            "",
+            "et",
+            "CREATE EVENT TRIGGER et ON sql_drop EXECUTE FUNCTION s.g();",
+        );
         let labels = [
             ("DATABASE \"App DB\"", "", "DATABASE \"App DB\""),
             ("SCHEMA s", "", "SCHEMA s"),
             ("TABLE t", "s", "TABLE s.t"),
             ("COLUMN t.secret", "s", "COLUMN s.t.secret"),
             ("FUNCTION f(integer)", "s", "FUNCTION s.f(integer)"),
+            ("EVENT TRIGGER et", "", "EVENT TRIGGER et"),
         ];
         for (tag, namespace, on) in labels {
             add(
@@ -5132,6 +5145,10 @@ mod tests {
         assert_eq!(columns[1].security_labels, Some(expected.clone()));
         assert_eq!(
             assembly.functions[0].security_labels,
+            Some(expected.clone())
+        );
+        assert_eq!(
+            assembly.event_triggers[0].security_labels,
             Some(expected.clone())
         );
 
@@ -5187,6 +5204,9 @@ mod tests {
             defns,
             vec![
                 entry("DATABASE \"App DB\"", "DATABASE \"App DB\""),
+                // pg_restore moves the labels of an event trigger to
+                // its last pass only by this tag
+                entry("EVENT TRIGGER et", "EVENT TRIGGER et"),
                 (
                     String::from("app"),
                     String::from(

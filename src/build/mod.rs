@@ -391,6 +391,13 @@
 //!      the comment on a table column is. The Python did not render
 //!      them. The test-project materialized view has two, thus its
 //!      archive has two more entries.
+//! 113. The `security_labels` of an event trigger render as a
+//!      `SECURITY LABEL` entry (see 89) with the tag `EVENT TRIGGER
+//!      name`, as pg_dump tags it. pg_restore creates event triggers
+//!      in its last pass and moves a label there only by that tag
+//!      (see 26). The Python had no place for security labels. The
+//!      test-project event trigger has none, thus its archive does
+//!      not change.
 
 mod acls;
 mod calls;
@@ -820,10 +827,16 @@ impl Builder {
         let defn = security_label_sql(kind, &name, labels);
         // add_entry ends the definition with the last `;`
         let defn = defn.trim_end().trim_end_matches(';').to_string();
+        // pg_restore moves the labels of an event trigger to its last
+        // pass only by this tag, as for a comment (deviation 113)
+        let tag = match desc {
+            "EVENT TRIGGER" => format!("EVENT TRIGGER {tag}"),
+            _ => tag.to_string(),
+        };
         self.add_entry(
             "SECURITY LABEL",
             namespace,
-            tag,
+            &tag,
             owner,
             &[defn],
             &[],
