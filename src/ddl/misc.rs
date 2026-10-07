@@ -826,6 +826,7 @@ pub(crate) fn create_event_trigger(
         function,
         enabled: None,
         comment: None,
+        security_labels: None,
     }))
 }
 
