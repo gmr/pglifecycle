@@ -342,8 +342,8 @@ pub fn mutated_foreign_archive(path: &std::path::Path) {
 
 /// A small archive with security labels: `label` is the label of the
 /// `dummy` provider on the database, the schema, a table, a column, a
-/// function and a column of a view and of a materialized view, or there
-/// are no labels when it is `None`
+/// function, an event trigger and a column of a view and of a
+/// materialized view, or there are no labels when it is `None`
 pub fn labeled_archive(path: &std::path::Path, label: Option<&str>) {
     let mut dump = libpgdump::new("labels", "UTF8", "18.0").unwrap();
     add(&mut dump, OT::Schema, "", "test", "CREATE SCHEMA test;");
@@ -376,6 +376,22 @@ pub fn labeled_archive(path: &std::path::Path, label: Option<&str>) {
         "m",
         "CREATE MATERIALIZED VIEW test.m AS SELECT 1 AS c WITH NO DATA;",
     );
+    add(
+        &mut dump,
+        OT::Function,
+        "test",
+        "on_drop()",
+        "CREATE FUNCTION test.on_drop() RETURNS event_trigger \
+         LANGUAGE plpgsql AS $$BEGIN END$$;",
+    );
+    add(
+        &mut dump,
+        OT::EventTrigger,
+        "",
+        "et",
+        "CREATE EVENT TRIGGER et ON sql_drop \
+         EXECUTE FUNCTION test.on_drop();",
+    );
     if let Some(label) = label {
         for (namespace, tag, on) in [
             ("", "DATABASE labels", "DATABASE labels"),
@@ -383,6 +399,7 @@ pub fn labeled_archive(path: &std::path::Path, label: Option<&str>) {
             ("test", "TABLE t", "TABLE test.t"),
             ("test", "COLUMN t.secret", "COLUMN test.t.secret"),
             ("test", "FUNCTION f(integer)", "FUNCTION test.f(integer)"),
+            ("", "EVENT TRIGGER et", "EVENT TRIGGER et"),
             // pg_dump puts the column labels in the entry of the view
             ("test", "VIEW v", "COLUMN test.v.c"),
             ("test", "MATERIALIZED VIEW m", "COLUMN test.m.c"),

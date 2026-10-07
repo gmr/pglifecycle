@@ -892,6 +892,20 @@ fn outside_items() -> Vec<Item> {
                 .unwrap(),
             ),
         ),
+        // deviation 113: the security labels of an event trigger
+        item(
+            31,
+            ObjectType::EventTrigger,
+            Definition::EventTrigger(
+                serde_json::from_value(serde_json::json!({
+                    "name": "Labeled Trigger",
+                    "event": "sql_drop",
+                    "function": "test.on_drop()",
+                    "security_labels": {"dummy": "secret"},
+                }))
+                .unwrap(),
+            ),
+        ),
     ]
 }
 
@@ -1185,6 +1199,17 @@ const OUTSIDE_CORRECTED: &[(&str, &str, &str, &str, &str)] = &[
         "",
         "DATABASE outside",
         "SECURITY LABEL FOR \"My Provider\" ON DATABASE outside IS \
+         $$secret$$;\n",
+        "",
+    ),
+    // deviation 113: the security label entry of an event trigger is
+    // tagged `EVENT TRIGGER name`, as pg_dump tags it, so that
+    // pg_restore runs it after the trigger
+    (
+        "SECURITY LABEL",
+        "",
+        "EVENT TRIGGER Labeled Trigger",
+        "SECURITY LABEL FOR dummy ON EVENT TRIGGER \"Labeled Trigger\" IS \
          $$secret$$;\n",
         "",
     ),

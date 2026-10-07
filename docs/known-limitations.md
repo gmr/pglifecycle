@@ -26,11 +26,9 @@ to. This page links to those descriptions and does not repeat them.
 the project without these entries. See
 [Unsupported dump entries](commands.md#unsupported-dump-entries).
 
-- **Comments and security labels with no place in the model.** A
-  comment on an attribute of a composite type, on a constraint of a
-  domain, or on a trigger on a view goes to `remaining.yaml`. A
-  security label on an event trigger also goes there. Use
-  `--no-security-labels` to leave the labels out of the dump.
+- **Comments with no place in the model.** A comment on an attribute
+  of a composite type, on a constraint of a domain, or on a trigger on
+  a view goes to `remaining.yaml`.
 - **Security labels on the attributes of a composite type.** The
   project does not manage them. PostgreSQL does not support security
   labels on the attributes of a composite type

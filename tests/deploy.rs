@@ -363,6 +363,7 @@ fn security_labels_change_in_place() {
         "SECURITY LABEL FOR dummy ON DATABASE labels IS $$secret$$;",
         "SECURITY LABEL FOR dummy ON COLUMN test.v.c IS $$secret$$;",
         "SECURITY LABEL FOR dummy ON COLUMN test.m.c IS $$secret$$;",
+        "SECURITY LABEL FOR dummy ON EVENT TRIGGER et IS $$secret$$;",
     ] {
         assert!(
             script.contains(statement),

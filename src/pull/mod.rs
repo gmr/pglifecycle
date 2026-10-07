@@ -2190,6 +2190,11 @@ impl Assembly {
                 .iter_mut()
                 .find(|l| l.name == *name)
                 .map(|l| &mut l.security_labels),
+            "EVENT TRIGGER" => self
+                .event_triggers
+                .iter_mut()
+                .find(|t| t.name == *name)
+                .map(|t| &mut t.security_labels),
             "TABLE" | "FOREIGN TABLE" => {
                 self.find_table(target).map(|t| &mut t.security_labels)
             }
@@ -5140,6 +5145,13 @@ mod tests {
             "m",
             "CREATE MATERIALIZED VIEW s.m AS SELECT 1 AS c WITH NO DATA;",
         );
+        add(
+            &mut dump,
+            OT::EventTrigger,
+            "",
+            "et",
+            "CREATE EVENT TRIGGER et ON sql_drop EXECUTE FUNCTION s.g();",
+        );
         let labels = [
             ("DATABASE \"App DB\"", "", "DATABASE \"App DB\""),
             ("SCHEMA s", "", "SCHEMA s"),
@@ -5148,6 +5160,7 @@ mod tests {
             ("FUNCTION f(integer)", "s", "FUNCTION s.f(integer)"),
             ("VIEW v", "s", "COLUMN s.v.c"),
             ("MATERIALIZED VIEW m", "s", "COLUMN s.m.c"),
+            ("EVENT TRIGGER et", "", "EVENT TRIGGER et"),
         ];
         for (tag, namespace, on) in labels {
             add(
@@ -5197,6 +5210,10 @@ mod tests {
         }]);
         assert_eq!(assembly.views[0].columns, columns);
         assert_eq!(assembly.materialized_views[0].columns, columns);
+        assert_eq!(
+            assembly.event_triggers[0].security_labels,
+            Some(expected.clone())
+        );
 
         let dir = tempfile::tempdir().unwrap();
         let dest = dir.path().join("project");
@@ -5250,6 +5267,9 @@ mod tests {
             defns,
             vec![
                 entry("DATABASE \"App DB\"", "DATABASE \"App DB\""),
+                // pg_restore moves the labels of an event trigger to
+                // its last pass only by this tag
+                entry("EVENT TRIGGER et", "EVENT TRIGGER et"),
                 (
                     String::from("app"),
                     String::from(

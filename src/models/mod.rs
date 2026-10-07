@@ -183,6 +183,7 @@ impl Definition {
         match self {
             Definition::Aggregate(d) => d.security_labels.as_ref(),
             Definition::Domain(d) => d.security_labels.as_ref(),
+            Definition::EventTrigger(d) => d.security_labels.as_ref(),
             Definition::Function(d) => d.security_labels.as_ref(),
             Definition::Group(d) => d.security_labels.as_ref(),
             Definition::Language(d) => d.security_labels.as_ref(),

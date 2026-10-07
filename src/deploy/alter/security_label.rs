@@ -250,6 +250,7 @@ pub(super) fn without(definition: &Definition) -> Definition {
     match &mut definition {
         Definition::Aggregate(d) => d.security_labels = None,
         Definition::Domain(d) => d.security_labels = None,
+        Definition::EventTrigger(d) => d.security_labels = None,
         Definition::Function(d) => d.security_labels = None,
         Definition::Group(d) => d.security_labels = None,
         Definition::Language(d) => d.security_labels = None,
@@ -290,6 +291,7 @@ fn target(definition: &Definition) -> Option<(&'static str, String)> {
     Some(match definition {
         Definition::Aggregate(d) => ("AGGREGATE", super::aggregate::target(d)),
         Definition::Domain(d) => ("DOMAIN", qualified(&d.schema, &d.name)),
+        Definition::EventTrigger(d) => ("EVENT TRIGGER", quote_ident(&d.name)),
         Definition::Function(d) => ("FUNCTION", function_target(d)),
         Definition::Language(d) => ("LANGUAGE", quote_ident(&d.name)),
         Definition::MaterializedView(d) => {
