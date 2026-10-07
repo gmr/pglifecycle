@@ -2300,6 +2300,65 @@ fn separates_a_not_valid_domain_check() {
     assert_eq!(deps, [level.dump_id, level_ok.dump_id]);
 }
 
+/// Deviation 100: the triggers of a view render as TRIGGER entries
+/// after the view, with their comments, as the triggers of a table do
+#[test]
+fn renders_view_triggers() {
+    let project = project::Project {
+        name: "views".into(),
+        superuser: "postgres".into(),
+        default_schema: "public".into(),
+        path: std::path::PathBuf::new(),
+        settings: Default::default(),
+        inventory: vec![Item {
+            id: 0,
+            desc: ObjectType::View,
+            definition: Definition::View(
+                serde_json::from_value(serde_json::json!({
+                    "name": "v", "schema": "test", "owner": "postgres",
+                    "query": "SELECT 1 AS id",
+                    "triggers": [{
+                        "name": "v_ins", "when": "INSTEAD OF",
+                        "events": ["INSERT"], "for_each": "ROW",
+                        "function": "test.v_ins",
+                        "comment": "redirects inserts",
+                    }],
+                }))
+                .unwrap(),
+            ),
+            dependencies: BTreeSet::new(),
+        }],
+    };
+    let output = build::assemble(&project).unwrap();
+    let entry = |desc: &str| {
+        output
+            .dump
+            .entries()
+            .iter()
+            .find(|e| e.desc.as_str() == desc)
+            .unwrap_or_else(|| panic!("missing entry {desc}"))
+    };
+    let view = entry("VIEW");
+    let trigger = entry("TRIGGER");
+    assert_eq!(
+        trigger.defn.as_deref(),
+        Some(
+            "CREATE TRIGGER v_ins INSTEAD OF INSERT ON test.v FOR EACH \
+             ROW EXECUTE FUNCTION test.v_ins();\n"
+        )
+    );
+    assert_eq!(trigger.dependencies, [view.dump_id]);
+    let comment = entry("COMMENT");
+    assert_eq!(
+        comment.defn.as_deref(),
+        Some(
+            "COMMENT ON TRIGGER v_ins ON test.v IS $$redirects \
+             inserts$$;\n;\n"
+        )
+    );
+    assert_eq!(comment.dependencies, [trigger.dump_id]);
+}
+
 /// Deviation 110: a comment on a constraint of a domain renders as a
 /// `COMMENT` entry, `COMMENT ON CONSTRAINT c ON DOMAIN d IS ...`, as
 /// pg_dump writes it. A constraint with no name has the name that

@@ -392,7 +392,8 @@ keep (`ALTER TABLE ... DISABLE TRIGGER` or `ENABLE REPLICA
 TRIGGER`, `CLUSTER ON`, an index column's `SET STATISTICS`), or it is
 of another type, such as an operator class, a table column of a type
 or domain that deploy drops, an inheritance child or a partition with
-`attached` of a table that deploy drops, the attachment of a partition
+`attached` of a table that deploy drops, a trigger of a view that
+deploy does not drop, the attachment of a partition
 that deploy drops without its table, the membership of a table that
 deploy drops in a publication, a sequence that a column of a table
 that deploy drops owns (`serial` or `OWNED BY`), or a foreign key of another table that
