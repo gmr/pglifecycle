@@ -347,6 +347,10 @@ const NEW_COLUMN_COMMENTS: &[(&str, &str)] = &[
         "When the record was last modified",
     ),
     ("users.state", "The current state of the user"),
+    // deviation 104: the comments in the `columns` of a materialized
+    // view
+    ("user_addresses.locality", "town, city, etc"),
+    ("user_addresses.region", "region, state, province, etc"),
 ];
 
 /// Comment entries Python lost entirely to the text search name bug
@@ -870,6 +874,21 @@ fn outside_items() -> Vec<Item> {
                 .unwrap(),
             ),
         ),
+        // deviation 104
+        item(
+            30,
+            ObjectType::View,
+            Definition::View(
+                serde_json::from_value(serde_json::json!({
+                    "name": "named",
+                    "schema": "test",
+                    "owner": "postgres",
+                    "query": "SELECT 1 AS \"Has Space\"",
+                    "columns": [{"name": "Has Space", "comment": "it's spaced"}],
+                }))
+                .unwrap(),
+            ),
+        ),
     ]
 }
 
@@ -1253,6 +1272,17 @@ const OUTSIDE_CORRECTED: &[(&str, &str, &str, &str, &str)] = &[
         "CREATE MATERIALIZED VIEW test.ended_totals AS SELECT 1 AS n;\n",
         "DROP MATERIALIZED VIEW IF EXISTS test.ended_totals;\n",
     ),
+    // deviation 104: a comment in the `columns` of a view or a
+    // materialized view is a COMMENT entry after it, tagged as the
+    // comment of a table column is. The Python did not render it
+    (
+        "COMMENT",
+        "test",
+        "named.Has Space",
+        "COMMENT ON COLUMN test.named.\"Has Space\" IS $$it's \
+         spaced$$;\n;\n",
+        "",
+    ),
 ];
 
 /// The settings of the database for deviation 48, its comment for
@@ -1522,10 +1552,10 @@ fn matches_python_build_output() {
          public.empty_table TO developers;\n"
     );
 
-    // 60 Python entries + 4 recovered text search comments + 12 new
-    // column comments + 1 ACL + 1 FK CONSTRAINT (deviation 14)
-    // - 1 create: false role
-    assert_eq!(dump.entries().len(), 77);
+    // 60 Python entries + 4 recovered text search comments + 14 new
+    // column comments (2 of deviation 104) + 1 ACL + 1 FK CONSTRAINT
+    // (deviation 14) - 1 create: false role
+    assert_eq!(dump.entries().len(), 79);
 }
 
 /// The deviations that no test-project object shows, asserted on a

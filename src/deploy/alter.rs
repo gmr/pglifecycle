@@ -38,9 +38,9 @@ use crate::models::{
     CheckConstraint, Column, ColumnDefault, ColumnGenerated, ColumnNotNull,
     ColumnSetting, Definition, Domain, DomainConstraint, ExcludeConstraint,
     Extension, ForeignDataWrapper, ForeignKey, Function, GeneratedKind, Index,
-    NotNullConstraint, Policy, ReplicaIdentity, Rule, Schema, Sequence,
-    SequenceOptions, Server, Table, TablePartition, Trigger, Type,
-    UserMapping, View, ViewColumn,
+    MaterializedView, NotNullConstraint, Policy, ReplicaIdentity, Rule,
+    Schema, Sequence, SequenceOptions, Server, Table, TablePartition, Trigger,
+    Type, UserMapping, View, ViewColumn,
 };
 use crate::project::{routine_base_name, split_sql_name};
 use crate::utils::{
@@ -311,6 +311,10 @@ fn resolve_object(
             }
         }
         (Definition::View(repo), Definition::View(db)) => view(repo, db),
+        (
+            Definition::MaterializedView(repo),
+            Definition::MaterializedView(db),
+        ) => materialized_view(repo, db),
         (Definition::Procedure(repo), Definition::Procedure(db)) => {
             procedure::procedure(repo, db)
         }
@@ -484,12 +488,94 @@ fn view(repo: &View, db: &View) -> Resolution {
             db.rules.as_deref().unwrap_or_default(),
             &mut then,
         );
+        column_comments(
+            &name,
+            repo.columns.as_deref(),
+            db.columns.as_deref(),
+            &mut then,
+        );
         Resolution::OrReplace {
             comment: comment_delta("VIEW", &name, &repo.comment, &db.comment),
             then,
         }
     } else {
         Resolution::Replace
+    }
+}
+
+/// A materialized view has no in-place form, except for its comment
+/// and the comments on its columns
+fn materialized_view(
+    repo: &MaterializedView,
+    db: &MaterializedView,
+) -> Resolution {
+    let without = |view: &MaterializedView| {
+        Definition::MaterializedView(MaterializedView {
+            comment: None,
+            columns: view.columns.as_ref().map(|columns| {
+                columns
+                    .iter()
+                    .map(|c| ViewColumn::Name(view_column_name(c).into()))
+                    .collect()
+            }),
+            ..view.clone()
+        })
+    };
+    if !super::diff::same(&without(repo), &without(db)) {
+        return Resolution::Replace;
+    }
+    let name = qualified(&repo.schema, &repo.name);
+    let mut alters = Vec::new();
+    column_comments(
+        &name,
+        repo.columns.as_deref(),
+        db.columns.as_deref(),
+        &mut alters,
+    );
+    push_comment(
+        &mut alters,
+        "MATERIALIZED VIEW",
+        &name,
+        &repo.comment,
+        &db.comment,
+    );
+    Resolution::Statements(alters)
+}
+
+/// The comments in the `columns` of a view or a materialized view that
+/// the project changes. A comment that the project removes is cleared.
+fn column_comments(
+    relation: &str,
+    repo: Option<&[ViewColumn]>,
+    db: Option<&[ViewColumn]>,
+    alters: &mut Vec<Alter>,
+) {
+    let comments = |columns: Option<&[ViewColumn]>| {
+        columns
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|column| match column {
+                ViewColumn::Detailed {
+                    name,
+                    comment: Some(comment),
+                } => Some((name.clone(), comment.clone())),
+                _ => None,
+            })
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    let (wanted, existing) = (comments(repo), comments(db));
+    let target = |column: &str| format!("{relation}.{}", quote_ident(column));
+    for (column, comment) in &wanted {
+        if existing.get(column) != Some(comment) {
+            alters.push(Alter::new(comment_on(
+                "COLUMN",
+                &target(column),
+                Some(comment),
+            )));
+        }
+    }
+    for column in existing.keys().filter(|c| !wanted.contains_key(*c)) {
+        alters.push(Alter::new(comment_on("COLUMN", &target(column), None)));
     }
 }
 
@@ -500,10 +586,42 @@ fn view_column_name(column: &ViewColumn) -> &str {
     }
 }
 
+/// The `columns` of a view or a materialized view in the form deploy
+/// compares: an entry with no comment is a name, the names that the
+/// query gives follow a short list, and a list that gives only the
+/// names that the query gives is no list
+pub(crate) fn canonical_view_columns(
+    columns: Option<&[ViewColumn]>,
+    query: Option<&str>,
+) -> Option<Vec<ViewColumn>> {
+    let mut columns: Vec<ViewColumn> = columns?
+        .iter()
+        .map(|column| match column {
+            ViewColumn::Detailed {
+                name,
+                comment: None,
+            } => ViewColumn::Name(name.clone()),
+            column => column.clone(),
+        })
+        .collect();
+    let Some(queried) = query.and_then(crate::ddl::query_column_names) else {
+        return Some(columns);
+    };
+    columns.extend(
+        queried
+            .iter()
+            .skip(columns.len())
+            .map(|name| ViewColumn::Name(name.clone())),
+    );
+    let only_names = columns.iter().all(|c| matches!(c, ViewColumn::Name(_)));
+    let names: Vec<&str> = columns.iter().map(view_column_name).collect();
+    (!only_names || names != queried).then_some(columns)
+}
+
 /// True when `repo`'s columns are the `db` columns optionally followed
 /// by additional columns (the only mutation CREATE OR REPLACE VIEW
 /// permits). The names come from the column list of each view, else
-/// from its query (see [`query_column_names`]). Unknown names on either
+/// from its query (see [`crate::ddl::query_column_names`]). Unknown names on either
 /// side are treated as compatible, so the caller keeps the existing OR
 /// REPLACE behavior rather than forcing an unnecessary drop.
 fn view_columns_compatible(repo: &View, db: &View) -> bool {
@@ -528,7 +646,10 @@ fn view_column_names(view: &View) -> Option<Vec<String>> {
             .map(|column| view_column_name(column).to_string())
             .collect()
     });
-    let queried = view.query.as_deref().and_then(query_column_names);
+    let queried = view
+        .query
+        .as_deref()
+        .and_then(crate::ddl::query_column_names);
     match (listed, queried) {
         (Some(mut listed), Some(queried)) => {
             listed.extend(queried.into_iter().skip(listed.len()));
@@ -536,89 +657,6 @@ fn view_column_names(view: &View) -> Option<Vec<String>> {
         }
         (Some(listed), None) => Some(listed),
         (None, queried) => queried,
-    }
-}
-
-/// The names of the output columns of a query, as PostgreSQL gives
-/// them: the name after `AS` (or a label with no `AS`), or the last
-/// name of a column reference. `pg_get_viewdef` writes `AS` for each
-/// other expression. None when a name is not known this way (`*`, an
-/// expression with no label, a query in parentheses, VALUES): then the
-/// caller cannot compare the columns
-fn query_column_names(query: &str) -> Option<Vec<String>> {
-    use super::routine_body::identifier;
-    use crate::ddl::NodeExt;
-    let sql = format!("{};", query.trim().trim_end_matches(';'));
-    let mut parser = tree_sitter::Parser::new();
-    parser
-        .set_language(&tree_sitter_postgres::LANGUAGE.into())
-        .ok()?;
-    let tree = parser.parse(&sql, None)?;
-    let root = tree.root_node();
-    if root.has_error() {
-        return None;
-    }
-    let statement = root.find("SelectStmt")?;
-    let mut select = statement
-        .child_of_kind("select_no_parens")?
-        .child_of_kind("simple_select")?;
-    // a set operation has the names of its first query
-    while let Some(first) = select.child_of_kind("select_clause") {
-        select = first.child_of_kind("simple_select")?;
-    }
-    select.child_of_kind("kw_select")?;
-    let list = select
-        .child_of_kind("opt_target_list")
-        .and_then(|list| list.child_of_kind("target_list"))
-        .or_else(|| select.child_of_kind("target_list"))?;
-    let mut targets = Vec::new();
-    target_elements(list, &mut targets);
-    targets
-        .iter()
-        .map(|target| {
-            if let Some(label) = target
-                .child_of_kind("ColLabel")
-                .or_else(|| target.child_of_kind("BareColLabel"))
-            {
-                return Some(identifier(label.text(&sql)));
-            }
-            // a column reference in its expression, with no operator
-            let mut node = target.child_of_kind("a_expr")?;
-            while matches!(node.kind(), "a_expr" | "c_expr")
-                && node.child_count() == 1
-            {
-                node = node.child(0)?;
-            }
-            if node.kind() != "columnref" {
-                return None;
-            }
-            let name = match node.child_of_kind("indirection") {
-                Some(indirection) => {
-                    // the last element must be a name, not a subscript
-                    // or `*`
-                    let last = indirection
-                        .child(indirection.child_count().checked_sub(1)?)?;
-                    last.child_of_kind("attr_name")?.text(&sql)
-                }
-                None => node.child_of_kind("ColId")?.text(&sql),
-            };
-            Some(identifier(name))
-        })
-        .collect()
-}
-
-/// The `target_el` nodes of a `target_list`, which the grammar nests
-fn target_elements<'tree>(
-    list: tree_sitter::Node<'tree>,
-    targets: &mut Vec<tree_sitter::Node<'tree>>,
-) {
-    let mut cursor = list.walk();
-    for child in list.children(&mut cursor) {
-        match child.kind() {
-            "target_list" => target_elements(child, targets),
-            "target_el" => targets.push(child),
-            _ => {}
-        }
     }
 }
 
@@ -4142,17 +4180,19 @@ mod tests {
 
     #[test]
     fn unsupported_definitions_replace() {
-        // a materialized view has no in-place form
-        let mview: models::MaterializedView =
+        // a materialized view has no in-place form, except for its
+        // comments
+        let mview = |query: &str| -> models::MaterializedView {
             serde_json::from_value(serde_json::json!({
                 "name": "m", "schema": "test", "owner": "postgres",
-                "query": "SELECT 1",
+                "query": query,
             }))
-            .unwrap();
+            .unwrap()
+        };
         assert!(matches!(
             resolve(
-                &Definition::MaterializedView(mview.clone()),
-                &Definition::MaterializedView(mview)
+                &Definition::MaterializedView(mview("SELECT 2")),
+                &Definition::MaterializedView(mview("SELECT 1"))
             ),
             Resolution::Replace
         ));
@@ -4474,6 +4514,123 @@ mod tests {
             or_replace_comment(resolve(&v(None), &v(Some("old")))),
             Some("COMMENT ON VIEW test.v IS NULL;\n".into())
         );
+    }
+
+    #[test]
+    fn view_column_comments_follow_the_project() {
+        let v = |columns: serde_json::Value| -> Definition {
+            Definition::View(
+                serde_json::from_value(serde_json::json!({
+                    "name": "v", "schema": "test", "owner": "postgres",
+                    "query": "SELECT 1 AS a, 2 AS b, 3 AS c",
+                    "columns": columns,
+                }))
+                .unwrap(),
+            )
+        };
+        let Resolution::OrReplace { then, .. } = resolve(
+            &v(serde_json::json!([
+                {"name": "a", "comment": "new"},
+                {"name": "b", "comment": "kept"},
+                "c",
+            ])),
+            &v(serde_json::json!([
+                {"name": "a", "comment": "old"},
+                {"name": "b", "comment": "kept"},
+                {"name": "c", "comment": "gone"},
+            ])),
+        ) else {
+            panic!("expected OrReplace");
+        };
+        let sql: Vec<_> = then.iter().map(|a| a.sql.as_str()).collect();
+        assert_eq!(
+            sql,
+            [
+                "COMMENT ON COLUMN test.v.a IS $$new$$;\n",
+                "COMMENT ON COLUMN test.v.c IS NULL;\n",
+            ]
+        );
+        assert!(then.iter().all(|a| !a.destructive));
+    }
+
+    #[test]
+    fn materialized_view_comments_change_in_place() {
+        let m = |comment: &str, column: &str| -> Definition {
+            Definition::MaterializedView(
+                serde_json::from_value(serde_json::json!({
+                    "name": "m", "schema": "test", "owner": "postgres",
+                    "query": "SELECT 1 AS a",
+                    "comment": comment,
+                    "columns": [{"name": "a", "comment": column}],
+                }))
+                .unwrap(),
+            )
+        };
+        let Resolution::Statements(alters) =
+            resolve(&m("new", "new a"), &m("old", "old a"))
+        else {
+            panic!("expected Statements");
+        };
+        let sql: Vec<_> = alters.iter().map(|a| a.sql.as_str()).collect();
+        assert_eq!(
+            sql,
+            [
+                "COMMENT ON COLUMN test.m.a IS $$new a$$;\n",
+                "COMMENT ON MATERIALIZED VIEW test.m IS $$new$$;\n",
+            ]
+        );
+    }
+
+    /// A `columns` list that gives only the names that the query gives
+    /// is the same as no list; a list that renames a column is not
+    #[test]
+    fn view_columns_that_repeat_the_query_are_no_change() {
+        let v = |columns: serde_json::Value| -> Definition {
+            Definition::View(
+                serde_json::from_value(serde_json::json!({
+                    "name": "v", "schema": "test", "owner": "postgres",
+                    "query": "SELECT t.a, (t.a + 1) AS \"?column?\" FROM t",
+                    "columns": columns,
+                }))
+                .unwrap(),
+            )
+        };
+        let same = super::super::diff::same;
+        let none = serde_json::Value::Null;
+        assert!(same(
+            &v(serde_json::json!(["a", {"name": "?column?"}])),
+            &v(none.clone())
+        ));
+        assert!(same(&v(serde_json::json!(["a"])), &v(none.clone())));
+        assert!(!same(&v(serde_json::json!(["a", "b"])), &v(none.clone())));
+        assert!(!same(
+            &v(serde_json::json!([{"name": "a", "comment": "x"}])),
+            &v(none)
+        ));
+    }
+
+    /// A materialized view whose column comments change and whose list
+    /// only repeats the query changes in place
+    #[test]
+    fn materialized_view_column_list_is_not_a_rebuild() {
+        let m = |columns: serde_json::Value| -> Definition {
+            Definition::MaterializedView(
+                serde_json::from_value(serde_json::json!({
+                    "name": "m", "schema": "test", "owner": "postgres",
+                    "query": "SELECT t.a, t.b FROM t",
+                    "columns": columns,
+                }))
+                .unwrap(),
+            )
+        };
+        let Resolution::Statements(alters) = resolve(
+            &m(serde_json::json!(["a", {"name": "b", "comment": "new"}])),
+            &m(serde_json::Value::Null),
+        ) else {
+            panic!("expected Statements");
+        };
+        let sql: Vec<_> = alters.iter().map(|a| a.sql.as_str()).collect();
+        assert_eq!(sql, ["COMMENT ON COLUMN test.m.b IS $$new$$;\n"]);
     }
 
     fn view_with_columns(columns: serde_json::Value) -> Definition {

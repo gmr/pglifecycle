@@ -903,12 +903,20 @@ fn normalized(definition: &Definition) -> Value {
         }
         Definition::MaterializedView(view) => {
             let mut view = view.canonical();
+            view.columns = super::alter::canonical_view_columns(
+                view.columns.as_deref(),
+                view.query.as_deref(),
+            );
             view.query = view.query.as_deref().map(canonical_query);
             canonical = Definition::MaterializedView(view);
             &canonical
         }
         Definition::View(view) => {
             canonical = Definition::View(crate::models::View {
+                columns: super::alter::canonical_view_columns(
+                    view.columns.as_deref(),
+                    view.query.as_deref(),
+                ),
                 query: view.query.as_deref().map(canonical_query),
                 ..view.clone()
             });

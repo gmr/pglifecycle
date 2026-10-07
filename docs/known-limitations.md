@@ -27,15 +27,15 @@ the project without these entries. See
 [Unsupported dump entries](commands.md#unsupported-dump-entries).
 
 - **Comments and security labels with no place in the model.** A
-  comment on a column of a view or of a materialized view, on an
-  attribute of a composite type, on a constraint of a domain, or on a
-  trigger on a view goes to `remaining.yaml`. A security label on an
-  event trigger also goes there. Use `--no-security-labels` to leave
-  the labels out of the dump.
+  comment on an attribute of a composite type, on a constraint of a
+  domain, or on a trigger on a view goes to `remaining.yaml`. A
+  security label on an event trigger also goes there. Use
+  `--no-security-labels` to leave the labels out of the dump.
 - **Security labels on the attributes of a composite type.** The
-  project does not manage them. pg_dump does not dump them, thus
-  `pull` cannot read them and `deploy` cannot see them in the
-  database.
+  project does not manage them. PostgreSQL does not support security
+  labels on the attributes of a composite type
+  (`SecLabelSupportsObjectType` in `seclabel.c` refuses
+  `OBJECT_ATTRIBUTE`).
 
 ## Build
 

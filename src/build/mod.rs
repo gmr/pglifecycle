@@ -386,13 +386,18 @@
 //!     (see 86). The Python wrote the query as it is, thus the entry
 //!     had `;;`. The test-project view query ends with `;`, thus its
 //!     entry has one `;` less.
-//! 116. The `column_security_labels` of a view or a materialized view
-//!      render as one `SECURITY LABEL` entry for each column after the
-//!      view, with the tag `view.column` and `ON COLUMN
-//!      schema.view.column`, as for a table column (see 89). pg_dump
-//!      writes the labels of all columns in the entry of the view. The
-//!      Python had no place for them. The test-project has none, thus
-//!      its archive does not change.
+//! 104. A `comment` in the `columns` of a view or a materialized view
+//!      renders as a `COMMENT ON COLUMN` entry after the view, tagged as
+//!      the comment on a table column is. The Python did not render
+//!      them. The test-project materialized view has two, thus its
+//!      archive has two more entries.
+//! 116. The `security_labels` in the `columns` of a view or a
+//!      materialized view render as one `SECURITY LABEL` entry for each
+//!      column after the view, with the tag `view.column` and `ON
+//!      COLUMN schema.view.column`, as for a table column (see 89).
+//!      pg_dump writes the labels of all columns in the entry of the
+//!      view. The Python did not render them. The test-project has
+//!      none, thus its archive does not change.
 
 mod acls;
 mod calls;
@@ -1905,12 +1910,12 @@ impl Builder {
         };
         if let Some(sql) = &d.sql {
             self.add_item(item, vec![sql.clone()], vec![], false)?;
-            return self.add_column_security_labels(
+            return self.dump_column_comments(
                 item,
                 &d.schema,
                 &d.name,
                 &d.owner,
-                d.column_security_labels.as_ref(),
+                d.columns.as_deref(),
             );
         }
         let mut create = vec![
@@ -1955,15 +1960,54 @@ impl Builder {
             self.item_name(item),
         ];
         self.add_item(item, create, drop, false)?;
-        self.add_column_security_labels(
+        self.dump_column_comments(
             item,
             &d.schema,
             &d.name,
             &d.owner,
-            d.column_security_labels.as_ref(),
+            d.columns.as_deref(),
         )?;
         for index in d.indexes.as_deref().unwrap_or_default() {
             self.dump_index(index, item, &d.schema, &d.owner, None)?;
+        }
+        Ok(())
+    }
+
+    /// The COMMENT entry of each comment in the `columns` of a view or
+    /// a materialized view, after the view, as pg_dump writes them
+    /// (deviation 104)
+    fn dump_column_comments(
+        &mut self,
+        item: &Item,
+        schema: &str,
+        name: &str,
+        owner: &str,
+        columns: Option<&[ViewColumn]>,
+    ) -> Result<(), String> {
+        let dump_id = self.dump_id_map[&item.id];
+        for column in columns.unwrap_or_default() {
+            let ViewColumn::Detailed {
+                name: column,
+                comment: Some(comment),
+            } = column
+            else {
+                continue;
+            };
+            let target = format!(
+                "{}.{}.{}",
+                quote_ident(schema),
+                quote_ident(name),
+                quote_ident(column)
+            );
+            self.add_comment(
+                "COLUMN",
+                schema,
+                &format!("{name}.{column}"),
+                owner,
+                dump_id,
+                comment,
+                Some(target),
+            )?;
         }
         Ok(())
     }
@@ -3887,12 +3931,12 @@ impl Builder {
         };
         if let Some(sql) = &d.sql {
             self.add_item(item, vec![sql.clone()], vec![], false)?;
-            self.add_column_security_labels(
+            self.dump_column_comments(
                 item,
                 &d.schema,
                 &d.name,
                 &d.owner,
-                d.column_security_labels.as_ref(),
+                d.columns.as_deref(),
             )?;
             for rule in d.rules.as_deref().unwrap_or_default() {
                 self.dump_rule(rule, item, &d.schema, &d.name, &d.owner)?;
@@ -3931,12 +3975,12 @@ impl Builder {
         });
         let drop = vec!["DROP VIEW IF EXISTS".into(), self.item_name(item)];
         self.add_item(item, create, drop, false)?;
-        self.add_column_security_labels(
+        self.dump_column_comments(
             item,
             &d.schema,
             &d.name,
             &d.owner,
-            d.column_security_labels.as_ref(),
+            d.columns.as_deref(),
         )?;
         for rule in d.rules.as_deref().unwrap_or_default() {
             self.dump_rule(rule, item, &d.schema, &d.name, &d.owner)?;
