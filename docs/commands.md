@@ -293,6 +293,8 @@ reconciled in place where PostgreSQL can express it:
   the existing values against a new check (if it is not `NOT VALID`),
   a validated check or a NOT NULL, so the statement fails if a value
   does not satisfy it. `--allow-drop` does not gate this statement.
+  A comment on a constraint changes with `COMMENT ON CONSTRAINT ...
+  ON DOMAIN`, and does not rebuild the domain or the constraint.
 - **Enum types** — `ALTER TYPE ... ADD VALUE` for appended values;
   reordering or removing values falls back.
 - **Extensions** — `ALTER EXTENSION ... UPDATE` / `SET SCHEMA`.
