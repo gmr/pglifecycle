@@ -42,6 +42,13 @@ CREATE DOMAIN test.quoted_check AS integer
 CREATE DOMAIN test.not_null_taken AS integer
         CONSTRAINT not_null_taken_not_null CHECK ( value > 0 ) NOT NULL;
 
+-- Comments on domain constraints: a NOT NULL and a CHECK with no name
+-- have the names that PostgreSQL makes for them
+COMMENT ON CONSTRAINT positive_count_not_null ON DOMAIN test.positive_count
+    IS 'Required';
+COMMENT ON CONSTRAINT positive_count_check ON DOMAIN test.positive_count
+    IS 'Above zero';
+
 CREATE TYPE user_state AS ENUM ('unverified', 'verified', 'suspended');
 
 CREATE TABLE users (
@@ -877,6 +884,8 @@ ALTER DOMAIN test.score ADD CONSTRAINT score_check CHECK (test.score_ok(VALUE));
 CREATE DOMAIN test.percent AS INTEGER CONSTRAINT percent_low CHECK (VALUE >= 0);
 ALTER DOMAIN test.percent
     ADD CONSTRAINT percent_high CHECK (VALUE <= 100) NOT VALID;
+COMMENT ON CONSTRAINT percent_high ON DOMAIN test.percent
+    IS 'Not checked yet';
 
 -- A column whose type is the row type of another table. Name order
 -- puts `a_segments` before `z_points`, and tables share one priority,

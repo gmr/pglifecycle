@@ -72,6 +72,7 @@ pub(crate) fn create_domain(
                         nullable: None,
                         expression: Some(expr.text(src).to_string()),
                         not_valid: None,
+                        comment: None,
                     },
                 );
             }
@@ -82,6 +83,7 @@ pub(crate) fn create_domain(
                     nullable: Some(false),
                     expression: None,
                     not_valid: None,
+                    comment: None,
                 },
             );
         } else if elem.has("kw_default")
@@ -131,6 +133,7 @@ pub(crate) fn alter_domain(node: &Node, src: &str) -> Statement {
                     elem.child_of_kind("a_expr")?.text(src).to_string(),
                 ),
                 not_valid,
+                comment: None,
             })
         });
     match (node.child_of_kind("any_name"), check) {
@@ -984,6 +987,7 @@ mod tests {
                     nullable: Some(false),
                     expression: None,
                     not_valid: None,
+                    comment: None,
                 }])
             );
         }
@@ -1007,6 +1011,7 @@ mod tests {
                 nullable: None,
                 expression: Some("s.z_ok((VALUE)::s.a_dom)".into()),
                 not_valid: None,
+                comment: None,
             }
         );
         let Statement::AddDomainCheck { check, .. } = parse_one(
@@ -1022,6 +1027,7 @@ mod tests {
                 nullable: None,
                 expression: Some("VALUE > 0".into()),
                 not_valid: Some(true),
+                comment: None,
             }
         );
         for sql in [

@@ -2384,7 +2384,12 @@ fn sequence(repo: &Sequence, db: &Sequence) -> Resolution {
 /// change rebuilds. The two sides compare in the form of
 /// [`canonical_domain`].
 fn domain(repo: &Domain, db: &Domain) -> Resolution {
-    let (repo, mut db) = (&canonical_domain(repo), canonical_domain(db));
+    let (mut repo, mut db) = (canonical_domain(repo), canonical_domain(db));
+    // the constraints compare with no comments; the comments change in
+    // place after the constraints
+    let wanted = take_constraint_comments(&mut repo);
+    let mut existing = take_constraint_comments(&mut db);
+    let repo = &repo;
     // a NOT VALID check that the project has as valid, and otherwise
     // the same, is validated, and then it is the same on the two sides
     let mut validated = Vec::new();
@@ -2436,6 +2441,12 @@ fn domain(repo: &Domain, db: &Domain) -> Resolution {
             ))
         })
         .collect();
+    // a renamed constraint keeps its comment
+    for (old, new) in &renames {
+        if let Some(comment) = existing.remove(old) {
+            existing.insert(new.clone(), comment);
+        }
+    }
     for check in validated {
         alters.push(Alter::new(format!(
             "ALTER DOMAIN {name} VALIDATE CONSTRAINT {};\n",
@@ -2480,15 +2491,70 @@ fn domain(repo: &Domain, db: &Domain) -> Resolution {
         ))),
         (None, Some(_)) => alters
             .push(Alter::new(format!("ALTER DOMAIN {name} DROP NOT NULL;\n"))),
-        (Some(r), Some(d)) if r != d => alters.push(Alter::new(format!(
-            "ALTER DOMAIN {name} RENAME CONSTRAINT {} TO {};\n",
-            constraint(d),
-            constraint(r)
-        ))),
+        (Some(r), Some(d)) if r != d => {
+            let d = d.unwrap_or_else(|| db.not_null_name());
+            if let Some(comment) = existing.remove(&d) {
+                existing.insert(
+                    r.clone().unwrap_or(repo.not_null_name()),
+                    comment,
+                );
+            }
+            alters.push(Alter::new(format!(
+                "ALTER DOMAIN {name} RENAME CONSTRAINT {} TO {};\n",
+                quote_ident(&d),
+                constraint(r)
+            )))
+        }
         _ => {}
     }
     push_comment(&mut alters, "DOMAIN", &name, &repo.comment, &db.comment);
+    // a comment that the project removes is cleared only while the
+    // constraint stays; a dropped constraint takes its comment with it
+    let target = |c: &str| format!("{} ON DOMAIN {name}", quote_ident(c));
+    for (c, comment) in &wanted {
+        if existing.get(c) != Some(comment) {
+            alters.push(Alter::new(comment_on(
+                "CONSTRAINT",
+                &target(c),
+                Some(comment),
+            )));
+        }
+    }
+    let not_null_name = repo.not_null_name();
+    let kept = |c: &str| {
+        repo.check_constraints
+            .iter()
+            .flatten()
+            .any(|k| k.name.as_deref().unwrap_or(&not_null_name) == c)
+    };
+    for c in existing.keys() {
+        if !wanted.contains_key(c) && kept(c) {
+            alters.push(Alter::new(comment_on(
+                "CONSTRAINT",
+                &target(c),
+                None,
+            )));
+        }
+    }
     Resolution::Statements(alters)
+}
+
+/// Take the comments on the constraints of `domain`, by the name of each
+/// constraint. A NOT NULL with no name has the name that PostgreSQL
+/// makes for it (see [`Domain::not_null_name`])
+fn take_constraint_comments(
+    domain: &mut Domain,
+) -> std::collections::BTreeMap<String, String> {
+    let not_null = domain.not_null_name();
+    domain
+        .check_constraints
+        .iter_mut()
+        .flatten()
+        .filter_map(|c| {
+            let comment = c.comment.take()?;
+            Some((c.name.clone().unwrap_or_else(|| not_null.clone()), comment))
+        })
+        .collect()
 }
 
 /// The renames, in an order where each new name is free, and then the
@@ -4912,6 +4978,7 @@ mod tests {
             nullable: None,
             expression: Some(expression.to_string()),
             not_valid: None,
+            comment: None,
         };
         let db: Domain = serde_json::from_value(serde_json::json!({
             "name": "d", "schema": "test", "owner": "postgres",
@@ -4987,6 +5054,64 @@ mod tests {
             Resolution::Statements(ref alters) if alters.is_empty()
         ));
         assert!(matches!(domain(&not_valid, &valid), Resolution::Replace));
+    }
+
+    /// A comment on a constraint of a domain changes in place, with no
+    /// rebuild and no DROP or ADD of the constraint. A constraint with
+    /// no name has the name that PostgreSQL makes for it. A renamed
+    /// constraint keeps its comment, and an added one gets its comment
+    #[test]
+    fn domain_constraint_comments_change_in_place() {
+        let with = |constraints: serde_json::Value| -> Domain {
+            serde_json::from_value(serde_json::json!({
+                "name": "d", "schema": "test", "owner": "postgres",
+                "data_type": "integer", "check_constraints": constraints,
+            }))
+            .unwrap()
+        };
+        let db = with(serde_json::json!([
+            {"nullable": false, "comment": "nn"},
+            {"name": "a", "expression": "(VALUE > 0)", "comment": "old"},
+            {"name": "b", "expression": "(VALUE < 9)", "comment": "gone"},
+        ]));
+        let repo = with(serde_json::json!([
+            {"nullable": false, "comment": "nn"},
+            {"name": "a", "expression": "(VALUE > 0)", "comment": "new"},
+            {"name": "b", "expression": "(VALUE < 9)"},
+            {"expression": "(VALUE <> 5)", "comment": "added"},
+        ]));
+        assert_eq!(
+            sql(&statements(domain(&repo, &db))),
+            vec![
+                "ALTER DOMAIN test.d ADD CONSTRAINT d_check \
+                 CHECK ((VALUE <> 5));\n",
+                "COMMENT ON CONSTRAINT a ON DOMAIN test.d IS $$new$$;\n",
+                "COMMENT ON CONSTRAINT d_check ON DOMAIN test.d \
+                 IS $$added$$;\n",
+                "COMMENT ON CONSTRAINT b ON DOMAIN test.d IS NULL;\n",
+            ]
+        );
+        let not_null = with(serde_json::json!([
+            {"nullable": false, "comment": "x"},
+        ]));
+        let renamed = with(serde_json::json!([
+            {"name": "nn", "nullable": false, "comment": "x"},
+        ]));
+        assert_eq!(
+            sql(&statements(domain(&renamed, &not_null))),
+            vec!["ALTER DOMAIN test.d RENAME CONSTRAINT d_not_null TO nn;\n"]
+        );
+        assert_eq!(
+            sql(&statements(domain(
+                &with(serde_json::json!([
+                    {"nullable": false},
+                ])),
+                &not_null
+            ))),
+            vec![
+                "COMMENT ON CONSTRAINT d_not_null ON DOMAIN test.d IS NULL;\n"
+            ]
+        );
     }
 
     /// A CHECK with no name compares with the name that PostgreSQL

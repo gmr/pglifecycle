@@ -2598,7 +2598,13 @@ impl Assembly {
             name: table.to_string(),
         };
         let Some(table) = self.find_table(&relation) else {
-            return false;
+            // the target has no DOMAIN keyword. A table and a domain
+            // cannot have the same name in a schema
+            return self.apply_domain_constraint_comment(
+                &relation,
+                &target.name,
+                comment,
+            );
         };
         match table
             .exclude_constraints
@@ -2615,6 +2621,35 @@ impl Assembly {
             }
         }
         true
+    }
+
+    /// `COMMENT ON CONSTRAINT c ON DOMAIN schema.domain`. A NOT NULL
+    /// with no name has the name that PostgreSQL makes for it
+    fn apply_domain_constraint_comment(
+        &mut self,
+        domain: &QualifiedName,
+        name: &str,
+        comment: &str,
+    ) -> bool {
+        let schema = domain.schema.clone().unwrap_or_default();
+        let Some(domain) = self
+            .domains
+            .iter_mut()
+            .find(|d| d.schema == schema && d.name == domain.name)
+        else {
+            return false;
+        };
+        let not_null = domain.not_null_name();
+        domain
+            .check_constraints
+            .iter_mut()
+            .flatten()
+            .find(|c| match &c.name {
+                Some(n) => n == name,
+                None => c.is_not_null() && not_null == name,
+            })
+            .map(|c| c.comment = Some(comment.to_string()))
+            .is_some()
     }
 
     /// `COMMENT ON RULE r ON schema.relation`, the same two-name shape
@@ -3864,6 +3899,54 @@ mod tests {
         let mut assembly = Assembly::default();
         assembly.ingest(&dump).unwrap();
         assert_eq!(assembly.event_triggers[0].owner, None);
+    }
+
+    /// A comment on a constraint of a domain goes to that constraint: a
+    /// CHECK by its name, a NOT VALID CHECK of its own entry, and a NOT
+    /// NULL with no name by the name that PostgreSQL makes for it
+    #[test]
+    fn domain_constraint_comments_attach() {
+        let mut dump = libpgdump::new("fixtures", "UTF8", "18.0").unwrap();
+        add(
+            &mut dump,
+            OT::Domain,
+            "s",
+            "d",
+            "CREATE DOMAIN s.d AS integer NOT NULL \
+             CONSTRAINT d_check CHECK ((VALUE > 0));",
+        );
+        add(
+            &mut dump,
+            OT::CheckConstraint,
+            "s",
+            "d nv",
+            "ALTER DOMAIN s.d ADD CONSTRAINT nv CHECK ((VALUE < 9)) \
+             NOT VALID;",
+        );
+        for (name, comment) in
+            [("d_check", "a"), ("d_not_null", "b"), ("nv", "c")]
+        {
+            add(
+                &mut dump,
+                OT::Comment,
+                "s",
+                &format!("CONSTRAINT {name} ON DOMAIN d"),
+                &format!(
+                    "COMMENT ON CONSTRAINT {name} ON DOMAIN s.d \
+                     IS '{comment}';"
+                ),
+            );
+        }
+        let mut assembly = Assembly::default();
+        assembly.ingest(&dump).unwrap();
+        assert!(assembly.remaining.is_empty());
+        let comments: Vec<_> = assembly.domains[0]
+            .check_constraints
+            .iter()
+            .flatten()
+            .map(|c| c.comment.as_deref())
+            .collect();
+        assert_eq!(comments, [Some("b"), Some("a"), Some("c")]);
     }
 
     /// A comment the model has no place for keeps its entry, so the
