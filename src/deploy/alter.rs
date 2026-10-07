@@ -39,8 +39,8 @@ use crate::models::{
     ColumnSetting, Definition, Domain, DomainConstraint, ExcludeConstraint,
     Extension, ForeignDataWrapper, ForeignKey, Function, GeneratedKind, Index,
     NotNullConstraint, Policy, ReplicaIdentity, Rule, Schema, Sequence,
-    SequenceOptions, Server, Table, Trigger, Type, UserMapping, View,
-    ViewColumn,
+    SequenceOptions, Server, Table, TablePartition, Trigger, Type,
+    UserMapping, View, ViewColumn,
 };
 use crate::project::{routine_base_name, split_sql_name};
 use crate::utils::{
@@ -651,7 +651,6 @@ fn table_in(repo: &Table, db: &Table, groups: &IndexGroups) -> Resolution {
         || repo.parents != db.parents
         || repo.like_table != db.like_table
         || repo.partition != db.partition
-        || repo.partitions != db.partitions
         || repo.access_method != db.access_method
         || repo.storage_parameters != db.storage_parameters
         || repo.tablespace != db.tablespace
@@ -671,6 +670,10 @@ fn table_in(repo: &Table, db: &Table, groups: &IndexGroups) -> Resolution {
     }
     column_settings(&name, repo, db, &mut alters);
     indexes(&name, repo, db, groups, &mut alters);
+    // after the columns and the indexes, which PARTITION OF copies
+    if !partitions(&name, repo, db, &mut alters) {
+        return Resolution::Replace;
+    }
     rules(
         &name,
         repo.rules.as_deref().unwrap_or_default(),
@@ -698,6 +701,77 @@ fn table_in(repo: &Table, db: &Table, groups: &IndexGroups) -> Resolution {
     policies(&name, repo, db, &mut alters);
     push_comment(&mut alters, "TABLE", &name, &repo.comment, &db.comment);
     Resolution::Statements(alters)
+}
+
+/// Partition reconciliation for a partitioned table. A new partition
+/// that the project gives by its bounds only is made with CREATE TABLE
+/// ... PARTITION OF. A new partition that is a table of its own
+/// (`attached: true`) is attached by the plan, after its table and
+/// indexes (see `deploy::plan`). A partition that the project does not
+/// have is dropped when it is only bounds in the database, and
+/// detached when it is a table of its own: the project then has the
+/// table, as diff removes from `db` each such partition whose table
+/// the project does not have, and the plan drops that table. Both
+/// lose data of the partitioned table, thus they are destructive.
+/// Other changes to a partition, for example its bounds, need the
+/// table made again: the result is then false.
+fn partitions(
+    name: &str,
+    repo: &Table,
+    db: &Table,
+    alters: &mut Vec<Alter>,
+) -> bool {
+    let key = |p: &TablePartition| (p.schema.clone(), p.name.clone());
+    let wanted = repo.partitions.as_deref().unwrap_or_default();
+    let existing = db.partitions.as_deref().unwrap_or_default();
+    let find = |list: &[TablePartition], p: &TablePartition| {
+        list.iter().find(|other| key(other) == key(p)).cloned()
+    };
+    let without_comment = |p: &TablePartition| TablePartition {
+        comment: None,
+        ..p.clone()
+    };
+    for old in existing {
+        let partition = qualified(&old.schema, &old.name);
+        match find(wanted, old) {
+            Some(new) if without_comment(&new) != without_comment(old) => {
+                return false;
+            }
+            Some(new) => {
+                push_comment(
+                    alters,
+                    "TABLE",
+                    &partition,
+                    &new.comment,
+                    &old.comment,
+                );
+            }
+            None if old.attached == Some(true) => {
+                alters.push(Alter::destructive(format!(
+                    "ALTER TABLE {name} DETACH PARTITION {partition};\n"
+                )));
+            }
+            None => {
+                alters.push(Alter::destructive(format!(
+                    "DROP TABLE {partition};\n"
+                )));
+            }
+        }
+    }
+    for new in wanted {
+        if new.attached == Some(true) || find(existing, new).is_some() {
+            continue;
+        }
+        let partition = qualified(&new.schema, &new.name);
+        alters.push(Alter::new(format!(
+            "CREATE TABLE {partition} PARTITION OF {name} {};\n",
+            build::render_partition_for_values(new)
+        )));
+        if new.comment.is_some() {
+            push_comment(alters, "TABLE", &partition, &new.comment, &None);
+        }
+    }
+    true
 }
 
 /// True when [`indexes`] drops and creates the index that the repo's
@@ -3024,6 +3098,84 @@ mod tests {
                 "ALTER TABLE ONLY test.users ALTER COLUMN doubled SET \
                  EXPRESSION AS (id * 3);\n",
             ]
+        );
+    }
+
+    /// A partitioned table with partitions, as JSON values
+    fn parted(partitions: serde_json::Value) -> Table {
+        let mut table = base_table();
+        table["partition"] =
+            serde_json::json!({"type": "RANGE", "columns": ["id"]});
+        table["partitions"] = partitions;
+        parse_table(table)
+    }
+
+    fn bounds(name: &str, from: i64, to: i64) -> serde_json::Value {
+        serde_json::json!({"name": name, "schema": "test",
+                           "for_values_from": from, "for_values_to": to})
+    }
+
+    /// A new partition does not make the partitioned table again: one
+    /// given by its bounds is made with PARTITION OF, and the plan
+    /// attaches one that is a table of its own
+    #[test]
+    fn new_partition_is_made_in_place() {
+        let mut second = bounds("users_2", 10, 20);
+        second["comment"] = "the second".into();
+        let mut third = bounds("users_3", 20, 30);
+        third["attached"] = true.into();
+        let repo = parted(serde_json::json!([
+            bounds("users_1", 0, 10),
+            second,
+            third,
+        ]));
+        let db = parted(serde_json::json!([bounds("users_1", 0, 10)]));
+        let alters = statements(table(&repo, &db));
+        assert_eq!(
+            sql(&alters),
+            vec![
+                "CREATE TABLE test.users_2 PARTITION OF test.users FOR \
+                 VALUES FROM (10) TO (20);\n",
+                "COMMENT ON TABLE test.users_2 IS $$the second$$;\n",
+            ]
+        );
+        assert!(alters.iter().all(|a| !a.destructive));
+    }
+
+    /// A partition that the project does not have is dropped when it is
+    /// only bounds, and detached when it is a table of its own. Both
+    /// are destructive. A change to the bounds makes the table again,
+    /// and a change to the comment is made in place
+    #[test]
+    fn removed_partition_is_dropped_or_detached() {
+        let mut attached = bounds("users_3", 20, 30);
+        attached["attached"] = true.into();
+        let repo = parted(serde_json::json!([bounds("users_1", 0, 10)]));
+        let db = parted(serde_json::json!([
+            bounds("users_1", 0, 10),
+            bounds("users_2", 10, 20),
+            attached,
+        ]));
+        let alters = statements(table(&repo, &db));
+        assert_eq!(
+            sql(&alters),
+            vec![
+                "DROP TABLE test.users_2;\n",
+                "ALTER TABLE test.users DETACH PARTITION test.users_3;\n",
+            ]
+        );
+        assert!(alters.iter().all(|a| a.destructive));
+
+        let db = parted(serde_json::json!([bounds("users_1", 0, 5)]));
+        assert!(matches!(table(&repo, &db), Resolution::Replace));
+
+        let mut commented = bounds("users_1", 0, 10);
+        commented["comment"] = "old".into();
+        let db = parted(serde_json::json!([commented]));
+        let alters = statements(table(&repo, &db));
+        assert_eq!(
+            sql(&alters),
+            vec!["COMMENT ON TABLE test.users_1 IS NULL;\n"]
         );
     }
 

@@ -196,6 +196,13 @@ reconciled in place where PostgreSQL can express it:
   group is removed, deploy drops the partitioned table's index, then
   makes all of them again and attaches them. A change to the comment
   only does not rebuild the group.
+  A new partition of a partitioned table is made with `CREATE TABLE
+  ... PARTITION OF`. A new partition with `attached: true` is attached
+  with `ATTACH PARTITION` after its table and its indexes, and gets
+  the NOT NULL constraints of its parent that its file does not give.
+  A partition that the project does not have is dropped, or detached
+  when the project keeps its table. The drop and the detach are
+  destructive. A change to the bounds of a partition falls back.
   A changed generated expression is set with `ALTER COLUMN ... SET
   EXPRESSION` (PostgreSQL 17 and later); a change between stored and
   virtual, or to or from a plain column, falls back.

@@ -13,8 +13,8 @@ Most limits are in two areas:
 - A form that you write by hand, which PostgreSQL keeps in another
   form. `deploy` then finds a change on each run. Write the form that
   `pull` writes.
-- Rare shapes of objects, for example a partitioned table that gets a
-  new partition, or an object type that `pull` does not model.
+- Rare shapes of objects, or an object type that `pull` does not
+  model.
 
 Some limits are already described with the command that they apply
 to. This page links to those descriptions and does not repeat them.
@@ -70,10 +70,6 @@ These limits are new on this page:
   the query (`name = 'x'` becomes `(name = 'x'::text)`). A query
   without them is a change on each deploy. Write them as `pull` writes
   them.
-- **Partitioned tables with mixed partitions.** When some partitions
-  of a table are only bounds in the parent and others are files with
-  `attached: true`, the parent's `ON ONLY` index is a change on each
-  deploy. Write all partitions in the same form.
 
 ## Deploy: order and rebuild limits
 
@@ -108,12 +104,6 @@ These limits are new on this page:
   or an object of another type (a view, for example) depends on the
   constraint, `deploy` stops with an error (with `--allow-drop`).
   Make such a change by hand, then `pull` the database.
-- **A new partition of an existing partitioned table.** `deploy`
-  plans a rebuild of the parent table, not `CREATE TABLE ... PARTITION
-  OF`. Without `--allow-drop`, the rebuild is withheld. With
-  `--allow-drop`, the rebuild loses the data of the parent and of the
-  partitions that are only bounds. Make the partition by hand, then
-  `pull` the database.
 - **A new column with a default that calls a new function.** When the
   function has a SQL-standard body (`sql_body`), it can read the new
   column, so `deploy` adds the column with no default, then makes the
@@ -126,10 +116,6 @@ These limits are new on this page:
   call. When that function has a SQL-standard body that reads the
   object, the function and the object need each other first, and the
   script fails on apply. Deploy the function first, then the rest.
-- **An attached partition without the parent's NOT NULL.** When a
-  hand-written partition file with `attached: true` does not have the
-  NOT NULL of a parent column, `ATTACH PARTITION` fails. Give the
-  column `nullable: false`, as the parent has it.
 - **A change from integer to serial.** For a column that does not own
   a sequence in the database, `deploy` makes a new sequence that
   starts at 1, sets the default and links the sequence to the column.

@@ -4813,7 +4813,9 @@ fn render_typed_table_column(column: &Column) -> Option<String> {
 
 /// The `FOR VALUES ...` (or `DEFAULT`) clause attaching a child
 /// partition to its parent
-fn render_partition_for_values(partition: &TablePartition) -> String {
+pub(crate) fn render_partition_for_values(
+    partition: &TablePartition,
+) -> String {
     if partition.default == Some(true) {
         return "DEFAULT".into();
     }

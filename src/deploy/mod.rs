@@ -50,6 +50,8 @@ pub fn deploy(args: &cli::Deploy) -> Result<(), String> {
     // a NULL default in the form that PostgreSQL stores, which the
     // types of the project tell
     diff::store_null_defaults(&mut project);
+    // the NOT NULL of a parent, which ATTACH PARTITION needs
+    diff::inherit_partition_not_nulls(&mut project);
     let source = source_label(args);
     log::info!("Comparing {} against {source}", project.name);
     let ddl = pgdump::DumpDdl {
@@ -668,6 +670,8 @@ fn plan(
     let mut delayed: HashMap<i32, usize> = HashMap::new();
     // OWNED BY of a changed sequence, after each owner change
     let mut links = Vec::new();
+    // ATTACH PARTITION of a new partition, after all other entries
+    let mut attaches = Vec::new();
     // the statements that wait for all in-place statements
     let mut deferred = Vec::new();
     for (position, entry) in output.dump.entries().iter().enumerate() {
@@ -811,6 +815,29 @@ fn plan(
                     push(destructive, statement);
                 }
             }
+            continue;
+        }
+        // a new partition of a table that the database has: ATTACH
+        // PARTITION waits for the indexes of the partition, which it
+        // then attaches to the indexes of its table. Else PostgreSQL
+        // makes a second index in the partition. It is withheld with a
+        // rebuild of the partition
+        if new_attach(entry, output, &entries_by_id, diff, resolutions) {
+            let rebuilt = owners.iter().any(|id| {
+                diff.items.get(id) == Some(&Change::Changed)
+                    && !matches!(
+                        resolutions.get(id),
+                        Some(Resolution::Statements(_))
+                    )
+            });
+            attaches.push((
+                rebuilt,
+                Statement {
+                    label,
+                    sql: defn,
+                    fails_open: false,
+                },
+            ));
             continue;
         }
         if !changes.contains(&Change::Changed)
@@ -1070,6 +1097,9 @@ fn plan(
     for (destructive, statement) in waiting.into_values().flatten() {
         push(destructive, statement);
     }
+    for (destructive, statement) in attaches {
+        push(destructive, statement);
+    }
     for (destructive, statement) in deferred {
         push(destructive, statement);
     }
@@ -1146,6 +1176,49 @@ fn entry_owners(
         }
     }
     items
+}
+
+/// True when `entry` is the TABLE ATTACH of a partition that the
+/// database does not have attached: its table is new, or the database
+/// has it without the partition. A partitioned table that the plan
+/// makes again attaches all of its partitions with the rebuild.
+fn new_attach(
+    entry: &libpgdump::Entry,
+    output: &build::BuildOutput,
+    entries_by_id: &HashMap<i32, &libpgdump::Entry>,
+    diff: &Diff,
+    resolutions: &BTreeMap<usize, Resolution>,
+) -> bool {
+    if entry.desc != libpgdump::ObjectType::TableAttach {
+        return false;
+    }
+    // the TABLE ATTACH entry has the name of the partition
+    let Some(id) = entry
+        .dependencies
+        .iter()
+        .filter_map(|id| entries_by_id.get(id))
+        .find(|table| {
+            table.desc == libpgdump::ObjectType::Table
+                && (table.namespace != entry.namespace
+                    || table.tag != entry.tag)
+        })
+        .and_then(|table| output.item_ids.get(&table.dump_id))
+    else {
+        return false;
+    };
+    match diff.items.get(id) {
+        Some(Change::Added) => true,
+        Some(Change::Changed) => {
+            matches!(resolutions.get(id), Some(Resolution::Statements(_)))
+                && diff.changed.get(id).and_then(as_table).is_some_and(|db| {
+                    !db.partitions.iter().flatten().any(|p| {
+                        entry.namespace.as_deref() == Some(&p.schema)
+                            && entry.tag.as_deref() == Some(&p.name)
+                    })
+                })
+        }
+        _ => false,
+    }
 }
 
 /// The privilege statements that come directly after the CREATE of an

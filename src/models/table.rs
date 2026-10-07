@@ -1196,6 +1196,49 @@ impl Table {
         }
         table
     }
+
+    /// This table, an attached partition of `parent`, with NOT NULL on
+    /// each column that has a NOT NULL in `parent` that partitions
+    /// inherit. ATTACH PARTITION fails when the partition does not have
+    /// such a NOT NULL, and CREATE TABLE ... PARTITION OF makes it. Thus
+    /// a project can give the partition without it, as it does for a
+    /// partition that it gives by its bounds only.
+    pub fn with_parent_not_nulls(&self, parent: &Table) -> Table {
+        let parent = parent.canonical();
+        let inherited = |column: &str| {
+            parent.columns.iter().flatten().any(|c| {
+                c.name == column
+                    && c.nullable == Some(false)
+                    && c.not_null_constraint
+                        .as_ref()
+                        .is_none_or(|n| n.no_inherit != Some(true))
+            })
+        };
+        let mut table = self.clone();
+        let table_level: Vec<String> = table
+            .not_null_constraints
+            .iter()
+            .flatten()
+            .map(|n| n.column.clone())
+            .collect();
+        let always: Vec<String> = table
+            .columns
+            .iter()
+            .flatten()
+            .filter(|c| self.is_always_not_null(c))
+            .map(|c| c.name.clone())
+            .collect();
+        for column in table.columns.iter_mut().flatten() {
+            if inherited(&column.name)
+                && column.nullable != Some(false)
+                && !table_level.contains(&column.name)
+                && !always.contains(&column.name)
+            {
+                column.nullable = Some(false);
+            }
+        }
+        table
+    }
 }
 
 /// Defines how a table is partitioned
