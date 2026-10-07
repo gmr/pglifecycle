@@ -4529,6 +4529,39 @@ mod tests {
         );
     }
 
+    /// The triggers of a view reconcile by name, as a table's do
+    #[test]
+    fn view_triggers_reconcile_by_name() {
+        let v = |events: serde_json::Value| -> Definition {
+            Definition::View(
+                serde_json::from_value(serde_json::json!({
+                    "name": "v", "schema": "test", "owner": "postgres",
+                    "query": "SELECT 1",
+                    "triggers": [{
+                        "name": "v_ins", "when": "INSTEAD OF",
+                        "events": events, "for_each": "ROW",
+                        "function": "test.v_ins",
+                    }],
+                }))
+                .unwrap(),
+            )
+        };
+        let Resolution::OrReplace { then, .. } = resolve(
+            &v(serde_json::json!(["INSERT"])),
+            &v(serde_json::json!(["UPDATE"])),
+        ) else {
+            panic!("expected OR REPLACE");
+        };
+        assert_eq!(
+            sql(&then),
+            vec![
+                "DROP TRIGGER IF EXISTS v_ins ON test.v;\n",
+                "CREATE TRIGGER v_ins INSTEAD OF INSERT ON test.v FOR EACH \
+                 ROW EXECUTE FUNCTION test.v_ins();\n",
+            ]
+        );
+    }
+
     #[test]
     fn view_column_comments_follow_the_project() {
         let v = |columns: serde_json::Value| -> Definition {
@@ -4644,39 +4677,6 @@ mod tests {
         };
         let sql: Vec<_> = alters.iter().map(|a| a.sql.as_str()).collect();
         assert_eq!(sql, ["COMMENT ON COLUMN test.m.b IS $$new$$;\n"]);
-    }
-
-    /// The triggers of a view reconcile by name, as a table's do
-    #[test]
-    fn view_triggers_reconcile_by_name() {
-        let v = |events: serde_json::Value| -> Definition {
-            Definition::View(
-                serde_json::from_value(serde_json::json!({
-                    "name": "v", "schema": "test", "owner": "postgres",
-                    "query": "SELECT 1",
-                    "triggers": [{
-                        "name": "v_ins", "when": "INSTEAD OF",
-                        "events": events, "for_each": "ROW",
-                        "function": "test.v_ins",
-                    }],
-                }))
-                .unwrap(),
-            )
-        };
-        let Resolution::OrReplace { then, .. } = resolve(
-            &v(serde_json::json!(["INSERT"])),
-            &v(serde_json::json!(["UPDATE"])),
-        ) else {
-            panic!("expected OR REPLACE");
-        };
-        assert_eq!(
-            sql(&then),
-            vec![
-                "DROP TRIGGER IF EXISTS v_ins ON test.v;\n",
-                "CREATE TRIGGER v_ins INSTEAD OF INSERT ON test.v FOR EACH \
-                 ROW EXECUTE FUNCTION test.v_ins();\n",
-            ]
-        );
     }
 
     fn view_with_columns(columns: serde_json::Value) -> Definition {

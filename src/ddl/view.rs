@@ -122,9 +122,13 @@ pub(crate) fn query_column_names(query: &str) -> Option<Vec<String>> {
         return None;
     }
     let statement = root.find("SelectStmt")?;
-    let mut select = statement
-        .child_of_kind("select_no_parens")?
-        .child_of_kind("simple_select")?;
+    let query = statement.child_of_kind("select_no_parens")?;
+    // a WITH query has its outer query in a select_clause
+    let mut select = query.child_of_kind("simple_select").or_else(|| {
+        query
+            .child_of_kind("select_clause")?
+            .child_of_kind("simple_select")
+    })?;
     // a set operation has the names of its first query
     while let Some(first) = select.child_of_kind("select_clause") {
         select = first.child_of_kind("simple_select")?;
@@ -237,6 +241,24 @@ mod tests {
                 ViewColumn::Name("a".into()),
                 ViewColumn::Name("b".into())
             ])
+        );
+    }
+
+    #[test]
+    fn query_column_names_of_a_with_query() {
+        assert_eq!(
+            query_column_names(
+                "WITH t AS (SELECT 1 AS inner_col) SELECT inner_col AS a, \
+                 t.inner_col FROM t"
+            ),
+            Some(vec!["a".into(), "inner_col".into()])
+        );
+        assert_eq!(
+            query_column_names(
+                "WITH t AS (SELECT 1 AS x) SELECT x AS a FROM t \
+                 UNION SELECT 2"
+            ),
+            Some(vec!["a".into()])
         );
     }
 
