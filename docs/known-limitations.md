@@ -26,10 +26,12 @@ to. This page links to those descriptions and does not repeat them.
 the project without these entries. See
 [Unsupported dump entries](commands.md#unsupported-dump-entries).
 
-- **Comments and security labels on objects that pull does not
-  model.** Such a comment or label goes to `remaining.yaml` with its
-  object. Use `--no-security-labels` to leave the labels out of the
-  dump.
+- **Comments and security labels with no place in the model.** A
+  comment on a column of a view or of a materialized view, on an
+  attribute of a composite type, on a constraint of a domain, or on a
+  trigger on a view goes to `remaining.yaml`. A security label on an
+  event trigger also goes there. Use `--no-security-labels` to leave
+  the labels out of the dump.
 - **Security labels on the attributes of a composite type.** The
   project does not manage them. pg_dump does not dump them, thus
   `pull` cannot read them and `deploy` cannot see them in the
@@ -67,12 +69,13 @@ These limits are already described:
 
 These limits are new on this page:
 
-- **Materialized view queries.** `deploy` formats the `query` of a
-  materialized view as `pull` does, so its layout and a `;` at the end
-  are not a change. But PostgreSQL also adds casts and parentheses to
-  the query (`name = 'x'` becomes `(name = 'x'::text)`). A query
-  without them is a change on each deploy. Write them as `pull` writes
-  them.
+- **View and materialized view queries.** `deploy` formats the
+  `query` of a view or a materialized view as `pull` does, so its
+  layout and a `;` at the end are not a change. But PostgreSQL also
+  adds casts and parentheses to the query (`name = 'x'` becomes
+  `(name = 'x'::text)`). A query without them is a change on each
+  deploy: `CREATE OR REPLACE VIEW` for a view, and a drop and create
+  for a materialized view. Write them as `pull` writes them.
 
 ## Deploy: order and rebuild limits
 
