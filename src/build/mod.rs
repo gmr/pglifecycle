@@ -1380,21 +1380,27 @@ impl Builder {
             // deviation 61: the NOT NULL first, then the constraints
             // with a name, then the ones with no name, which thus get
             // the names of `Domain::with_check_names`. A NOT NULL with
-            // no name gets its name here when PostgreSQL adds a number
-            let mut constraints: Vec<_> =
-                inline.into_iter().map(|(c, _)| c).collect();
-            constraints.sort_by_key(|c| (!c.is_not_null(), c.name.is_none()));
+            // no name gets its name here when PostgreSQL adds a number.
+            // A constraint with no name and with a comment also gets its
+            // name here, because PostgreSQL can give it a different name
+            // when another constraint in the schema has that name
+            // (deviation 110)
+            let mut constraints = inline;
+            constraints
+                .sort_by_key(|(c, _)| (!c.is_not_null(), c.name.is_none()));
             let not_null_name = d.not_null_name();
             let numbered =
                 not_null_name != make_object_name(&d.name, None, "not_null");
             let mut rendered = Vec::new();
-            for c in constraints {
+            for (c, n) in constraints {
                 // deviation 54: CONSTRAINT only with a name
                 let mut value = Vec::new();
+                let commented = c.comment.is_some();
                 let name = match &c.name {
-                    None if numbered && c.is_not_null() => {
+                    None if (numbered || commented) && c.is_not_null() => {
                         Some(&not_null_name)
                     }
+                    None if commented => n.name.as_ref(),
                     name => name.as_ref(),
                 };
                 if let Some(name) = name {

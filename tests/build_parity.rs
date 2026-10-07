@@ -2278,8 +2278,9 @@ fn separates_a_not_valid_domain_check() {
 /// Deviation 110: a comment on a constraint of a domain renders as a
 /// `COMMENT` entry, `COMMENT ON CONSTRAINT c ON DOMAIN d IS ...`, as
 /// pg_dump writes it. A constraint with no name has the name that
-/// PostgreSQL gives it. The comment on a NOT VALID CHECK comes after
-/// the entry of that CHECK
+/// PostgreSQL gives it, and `CREATE DOMAIN` gives it that name, as
+/// another constraint in the schema can have the name. The comment on
+/// a NOT VALID CHECK comes after the entry of that CHECK
 #[test]
 fn renders_domain_constraint_comments() {
     let project = project::Project {
@@ -2317,6 +2318,14 @@ fn renders_domain_constraint_comments() {
             .unwrap_or_else(|| panic!("missing entry {desc} {tag}"))
     };
     let level = entry("DOMAIN", "level");
+    let create = level.defn.as_deref().unwrap_or_default();
+    assert!(
+        create.contains(
+            "CONSTRAINT level_not_null NOT NULL \
+             CONSTRAINT level_check CHECK (VALUE < 10)"
+        ),
+        "{create}"
+    );
     let high = entry("CHECK CONSTRAINT", "level level_high");
     for (name, comment, parent) in [
         ("level_not_null", "nn", level.dump_id),
