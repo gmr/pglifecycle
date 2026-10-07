@@ -381,6 +381,11 @@
 //!     the entry still has no drop statement (see 48). The Python had
 //!     no place for these properties. The test-project has none, thus
 //!     its archive does not change.
+//! 104. The `column_comments` of a view or a materialized view render
+//!      as a `COMMENT ON COLUMN` entry for each column after the view,
+//!      tagged as the comment on a table column is. The Python had no
+//!      place for them. The test-project has none, thus its archive
+//!      does not change.
 
 mod acls;
 mod calls;
@@ -1861,7 +1866,14 @@ impl Builder {
             unreachable!()
         };
         if let Some(sql) = &d.sql {
-            return self.add_item(item, vec![sql.clone()], vec![], false);
+            self.add_item(item, vec![sql.clone()], vec![], false)?;
+            return self.dump_column_comments(
+                item,
+                &d.schema,
+                &d.name,
+                &d.owner,
+                d.column_comments.as_ref(),
+            );
         }
         let mut create = vec![
             "CREATE".into(),
@@ -1905,8 +1917,47 @@ impl Builder {
             self.item_name(item),
         ];
         self.add_item(item, create, drop, false)?;
+        self.dump_column_comments(
+            item,
+            &d.schema,
+            &d.name,
+            &d.owner,
+            d.column_comments.as_ref(),
+        )?;
         for index in d.indexes.as_deref().unwrap_or_default() {
             self.dump_index(index, item, &d.schema, &d.owner, None)?;
+        }
+        Ok(())
+    }
+
+    /// The COMMENT entry of each column comment of a view or a
+    /// materialized view, after the view, as pg_dump writes them
+    /// (deviation 104)
+    fn dump_column_comments(
+        &mut self,
+        item: &Item,
+        schema: &str,
+        name: &str,
+        owner: &str,
+        comments: Option<&BTreeMap<String, String>>,
+    ) -> Result<(), String> {
+        let dump_id = self.dump_id_map[&item.id];
+        for (column, comment) in comments.into_iter().flatten() {
+            let target = format!(
+                "{}.{}.{}",
+                quote_ident(schema),
+                quote_ident(name),
+                quote_ident(column)
+            );
+            self.add_comment(
+                "COLUMN",
+                schema,
+                &format!("{name}.{column}"),
+                owner,
+                dump_id,
+                comment,
+                Some(target),
+            )?;
         }
         Ok(())
     }
@@ -3830,6 +3881,13 @@ impl Builder {
         };
         if let Some(sql) = &d.sql {
             self.add_item(item, vec![sql.clone()], vec![], false)?;
+            self.dump_column_comments(
+                item,
+                &d.schema,
+                &d.name,
+                &d.owner,
+                d.column_comments.as_ref(),
+            )?;
             for rule in d.rules.as_deref().unwrap_or_default() {
                 self.dump_rule(rule, item, &d.schema, &d.name, &d.owner)?;
             }
@@ -3862,6 +3920,13 @@ impl Builder {
         create.push(d.query.clone().unwrap_or_default());
         let drop = vec!["DROP VIEW IF EXISTS".into(), self.item_name(item)];
         self.add_item(item, create, drop, false)?;
+        self.dump_column_comments(
+            item,
+            &d.schema,
+            &d.name,
+            &d.owner,
+            d.column_comments.as_ref(),
+        )?;
         for rule in d.rules.as_deref().unwrap_or_default() {
             self.dump_rule(rule, item, &d.schema, &d.name, &d.owner)?;
         }
@@ -6039,6 +6104,7 @@ mod tests {
                 security_barrier: Some(true),
                 query: Some("SELECT 1".into()),
                 comment: None,
+                column_comments: None,
                 security_labels: None,
                 rules: None,
             }),
@@ -6092,6 +6158,7 @@ mod tests {
                 security_barrier: None,
                 query: Some("SELECT 1, 2".into()),
                 comment: None,
+                column_comments: None,
                 security_labels: None,
                 rules: None,
             }),
@@ -6143,6 +6210,7 @@ mod tests {
                 security_barrier: None,
                 query: None,
                 comment: None,
+                column_comments: None,
                 security_labels: None,
                 rules: Some(vec![crate::models::Rule {
                     name: "no_delete".into(),

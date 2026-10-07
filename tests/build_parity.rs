@@ -860,6 +860,23 @@ fn outside_items() -> Vec<Item> {
                     "schema": "test",
                     "owner": "postgres",
                     "query": "SELECT 1 AS n;\n",
+                    // deviation 104
+                    "column_comments": {"n": "a number"},
+                }))
+                .unwrap(),
+            ),
+        ),
+        // deviation 104
+        item(
+            30,
+            ObjectType::View,
+            Definition::View(
+                serde_json::from_value(serde_json::json!({
+                    "name": "named",
+                    "schema": "test",
+                    "owner": "postgres",
+                    "query": "SELECT 1 AS \"Has Space\"",
+                    "column_comments": {"Has Space": "it's spaced"},
                 }))
                 .unwrap(),
             ),
@@ -1235,6 +1252,24 @@ const OUTSIDE_CORRECTED: &[(&str, &str, &str, &str, &str)] = &[
         "ended_totals",
         "CREATE MATERIALIZED VIEW test.ended_totals AS SELECT 1 AS n;\n",
         "DROP MATERIALIZED VIEW IF EXISTS test.ended_totals;\n",
+    ),
+    // deviation 104: the column comments of a view or a materialized
+    // view are COMMENT entries after it, tagged as the comment of a
+    // table column is. The Python had no place for them
+    (
+        "COMMENT",
+        "test",
+        "ended_totals.n",
+        "COMMENT ON COLUMN test.ended_totals.n IS $$a number$$;\n;\n",
+        "",
+    ),
+    (
+        "COMMENT",
+        "test",
+        "named.Has Space",
+        "COMMENT ON COLUMN test.named.\"Has Space\" IS $$it's \
+         spaced$$;\n;\n",
+        "",
     ),
 ];
 

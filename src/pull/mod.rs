@@ -2313,15 +2313,44 @@ impl Assembly {
     }
 
     /// `COMMENT ON COLUMN schema.table.column` — the ddl layer puts
-    /// everything before the column into `target.schema`
+    /// everything before the column into `target.schema`. The comment
+    /// on a column of a view or a materialized view goes into its
+    /// `column_comments`.
     fn apply_column_comment(
         &mut self,
         target: &QualifiedName,
         comment: &str,
     ) -> bool {
-        self.column(target)
-            .map(|c| c.comment = Some(comment.to_string()))
-            .is_some()
+        if let Some(column) = self.column(target) {
+            column.comment = Some(comment.to_string());
+            return true;
+        }
+        let Some(relation) = &target.schema else {
+            return false;
+        };
+        let (schema, name) =
+            relation.split_once('.').unwrap_or(("", relation));
+        let comments = match self
+            .views
+            .iter_mut()
+            .find(|v| v.schema == schema && v.name == name)
+        {
+            Some(view) => &mut view.column_comments,
+            None => {
+                let relation = QualifiedName {
+                    schema: Some(schema.to_string()),
+                    name: name.to_string(),
+                };
+                match self.find_materialized_view(&relation) {
+                    Some(view) => &mut view.column_comments,
+                    None => return false,
+                }
+            }
+        };
+        comments
+            .get_or_insert_default()
+            .insert(target.name.clone(), comment.to_string());
+        true
     }
 
     /// The table column that `COMMENT ON COLUMN` or `SECURITY LABEL ON
@@ -3755,6 +3784,59 @@ mod tests {
         assembly.ingest(&dump).unwrap();
         assert_eq!(assembly.remaining.len(), 1);
         assert_eq!(assembly.remaining[0].desc, "COMMENT");
+    }
+
+    /// A comment on a column of a view or a materialized view goes into
+    /// the `column_comments` of the view
+    #[test]
+    fn view_column_comments_go_to_the_view() {
+        let mut dump = libpgdump::new("fixtures", "UTF8", "18.0").unwrap();
+        add(&mut dump, OT::Schema, "", "s", "CREATE SCHEMA s;");
+        add(
+            &mut dump,
+            OT::View,
+            "s",
+            "v",
+            "CREATE VIEW s.v AS SELECT 1 AS a;",
+        );
+        add(
+            &mut dump,
+            OT::MaterializedView,
+            "s",
+            "m",
+            "CREATE MATERIALIZED VIEW s.m AS SELECT 1 AS b WITH NO DATA;",
+        );
+        add(
+            &mut dump,
+            OT::Comment,
+            "s",
+            "COLUMN v.a",
+            "COMMENT ON COLUMN s.v.a IS 'view column';",
+        );
+        add(
+            &mut dump,
+            OT::Comment,
+            "s",
+            "COLUMN m.b",
+            "COMMENT ON COLUMN s.m.b IS 'matview column';",
+        );
+        let mut assembly = Assembly::default();
+        assembly.ingest(&dump).unwrap();
+        assert!(assembly.remaining.is_empty());
+        let comments = |c: &Option<BTreeMap<String, String>>| {
+            c.clone()
+                .unwrap_or_default()
+                .into_iter()
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            comments(&assembly.views[0].column_comments),
+            [("a".to_string(), "view column".to_string())]
+        );
+        assert_eq!(
+            comments(&assembly.materialized_views[0].column_comments),
+            [("b".to_string(), "matview column".to_string())]
+        );
     }
 
     #[test]

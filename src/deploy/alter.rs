@@ -38,9 +38,9 @@ use crate::models::{
     CheckConstraint, Column, ColumnDefault, ColumnGenerated, ColumnNotNull,
     ColumnSetting, Definition, Domain, DomainConstraint, ExcludeConstraint,
     Extension, ForeignDataWrapper, ForeignKey, Function, GeneratedKind, Index,
-    NotNullConstraint, Policy, ReplicaIdentity, Rule, Schema, Sequence,
-    SequenceOptions, Server, Table, TablePartition, Trigger, Type,
-    UserMapping, View, ViewColumn,
+    MaterializedView, NotNullConstraint, Policy, ReplicaIdentity, Rule,
+    Schema, Sequence, SequenceOptions, Server, Table, TablePartition, Trigger,
+    Type, UserMapping, View, ViewColumn,
 };
 use crate::project::{routine_base_name, split_sql_name};
 use crate::utils::{
@@ -311,6 +311,10 @@ fn resolve_object(
             }
         }
         (Definition::View(repo), Definition::View(db)) => view(repo, db),
+        (
+            Definition::MaterializedView(repo),
+            Definition::MaterializedView(db),
+        ) => materialized_view(repo, db),
         (Definition::Procedure(repo), Definition::Procedure(db)) => {
             procedure::procedure(repo, db)
         }
@@ -484,12 +488,79 @@ fn view(repo: &View, db: &View) -> Resolution {
             db.rules.as_deref().unwrap_or_default(),
             &mut then,
         );
+        column_comments(
+            &name,
+            &repo.column_comments,
+            &db.column_comments,
+            &mut then,
+        );
         Resolution::OrReplace {
             comment: comment_delta("VIEW", &name, &repo.comment, &db.comment),
             then,
         }
     } else {
         Resolution::Replace
+    }
+}
+
+/// A materialized view has no in-place form, except for its comment
+/// and the comments on its columns
+fn materialized_view(
+    repo: &MaterializedView,
+    db: &MaterializedView,
+) -> Resolution {
+    let without = |view: &MaterializedView| {
+        Definition::MaterializedView(MaterializedView {
+            comment: None,
+            column_comments: None,
+            ..view.clone()
+        })
+    };
+    if !super::diff::same(&without(repo), &without(db)) {
+        return Resolution::Replace;
+    }
+    let name = qualified(&repo.schema, &repo.name);
+    let mut alters = Vec::new();
+    column_comments(
+        &name,
+        &repo.column_comments,
+        &db.column_comments,
+        &mut alters,
+    );
+    push_comment(
+        &mut alters,
+        "MATERIALIZED VIEW",
+        &name,
+        &repo.comment,
+        &db.comment,
+    );
+    Resolution::Statements(alters)
+}
+
+/// The comments on the columns of a view or a materialized view that
+/// the project changes. A comment that the project removes is cleared.
+fn column_comments(
+    relation: &str,
+    repo: &Option<std::collections::BTreeMap<String, String>>,
+    db: &Option<std::collections::BTreeMap<String, String>>,
+    alters: &mut Vec<Alter>,
+) {
+    let (wanted, existing) = (
+        repo.clone().unwrap_or_default(),
+        db.clone().unwrap_or_default(),
+    );
+    let target = |column: &str| format!("{relation}.{}", quote_ident(column));
+    for (column, comment) in &wanted {
+        if existing.get(column) != Some(comment) {
+            alters.push(Alter::new(comment_on(
+                "COLUMN",
+                &target(column),
+                Some(comment),
+            )));
+        }
+    }
+    for column in existing.keys().filter(|c| !wanted.contains_key(*c)) {
+        alters.push(Alter::new(comment_on("COLUMN", &target(column), None)));
     }
 }
 
@@ -4142,17 +4213,19 @@ mod tests {
 
     #[test]
     fn unsupported_definitions_replace() {
-        // a materialized view has no in-place form
-        let mview: models::MaterializedView =
+        // a materialized view has no in-place form, except for its
+        // comments
+        let mview = |query: &str| -> models::MaterializedView {
             serde_json::from_value(serde_json::json!({
                 "name": "m", "schema": "test", "owner": "postgres",
-                "query": "SELECT 1",
+                "query": query,
             }))
-            .unwrap();
+            .unwrap()
+        };
         assert!(matches!(
             resolve(
-                &Definition::MaterializedView(mview.clone()),
-                &Definition::MaterializedView(mview)
+                &Definition::MaterializedView(mview("SELECT 2")),
+                &Definition::MaterializedView(mview("SELECT 1"))
             ),
             Resolution::Replace
         ));
@@ -4473,6 +4546,63 @@ mod tests {
         assert_eq!(
             or_replace_comment(resolve(&v(None), &v(Some("old")))),
             Some("COMMENT ON VIEW test.v IS NULL;\n".into())
+        );
+    }
+
+    #[test]
+    fn view_column_comments_follow_the_project() {
+        let v = |comments: serde_json::Value| -> Definition {
+            Definition::View(
+                serde_json::from_value(serde_json::json!({
+                    "name": "v", "schema": "test", "owner": "postgres",
+                    "query": "SELECT 1 AS a, 2 AS b, 3 AS c",
+                    "column_comments": comments,
+                }))
+                .unwrap(),
+            )
+        };
+        let Resolution::OrReplace { then, .. } = resolve(
+            &v(serde_json::json!({"a": "new", "b": "kept"})),
+            &v(serde_json::json!({"a": "old", "b": "kept", "c": "gone"})),
+        ) else {
+            panic!("expected OrReplace");
+        };
+        let sql: Vec<_> = then.iter().map(|a| a.sql.as_str()).collect();
+        assert_eq!(
+            sql,
+            [
+                "COMMENT ON COLUMN test.v.a IS $$new$$;\n",
+                "COMMENT ON COLUMN test.v.c IS NULL;\n",
+            ]
+        );
+        assert!(then.iter().all(|a| !a.destructive));
+    }
+
+    #[test]
+    fn materialized_view_comments_change_in_place() {
+        let m = |comment: &str, column: &str| -> Definition {
+            Definition::MaterializedView(
+                serde_json::from_value(serde_json::json!({
+                    "name": "m", "schema": "test", "owner": "postgres",
+                    "query": "SELECT 1 AS a",
+                    "comment": comment,
+                    "column_comments": {"a": column},
+                }))
+                .unwrap(),
+            )
+        };
+        let Resolution::Statements(alters) =
+            resolve(&m("new", "new a"), &m("old", "old a"))
+        else {
+            panic!("expected Statements");
+        };
+        let sql: Vec<_> = alters.iter().map(|a| a.sql.as_str()).collect();
+        assert_eq!(
+            sql,
+            [
+                "COMMENT ON COLUMN test.m.a IS $$new a$$;\n",
+                "COMMENT ON MATERIALIZED VIEW test.m IS $$new$$;\n",
+            ]
         );
     }
 

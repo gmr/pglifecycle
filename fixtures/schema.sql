@@ -218,6 +218,11 @@ CREATE TRIGGER users_touch_last_modified_args
 COMMENT ON COLUMN users.display_name IS
     'Optional user-facing display name';
 
+-- Per-object COMMENT: a column of a view and of a materialized view,
+-- which go into the `column_comments` of the view
+COMMENT ON COLUMN active_users.name IS 'The name of the user';
+COMMENT ON COLUMN user_states.total IS 'The number of users';
+
 -- Bare `public` schema reference, exercising case-folding of an
 -- unquoted `public` identifier. Uses a SERIAL primary key: pg_dump
 -- emits the column default as a separate, later `ALTER TABLE ONLY

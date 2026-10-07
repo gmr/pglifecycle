@@ -254,7 +254,10 @@ reconciled in place where PostgreSQL can express it:
   the last name of a column reference, as `pull` writes it. When a
   name is not known this way (`*`, an expression with no `AS`), deploy
   uses `CREATE OR REPLACE`. Deploy does not find a change to the type
-  of a view column. A view's rules are reconciled after it. A `sql_body` is compared as
+  of a view column. A view's rules and the comments on its columns
+  (`column_comments`) are reconciled after it. A materialized view
+  changes in place only for its comment and the comments on its
+  columns; another change falls back. A `sql_body` is compared as
   text with the form PostgreSQL keeps, so write it as `pull` writes
   it. An `AS` name that PostgreSQL adds to a constant column when
   deploy makes the routine (`SELECT 'a'::text AS text`) is not a
