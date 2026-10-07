@@ -287,7 +287,7 @@ fn resolve_object(
             sequence(repo, db)
         }
         (Definition::Domain(repo), Definition::Domain(db)) => domain(repo, db),
-        (Definition::Type(repo), Definition::Type(db)) => enum_type(repo, db),
+        (Definition::Type(repo), Definition::Type(db)) => user_type(repo, db),
         (Definition::Extension(repo), Definition::Extension(db)) => {
             extension(repo, db)
         }
@@ -2672,6 +2672,41 @@ fn domain_check_changes<'a>(
 /// Enum reconciliation: append-only value additions via ALTER TYPE
 /// ADD VALUE. Any other change (reordering, insertion, removal, or a
 /// non-enum type kind) rebuilds.
+/// A type that changes only in its comments takes `COMMENT ON`
+/// statements, also for a composite type attribute; else see
+/// [`enum_type`]
+fn user_type(repo: &Type, db: &Type) -> Resolution {
+    let without = |t: &Type| {
+        let mut t = t.clone();
+        t.comment = None;
+        for column in t.columns.iter_mut().flatten() {
+            column.comment = None;
+        }
+        Definition::Type(t)
+    };
+    if !super::diff::same(&without(repo), &without(db)) {
+        return enum_type(repo, db);
+    }
+    let name = qualified(&repo.schema, &repo.name);
+    let mut alters = Vec::new();
+    push_comment(&mut alters, "TYPE", &name, &repo.comment, &db.comment);
+    for (r, d) in repo
+        .columns
+        .iter()
+        .flatten()
+        .zip(db.columns.iter().flatten())
+    {
+        push_comment(
+            &mut alters,
+            "COLUMN",
+            &format!("{name}.{}", quote_ident(&r.name)),
+            &r.comment,
+            &d.comment,
+        );
+    }
+    Resolution::Statements(alters)
+}
+
 fn enum_type(repo: &Type, db: &Type) -> Resolution {
     let (Some(repo_values), Some(db_values)) =
         (&repo.enum_values, &db.enum_values)
@@ -5022,6 +5057,40 @@ mod tests {
         let mut repo = db.clone();
         repo.enum_values = Some(vec!["b".into(), "a".into()]);
         assert!(matches!(enum_type(&repo, &db), Resolution::Replace));
+    }
+
+    #[test]
+    fn composite_attribute_comments_change_in_place() {
+        let db: Type = serde_json::from_value(serde_json::json!({
+            "name": "pair", "schema": "test", "owner": "postgres",
+            "type": "composite", "columns": [
+                {"name": "a", "data_type": "integer"},
+                {"name": "b", "data_type": "text", "comment": "old"},
+            ],
+        }))
+        .unwrap();
+        let mut repo = db.clone();
+        let columns = repo.columns.as_mut().unwrap();
+        columns[0].comment = Some("first".into());
+        columns[1].comment = None;
+        let resolve_type = |repo: &Type, db: &Type| -> Resolution {
+            resolve(
+                &Definition::Type(repo.clone()),
+                &Definition::Type(db.clone()),
+            )
+        };
+        let alters = statements(resolve_type(&repo, &db));
+        assert_eq!(
+            sql(&alters),
+            vec![
+                "COMMENT ON COLUMN test.pair.a IS $$first$$;\n",
+                "COMMENT ON COLUMN test.pair.b IS NULL;\n",
+            ]
+        );
+        assert!(alters.iter().all(|a| !a.destructive));
+        // a change other than a comment still rebuilds the type
+        repo.columns.as_mut().unwrap()[1].data_type = "varchar".into();
+        assert!(matches!(resolve_type(&repo, &db), Resolution::Replace));
     }
 
     #[test]

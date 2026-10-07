@@ -239,6 +239,7 @@ pub(crate) fn create_type(
                         .find("opt_collate_clause")
                         .and_then(|n| n.child_of_kind("any_name"))
                         .map(|n| n.text(src).to_string()),
+                    comment: None,
                 })
                 .collect(),
         );

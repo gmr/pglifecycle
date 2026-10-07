@@ -396,6 +396,11 @@
 //!      the comment on a table column is. The Python did not render
 //!      them. The test-project materialized view has two, thus its
 //!      archive has two more entries.
+//! 107. The `comment` of a composite type attribute renders as a
+//!      `COMMENT ON COLUMN schema.type.attribute` entry that depends
+//!      on the type, as pg_dump writes it. The Python had no field for
+//!      it. No test-project attribute has a comment, thus its archive
+//!      does not change.
 //! 110. The `comment` of a domain constraint renders as a `COMMENT`
 //!      entry, `COMMENT ON CONSTRAINT c ON DOMAIN d IS ...`, with the
 //!      tag `CONSTRAINT c ON DOMAIN d`, as pg_dump writes it. A
@@ -3875,6 +3880,24 @@ impl Builder {
         }
         let drop = vec!["DROP TYPE IF EXISTS".into(), self.item_name(item)];
         self.add_item(item, create, drop, false)?;
+        // deviation 107
+        for column in d.columns.iter().flatten() {
+            if let Some(comment) = &column.comment {
+                self.add_comment(
+                    "COLUMN",
+                    &d.schema,
+                    &format!("{}.{}", d.name, column.name),
+                    &d.owner,
+                    self.dump_id_map[&item.id],
+                    comment,
+                    Some(format!(
+                        "{}.{}",
+                        self.item_name(item),
+                        quote_ident(&column.name)
+                    )),
+                )?;
+            }
+        }
         if let Some(shell) = shell
             && let Some(dump_id) = self.dump_id_map.get(&item.id)
             && let Some(entry) = self.dump.get_entry_mut(*dump_id)

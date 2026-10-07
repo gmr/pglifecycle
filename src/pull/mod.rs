@@ -1690,7 +1690,8 @@ impl Assembly {
             } => {
                 // a comment with nowhere to go would be lost from the
                 // project, so its entry is kept and the pull fails
-                if !self.apply_comment(&on, &target, comment) {
+                let namespace = entry.namespace.as_deref();
+                if !self.apply_comment(&on, &target, comment, namespace) {
                     self.push_remaining(entry);
                 }
             }
@@ -1700,18 +1701,20 @@ impl Assembly {
                 provider,
                 label,
             } => {
-                let applied = match self.security_labels_of(&on, &target) {
-                    Some(labels) => {
-                        set_security_label(labels, provider, label);
-                        true
-                    }
-                    None => {
-                        on == "COLUMN"
-                            && self.set_view_column_label(
-                                &target, provider, label,
-                            )
-                    }
-                };
+                let namespace = entry.namespace.as_deref();
+                let applied =
+                    match self.security_labels_of(&on, &target, namespace) {
+                        Some(labels) => {
+                            set_security_label(labels, provider, label);
+                            true
+                        }
+                        None => {
+                            on == "COLUMN"
+                                && self.set_view_column_label(
+                                    &target, namespace, provider, label,
+                                )
+                        }
+                    };
                 // as for a comment, a label with nowhere to go keeps
                 // its entry
                 if !applied {
@@ -1949,6 +1952,7 @@ impl Assembly {
         on: &str,
         target: &QualifiedName,
         comment: String,
+        namespace: Option<&str>,
     ) -> bool {
         let schema = target.schema.clone().unwrap_or_default();
         let name = &target.name;
@@ -1993,7 +1997,7 @@ impl Assembly {
                 .find_table(target)
                 .map(|t| t.comment = Some(comment.clone()))
                 .is_some(),
-            "COLUMN" => self.apply_column_comment(target, &comment),
+            "COLUMN" => self.apply_column_comment(target, &comment, namespace),
             "DOMAIN" => self
                 .domains
                 .iter_mut()
@@ -2178,6 +2182,7 @@ impl Assembly {
         &mut self,
         on: &str,
         target: &QualifiedName,
+        namespace: Option<&str>,
     ) -> Option<&mut Option<models::SecurityLabels>> {
         let schema = target.schema.clone().unwrap_or_default();
         let name = &target.name;
@@ -2201,7 +2206,9 @@ impl Assembly {
             "TABLE" | "FOREIGN TABLE" => {
                 self.find_table(target).map(|t| &mut t.security_labels)
             }
-            "COLUMN" => self.column(target).map(|c| &mut c.security_labels),
+            "COLUMN" => self
+                .column(target, namespace)
+                .map(|c| &mut c.security_labels),
             "DOMAIN" => self
                 .domains
                 .iter_mut()
@@ -2262,10 +2269,11 @@ impl Assembly {
     fn set_view_column_label(
         &mut self,
         target: &QualifiedName,
+        namespace: Option<&str>,
         provider: String,
         label: Option<String>,
     ) -> bool {
-        let Some((_, labels)) = self.view_column(target) else {
+        let Some((_, labels)) = self.view_column(target, namespace) else {
             return false;
         };
         set_security_label(labels, provider, label);
@@ -2360,19 +2368,24 @@ impl Assembly {
     }
 
     /// `COMMENT ON COLUMN schema.table.column` — the ddl layer puts
-    /// everything before the column into `target.schema`. The comment
+    /// everything before the column into `target.schema`. The TOC
+    /// entry's namespace is the schema of the relation. The comment
     /// on a column of a view or a materialized view goes into its
     /// `columns` (see [`Self::view_column`]).
     fn apply_column_comment(
         &mut self,
         target: &QualifiedName,
         comment: &str,
+        namespace: Option<&str>,
     ) -> bool {
-        if let Some(column) = self.column(target) {
+        if let Some(column) = self.column(target, namespace) {
             column.comment = Some(comment.to_string());
             return true;
         }
-        let Some((column, _)) = self.view_column(target) else {
+        if self.apply_type_attribute_comment(target, comment, namespace) {
+            return true;
+        }
+        let Some((column, _)) = self.view_column(target, namespace) else {
             return false;
         };
         *column = Some(comment.to_string());
@@ -2389,11 +2402,12 @@ impl Assembly {
     fn view_column(
         &mut self,
         target: &QualifiedName,
+        namespace: Option<&str>,
     ) -> Option<(&mut Option<String>, &mut Option<models::SecurityLabels>)>
     {
-        let relation = target.schema.as_ref()?;
-        let (schema, name) =
-            relation.split_once('.').unwrap_or(("", relation));
+        let relation = target.schema.as_deref()?;
+        let (schema, name) = split_relation(relation, namespace);
+        let schema = schema.unwrap_or_default();
         let (columns, query) = match self
             .views
             .iter()
@@ -2405,8 +2419,8 @@ impl Assembly {
             }
             None => {
                 let relation = QualifiedName {
-                    schema: Some(schema.to_string()),
-                    name: name.to_string(),
+                    schema: Some(schema),
+                    name,
                 };
                 let view = self.find_materialized_view(&relation)?;
                 (&mut view.columns, view.query.as_deref())
@@ -2446,22 +2460,38 @@ impl Assembly {
         }
     }
 
+    /// pg_dump writes the comment of a composite type attribute as
+    /// `COMMENT ON COLUMN schema.type.attribute`
+    fn apply_type_attribute_comment(
+        &mut self,
+        target: &QualifiedName,
+        comment: &str,
+        namespace: Option<&str>,
+    ) -> bool {
+        let Some(relation) = target.schema.as_deref() else {
+            return false;
+        };
+        let (schema, name) = split_relation(relation, namespace);
+        let schema = schema.unwrap_or_default();
+        self.types
+            .iter_mut()
+            .find(|t| t.schema == schema && t.name == name)
+            .and_then(|t| t.columns.as_mut())
+            .and_then(|c| c.iter_mut().find(|c| c.name == target.name))
+            .map(|c| c.comment = Some(comment.to_string()))
+            .is_some()
+    }
+
     /// The table column that `COMMENT ON COLUMN` or `SECURITY LABEL ON
     /// COLUMN` names (see [`Self::apply_column_comment`])
     fn column(
         &mut self,
         target: &QualifiedName,
+        namespace: Option<&str>,
     ) -> Option<&mut models::Column> {
-        let relation = target.schema.as_ref()?;
-        let (schema, table) = match relation.split_once('.') {
-            Some((schema, table)) => (Some(schema.to_string()), table),
-            None => (None, relation.as_str()),
-        };
-        let relation = QualifiedName {
-            schema,
-            name: table.to_string(),
-        };
-        self.find_table(&relation)?
+        let (schema, name) =
+            split_relation(target.schema.as_deref()?, namespace);
+        self.find_table(&QualifiedName { schema, name })?
             .columns
             .iter_mut()
             .flatten()
@@ -3039,6 +3069,26 @@ fn aggregate_signature(aggregate: &models::Aggregate) -> String {
 
 /// `DESC namespace.tag` for an archive entry, for log lines and error
 /// messages that have to name the object a user would recognize
+/// Split the `schema.relation` that the ddl layer joins with no
+/// quotes. A `.` can occur in either name, so the TOC entry's
+/// namespace gives the schema; with no namespace, split at the first
+/// `.`.
+fn split_relation(
+    relation: &str,
+    namespace: Option<&str>,
+) -> (Option<String>, String) {
+    if let Some(name) = namespace
+        .filter(|n| !n.is_empty())
+        .and_then(|n| relation.strip_prefix(n)?.strip_prefix('.'))
+    {
+        return (namespace.map(str::to_string), name.to_string());
+    }
+    match relation.split_once('.') {
+        Some((schema, name)) => (Some(schema.to_string()), name.to_string()),
+        None => (None, relation.to_string()),
+    }
+}
+
 fn entry_label(entry: &libpgdump::Entry) -> String {
     let tag = entry.tag.as_deref().unwrap_or("?");
     match entry.namespace.as_deref().filter(|n| !n.is_empty()) {
@@ -4170,6 +4220,138 @@ mod tests {
             Some("a wrapper")
         );
         assert_eq!(assembly.servers[0].comment.as_deref(), Some("a server"));
+    }
+
+    #[test]
+    fn type_attribute_comment_attaches_to_attribute() {
+        let mut dump = libpgdump::new("fixtures", "UTF8", "18.0").unwrap();
+        add(&mut dump, OT::Schema, "", "s", "CREATE SCHEMA s;");
+        add(
+            &mut dump,
+            OT::Type,
+            "s",
+            "pair",
+            "CREATE TYPE s.pair AS (a integer, b text);",
+        );
+        add(
+            &mut dump,
+            OT::Comment,
+            "s",
+            "COLUMN pair.b",
+            "COMMENT ON COLUMN s.pair.b IS 'the second';",
+        );
+        let mut assembly = Assembly::default();
+        assembly.ingest(&dump).unwrap();
+        assert!(assembly.remaining.is_empty(), "{:?}", assembly.remaining);
+        let columns = assembly.types[0].columns.as_ref().unwrap();
+        assert_eq!(columns[0].comment, None);
+        assert_eq!(columns[1].comment.as_deref(), Some("the second"));
+    }
+
+    /// A `.` in the schema name does not split the type name
+    #[test]
+    fn type_attribute_comment_with_dotted_schema() {
+        let mut dump = libpgdump::new("fixtures", "UTF8", "18.0").unwrap();
+        add(
+            &mut dump,
+            OT::Schema,
+            "",
+            "tenant.eu",
+            "CREATE SCHEMA \"tenant.eu\";",
+        );
+        add(
+            &mut dump,
+            OT::Type,
+            "tenant.eu",
+            "pair",
+            "CREATE TYPE \"tenant.eu\".pair AS (a integer, b text);",
+        );
+        add(
+            &mut dump,
+            OT::Comment,
+            "tenant.eu",
+            "COLUMN pair.b",
+            "COMMENT ON COLUMN \"tenant.eu\".pair.b IS 'the second';",
+        );
+        let mut assembly = Assembly::default();
+        assembly.ingest(&dump).unwrap();
+        assert!(assembly.remaining.is_empty(), "{:?}", assembly.remaining);
+        let columns = assembly.types[0].columns.as_ref().unwrap();
+        assert_eq!(columns[1].comment.as_deref(), Some("the second"));
+    }
+
+    /// `"a.b".c` and `a."b.c"` join to the same name: the TOC
+    /// namespace picks the recipient, for types and for tables
+    #[test]
+    fn column_comment_keeps_identifier_boundaries() {
+        let mut dump = libpgdump::new("fixtures", "UTF8", "18.0").unwrap();
+        add(&mut dump, OT::Schema, "", "a", "CREATE SCHEMA a;");
+        add(&mut dump, OT::Schema, "", "a.b", "CREATE SCHEMA \"a.b\";");
+        add(
+            &mut dump,
+            OT::Type,
+            "a.b",
+            "c",
+            "CREATE TYPE \"a.b\".c AS (x integer);",
+        );
+        add(
+            &mut dump,
+            OT::Type,
+            "a",
+            "b.c",
+            "CREATE TYPE a.\"b.c\" AS (x integer);",
+        );
+        add(
+            &mut dump,
+            OT::Type,
+            "a.b",
+            "d",
+            "CREATE TYPE \"a.b\".d AS (x integer);",
+        );
+        add(
+            &mut dump,
+            OT::Table,
+            "a",
+            "b.d",
+            "CREATE TABLE a.\"b.d\" (x integer);",
+        );
+        add(
+            &mut dump,
+            OT::Comment,
+            "a",
+            "COLUMN \"b.c\".x",
+            "COMMENT ON COLUMN a.\"b.c\".x IS 'type a.b.c';",
+        );
+        add(
+            &mut dump,
+            OT::Comment,
+            "a.b",
+            "COLUMN c.x",
+            "COMMENT ON COLUMN \"a.b\".c.x IS 'type a.b . c';",
+        );
+        add(
+            &mut dump,
+            OT::Comment,
+            "a.b",
+            "COLUMN d.x",
+            "COMMENT ON COLUMN \"a.b\".d.x IS 'type d';",
+        );
+        let mut assembly = Assembly::default();
+        assembly.ingest(&dump).unwrap();
+        assert!(assembly.remaining.is_empty(), "{:?}", assembly.remaining);
+        let comment = |schema: &str, name: &str| {
+            let t = assembly
+                .types
+                .iter()
+                .find(|t| t.schema == schema && t.name == name)
+                .unwrap();
+            t.columns.as_ref().unwrap()[0].comment.clone()
+        };
+        assert_eq!(comment("a", "b.c").as_deref(), Some("type a.b.c"));
+        assert_eq!(comment("a.b", "c").as_deref(), Some("type a.b . c"));
+        assert_eq!(comment("a.b", "d").as_deref(), Some("type d"));
+        let table = &assembly.tables[0];
+        assert_eq!(table.columns.as_ref().unwrap()[0].comment, None);
     }
 
     #[test]

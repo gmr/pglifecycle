@@ -26,8 +26,6 @@ to. This page links to those descriptions and does not repeat them.
 the project without these entries. See
 [Unsupported dump entries](commands.md#unsupported-dump-entries).
 
-- **Comments with no place in the model.** A comment on an attribute
-  of a composite type goes to `remaining.yaml`.
 - **Security labels on the attributes of a composite type.** The
   project does not manage them. PostgreSQL does not support security
   labels on the attributes of a composite type
