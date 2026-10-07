@@ -2,7 +2,7 @@
 $schema: https://json-schema.org/draft/2020-12/schema
 $id: https://gmr.github.io/pglifecycle/schemata/trigger.json
 title: Trigger
-description: Defines a trigger on a table
+description: Defines a trigger on a table or view
 type: object
 properties:
   name:

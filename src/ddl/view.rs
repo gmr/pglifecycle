@@ -43,6 +43,7 @@ pub(crate) fn create_view(
                 _ => None,
             }),
         query,
+        triggers: None,
         rules: None,
         comment: None,
         security_labels: None,

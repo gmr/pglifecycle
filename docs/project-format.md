@@ -249,6 +249,10 @@ replica_identity: FULL
   foreign key and NOT NULL constraints live in `constraint_comments`,
   keyed by constraint name.
 
+- Tables and views carry `triggers`, with the same fields. A view can
+  have an `INSTEAD OF` trigger. A materialized view cannot have
+  triggers.
+
 - The `columns` of a view or a materialized view are the names of its
   columns, in order (`CREATE VIEW v (a, b) AS ...`). A list that does
   not give the name of each column renames the columns. A comment on a

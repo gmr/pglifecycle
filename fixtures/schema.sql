@@ -214,6 +214,22 @@ CREATE TRIGGER users_touch_last_modified_args
     FOR EACH ROW EXECUTE FUNCTION
         test.touch_last_modified('audit', '42');
 
+-- An INSTEAD OF trigger and its comment on a view. Pull keeps them on
+-- the view, as it keeps a trigger on a table.
+CREATE FUNCTION test.active_users_insert() RETURNS trigger
+    LANGUAGE plpgsql AS $$
+BEGIN
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER active_users_insert
+    INSTEAD OF INSERT ON active_users
+    FOR EACH ROW EXECUTE FUNCTION test.active_users_insert();
+
+COMMENT ON TRIGGER active_users_insert ON active_users IS
+    'Redirects inserts';
+
 -- Per-object COMMENT: column
 COMMENT ON COLUMN users.display_name IS
     'Optional user-facing display name';

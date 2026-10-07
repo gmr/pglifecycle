@@ -386,6 +386,11 @@
 //!     (see 86). The Python wrote the query as it is, thus the entry
 //!     had `;;`. The test-project view query ends with `;`, thus its
 //!     entry has one `;` less.
+//! 100. The `triggers` of a view render as `TRIGGER` entries after the
+//!      view, with their comments, as the triggers of a table do. An
+//!      INSTEAD OF trigger can only be on a view. The Python had no
+//!      place for the triggers of a view. The test-project has none,
+//!      thus its archive does not change.
 //! 104. A `comment` in the `columns` of a view or a materialized view
 //!      renders as a `COMMENT ON COLUMN` entry after the view, tagged as
 //!      the comment on a table column is. The Python did not render
@@ -2743,7 +2748,7 @@ impl Builder {
             )?;
         }
         for trigger in d.triggers.as_deref().unwrap_or_default() {
-            self.dump_trigger(trigger, item, d)?;
+            self.dump_trigger(trigger, item, &d.schema, &d.owner)?;
         }
         for rule in d.rules.as_deref().unwrap_or_default() {
             self.dump_rule(rule, item, &d.schema, &d.name, &d.owner)?;
@@ -3128,16 +3133,17 @@ impl Builder {
         &mut self,
         trigger: &Trigger,
         parent: &Item,
-        table: &crate::models::Table,
+        schema: &str,
+        owner: &str,
     ) -> Result<(), String> {
         let name = trigger.name.clone().unwrap_or_default();
         let (create, drop) = render_trigger(trigger, &self.item_name(parent));
         let parent_dump_id = self.dump_id_map[&parent.id];
         let dump_id = self.add_entry(
             "TRIGGER",
-            &table.schema,
+            schema,
             &name,
-            &table.owner,
+            owner,
             &create,
             &drop,
             &[parent_dump_id],
@@ -3153,9 +3159,9 @@ impl Builder {
             );
             self.add_comment(
                 "TRIGGER",
-                &table.schema,
+                schema,
                 &name,
-                &table.owner,
+                owner,
                 dump_id,
                 comment,
                 Some(target),
@@ -3906,17 +3912,7 @@ impl Builder {
         };
         if let Some(sql) = &d.sql {
             self.add_item(item, vec![sql.clone()], vec![], false)?;
-            self.dump_column_comments(
-                item,
-                &d.schema,
-                &d.name,
-                &d.owner,
-                d.columns.as_deref(),
-            )?;
-            for rule in d.rules.as_deref().unwrap_or_default() {
-                self.dump_rule(rule, item, &d.schema, &d.name, &d.owner)?;
-            }
-            return Ok(());
+            return self.dump_view_children(item, d);
         }
         let mut create = vec!["CREATE".into()];
         if d.recursive == Some(true) {
@@ -3950,6 +3946,16 @@ impl Builder {
         });
         let drop = vec!["DROP VIEW IF EXISTS".into(), self.item_name(item)];
         self.add_item(item, create, drop, false)?;
+        self.dump_view_children(item, d)
+    }
+
+    /// The column comments, triggers and rules of a view, in the order
+    /// a table has them
+    fn dump_view_children(
+        &mut self,
+        item: &Item,
+        d: &crate::models::View,
+    ) -> Result<(), String> {
         self.dump_column_comments(
             item,
             &d.schema,
@@ -3957,6 +3963,9 @@ impl Builder {
             &d.owner,
             d.columns.as_deref(),
         )?;
+        for trigger in d.triggers.as_deref().unwrap_or_default() {
+            self.dump_trigger(trigger, item, &d.schema, &d.owner)?;
+        }
         for rule in d.rules.as_deref().unwrap_or_default() {
             self.dump_rule(rule, item, &d.schema, &d.name, &d.owner)?;
         }
@@ -6135,6 +6144,7 @@ mod tests {
                 query: Some("SELECT 1".into()),
                 comment: None,
                 security_labels: None,
+                triggers: None,
                 rules: None,
             }),
             dependencies: BTreeSet::new(),
@@ -6188,6 +6198,7 @@ mod tests {
                 query: Some("SELECT 1, 2".into()),
                 comment: None,
                 security_labels: None,
+                triggers: None,
                 rules: None,
             }),
             dependencies: BTreeSet::new(),
@@ -6239,6 +6250,7 @@ mod tests {
                 query: None,
                 comment: None,
                 security_labels: None,
+                triggers: None,
                 rules: Some(vec![crate::models::Rule {
                     name: "no_delete".into(),
                     event: "DELETE".into(),
@@ -6273,6 +6285,62 @@ mod tests {
             .filter_map(|e| e.tag.clone())
             .collect();
         assert_eq!(rules, vec!["active_orders no_delete".to_string()]);
+    }
+
+    /// A view gets its triggers and their comments, as a table does
+    #[test]
+    fn view_emits_triggers() {
+        let item = Item {
+            id: 1,
+            desc: ObjectType::View,
+            definition: Definition::View(
+                serde_json::from_value(serde_json::json!({
+                    "name": "v", "schema": "test", "owner": "app",
+                    "query": "SELECT 1 AS id",
+                    "triggers": [{
+                        "name": "v_ins", "when": "INSTEAD OF",
+                        "events": ["INSERT"], "for_each": "ROW",
+                        "function": "test.v_ins",
+                        "comment": "redirects inserts",
+                    }],
+                }))
+                .unwrap(),
+            ),
+            dependencies: BTreeSet::new(),
+        };
+        let dump = libpgdump::new("t", "UTF-8", "18.0").unwrap();
+        let mut builder = Builder {
+            dump,
+            dump_id_map: HashMap::new(),
+            text_search_last: HashMap::new(),
+            pending_attaches: Vec::new(),
+            index_attaches: IndexAttaches::default(),
+            text_search_ids: HashMap::new(),
+            text_search_refs: Vec::new(),
+            partition_ids: HashMap::new(),
+            superuser: "postgres".into(),
+            calls: Rc::default(),
+        };
+        builder.dump_item(&item).unwrap();
+        let defns: Vec<_> = builder
+            .dump
+            .entries()
+            .iter()
+            .filter(|e| {
+                e.desc == libpgdump::ObjectType::Trigger
+                    || e.desc == libpgdump::ObjectType::Comment
+            })
+            .filter_map(|e| e.defn.clone())
+            .collect();
+        assert_eq!(
+            defns,
+            vec![
+                "CREATE TRIGGER v_ins INSTEAD OF INSERT ON test.v FOR EACH \
+                 ROW EXECUTE FUNCTION test.v_ins();\n",
+                "COMMENT ON TRIGGER v_ins ON test.v IS $$redirects \
+                 inserts$$;\n;\n",
+            ]
+        );
     }
 
     #[test]
