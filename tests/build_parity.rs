@@ -2261,3 +2261,67 @@ fn separates_a_not_valid_domain_check() {
     let level_ok = entry("FUNCTION", "level_ok");
     assert_eq!(deps, [level.dump_id, level_ok.dump_id]);
 }
+
+/// Deviation 110: a comment on a constraint of a domain renders as a
+/// `COMMENT` entry, `COMMENT ON CONSTRAINT c ON DOMAIN d IS ...`, as
+/// pg_dump writes it. A constraint with no name has the name that
+/// PostgreSQL gives it. The comment on a NOT VALID CHECK comes after
+/// the entry of that CHECK
+#[test]
+fn renders_domain_constraint_comments() {
+    let project = project::Project {
+        name: "domains".into(),
+        superuser: "postgres".into(),
+        default_schema: "public".into(),
+        path: std::path::PathBuf::new(),
+        settings: Default::default(),
+        inventory: vec![Item {
+            id: 0,
+            desc: ObjectType::Domain,
+            definition: Definition::Domain(
+                serde_json::from_value(serde_json::json!({
+                    "name": "level", "schema": "test",
+                    "owner": "postgres", "data_type": "integer",
+                    "check_constraints": [
+                        {"nullable": false, "comment": "nn"},
+                        {"expression": "VALUE < 10", "comment": "low"},
+                        {"name": "level_high", "expression": "VALUE > 0",
+                         "not_valid": true, "comment": "high"},
+                    ],
+                }))
+                .unwrap(),
+            ),
+            dependencies: BTreeSet::new(),
+        }],
+    };
+    let output = build::assemble(&project).unwrap();
+    let entry = |desc: &str, tag: &str| {
+        output
+            .dump
+            .entries()
+            .iter()
+            .find(|e| e.desc.as_str() == desc && e.tag.as_deref() == Some(tag))
+            .unwrap_or_else(|| panic!("missing entry {desc} {tag}"))
+    };
+    let level = entry("DOMAIN", "level");
+    let high = entry("CHECK CONSTRAINT", "level level_high");
+    for (name, comment, parent) in [
+        ("level_not_null", "nn", level.dump_id),
+        ("level_check", "low", level.dump_id),
+        ("level_high", "high", high.dump_id),
+    ] {
+        let found =
+            entry("COMMENT", &format!("CONSTRAINT {name} ON DOMAIN level"));
+        let defn = found.defn.as_deref().unwrap_or_default();
+        assert!(
+            defn.starts_with(&format!(
+                "COMMENT ON CONSTRAINT {name} ON DOMAIN test.level \
+                 IS $${comment}$$;"
+            )),
+            "{defn}"
+        );
+        assert_eq!(found.namespace.as_deref(), Some("test"));
+        assert_eq!(found.owner.as_deref(), Some("postgres"));
+        assert_eq!(found.dependencies, [parent]);
+    }
+}

@@ -69,6 +69,10 @@ properties:
             VALID, and only ALTER DOMAIN can add it, so the build writes it
             that way. Absent means valid, the default.
           type: boolean
+        comment:
+          title: Comment
+          description: An optional comment about the constraint.
+          type: string
       oneOf:
         - required: [expression]
           not: {required: [nullable]}
