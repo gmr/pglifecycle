@@ -907,6 +907,13 @@ fn normalized(definition: &Definition) -> Value {
             canonical = Definition::MaterializedView(view);
             &canonical
         }
+        Definition::View(view) => {
+            canonical = Definition::View(crate::models::View {
+                query: view.query.as_deref().map(canonical_query),
+                ..view.clone()
+            });
+            &canonical
+        }
         Definition::Function(function) => {
             canonical = Definition::Function(Function {
                 configuration: function
@@ -1054,12 +1061,12 @@ fn normalized(definition: &Definition) -> Value {
     value
 }
 
-/// The query of a materialized view in the form that pull writes it:
-/// in the `pg_dump` style, with no `;` at the end. Thus a query in
-/// another layout, or with a `;` at the end, is not a change. The
-/// formatter gives the same text when it formats its own text again. A
-/// query that the formatter cannot read is compared with no `;` and no
-/// space at the end.
+/// The query of a view or a materialized view in the form that pull
+/// writes it: in the `pg_dump` style, with no `;` at the end. Thus a
+/// query in another layout, or with a `;` at the end, is not a change.
+/// The formatter gives the same text when it formats its own text
+/// again. A query that the formatter cannot read is compared with no
+/// `;` and no space at the end.
 fn canonical_query(query: &str) -> String {
     let formatted = crate::pull::format_pg_dump(query);
     crate::pull::strip_trailing(formatted.as_deref().unwrap_or(query))
@@ -3027,6 +3034,33 @@ mod tests {
         );
         // a query that the formatter cannot read compares with no `;`
         assert_eq!(view("SELECT FROM WHERE (;"), view("SELECT FROM WHERE ("));
+    }
+
+    /// A view query in another layout, or with a `;` at the end,
+    /// against the form that pull writes
+    #[test]
+    fn view_query_layout_is_not_a_change() {
+        let view = |query: &str| {
+            normalized(&Definition::View(
+                serde_json::from_value(serde_json::json!({
+                    "name": "v", "schema": "test", "owner": "postgres",
+                    "query": query,
+                }))
+                .unwrap(),
+            ))
+        };
+        let pulled = " SELECT id,\n    name\n   FROM test.a\n  \
+                      WHERE (name = 'x'::text)";
+        for written in [
+            "SELECT id, name FROM test.a WHERE (name = 'x'::text)",
+            "select id,\n  name\nfrom test.a\nwhere (name = 'x'::text) ;\n",
+        ] {
+            assert_eq!(view(written), view(pulled), "{written}");
+        }
+        assert_ne!(
+            view("SELECT id FROM test.a WHERE (name = 'x'::text)"),
+            view(pulled)
+        );
     }
 
     #[test]
