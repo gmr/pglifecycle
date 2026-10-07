@@ -381,6 +381,11 @@
 //!     the entry still has no drop statement (see 48). The Python had
 //!     no place for these properties. The test-project has none, thus
 //!     its archive does not change.
+//! 95. A view query that ends with `;` renders with no `;` at the
+//!     end, because the entry adds one, as for a materialized view
+//!     (see 86). The Python wrote the query as it is, thus the entry
+//!     had `;;`. The test-project view query ends with `;`, thus its
+//!     entry has one `;` less.
 //! 107. The `comment` of a composite type attribute renders as a
 //!      `COMMENT ON COLUMN schema.type.attribute` entry that depends
 //!      on the type, as pg_dump writes it. The Python had no field for
@@ -3882,7 +3887,12 @@ impl Builder {
             create.push(format!("WITH ({})", with_options.join(", ")));
         }
         create.push("AS".into());
-        create.push(d.query.clone().unwrap_or_default());
+        // the entry adds the `;` (deviation 95)
+        let query = d.query.as_deref().unwrap_or_default();
+        create.push(match query.trim_end().strip_suffix(';') {
+            Some(query) => query.trim_end_matches(';').to_string(),
+            None => query.to_string(),
+        });
         let drop = vec!["DROP VIEW IF EXISTS".into(), self.item_name(item)];
         self.add_item(item, create, drop, false)?;
         for rule in d.rules.as_deref().unwrap_or_default() {

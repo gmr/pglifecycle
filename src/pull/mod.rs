@@ -1963,6 +1963,18 @@ impl Assembly {
                 .find(|l| l.name == *name)
                 .map(|l| l.comment = Some(comment.clone()))
                 .is_some(),
+            "FOREIGN DATA WRAPPER" => self
+                .foreign_data_wrappers
+                .iter_mut()
+                .find(|w| w.name == *name)
+                .map(|w| w.comment = Some(comment.clone()))
+                .is_some(),
+            "SERVER" => self
+                .servers
+                .iter_mut()
+                .find(|s| s.name == *name)
+                .map(|s| s.comment = Some(comment.clone()))
+                .is_some(),
             "TABLE" | "FOREIGN TABLE" => self
                 .find_table(target)
                 .map(|t| t.comment = Some(comment.clone()))
@@ -3777,6 +3789,49 @@ mod tests {
         assembly.ingest(&dump).unwrap();
         assert_eq!(assembly.remaining.len(), 1);
         assert_eq!(assembly.remaining[0].desc, "COMMENT");
+    }
+
+    /// A comment on a foreign data wrapper or a server goes to the
+    /// comment of that object
+    #[test]
+    fn fdw_and_server_comments_attach() {
+        let mut dump = libpgdump::new("fixtures", "UTF8", "18.0").unwrap();
+        add(
+            &mut dump,
+            OT::ForeignDataWrapper,
+            "",
+            "w",
+            "CREATE FOREIGN DATA WRAPPER w;",
+        );
+        add(
+            &mut dump,
+            OT::Server,
+            "",
+            "s",
+            "CREATE SERVER s FOREIGN DATA WRAPPER w;",
+        );
+        add(
+            &mut dump,
+            OT::Comment,
+            "",
+            "FOREIGN DATA WRAPPER w",
+            "COMMENT ON FOREIGN DATA WRAPPER w IS 'a wrapper';",
+        );
+        add(
+            &mut dump,
+            OT::Comment,
+            "",
+            "SERVER s",
+            "COMMENT ON SERVER s IS 'a server';",
+        );
+        let mut assembly = Assembly::default();
+        assembly.ingest(&dump).unwrap();
+        assert!(assembly.remaining.is_empty());
+        assert_eq!(
+            assembly.foreign_data_wrappers[0].comment.as_deref(),
+            Some("a wrapper")
+        );
+        assert_eq!(assembly.servers[0].comment.as_deref(), Some("a server"));
     }
 
     #[test]

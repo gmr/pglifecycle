@@ -106,6 +106,8 @@ const DEVIATIONS: &[(&str, &str, &str)] = &[
     // deviation 86: the query ends with `;`, which Python rendered as
     // `;;`
     ("MATERIALIZED VIEW", "test", "user_addresses"),
+    // deviation 95: the same for a view
+    ("VIEW", "test", "user_addresses"),
 ];
 
 /// Deviation 17: entries whose *drop* statement was corrected, with
@@ -317,6 +319,8 @@ const CORRECTED: &[(&str, &str, &str, &str)] = &[
         "user_addresses",
         "ON b.user_id = a.id;\n",
     ),
+    // deviation 95: one `;` at the end, also asserted below
+    ("VIEW", "test", "user_addresses", "country = 'US';\n"),
 ];
 
 /// (tag, comment) for COMMENT ON COLUMN entries: build now emits these
@@ -1466,6 +1470,15 @@ fn matches_python_build_output() {
         .map(|(_, _, defn, ..)| defn.as_str())
         .unwrap();
     assert!(defn.ends_with("ON b.user_id = a.id;\n"), "{defn}");
+
+    // deviation 95: the view query has one `;` at the end
+    let key = entry_key("VIEW", "test", "user_addresses");
+    let defn = rust_tuples
+        .iter()
+        .find(|(k, ..)| k == &key)
+        .map(|(_, _, defn, ..)| defn.as_str())
+        .unwrap();
+    assert!(defn.ends_with("country = 'US';\n"), "{defn}");
 
     // comments Python lost to the text search tag bug
     for (tag, comment) in RECOVERED_COMMENTS {
