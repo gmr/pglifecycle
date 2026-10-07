@@ -2338,20 +2338,20 @@ impl Assembly {
     }
 
     /// pg_dump writes the comment of a composite type attribute as
-    /// `COMMENT ON COLUMN schema.type.attribute`
+    /// `COMMENT ON COLUMN schema.type.attribute`. The ddl layer joins
+    /// `schema.type` with no quotes, thus a name with a `.` makes the
+    /// split ambiguous: compare the joined name.
     fn apply_type_attribute_comment(
         &mut self,
         target: &QualifiedName,
         comment: &str,
     ) -> bool {
-        let Some((schema, name)) =
-            target.schema.as_ref().and_then(|r| r.split_once('.'))
-        else {
+        let Some(relation) = target.schema.as_deref() else {
             return false;
         };
         self.types
             .iter_mut()
-            .filter(|t| t.schema == schema && t.name == name)
+            .filter(|t| format!("{}.{}", t.schema, t.name) == relation)
             .flat_map(|t| t.columns.iter_mut().flatten())
             .find(|c| c.name == target.name)
             .map(|c| c.comment = Some(comment.to_string()))
@@ -3857,6 +3857,38 @@ mod tests {
         assert!(assembly.remaining.is_empty(), "{:?}", assembly.remaining);
         let columns = assembly.types[0].columns.as_ref().unwrap();
         assert_eq!(columns[0].comment, None);
+        assert_eq!(columns[1].comment.as_deref(), Some("the second"));
+    }
+
+    /// A `.` in the schema name does not split the type name
+    #[test]
+    fn type_attribute_comment_with_dotted_schema() {
+        let mut dump = libpgdump::new("fixtures", "UTF8", "18.0").unwrap();
+        add(
+            &mut dump,
+            OT::Schema,
+            "",
+            "tenant.eu",
+            "CREATE SCHEMA \"tenant.eu\";",
+        );
+        add(
+            &mut dump,
+            OT::Type,
+            "tenant.eu",
+            "pair",
+            "CREATE TYPE \"tenant.eu\".pair AS (a integer, b text);",
+        );
+        add(
+            &mut dump,
+            OT::Comment,
+            "tenant.eu",
+            "COLUMN pair.b",
+            "COMMENT ON COLUMN \"tenant.eu\".pair.b IS 'the second';",
+        );
+        let mut assembly = Assembly::default();
+        assembly.ingest(&dump).unwrap();
+        assert!(assembly.remaining.is_empty(), "{:?}", assembly.remaining);
+        let columns = assembly.types[0].columns.as_ref().unwrap();
         assert_eq!(columns[1].comment.as_deref(), Some("the second"));
     }
 
