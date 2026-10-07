@@ -391,6 +391,11 @@
 //!      INSTEAD OF trigger can only be on a view. The Python had no
 //!      place for the triggers of a view. The test-project has none,
 //!      thus its archive does not change.
+//! 104. A `comment` in the `columns` of a view or a materialized view
+//!      renders as a `COMMENT ON COLUMN` entry after the view, tagged as
+//!      the comment on a table column is. The Python did not render
+//!      them. The test-project materialized view has two, thus its
+//!      archive has two more entries.
 //! 107. The `comment` of a composite type attribute renders as a
 //!      `COMMENT ON COLUMN schema.type.attribute` entry that depends
 //!      on the type, as pg_dump writes it. The Python had no field for
@@ -1927,7 +1932,14 @@ impl Builder {
             unreachable!()
         };
         if let Some(sql) = &d.sql {
-            return self.add_item(item, vec![sql.clone()], vec![], false);
+            self.add_item(item, vec![sql.clone()], vec![], false)?;
+            return self.dump_column_comments(
+                item,
+                &d.schema,
+                &d.name,
+                &d.owner,
+                d.columns.as_deref(),
+            );
         }
         let mut create = vec![
             "CREATE".into(),
@@ -1971,8 +1983,54 @@ impl Builder {
             self.item_name(item),
         ];
         self.add_item(item, create, drop, false)?;
+        self.dump_column_comments(
+            item,
+            &d.schema,
+            &d.name,
+            &d.owner,
+            d.columns.as_deref(),
+        )?;
         for index in d.indexes.as_deref().unwrap_or_default() {
             self.dump_index(index, item, &d.schema, &d.owner, None)?;
+        }
+        Ok(())
+    }
+
+    /// The COMMENT entry of each comment in the `columns` of a view or
+    /// a materialized view, after the view, as pg_dump writes them
+    /// (deviation 104)
+    fn dump_column_comments(
+        &mut self,
+        item: &Item,
+        schema: &str,
+        name: &str,
+        owner: &str,
+        columns: Option<&[ViewColumn]>,
+    ) -> Result<(), String> {
+        let dump_id = self.dump_id_map[&item.id];
+        for column in columns.unwrap_or_default() {
+            let ViewColumn::Detailed {
+                name: column,
+                comment: Some(comment),
+            } = column
+            else {
+                continue;
+            };
+            let target = format!(
+                "{}.{}.{}",
+                quote_ident(schema),
+                quote_ident(name),
+                quote_ident(column)
+            );
+            self.add_comment(
+                "COLUMN",
+                schema,
+                &format!("{name}.{column}"),
+                owner,
+                dump_id,
+                comment,
+                Some(target),
+            )?;
         }
         Ok(())
     }
@@ -3952,12 +4010,20 @@ impl Builder {
         self.dump_view_children(item, d)
     }
 
-    /// The triggers and rules of a view, in the order a table has them
+    /// The column comments, triggers and rules of a view, in the order
+    /// a table has them
     fn dump_view_children(
         &mut self,
         item: &Item,
         d: &crate::models::View,
     ) -> Result<(), String> {
+        self.dump_column_comments(
+            item,
+            &d.schema,
+            &d.name,
+            &d.owner,
+            d.columns.as_deref(),
+        )?;
         for trigger in d.triggers.as_deref().unwrap_or_default() {
             self.dump_trigger(trigger, item, &d.schema, &d.owner)?;
         }

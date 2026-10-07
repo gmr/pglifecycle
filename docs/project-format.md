@@ -253,6 +253,13 @@ replica_identity: FULL
   have an `INSTEAD OF` trigger. A materialized view cannot have
   triggers.
 
+- The `columns` of a view or a materialized view are the names of its
+  columns, in order (`CREATE VIEW v (a, b) AS ...`). A list that does
+  not give the name of each column renames the columns. A comment on a
+  column lives in its entry, which is then a mapping with `name` and
+  `comment`. `pull` writes the list only for a view that has a comment
+  on a column. It gives each column the name that the query gives it.
+
 - Tables and views carry `rules`. A rule's `commands` are absent for
   `DO INSTEAD NOTHING`. A view's internal `_RETURN` rule is its query,
   never a rule.

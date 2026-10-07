@@ -26,11 +26,10 @@ to. This page links to those descriptions and does not repeat them.
 the project without these entries. See
 [Unsupported dump entries](commands.md#unsupported-dump-entries).
 
-- **Comments and security labels with no place in the model.** A
-  comment on a column of a view or of a materialized view goes to
-  `remaining.yaml`. A security label on a column of a view or of a
-  materialized view also goes there. Use
-  `--no-security-labels` to leave the labels out of the dump.
+- **Security labels with no place in the model.** A security label
+  on a column of a view or of a materialized view goes to
+  `remaining.yaml`. Use `--no-security-labels` to leave the labels out
+  of the dump.
 
 ## Build
 

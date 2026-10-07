@@ -14,7 +14,7 @@ mod database;
 mod dependents;
 mod diff;
 mod privileges;
-mod routine_body;
+pub(crate) mod routine_body;
 mod serial;
 
 pub(crate) use serial::integer_type as serial_integer_type;

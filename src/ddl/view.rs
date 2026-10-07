@@ -103,6 +103,92 @@ fn view_columns(node: &Node, src: &str) -> Option<Vec<ViewColumn>> {
     (!columns.is_empty()).then_some(columns)
 }
 
+/// The names of the output columns of a query, as PostgreSQL gives
+/// them: the name after `AS` (or a label with no `AS`), or the last
+/// name of a column reference. `pg_get_viewdef` writes `AS` for each
+/// other expression. None when a name is not known this way (`*`, an
+/// expression with no label, a query in parentheses, VALUES): then the
+/// caller cannot compare the columns
+pub(crate) fn query_column_names(query: &str) -> Option<Vec<String>> {
+    use crate::deploy::routine_body::identifier;
+    let sql = format!("{};", query.trim().trim_end_matches(';'));
+    let mut parser = tree_sitter::Parser::new();
+    parser
+        .set_language(&tree_sitter_postgres::LANGUAGE.into())
+        .ok()?;
+    let tree = parser.parse(&sql, None)?;
+    let root = tree.root_node();
+    if root.has_error() {
+        return None;
+    }
+    let statement = root.find("SelectStmt")?;
+    let query = statement.child_of_kind("select_no_parens")?;
+    // a WITH query has its outer query in a select_clause
+    let mut select = query.child_of_kind("simple_select").or_else(|| {
+        query
+            .child_of_kind("select_clause")?
+            .child_of_kind("simple_select")
+    })?;
+    // a set operation has the names of its first query
+    while let Some(first) = select.child_of_kind("select_clause") {
+        select = first.child_of_kind("simple_select")?;
+    }
+    select.child_of_kind("kw_select")?;
+    let list = select
+        .child_of_kind("opt_target_list")
+        .and_then(|list| list.child_of_kind("target_list"))
+        .or_else(|| select.child_of_kind("target_list"))?;
+    let mut targets = Vec::new();
+    target_elements(list, &mut targets);
+    targets
+        .iter()
+        .map(|target| {
+            if let Some(label) = target
+                .child_of_kind("ColLabel")
+                .or_else(|| target.child_of_kind("BareColLabel"))
+            {
+                return Some(identifier(label.text(&sql)));
+            }
+            // a column reference in its expression, with no operator
+            let mut node = target.child_of_kind("a_expr")?;
+            while matches!(node.kind(), "a_expr" | "c_expr")
+                && node.child_count() == 1
+            {
+                node = node.child(0)?;
+            }
+            if node.kind() != "columnref" {
+                return None;
+            }
+            let name = match node.child_of_kind("indirection") {
+                Some(indirection) => {
+                    // the last element must be a name, not a subscript
+                    // or `*`
+                    let last = indirection
+                        .child(indirection.child_count().checked_sub(1)?)?;
+                    last.child_of_kind("attr_name")?.text(&sql)
+                }
+                None => node.child_of_kind("ColId")?.text(&sql),
+            };
+            Some(identifier(name))
+        })
+        .collect()
+}
+
+/// The `target_el` nodes of a `target_list`, which the grammar nests
+fn target_elements<'tree>(
+    list: tree_sitter::Node<'tree>,
+    targets: &mut Vec<tree_sitter::Node<'tree>>,
+) {
+    let mut cursor = list.walk();
+    for child in list.children(&mut cursor) {
+        match child.kind() {
+            "target_list" => target_elements(child, targets),
+            "target_el" => targets.push(child),
+            _ => {}
+        }
+    }
+}
+
 /// Parse a PostgreSQL boolean reloption value. PostgreSQL accepts
 /// `true/t/on/yes/y/1` and `false/f/off/no/n/0` (case-insensitively)
 /// for boolean reloptions; a bare option key round-trips through
@@ -155,6 +241,24 @@ mod tests {
                 ViewColumn::Name("a".into()),
                 ViewColumn::Name("b".into())
             ])
+        );
+    }
+
+    #[test]
+    fn query_column_names_of_a_with_query() {
+        assert_eq!(
+            query_column_names(
+                "WITH t AS (SELECT 1 AS inner_col) SELECT inner_col AS a, \
+                 t.inner_col FROM t"
+            ),
+            Some(vec!["a".into(), "inner_col".into()])
+        );
+        assert_eq!(
+            query_column_names(
+                "WITH t AS (SELECT 1 AS x) SELECT x AS a FROM t \
+                 UNION SELECT 2"
+            ),
+            Some(vec!["a".into()])
         );
     }
 
