@@ -20,6 +20,7 @@ mod view;
 pub use misc::TextSearchObject;
 pub use split::split_statements;
 pub(crate) use table::apply_constraint;
+pub(crate) use view::query_column_names;
 
 use tree_sitter::Node;
 

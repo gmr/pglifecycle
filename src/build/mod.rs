@@ -386,11 +386,11 @@
 //!     (see 86). The Python wrote the query as it is, thus the entry
 //!     had `;;`. The test-project view query ends with `;`, thus its
 //!     entry has one `;` less.
-//! 104. The `column_comments` of a view or a materialized view render
-//!      as a `COMMENT ON COLUMN` entry for each column after the view,
-//!      tagged as the comment on a table column is. The Python had no
-//!      place for them. The test-project has none, thus its archive
-//!      does not change.
+//! 104. A `comment` in the `columns` of a view or a materialized view
+//!      renders as a `COMMENT ON COLUMN` entry after the view, tagged as
+//!      the comment on a table column is. The Python did not render
+//!      them. The test-project materialized view has two, thus its
+//!      archive has two more entries.
 
 mod acls;
 mod calls;
@@ -1877,7 +1877,7 @@ impl Builder {
                 &d.schema,
                 &d.name,
                 &d.owner,
-                d.column_comments.as_ref(),
+                d.columns.as_deref(),
             );
         }
         let mut create = vec![
@@ -1927,7 +1927,7 @@ impl Builder {
             &d.schema,
             &d.name,
             &d.owner,
-            d.column_comments.as_ref(),
+            d.columns.as_deref(),
         )?;
         for index in d.indexes.as_deref().unwrap_or_default() {
             self.dump_index(index, item, &d.schema, &d.owner, None)?;
@@ -1935,8 +1935,8 @@ impl Builder {
         Ok(())
     }
 
-    /// The COMMENT entry of each column comment of a view or a
-    /// materialized view, after the view, as pg_dump writes them
+    /// The COMMENT entry of each comment in the `columns` of a view or
+    /// a materialized view, after the view, as pg_dump writes them
     /// (deviation 104)
     fn dump_column_comments(
         &mut self,
@@ -1944,10 +1944,17 @@ impl Builder {
         schema: &str,
         name: &str,
         owner: &str,
-        comments: Option<&BTreeMap<String, String>>,
+        columns: Option<&[ViewColumn]>,
     ) -> Result<(), String> {
         let dump_id = self.dump_id_map[&item.id];
-        for (column, comment) in comments.into_iter().flatten() {
+        for column in columns.unwrap_or_default() {
+            let ViewColumn::Detailed {
+                name: column,
+                comment: Some(comment),
+            } = column
+            else {
+                continue;
+            };
             let target = format!(
                 "{}.{}.{}",
                 quote_ident(schema),
@@ -3891,7 +3898,7 @@ impl Builder {
                 &d.schema,
                 &d.name,
                 &d.owner,
-                d.column_comments.as_ref(),
+                d.columns.as_deref(),
             )?;
             for rule in d.rules.as_deref().unwrap_or_default() {
                 self.dump_rule(rule, item, &d.schema, &d.name, &d.owner)?;
@@ -3935,7 +3942,7 @@ impl Builder {
             &d.schema,
             &d.name,
             &d.owner,
-            d.column_comments.as_ref(),
+            d.columns.as_deref(),
         )?;
         for rule in d.rules.as_deref().unwrap_or_default() {
             self.dump_rule(rule, item, &d.schema, &d.name, &d.owner)?;
@@ -6114,7 +6121,6 @@ mod tests {
                 security_barrier: Some(true),
                 query: Some("SELECT 1".into()),
                 comment: None,
-                column_comments: None,
                 security_labels: None,
                 rules: None,
             }),
@@ -6168,7 +6174,6 @@ mod tests {
                 security_barrier: None,
                 query: Some("SELECT 1, 2".into()),
                 comment: None,
-                column_comments: None,
                 security_labels: None,
                 rules: None,
             }),
@@ -6220,7 +6225,6 @@ mod tests {
                 security_barrier: None,
                 query: None,
                 comment: None,
-                column_comments: None,
                 security_labels: None,
                 rules: Some(vec![crate::models::Rule {
                     name: "no_delete".into(),

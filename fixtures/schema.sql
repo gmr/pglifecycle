@@ -219,9 +219,17 @@ COMMENT ON COLUMN users.display_name IS
     'Optional user-facing display name';
 
 -- Per-object COMMENT: a column of a view and of a materialized view,
--- which go into the `column_comments` of the view
+-- which go into the `columns` of the view. pull names each column from
+-- the query: an expression with no AS name ("?column?") and a quoted
+-- name show that the names are correct
 COMMENT ON COLUMN active_users.name IS 'The name of the user';
 COMMENT ON COLUMN user_states.total IS 'The number of users';
+
+CREATE VIEW described_users AS
+    SELECT id, length(name) + 1, surname AS "Family Name" FROM users;
+
+COMMENT ON COLUMN described_users."?column?" IS 'One more than the length of the name';
+COMMENT ON COLUMN described_users."Family Name" IS 'The surname';
 
 -- Bare `public` schema reference, exercising case-folding of an
 -- unquoted `public` identifier. Uses a SERIAL primary key: pg_dump

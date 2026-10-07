@@ -74,12 +74,6 @@ properties:
     title: Comment
     description: An optional comment about the materialized view.
     type: string
-  column_comments:
-    title: Column Comments
-    description: Comments on the columns of the materialized view, by column name.
-    type: object
-    additionalProperties:
-      type: string
   security_labels:
     title: Security Labels
     $package_schema: security_labels

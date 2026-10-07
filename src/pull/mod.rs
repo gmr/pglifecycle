@@ -2327,7 +2327,7 @@ impl Assembly {
     /// `COMMENT ON COLUMN schema.table.column` — the ddl layer puts
     /// everything before the column into `target.schema`. The comment
     /// on a column of a view or a materialized view goes into its
-    /// `column_comments`.
+    /// `columns` (see [`Self::view_column`]).
     fn apply_column_comment(
         &mut self,
         target: &QualifiedName,
@@ -2337,32 +2337,66 @@ impl Assembly {
             column.comment = Some(comment.to_string());
             return true;
         }
-        let Some(relation) = &target.schema else {
+        let Some(column) = self.view_column(target) else {
             return false;
         };
+        let (models::ViewColumn::Name(name)
+        | models::ViewColumn::Detailed { name, .. }) = column.clone();
+        *column = models::ViewColumn::Detailed {
+            name,
+            comment: Some(comment.to_string()),
+        };
+        true
+    }
+
+    /// The entry in the `columns` of the view or the materialized view
+    /// that `COMMENT ON COLUMN` names. The list must name each column,
+    /// else it renames the columns, thus a view with no list gets the
+    /// names that its query gives (`pg_get_viewdef` writes `AS` for
+    /// each name that a column reference does not give). None when the
+    /// query does not give each name or no column has the name.
+    fn view_column(
+        &mut self,
+        target: &QualifiedName,
+    ) -> Option<&mut models::ViewColumn> {
+        let relation = target.schema.as_ref()?;
         let (schema, name) =
             relation.split_once('.').unwrap_or(("", relation));
-        let comments = match self
+        let (columns, query) = match self
             .views
-            .iter_mut()
-            .find(|v| v.schema == schema && v.name == name)
+            .iter()
+            .position(|v| v.schema == schema && v.name == name)
         {
-            Some(view) => &mut view.column_comments,
+            Some(index) => {
+                let view = &mut self.views[index];
+                (&mut view.columns, view.query.as_deref())
+            }
             None => {
                 let relation = QualifiedName {
                     schema: Some(schema.to_string()),
                     name: name.to_string(),
                 };
-                match self.find_materialized_view(&relation) {
-                    Some(view) => &mut view.column_comments,
-                    None => return false,
-                }
+                let view = self.find_materialized_view(&relation)?;
+                (&mut view.columns, view.query.as_deref())
             }
         };
-        comments
-            .get_or_insert_default()
-            .insert(target.name.clone(), comment.to_string());
-        true
+        let names = match columns {
+            Some(_) => None,
+            None => Some(query.and_then(ddl::query_column_names)?),
+        };
+        if let Some(names) = names {
+            if !names.contains(&target.name) {
+                return None;
+            }
+            *columns = Some(
+                names.into_iter().map(models::ViewColumn::Name).collect(),
+            );
+        }
+        columns.as_mut()?.iter_mut().find(|column| {
+            let (models::ViewColumn::Name(name)
+            | models::ViewColumn::Detailed { name, .. }) = column;
+            *name == target.name
+        })
     }
 
     /// The table column that `COMMENT ON COLUMN` or `SECURITY LABEL ON
@@ -3799,7 +3833,7 @@ mod tests {
     }
 
     /// A comment on a column of a view or a materialized view goes into
-    /// the `column_comments` of the view
+    /// its `columns`, which name each column that the query gives
     #[test]
     fn view_column_comments_go_to_the_view() {
         let mut dump = libpgdump::new("fixtures", "UTF8", "18.0").unwrap();
@@ -3809,7 +3843,8 @@ mod tests {
             OT::View,
             "s",
             "v",
-            "CREATE VIEW s.v AS SELECT 1 AS a;",
+            "CREATE VIEW s.v AS SELECT t.a, (t.a + 1) AS \"?column?\", \
+             t.\"Mixed\" FROM s.t;",
         );
         add(
             &mut dump,
@@ -3822,8 +3857,15 @@ mod tests {
             &mut dump,
             OT::Comment,
             "s",
-            "COLUMN v.a",
-            "COMMENT ON COLUMN s.v.a IS 'view column';",
+            "COLUMN v.Mixed",
+            "COMMENT ON COLUMN s.v.\"Mixed\" IS 'view column';",
+        );
+        add(
+            &mut dump,
+            OT::Comment,
+            "s",
+            "COLUMN v.?column?",
+            "COMMENT ON COLUMN s.v.\"?column?\" IS 'expression';",
         );
         add(
             &mut dump,
@@ -3835,20 +3877,64 @@ mod tests {
         let mut assembly = Assembly::default();
         assembly.ingest(&dump).unwrap();
         assert!(assembly.remaining.is_empty());
-        let comments = |c: &Option<BTreeMap<String, String>>| {
-            c.clone()
-                .unwrap_or_default()
-                .into_iter()
-                .collect::<Vec<_>>()
-        };
+        let detailed =
+            |name: &str, comment: &str| models::ViewColumn::Detailed {
+                name: name.into(),
+                comment: Some(comment.into()),
+            };
         assert_eq!(
-            comments(&assembly.views[0].column_comments),
-            [("a".to_string(), "view column".to_string())]
+            assembly.views[0].columns,
+            Some(vec![
+                models::ViewColumn::Name("a".into()),
+                detailed("?column?", "expression"),
+                detailed("Mixed", "view column"),
+            ])
         );
         assert_eq!(
-            comments(&assembly.materialized_views[0].column_comments),
-            [("b".to_string(), "matview column".to_string())]
+            assembly.materialized_views[0].columns,
+            Some(vec![detailed("b", "matview column")])
         );
+    }
+
+    /// A comment on a view column goes to `remaining.yaml` when the
+    /// query does not give the name of each column, or no column has
+    /// the name. The view then has no `columns`.
+    #[test]
+    fn unnamed_view_column_comments_remain() {
+        let mut dump = libpgdump::new("fixtures", "UTF8", "18.0").unwrap();
+        add(&mut dump, OT::Schema, "", "s", "CREATE SCHEMA s;");
+        add(
+            &mut dump,
+            OT::View,
+            "s",
+            "v",
+            "CREATE VIEW s.v AS SELECT t.a + 1, t.b FROM s.t;",
+        );
+        add(
+            &mut dump,
+            OT::View,
+            "s",
+            "w",
+            "CREATE VIEW s.w AS SELECT t.a FROM s.t;",
+        );
+        add(
+            &mut dump,
+            OT::Comment,
+            "s",
+            "COLUMN v.b",
+            "COMMENT ON COLUMN s.v.b IS 'unnamed sibling';",
+        );
+        add(
+            &mut dump,
+            OT::Comment,
+            "s",
+            "COLUMN w.z",
+            "COMMENT ON COLUMN s.w.z IS 'no such column';",
+        );
+        let mut assembly = Assembly::default();
+        assembly.ingest(&dump).unwrap();
+        assert_eq!(assembly.remaining.len(), 2);
+        assert!(assembly.views.iter().all(|v| v.columns.is_none()));
     }
 
     /// A comment on a foreign data wrapper or a server goes to the
