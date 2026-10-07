@@ -548,6 +548,8 @@ CREATE FOREIGN DATA WRAPPER gate_fdw OPTIONS (debug 'true');
 CREATE SERVER gate_srv FOREIGN DATA WRAPPER gate_fdw
     OPTIONS (host 'h', dbname 'w');
 CREATE USER MAPPING FOR postgres SERVER gate_srv OPTIONS (usr 'u');
+COMMENT ON FOREIGN DATA WRAPPER gate_fdw IS 'A wrapper with no handler';
+COMMENT ON SERVER gate_srv IS 'A server with no remote';
 -- a user mapping on a second server is a second archive entry of the
 -- same item, which deploy also makes
 CREATE SERVER gate_srv_b FOREIGN DATA WRAPPER gate_fdw;
