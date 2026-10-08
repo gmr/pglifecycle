@@ -274,9 +274,13 @@ fn parse(count: usize, stdout: &str, stderr: &str) -> Vec<Deparsed> {
         .map(|n| match deparsed.remove(&n) {
             Some(query) => Ok(query),
             None => {
-                let detail = errors
-                    .get(&n)
-                    .filter(|text| !text.trim().is_empty())
+                // a session error, such as SET LOCAL ROLE to a missing
+                // role, aborts the transaction and is the real cause
+                let detail = Some(&session)
+                    .filter(|text| text.contains("ERROR:"))
+                    .or_else(|| {
+                        errors.get(&n).filter(|text| !text.trim().is_empty())
+                    })
                     .unwrap_or(&session)
                     .trim()
                     .to_string();
@@ -404,5 +408,19 @@ mod tests {
             parse(1, "", ""),
             vec![Err((String::from("psql gave no result"), String::new()))]
         );
+    }
+
+    /// An error in the session setup aborts the transaction; it is the
+    /// reason for each query, not the errors that come after it
+    #[test]
+    fn prefers_a_session_setup_error() {
+        let stderr = "psql:d.sql:3: ERROR:  role \"x\" does not exist\n\
+                      pglifecycle_deparse 0\n\
+                      psql:d.sql:6: ERROR:  current transaction is \
+                      aborted\n";
+        let Err((reason, _)) = &parse(1, "", stderr)[0] else {
+            panic!("expected an error");
+        };
+        assert_eq!(reason, "role \"x\" does not exist");
     }
 }
