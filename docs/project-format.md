@@ -249,16 +249,17 @@ replica_identity: FULL
   foreign key and NOT NULL constraints live in `constraint_comments`,
   keyed by constraint name.
 
+- The `columns` of a view or a materialized view are the names of its
+  columns, in order (`CREATE VIEW v (a, b) AS ...`). A list that does
+  not give the name of each column renames the columns. The comment
+  and the security labels of a column live in its entry, which is then
+  a mapping with `name`, `comment` and `security_labels`. `pull` writes
+  the list only for a view that has a comment or a label on a column.
+  It gives each column the name that the query gives it.
+
 - Tables and views carry `triggers`, with the same fields. A view can
   have an `INSTEAD OF` trigger. A materialized view cannot have
   triggers.
-
-- The `columns` of a view or a materialized view are the names of its
-  columns, in order (`CREATE VIEW v (a, b) AS ...`). A list that does
-  not give the name of each column renames the columns. A comment on a
-  column lives in its entry, which is then a mapping with `name` and
-  `comment`. `pull` writes the list only for a view that has a comment
-  on a column. It gives each column the name that the query gives it.
 
 - Tables and views carry `rules`. A rule's `commands` are absent for
   `DO INSTEAD NOTHING`. A view's internal `_RETURN` rule is its query,
@@ -607,6 +608,22 @@ role_settings:
   with `shared_preload_libraries`. `pull` writes the field only for an
   object that has labels, thus `pull --no-security-labels` gives a
   project that does not manage labels.
+- A view and a materialized view keep the labels of a column in the
+  entry of that column in `columns`, as in `security_labels`. An entry
+  with no `security_labels` does not manage its labels, and an entry
+  with `{}` has no labels.
+
+```yaml
+---
+name: customer_emails
+schema: app
+owner: postgres
+columns:
+  - name: email
+    security_labels:
+      anon: MASKED WITH VALUE NULL
+query: SELECT email FROM app.customers
+```
 
 ```yaml
 ---

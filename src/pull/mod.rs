@@ -1700,21 +1700,30 @@ impl Assembly {
                 target,
                 provider,
                 label,
-            } => match self.security_labels_of(
-                &on,
-                &target,
-                entry.namespace.as_deref(),
-            ) {
-                Some(labels) => set_security_label(labels, provider, label),
+            } => {
+                let namespace = entry.namespace.as_deref();
+                let applied =
+                    match self.security_labels_of(&on, &target, namespace) {
+                        Some(labels) => {
+                            set_security_label(labels, provider, label);
+                            true
+                        }
+                        None => {
+                            on == "COLUMN"
+                                && self.set_view_column_label(
+                                    &target, namespace, provider, label,
+                                )
+                        }
+                    };
                 // as for a comment, a label with nowhere to go keeps
                 // its entry
-                None => {
+                if !applied {
                     log::warn!(
                         "Security label on unmatched object: {on} {target}"
                     );
                     self.push_remaining(entry);
                 }
-            },
+            }
             Statement::Acl(acl) => self.apply_acl(&acl),
             Statement::RoleMembership { .. }
             | Statement::CreateRole(_)
@@ -2254,6 +2263,23 @@ impl Assembly {
         }
     }
 
+    /// Set the label of `provider` on the column of a view or of a
+    /// materialized view that `SECURITY LABEL ON COLUMN` names (see
+    /// [`Self::view_column`]). False when no view column has that name.
+    fn set_view_column_label(
+        &mut self,
+        target: &QualifiedName,
+        namespace: Option<&str>,
+        provider: String,
+        label: Option<String>,
+    ) -> bool {
+        let Some((_, labels)) = self.view_column(target, namespace) else {
+            return false;
+        };
+        set_security_label(labels, provider, label);
+        true
+    }
+
     /// `COMMENT ON FUNCTION schema.fn(args)` — match the full identity
     /// signature so overloaded functions are not conflated; fall back
     /// to the base name only when it is unambiguous
@@ -2359,20 +2385,16 @@ impl Assembly {
         if self.apply_type_attribute_comment(target, comment, namespace) {
             return true;
         }
-        let Some(column) = self.view_column(target, namespace) else {
+        let Some((column, _)) = self.view_column(target, namespace) else {
             return false;
         };
-        let (models::ViewColumn::Name(name)
-        | models::ViewColumn::Detailed { name, .. }) = column.clone();
-        *column = models::ViewColumn::Detailed {
-            name,
-            comment: Some(comment.to_string()),
-        };
+        *column = Some(comment.to_string());
         true
     }
 
-    /// The entry in the `columns` of the view or the materialized view
-    /// that `COMMENT ON COLUMN` names. The list must name each column,
+    /// The comment and the labels of the entry in the `columns` of the
+    /// view or the materialized view that `COMMENT ON COLUMN` or
+    /// `SECURITY LABEL ON COLUMN` names. The list must name each column,
     /// else it renames the columns, thus a view with no list gets the
     /// names that its query gives (`pg_get_viewdef` writes `AS` for
     /// each name that a column reference does not give). None when the
@@ -2381,7 +2403,8 @@ impl Assembly {
         &mut self,
         target: &QualifiedName,
         namespace: Option<&str>,
-    ) -> Option<&mut models::ViewColumn> {
+    ) -> Option<(&mut Option<String>, &mut Option<models::SecurityLabels>)>
+    {
         let relation = target.schema.as_deref()?;
         let (schema, name) = split_relation(relation, namespace);
         let schema = schema.unwrap_or_default();
@@ -2415,11 +2438,26 @@ impl Assembly {
                 names.into_iter().map(models::ViewColumn::Name).collect(),
             );
         }
-        columns.as_mut()?.iter_mut().find(|column| {
+        let column = columns.as_mut()?.iter_mut().find(|column| {
             let (models::ViewColumn::Name(name)
             | models::ViewColumn::Detailed { name, .. }) = column;
             *name == target.name
-        })
+        })?;
+        if let models::ViewColumn::Name(name) = column {
+            *column = models::ViewColumn::Detailed {
+                name: std::mem::take(name),
+                comment: None,
+                security_labels: None,
+            };
+        }
+        match column {
+            models::ViewColumn::Detailed {
+                comment,
+                security_labels,
+                ..
+            } => Some((comment, security_labels)),
+            models::ViewColumn::Name(_) => None,
+        }
     }
 
     /// pg_dump writes the comment of a composite type attribute as
@@ -4084,6 +4122,7 @@ mod tests {
             |name: &str, comment: &str| models::ViewColumn::Detailed {
                 name: name.into(),
                 comment: Some(comment.into()),
+                security_labels: None,
             };
         assert_eq!(
             assembly.views[0].columns,
@@ -5423,6 +5462,20 @@ mod tests {
         );
         add(
             &mut dump,
+            OT::View,
+            "s",
+            "v",
+            "CREATE VIEW s.v AS SELECT 1 AS c;",
+        );
+        add(
+            &mut dump,
+            OT::MaterializedView,
+            "s",
+            "m",
+            "CREATE MATERIALIZED VIEW s.m AS SELECT 1 AS c WITH NO DATA;",
+        );
+        add(
+            &mut dump,
             OT::EventTrigger,
             "",
             "et",
@@ -5434,6 +5487,8 @@ mod tests {
             ("TABLE t", "s", "TABLE s.t"),
             ("COLUMN t.secret", "s", "COLUMN s.t.secret"),
             ("FUNCTION f(integer)", "s", "FUNCTION s.f(integer)"),
+            ("VIEW v", "s", "COLUMN s.v.c"),
+            ("MATERIALIZED VIEW m", "s", "COLUMN s.m.c"),
             ("EVENT TRIGGER et", "", "EVENT TRIGGER et"),
         ];
         for (tag, namespace, on) in labels {
@@ -5477,6 +5532,13 @@ mod tests {
             assembly.functions[0].security_labels,
             Some(expected.clone())
         );
+        let columns = Some(vec![models::ViewColumn::Detailed {
+            name: "c".into(),
+            comment: None,
+            security_labels: Some(expected.clone()),
+        }]);
+        assert_eq!(assembly.views[0].columns, columns);
+        assert_eq!(assembly.materialized_views[0].columns, columns);
         assert_eq!(
             assembly.event_triggers[0].security_labels,
             Some(expected.clone())
@@ -5547,9 +5609,11 @@ mod tests {
                 // the label names the function by its signature, so
                 // that it identifies one overload
                 entry("f", "FUNCTION s.f(IN a integer)"),
+                entry("m.c", "COLUMN s.m.c"),
                 entry("s", "SCHEMA s"),
                 entry("t", "TABLE s.t"),
                 entry("t.secret", "COLUMN s.t.secret"),
+                entry("v.c", "COLUMN s.v.c"),
             ]
         );
     }

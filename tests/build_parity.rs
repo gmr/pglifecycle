@@ -901,7 +901,12 @@ fn outside_items() -> Vec<Item> {
                     "schema": "test",
                     "owner": "postgres",
                     "query": "SELECT 1 AS \"Has Space\"",
-                    "columns": [{"name": "Has Space", "comment": "it's spaced"}],
+                    // deviation 116
+                    "columns": [{
+                        "name": "Has Space",
+                        "comment": "it's spaced",
+                        "security_labels": {"dummy": "it's"},
+                    }],
                 }))
                 .unwrap(),
             ),
@@ -1321,6 +1326,17 @@ const OUTSIDE_CORRECTED: &[(&str, &str, &str, &str, &str)] = &[
         "named.Has Space",
         "COMMENT ON COLUMN test.named.\"Has Space\" IS $$it's \
          spaced$$;\n;\n",
+        "",
+    ),
+    // deviation 116: the labels in the `columns` of a view or a
+    // materialized view are a SECURITY LABEL entry after the view, as
+    // those of a table column. The Python did not render them
+    (
+        "SECURITY LABEL",
+        "test",
+        "named.Has Space",
+        "SECURITY LABEL FOR dummy ON COLUMN test.named.\"Has Space\" IS \
+         $$it's$$;\n",
         "",
     ),
 ];

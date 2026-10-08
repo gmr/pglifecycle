@@ -565,6 +565,7 @@ fn column_comments(
                 ViewColumn::Detailed {
                     name,
                     comment: Some(comment),
+                    ..
                 } => Some((name.clone(), comment.clone())),
                 _ => None,
             })
@@ -594,9 +595,9 @@ fn view_column_name(column: &ViewColumn) -> &str {
 }
 
 /// The `columns` of a view or a materialized view in the form deploy
-/// compares: an entry with no comment is a name, the names that the
-/// query gives follow a short list, and a list that gives only the
-/// names that the query gives is no list
+/// compares: an entry with no comment and no labels is a name, the
+/// names that the query gives follow a short list, and a list that
+/// gives only the names that the query gives is no list
 pub(crate) fn canonical_view_columns(
     columns: Option<&[ViewColumn]>,
     query: Option<&str>,
@@ -607,6 +608,7 @@ pub(crate) fn canonical_view_columns(
             ViewColumn::Detailed {
                 name,
                 comment: None,
+                security_labels: None,
             } => ViewColumn::Name(name.clone()),
             column => column.clone(),
         })

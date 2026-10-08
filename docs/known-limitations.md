@@ -26,10 +26,11 @@ to. This page links to those descriptions and does not repeat them.
 the project without these entries. See
 [Unsupported dump entries](commands.md#unsupported-dump-entries).
 
-- **Security labels with no place in the model.** A security label
-  on a column of a view or of a materialized view goes to
-  `remaining.yaml`. Use `--no-security-labels` to leave the labels out
-  of the dump.
+- **Security labels on the attributes of a composite type.** The
+  project does not manage them. PostgreSQL does not support security
+  labels on the attributes of a composite type
+  (`SecLabelSupportsObjectType` in `seclabel.c` refuses
+  `OBJECT_ATTRIBUTE`).
 
 ## Build
 

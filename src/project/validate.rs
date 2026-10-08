@@ -343,6 +343,34 @@ mod tests {
         assert!(errors[0].contains("/configurations/0/mappings"));
     }
 
+    /// An entry in the `columns` of a view or a materialized view has
+    /// only `name`, `comment` and `security_labels`, so a misspelt key
+    /// is not valid
+    #[test]
+    fn view_column_entries_reject_unknown_keys() {
+        for obj_type in ["view", "materialized_view"] {
+            let view = |column| {
+                let data = json!({
+                    "schema": "public",
+                    "name": "v",
+                    "owner": "postgres",
+                    "query": "SELECT 1 AS a",
+                    "columns": [column],
+                });
+                validate_object(obj_type, "v", &data)
+            };
+            assert!(view(json!({
+                "name": "a",
+                "comment": "x",
+                "security_labels": {"dummy": "y"},
+            })));
+            assert!(!view(json!({
+                "name": "a",
+                "security_label": {"dummy": "y"},
+            })));
+        }
+    }
+
     /// Deploy reconciles the first entry of a column only, so a
     /// second entry for the same column is not valid
     #[test]

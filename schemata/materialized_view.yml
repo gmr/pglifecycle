@@ -38,8 +38,12 @@ properties:
             comment:
               title: Comment
               type: string
+            security_labels:
+              title: Security Labels
+              $package_schema: security_labels
           required:
             - name
+          additionalProperties: false
   table_access_method:
     title: Table Access Method
     description: Define the table access method
