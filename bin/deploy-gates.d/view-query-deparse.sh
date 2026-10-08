@@ -10,6 +10,8 @@
 # 3. A view query that uses a table that is new in the project cannot
 #    be deparsed before the deploy. deploy compares the query as text,
 #    gives a warning, and the deploy works.
+# 4. psql does not run a `\!` command in a project query: deploy gives
+#    the query to the server in a dollar quote.
 
 table="${WORKDIR}/project/tables/test/deparse_items.yaml"
 new_table="${WORKDIR}/project/tables/test/deparse_new.yaml"
@@ -82,6 +84,40 @@ expect_deparse_change \
     "a changed materialized view query is a change"
 perl -pi -e 's/2\.5/1.5/' "${matview}"
 expect_empty_plan "the reverted queries are unchanged"
+
+# a `\!` command in the query does not run on the deploy machine. The
+# first query is one statement, thus the server deparses it; the
+# second query is not, thus deploy compares it as text
+pwned="${WORKDIR}/pr226-pwned"
+cp "${view}" "${WORKDIR}/deparse_view.yaml"
+# $1 is the query, as a YAML block
+expect_no_command() {
+    printf -- '---\nname: deparse_view\nschema: test\nowner: postgres\n%s\n' \
+        "query: |" > "${view}"
+    printf '%s\n' "$1" "dependencies:" "  tables:" \
+        "  - test.deparse_items" >> "${view}"
+    ./target/debug/pglifecycle deploy -o "${WORKDIR}/deparse.sql" \
+        -d "${TARGET_DB}" "${WORKDIR}/project" 2>"${WORKDIR}/deparse.err"
+    if [ -e "${pwned}" ]; then
+        echo "Convergence gate FAILED: psql ran a command in a view" \
+            "query" >&2
+        cat "${view}" >&2
+        exit 1
+    fi
+}
+expect_no_command "  SELECT E'a\\' \\! touch ${pwned}
+  ' AS x"
+# the server deparsed this query: psql read it
+if grep -q 'not one SQL statement' "${WORKDIR}/deparse.err"; then
+    echo "Convergence gate FAILED: the query was not deparsed" >&2
+    cat "${WORKDIR}/deparse.err" >&2
+    exit 1
+fi
+expect_no_command "  SELECT 1 AS x
+  \\! touch ${pwned}"
+mv "${WORKDIR}/deparse_view.yaml" "${view}"
+echo "Convergence gate passed: psql does not run a command in a query"
+expect_empty_plan "the view is unchanged after the psql command check"
 
 # a query that uses a new table: the deparse fails, deploy works
 cat > "${new_table}" <<'YAML'

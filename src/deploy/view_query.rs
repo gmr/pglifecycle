@@ -35,7 +35,8 @@ struct Pending {
     index: usize,
     /// The kind and the name of the view, for the log
     label: String,
-    /// The CREATE TEMP VIEW statement, with no `;`
+    /// The CREATE TEMP VIEW statement, with no `;`; psql does not read
+    /// it as is (see `execute`)
     create: String,
     /// The query of the database
     stored: String,
@@ -205,16 +206,41 @@ fn script(pending: &[Pending], role: Option<&str>) -> String {
         script.push_str(&format!(
             "\\warn {MARKER}{n}\n\
              SAVEPOINT pglifecycle_deparse;\n\
-             {};\n\
+             {}\n\
              SELECT pg_catalog.json_build_object('view', {n}, 'query', \
              pg_catalog.pg_get_viewdef(\
              'pg_temp.pglifecycle_deparse_{n}'::pg_catalog.regclass));\n\
              ROLLBACK TO SAVEPOINT pglifecycle_deparse;\n",
-            pending.create
+            execute(&pending.create)
         ));
     }
     script.push_str("ROLLBACK;\n");
     script
+}
+
+/// A DO statement that runs `create`. psql reads the script and acts
+/// on a `\` command or a `:name` variable that is not in quotes. Thus
+/// `create`, with the query and the column names, is only in a dollar
+/// quote, and psql does not read it. The tag of each dollar quote does
+/// not occur in `create`; the two tags are different
+fn execute(create: &str) -> String {
+    let inner = dollar_tag(create, "pgl_q");
+    let outer = dollar_tag(create, "pgl_o");
+    // `create` ends with a line break, thus the end of the query and
+    // the closing tag do not make one more tag together
+    format!("DO {outer} BEGIN EXECUTE {inner}{create}{inner}; END {outer};")
+}
+
+/// The first of `$name$`, `$name1$`, `$name2$`, ... that does not occur
+/// in `text`
+fn dollar_tag(text: &str, name: &str) -> String {
+    (0..)
+        .map(|n| match n {
+            0 => format!("${name}$"),
+            n => format!("${name}{n}$"),
+        })
+        .find(|tag| !text.contains(tag.as_str()))
+        .expect("a tag that does not occur in the text")
 }
 
 /// The deparsed query, or the reason and the psql output of the
@@ -354,12 +380,42 @@ mod tests {
         assert!(script.contains(
             "\\warn pglifecycle_deparse 0\n\
              SAVEPOINT pglifecycle_deparse;\n\
-             CREATE TEMP VIEW pglifecycle_deparse_0 AS SELECT 1\n;\n"
+             DO $pgl_o$ BEGIN EXECUTE $pgl_q$\
+             CREATE TEMP VIEW pglifecycle_deparse_0 AS SELECT 1\n\
+             $pgl_q$; END $pgl_o$;\n"
         ));
         assert!(script.ends_with(
             "ROLLBACK TO SAVEPOINT pglifecycle_deparse;\nROLLBACK;\n"
         ));
         assert!(!script.contains("COMMIT"));
+    }
+
+    /// psql must not read a `\` command or a `:name` variable in the
+    /// query: the query is only in the dollar quote, and no tag occurs
+    /// in the query
+    #[test]
+    fn keeps_the_query_in_a_dollar_quote() {
+        let query = "SELECT 1 AS \"$pgl_o$\"\n\\! echo pwned\n\
+                     , :foo, :'foo', '$pgl_q$', '$pgl_q1$' -- $pgl_q";
+        let create = create_temp_view(0, false, None, query);
+        let script = execute(&create);
+        assert_eq!(
+            script,
+            format!(
+                "DO $pgl_o1$ BEGIN EXECUTE $pgl_q2${create}$pgl_q2$; END $pgl_o1$;"
+            )
+        );
+        for tag in ["$pgl_o1$", "$pgl_q2$"] {
+            assert!(!query.contains(tag), "{tag}");
+            assert_eq!(script.matches(tag).count(), 2, "{tag}");
+        }
+        let body = &script["DO $pgl_o1$ BEGIN EXECUTE $pgl_q2$".len()
+            ..script.len() - "$pgl_q2$; END $pgl_o1$;".len()];
+        assert_eq!(body, create);
+        for text in ["\\! echo pwned", ":foo", ":'foo'", "$pgl_q$"] {
+            assert_eq!(script.matches(text).count(), 1, "{text}");
+            assert!(body.contains(text), "{text}");
+        }
     }
 
     /// The output of psql for three queries: the second uses a table
