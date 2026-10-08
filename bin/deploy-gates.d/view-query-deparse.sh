@@ -115,6 +115,13 @@ if grep -q 'not one SQL statement' "${WORKDIR}/deparse.err"; then
 fi
 expect_no_command "  SELECT 1 AS x
   \\! touch ${pwned}"
+# the guard stopped this query before psql
+if ! grep -q 'not one SQL statement' "${WORKDIR}/deparse.err"; then
+    echo "Convergence gate FAILED: the query with two statements" \
+        "was not stopped" >&2
+    cat "${WORKDIR}/deparse.err" >&2
+    exit 1
+fi
 mv "${WORKDIR}/deparse_view.yaml" "${view}"
 echo "Convergence gate passed: psql does not run a command in a query"
 expect_empty_plan "the view is unchanged after the psql command check"
