@@ -64,13 +64,18 @@ These limits are already described:
 
 These limits are new on this page:
 
-- **View and materialized view queries.** `deploy` formats the
-  `query` of a view or a materialized view as `pull` does, so its
-  layout and a `;` at the end are not a change. But PostgreSQL also
+- **View and materialized view queries with `--dump`.** `deploy`
+  formats the `query` of a view or a materialized view as `pull` does,
+  so its layout and a `;` at the end are not a change. PostgreSQL also
   adds casts and parentheses to the query (`name = 'x'` becomes
-  `(name = 'x'::text)`). A query without them is a change on each
-  deploy: `CREATE OR REPLACE VIEW` for a view, and a drop and create
-  for a materialized view. Write them as `pull` writes them.
+  `(name = 'x'::text)`). Against a live database, the server deparses
+  the project query, so these are not a change (see
+  [deploy](commands.md#deploy)). With `--dump` there is no server, and
+  when the server cannot deparse a query (for example, the query uses
+  a table that is new in the project), deploy compares the formatted
+  text. Then a query without the casts is a change on each deploy:
+  `CREATE OR REPLACE VIEW` for a view, and a drop and create for a
+  materialized view. Write them as `pull` writes them.
 
 ## Deploy: order and rebuild limits
 

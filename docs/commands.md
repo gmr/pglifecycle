@@ -144,6 +144,22 @@ The settings are not local to the transaction, so they also apply when
 the script runs outside a transaction block. They stay until the
 session ends, or until a rollback of the transaction that set them.
 
+PostgreSQL adds casts and parentheses when it stores the query of a
+view or a materialized view (`name = 'x'` becomes
+`(name = 'x'::text)`). Against a live database, deploy thus asks the
+server to deparse each project query that is different from the query
+of the database after formatting. It runs one `psql` session with the
+connection settings of `pg_dump`. In a transaction that it rolls back,
+the session sets the role of `--role` and an empty `search_path`, as
+the script does. Then, for each query, it runs `CREATE TEMP VIEW` and
+reads the query with `pg_get_viewdef`, as `pg_dump` does. When the
+result is the query of the database, the view is not a change. Thus
+deploy needs `psql` and the `TEMP` privilege on the database. When
+the server cannot deparse a query (the query uses a table that is new
+in the project, the query is not one SQL statement, the role has no
+`TEMP` privilege, or `psql` cannot connect), deploy writes a warning
+that names the view and compares the formatted text. With `--dump`, deploy compares the formatted text.
+
 | Option | Description |
 | --- | --- |
 | `-D, --dump FILE` | Compare against a `pg_dump -Fc` file instead of connecting |

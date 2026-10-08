@@ -1075,7 +1075,7 @@ fn normalized(definition: &Definition) -> Value {
 /// The formatter gives the same text when it formats its own text
 /// again. A query that the formatter cannot read is compared with no
 /// `;` and no space at the end.
-fn canonical_query(query: &str) -> String {
+pub(super) fn canonical_query(query: &str) -> String {
     let formatted = crate::pull::format_pg_dump(query);
     crate::pull::strip_trailing(formatted.as_deref().unwrap_or(query))
 }
