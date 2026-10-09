@@ -250,6 +250,30 @@ fn apply_args(conn: &cli::Connection, script: &Path) -> Vec<OsString> {
     args
 }
 
+/// Run a script with psql in one session, and give its stdout and its
+/// stderr. An error does not stop the script (`ON_ERROR_STOP` is off),
+/// thus the caller reads the result of each statement. Only a failure
+/// to start psql is an error.
+pub fn run_script(
+    conn: &cli::Connection,
+    script: &Path,
+) -> Result<(String, String), String> {
+    let mut args = connection_args(conn);
+    if let Some(dbname) = &conn.dbname {
+        args.push("-d".into());
+        args.push(dbname.into());
+    }
+    for arg in ["-X", "-q", "-A", "-t", "-v", "ON_ERROR_STOP=0", "-f"] {
+        args.push(arg.into());
+    }
+    args.push(script.into());
+    let output = run("psql", &args, &[], conn)?;
+    Ok((
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr_of(&output),
+    ))
+}
+
 /// The user of the connection (`SELECT current_user`), read with psql
 pub fn current_user(conn: &cli::Connection) -> Result<String, String> {
     let mut args = connection_args(conn);

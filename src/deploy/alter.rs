@@ -587,7 +587,7 @@ fn column_comments(
     }
 }
 
-fn view_column_name(column: &ViewColumn) -> &str {
+pub(super) fn view_column_name(column: &ViewColumn) -> &str {
     match column {
         ViewColumn::Name(name) => name,
         ViewColumn::Detailed { name, .. } => name,

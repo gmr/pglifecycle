@@ -16,6 +16,7 @@ mod diff;
 mod privileges;
 pub(crate) mod routine_body;
 mod serial;
+mod view_query;
 
 pub(crate) use serial::integer_type as serial_integer_type;
 
@@ -70,6 +71,10 @@ pub fn deploy(args: &cli::Deploy) -> Result<(), String> {
         None,
         libpgfmt::style::Style::PgDump,
     )?;
+    // a --dump file has no server to deparse a view query
+    if args.dump.is_none() {
+        view_query::deparse(&mut project, &assembly, &args.connection);
+    }
     let conflicts =
         sequence_owner_conflicts(&project.inventory, &assembly.sequences);
     if !args.no_owner && !conflicts.is_empty() {
