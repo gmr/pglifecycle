@@ -199,13 +199,12 @@ required:
   - schema
   - name
 oneOf:
-  # sql replaces every other field: build writes it as it is
+  # sql replaces the other fields: build writes it as it is. The
+  # model needs arguments, sfunc and state_data_type, so sql can come
+  # with them; any other field would be ignored, so it is refused.
   - required: [sql]
     not:
       anyOf:
-        - required: [arguments]
-        - required: [sfunc]
-        - required: [state_data_type]
         - required: [state_data_size]
         - required: [ffunc]
         - required: [finalfunc_extra]

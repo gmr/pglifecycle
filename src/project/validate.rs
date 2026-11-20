@@ -308,6 +308,11 @@ mod tests {
         let valid = |data| validate_object("aggregate", "a", &data);
         assert!(valid(json!({"name": "a", "schema": "s",
             "sql": "CREATE AGGREGATE s.a(int) (SFUNC = int4pl, STYPE = int)"})));
+        // the model needs these, so sql can come with them
+        assert!(valid(json!({"name": "a", "schema": "s",
+            "sql": "CREATE AGGREGATE s.a(int) (SFUNC = int4pl, STYPE = int)",
+            "arguments": [{"data_type": "integer"}], "sfunc": "int4pl",
+            "state_data_type": "integer"})));
         assert!(!valid(json!({"name": "a", "schema": "s",
             "sql": "CREATE AGGREGATE s.a(int) (SFUNC = int4pl, STYPE = int)",
             "support": "s.a_support"})));
