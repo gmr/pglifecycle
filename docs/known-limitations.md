@@ -94,8 +94,8 @@ These limits are already described:
 - Changes that fall back to drop and create, for example a column
   type, the column order, partitioning and storage parameters. See
   [Change reconciliation](commands.md#change-reconciliation).
-- A subscription refresh and changes to `slot_name`, `two_phase` and
-  `failover`. See
+- A subscription refresh and changes to `slot_name`, `two_phase`,
+  `failover` and `retain_dead_tuples`. See
   [Destructive statements and limits](commands.md#destructive-statements-and-limits).
 - Roles, users and tablespaces: `deploy` does not change them. See
   [Destructive statements and limits](commands.md#destructive-statements-and-limits).

@@ -279,6 +279,25 @@ mod tests {
         assert!(validate_object("schema", "test", &data));
     }
 
+    /// FOR ALL TABLES and FOR ALL SEQUENCES name no tables or schemas,
+    /// and EXCEPT needs FOR ALL TABLES
+    #[test]
+    fn validates_for_all_publications() {
+        let valid = |data| validate_object("publication", "p", &data);
+        assert!(valid(json!({"name": "p", "all_tables": true,
+            "except_tables": ["s.t"], "all_sequences": true})));
+        assert!(valid(json!({"name": "p", "all_sequences": true})));
+        assert!(valid(json!({"name": "p", "tables": ["s.t"],
+            "schemas": ["s"]})));
+        assert!(!valid(json!({"name": "p", "all_sequences": true,
+            "tables": ["s.t"]})));
+        assert!(!valid(json!({"name": "p", "all_tables": true,
+            "schemas": ["s"]})));
+        assert!(!valid(json!({"name": "p", "except_tables": ["s.t"]})));
+        assert!(!valid(json!({"name": "p", "all_tables": false,
+            "except_tables": ["s.t"]})));
+    }
+
     #[test]
     fn rejects_invalid_objects() {
         let data = json!({"name": 42});

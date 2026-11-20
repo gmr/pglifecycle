@@ -1111,6 +1111,9 @@ impl Builder {
         if let Some(v) = &d.parallel {
             options.push(format!("PARALLEL = {v}"));
         }
+        if let Some(v) = &d.support {
+            options.push(format!("SUPPORT = {v}"));
+        }
         if d.hypothetical == Some(true) {
             options.push("HYPOTHETICAL".into());
         }
@@ -1618,6 +1621,12 @@ impl Builder {
             create.push(validator.clone());
         } else {
             create.push("NO VALIDATOR".into());
+        }
+        // no NO CONNECTION when it is absent: PostgreSQL 18 does not
+        // know the clause
+        if let Some(connection) = &d.connection {
+            create.push("CONNECTION".into());
+            create.push(connection.clone());
         }
         if let Some(options) = d.options.as_ref().filter(|o| !o.is_empty()) {
             create.push(format!("OPTIONS ({})", render_options(options)));
@@ -2215,8 +2224,9 @@ impl Builder {
         };
         let mut create =
             vec!["CREATE".into(), "PUBLICATION".into(), self.item_name(item)];
-        if d.all_tables == Some(true) {
-            create.push("FOR ALL TABLES".into());
+        if let Some(all) = render_publication_all(d) {
+            create.push("FOR".into());
+            create.push(all);
         } else {
             // each table is exactly the one named: pg_dump lists an
             // inheritance child separately and adds each with ONLY
@@ -2528,12 +2538,24 @@ impl Builder {
         let Definition::Subscription(d) = &item.definition else {
             unreachable!()
         };
+        let source = match (&d.server, &d.connection) {
+            (Some(server), _) => format!("SERVER {}", quote_ident(server)),
+            (None, Some(connection)) => format!(
+                "CONNECTION {}",
+                postgres_value(&Value::String(connection.clone()))
+            ),
+            (None, None) => {
+                return Err(format!(
+                    "SUBSCRIPTION {} has neither a connection nor a server",
+                    d.name
+                ));
+            }
+        };
         let mut create = vec![
             "CREATE".into(),
             "SUBSCRIPTION".into(),
             self.item_name(item),
-            "CONNECTION".into(),
-            postgres_value(&Value::String(d.connection.clone())),
+            source,
             "PUBLICATION".into(),
             d.publications
                 .iter()
@@ -5216,6 +5238,30 @@ pub(crate) fn render_publication_table(
             sql
         }
     }
+}
+
+/// The FOR ALL clause of a publication (`ALL TABLES [EXCEPT (...)]`,
+/// `ALL SEQUENCES`, or both), or None for a publication that names its
+/// tables or schemas
+pub(crate) fn render_publication_all(
+    publication: &crate::models::Publication,
+) -> Option<String> {
+    let mut all = Vec::new();
+    if publication.all_tables == Some(true) {
+        let mut tables = String::from("ALL TABLES");
+        if let Some(except) =
+            publication.except_tables.as_ref().filter(|t| !t.is_empty())
+        {
+            let except: Vec<String> =
+                except.iter().map(|t| format!("TABLE ONLY {t}")).collect();
+            tables.push_str(&format!(" EXCEPT ({})", except.join(", ")));
+        }
+        all.push(tables);
+    }
+    if publication.all_sequences == Some(true) {
+        all.push(String::from("ALL SEQUENCES"));
+    }
+    (!all.is_empty()).then(|| all.join(", "))
 }
 
 /// A publication's WITH options. `publish` is a list of operations in

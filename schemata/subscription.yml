@@ -14,6 +14,13 @@ properties:
     title: Connection Information
     description: The connection string to the publisher.
     type: string
+  server:
+    title: Foreign Server
+    description: >
+      The foreign server that gives the connection to the publisher, in
+      place of connection (PostgreSQL 19). Its foreign-data wrapper must
+      have a connection function.
+    type: string
   publications:
     title: Publications
     description: Publications to subscribe to on the publisher
@@ -131,6 +138,29 @@ properties:
           create_slot, or copy_data set to true.
         type: boolean
         default: true
+      retain_dead_tuples:
+        title: Retain Dead Tuples
+        description: >
+          Specifies whether the information that conflict detection needs
+          is retained (PostgreSQL 19).
+        type: boolean
+        default: false
+      max_retention_duration:
+        title: Maximum Retention Duration
+        description: >
+          The maximum time in milliseconds that the information for
+          conflict detection is retained; 0 for no limit (PostgreSQL 19).
+        type: integer
+        minimum: 0
+        default: 0
+      wal_receiver_timeout:
+        title: WAL Receiver Timeout
+        description: >
+          The wal_receiver_timeout of the apply workers of the
+          subscription, as a setting value such as 30s; -1 uses the
+          server setting (PostgreSQL 19).
+        type: string
+        default: "-1"
     additionalProperties: false
   comment:
     title: Comment
@@ -141,6 +171,8 @@ properties:
     $package_schema: security_labels
 required:
   - name
-  - connection
   - publications
+oneOf:
+  - required: [connection]
+  - required: [server]
 additionalProperties: false

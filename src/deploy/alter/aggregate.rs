@@ -89,6 +89,7 @@ pub(crate) fn canonical(aggregate: &Aggregate) -> Aggregate {
             .as_deref()
             .map(str::to_uppercase)
             .filter(|parallel| parallel != "UNSAFE"),
+        support: names(&aggregate.support),
         hypothetical: set(aggregate.hypothetical),
         ..aggregate.clone()
     }

@@ -137,7 +137,8 @@ add it to `MODELED_DESCS` and to `fixtures/schema.sql`.
   the on-disk project contract, carried over from Python unchanged.
 - `test-project/` — example project structure; a parity contract.
 - `fixtures/` — test database schemata: `schema.sql` for the
-  round-trip and deploy gates, `unsupported.sql` plus
+  round-trip and deploy gates (it includes `schema-pg19.sql` on
+  PostgreSQL 19 and later), `unsupported.sql` plus
   `unsupported-descs.txt` for the coverage gate, and
   `unexercised-descs.txt` for the parse-coverage gate.
 - `bin/` — gate scripts and fixture-data generation.

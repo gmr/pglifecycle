@@ -56,6 +56,21 @@ properties:
     title: Replicate All Tables
     description: Use to replicate all tables
     type: boolean
+  except_tables:
+    title: Tables Not Replicated
+    description: >
+      With all_tables, the schema-qualified tables that the publication
+      does not publish (FOR ALL TABLES EXCEPT, PostgreSQL 19).
+    type: array
+    items:
+      type: string
+    minItems: 1
+  all_sequences:
+    title: Replicate All Sequences
+    description: >
+      Publish all sequences, including sequences created later (FOR ALL
+      SEQUENCES, PostgreSQL 19).
+    type: boolean
   parameters:
     title: Publication Parameters
     type: object
@@ -92,10 +107,22 @@ properties:
 required:
   - name
 additionalProperties: false
-# FOR ALL TABLES excludes naming tables or schemas; a publication with
-# neither publishes nothing until tables are added
-not:
-  required: [all_tables]
-  anyOf:
-    - required: [tables]
-    - required: [schemas]
+# FOR ALL TABLES and FOR ALL SEQUENCES exclude naming tables or
+# schemas; a publication with neither publishes nothing until tables are
+# added. EXCEPT applies only to FOR ALL TABLES.
+allOf:
+  - not:
+      allOf:
+        - anyOf:
+            - required: [all_tables]
+            - required: [all_sequences]
+        - anyOf:
+            - required: [tables]
+            - required: [schemas]
+  - if:
+      required: [except_tables]
+    then:
+      required: [all_tables]
+      properties:
+        all_tables:
+          const: true

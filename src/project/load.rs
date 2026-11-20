@@ -572,6 +572,18 @@ impl Loader {
                 // body can put the operator before the functions that
                 // it names in the sort, so these need edges too
                 Definition::Operator(o) => calls.extend(operator_calls(o)),
+                Definition::ForeignDataWrapper(w) => {
+                    let fields: [(&Option<String>, &[&str]); 3] = [
+                        (&w.handler, &[]),
+                        (&w.validator, &["text[]", "oid"]),
+                        (&w.connection, &["oid", "oid", "internal"]),
+                    ];
+                    for (function, arguments) in fields {
+                        if let Some(function) = function {
+                            calls.push((function, signatures(&[arguments])));
+                        }
+                    }
+                }
                 Definition::Language(l) => {
                     let fields: [(&Option<String>, &[&str]); 3] = [
                         (&l.handler, &[]),
@@ -601,9 +613,19 @@ impl Loader {
                             table.name().to_string(),
                         ));
                     }
+                    for table in p.except_tables.iter().flatten() {
+                        references.push((ObjectType::Table, table.clone()));
+                    }
                     for schema in p.schemas.iter().flatten() {
                         references.push((ObjectType::Schema, schema.clone()));
                     }
+                }
+                Definition::Subscription(s) => {
+                    references.extend(
+                        s.server.iter().map(|server| {
+                            (ObjectType::Server, server.clone())
+                        }),
+                    );
                 }
                 _ => {}
             }
@@ -1663,6 +1685,7 @@ fn aggregate_calls(a: &Aggregate) -> Vec<(&str, Vec<Vec<String>>)> {
         (&a.msfunc, with(mstate, &[&direct])),
         (&a.minvfunc, with(mstate, &[&direct])),
         (&a.mffunc, finals(mstate, a.mfinalfunc_extra)),
+        (&a.support, signatures(&[&["internal"]])),
     ];
     for (function, candidates) in fields {
         if let Some(function) = function {

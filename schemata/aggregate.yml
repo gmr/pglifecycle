@@ -168,6 +168,12 @@ properties:
       the parallel-safety markings of the aggregate's support functions are
       not consulted by the planner, only the marking of the aggregate itself.
     enum: [SAFE, RESTRICTED, UNSAFE]
+  support:
+    title: Support Function
+    description: >
+      The planner support function of the aggregate (SUPPORT, PostgreSQL
+      19). It takes one internal argument and returns internal.
+    type: string
   hypothetical:
     title: Hypothetical-Set Aggregate Indicator
     description: >
@@ -217,6 +223,7 @@ oneOf:
         - minitial_condition
         - sort_operator
         - parallel
+        - support
         - hypothetical
   - required: [arguments, sfunc, state_data_type]
     not: {required: [sql]}

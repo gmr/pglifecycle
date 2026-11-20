@@ -338,8 +338,10 @@ impl Writer {
         for subscription in &assembly.subscriptions {
             let mut subscription = subscription.clone();
             if !self.include_password_hashes
-                && let Some(connection) =
-                    without_password(&subscription.connection)
+                && let Some(connection) = subscription
+                    .connection
+                    .as_deref()
+                    .and_then(without_password)
             {
                 log::warn!(
                     "Removed the password from the connection of \
@@ -347,7 +349,7 @@ impl Writer {
                      with --include-password-hashes",
                     subscription.name
                 );
-                subscription.connection = connection;
+                subscription.connection = Some(connection);
             }
             self.save(
                 top_level("subscriptions", &subscription.name)?,
@@ -1150,7 +1152,8 @@ mod tests {
         let assembly = Assembly {
             subscriptions: vec![models::Subscription {
                 name: String::from("s"),
-                connection: String::from("host=h password=secret"),
+                connection: Some(String::from("host=h password=secret")),
+                server: None,
                 publications: vec![String::from("p")],
                 parameters: None,
                 comment: None,
