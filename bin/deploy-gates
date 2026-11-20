@@ -20,6 +20,10 @@ PGHOST="${PGHOST:-localhost}"
 PGPORT="${PGPORT:-5432}"
 PGUSER="${PGUSER:-postgres}"
 export PGHOST PGPORT PGUSER
+# t if the server accepts standard_conforming_strings off; PostgreSQL 19
+# and later servers refuse it
+SCS_OFF_OK=$(psql -X -At -d postgres \
+    -c "SELECT current_setting('server_version_num')::int < 190000")
 
 SOURCE_DB=deploy_source
 TARGET_DB=deploy_target

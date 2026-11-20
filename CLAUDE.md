@@ -90,11 +90,15 @@ Module headers reference the Python file each replaces ("ports X.py").
 ## Testing & gates
 
 Integration tests live in `tests/`. The database gates need
-PostgreSQL: they bring up `compose.yaml` (Postgres 18) on a
-dynamically-mapped host port and run the scripts in `bin/`. GitHub
-Actions runs the same scripts in a `gates` job against a
-`postgres:18` service container, so a gate failure blocks a pull
-request; run them locally first.
+PostgreSQL: they bring up `compose.yaml` (Postgres 19; set
+`PG_VERSION=18` for 18) on a dynamically-mapped host port and run the
+scripts in `bin/`. The client tools on `PATH` must not be older than
+the server, because pg_dump refuses a newer server. GitHub Actions
+runs the same scripts in a `gates` job against `postgres:18` and
+`postgres:19` service containers, so a gate failure blocks a pull
+request; run them locally first. On PostgreSQL 19 and later the gates
+skip the checks that need `standard_conforming_strings` off, which
+those servers refuse; the PostgreSQL 18 job runs them.
 
 ```bash
 just db-up          # start the container, wait until healthy

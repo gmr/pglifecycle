@@ -43,8 +43,10 @@ definition: |2-
 YAML
 ./target/debug/pglifecycle deploy -o "${WORKDIR}/session-settings.sql" \
     -d "${TARGET_DB}" "${WORKDIR}/project"
-settings='-c standard_conforming_strings=off -c xmloption=document'
-settings+=' -c check_function_bodies=on'
+settings='-c xmloption=document -c check_function_bodies=on'
+if [[ ${SCS_OFF_OK} == t ]]; then
+    settings+=' -c standard_conforming_strings=off'
+fi
 if ! PGCLIENTENCODING=LATIN1 PGOPTIONS="${settings}" \
     psql -X -q -d "${TARGET_DB}" --single-transaction -v ON_ERROR_STOP=1 \
         -f "${WORKDIR}/session-settings.sql" > /dev/null \

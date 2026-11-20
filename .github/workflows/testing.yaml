@@ -63,16 +63,21 @@ jobs:
   # whether a pulled project still rebuilds the database it came from,
   # and how much schema `pull` drops on the way. Only a real server
   # answers that, so the gates in bin/ run against a service container
-  # on the same PostgreSQL version compose.yaml pins. They run as their
-  # own job because a gate failure means something different from a
-  # unit-test failure.
+  # for each supported PostgreSQL version. compose.yaml defaults to the
+  # newest. They run as their own job because a gate failure means
+  # something different from a unit-test failure.
   gates:
+    name: gates (PostgreSQL ${{ matrix.postgres }})
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: ["18", "19"]
     services:
       postgres:
-        image: postgres:18
+        image: postgres:${{ matrix.postgres }}
         env:
           POSTGRES_HOST_AUTH_METHOD: trust
         ports:
@@ -98,13 +103,13 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      # postgresql-client-18 comes from the PGDG repository because the
+      # postgresql-client-<version> comes from the PGDG repository because the
       # runner ships an older client and pg_dump refuses to dump a
       # server newer than itself, so the client major has to match the
       # service container. python3-yaml is for bin/coverage-gate, which
       # reads the generated remaining.yaml; its defn entries are block
       # scalars of arbitrary SQL, so line matching will not do.
-      # The 18 binaries go first on PATH. Without a host in the
+      # The client binaries go first on PATH. Without a host in the
       # arguments or in PGHOST, pg_wrapper selects the client of the
       # local cluster of the runner, which is older. A deploy gate step
       # removes PGHOST and selects the server through a service.
@@ -117,9 +122,10 @@ jobs:
           echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
             | sudo tee /etc/apt/sources.list.d/pgdg.list
           sudo apt-get update
-          sudo apt-get install -y postgresql-client-18 python3-yaml
-          echo /usr/lib/postgresql/18/bin >> "$GITHUB_PATH"
-          /usr/lib/postgresql/18/bin/pg_dump --version
+          sudo apt-get install -y \
+            "postgresql-client-${{ matrix.postgres }}" python3-yaml
+          echo "/usr/lib/postgresql/${{ matrix.postgres }}/bin" >> "$GITHUB_PATH"
+          "/usr/lib/postgresql/${{ matrix.postgres }}/bin/pg_dump" --version
 
       # The bin/ scripts are called directly rather than through `just`:
       # the recipes discover the compose.yaml container's mapped port,

@@ -11,11 +11,11 @@
 #    backslash in a string literal is not written two times.
 #
 # The step makes a reference database with the default settings, and
-# three sources with other settings. It pulls each source, and the
-# reference again with the other settings in the environment, and
-# compares each project with the project of the reference. It deploys
-# a project into a new LATIN1 database, and into a new UTF8 database
-# with the other settings in the environment. The deployed schema must
+# three sources with other settings (two on PostgreSQL 19 and later).
+# It pulls each source, and the reference again with the other settings
+# in the environment, and compares each project with the project of the
+# reference. It deploys a project into a new LATIN1 database, and into
+# a new UTF8 database with the other settings in the environment. The deployed schema must
 # be the schema of the reference, and the plan after the deploy must be
 # empty.
 # pull and deploy refuse a dump file that is not in UTF8, or that was
@@ -24,14 +24,21 @@
 # or in a service replaces PGOPTIONS.
 #
 # The step does not use the project or the target of the other steps.
+#
+# PostgreSQL 19 and later servers refuse standard_conforming_strings
+# off: SET, ALTER DATABASE and a connection option with it fail. On
+# these servers the step does not do the checks that need the setting
+# off. The gates job of PostgreSQL 18 does them.
 
 enc_dbs=(deploy_enc_plain deploy_enc_latin1 deploy_enc_client
     deploy_enc_scs deploy_enc_utf8_target deploy_enc_latin1_target
     deploy_conn_target)
 enc_role='deploy_enc_rôle'
 # the settings that a session must not use for the dump
-enc_hostile=(PGCLIENTENCODING=LATIN1
-    "PGOPTIONS=-c standard_conforming_strings=off")
+enc_hostile=(PGCLIENTENCODING=LATIN1)
+if [[ ${SCS_OFF_OK} == t ]]; then
+    enc_hostile+=("PGOPTIONS=-c standard_conforming_strings=off")
+fi
 
 # $1 is a message; the step fails with it
 enc_fail() {
@@ -115,9 +122,6 @@ enc_create deploy_enc_latin1 \
 enc_create deploy_enc_client
 psql -X -q -d postgres -v ON_ERROR_STOP=1 \
     -c "ALTER DATABASE deploy_enc_client SET client_encoding = 'LATIN1'"
-enc_create deploy_enc_scs
-psql -X -q -d postgres -v ON_ERROR_STOP=1 \
-    -c "ALTER DATABASE deploy_enc_scs SET standard_conforming_strings = off"
 
 # the reference; its text must be the text of the schema
 ./target/debug/pglifecycle pull -d deploy_enc_plain "${WORKDIR}/enc-plain"
@@ -148,10 +152,6 @@ enc_same_project "${WORKDIR}/enc-latin1" \
     --allow-unsupported "${WORKDIR}/enc-client"
 enc_same_project "${WORKDIR}/enc-client" \
     "a database that sets client_encoding to LATIN1"
-./target/debug/pglifecycle pull -d deploy_enc_scs --no-roles \
-    --allow-unsupported "${WORKDIR}/enc-scs"
-enc_same_project "${WORKDIR}/enc-scs" \
-    "a database that sets standard_conforming_strings to off"
 # the environment also changes the session of pg_dumpall
 env "${enc_hostile[@]}" ./target/debug/pglifecycle pull \
     -d deploy_enc_plain "${WORKDIR}/enc-env"
@@ -190,8 +190,6 @@ enc_deploy deploy_enc_utf8_target "${enc_hostile[@]}"
 # refused with a message that tells how to make it again
 PGCLIENTENCODING=LATIN1 pg_dump -d deploy_enc_plain -Fc --schema-only \
     -f "${WORKDIR}/enc-latin1.dump"
-PGOPTIONS='-c standard_conforming_strings=off' pg_dump -d deploy_enc_plain \
-    -Fc --schema-only -f "${WORKDIR}/enc-scs.dump"
 # $1 is the dump file, $2 is a pattern that the error must have
 enc_refused() {
     rm -rf "${WORKDIR}/enc-refused"
@@ -215,16 +213,29 @@ enc_refused() {
     echo "Convergence gate passed: pull and deploy refuse ${1##*/}"
 }
 enc_refused "${WORKDIR}/enc-latin1.dump" "LATIN1 encoding.*pg_dump -E UTF8"
-enc_refused "${WORKDIR}/enc-scs.dump" \
-    "standard_conforming_strings off.*standard_conforming_strings=on"
 
-# An options value in the connection string or in a service replaces
-# the PGOPTIONS of the dump, thus a live dump can have
-# standard_conforming_strings off. pull and deploy refuse the dump. The
-# error tells how to change the options value, and it does not name the
-# temporary dump file.
-enc_off='-c standard_conforming_strings=off'
-cat > "${WORKDIR}/pg_service.conf" <<SERVICES
+if [[ ${SCS_OFF_OK} == t ]]; then
+    # a database that sets standard_conforming_strings to off
+    enc_create deploy_enc_scs
+    psql -X -q -d postgres -v ON_ERROR_STOP=1 \
+        -c "ALTER DATABASE deploy_enc_scs SET standard_conforming_strings = off"
+    ./target/debug/pglifecycle pull -d deploy_enc_scs --no-roles \
+        --allow-unsupported "${WORKDIR}/enc-scs"
+    enc_same_project "${WORKDIR}/enc-scs" \
+        "a database that sets standard_conforming_strings to off"
+
+    PGOPTIONS='-c standard_conforming_strings=off' pg_dump -d deploy_enc_plain \
+        -Fc --schema-only -f "${WORKDIR}/enc-scs.dump"
+    enc_refused "${WORKDIR}/enc-scs.dump" \
+        "standard_conforming_strings off.*standard_conforming_strings=on"
+
+    # An options value in the connection string or in a service replaces
+    # the PGOPTIONS of the dump, thus a live dump can have
+    # standard_conforming_strings off. pull and deploy refuse the dump. The
+    # error tells how to change the options value, and it does not name the
+    # temporary dump file.
+    enc_off='-c standard_conforming_strings=off'
+    cat > "${WORKDIR}/pg_service.conf" <<SERVICES
 [enc_off]
 dbname=deploy_enc_plain
 options=${enc_off}
@@ -233,48 +244,49 @@ options=${enc_off}
 dbname=deploy_enc_scs
 options=-c statement_timeout=0
 SERVICES
-enc_live_error='standard_conforming_strings off.*options value'
-enc_live_error+='.*-c standard_conforming_strings=on'
-# $1 says what the step checks, $2 is the --dbname value; the other
-# arguments go to env
-enc_refused_live() {
-    local what="$1" dbname="$2" command
-    shift 2
-    local err="${WORKDIR}/enc-refused.err"
-    for command in pull deploy; do
-        rm -rf "${WORKDIR}/enc-refused"
-        local args=(pull --no-roles -d "${dbname}" "${WORKDIR}/enc-refused")
-        if [[ ${command} == deploy ]]; then
-            args=(deploy -d "${dbname}" -o "${WORKDIR}/enc-refused.sql"
-                "${WORKDIR}/enc-plain")
-        fi
-        if env PGSERVICEFILE="${WORKDIR}/pg_service.conf" "$@" \
-                ./target/debug/pglifecycle "${args[@]}" 2> "${err}"; then
-            enc_fail "${command} did not refuse the dump of ${what}"
-        fi
-        if ! grep -q "${enc_live_error}" "${err}" \
-                || grep -q 'pglifecycle-[^ ]*\.dump' "${err}"; then
-            cat "${err}" >&2
-            enc_fail "${command} refused the dump of ${what} with a wrong error"
-        fi
-    done
-    echo "Convergence gate passed: pull and deploy refuse the dump of ${what}"
-}
-enc_refused_live "a connection string with options" \
-    "dbname=deploy_enc_plain options='${enc_off}'"
-enc_refused_live "a URI with options" \
-    "postgresql:///deploy_enc_plain?options=-c%20standard_conforming_strings%3Doff"
-enc_refused_live "a service with options" "service=enc_off"
-enc_refused_live "a service in PGSERVICE" deploy_enc_plain PGSERVICE=enc_off
-# options without the setting also replace PGOPTIONS, thus the setting
-# of the database applies
-enc_refused_live "a service with other options" "service=enc_other"
-# the advice of the error gives the same project
-./target/debug/pglifecycle pull --no-roles --allow-unsupported \
-    -d "dbname=deploy_enc_scs options='${enc_off} -c standard_conforming_strings=on'" \
-    "${WORKDIR}/enc-options"
-enc_same_project "${WORKDIR}/enc-options" \
-    "a connection string with options that end with the setting on"
+    enc_live_error='standard_conforming_strings off.*options value'
+    enc_live_error+='.*-c standard_conforming_strings=on'
+    # $1 says what the step checks, $2 is the --dbname value; the other
+    # arguments go to env
+    enc_refused_live() {
+        local what="$1" dbname="$2" command
+        shift 2
+        local err="${WORKDIR}/enc-refused.err"
+        for command in pull deploy; do
+            rm -rf "${WORKDIR}/enc-refused"
+            local args=(pull --no-roles -d "${dbname}" "${WORKDIR}/enc-refused")
+            if [[ ${command} == deploy ]]; then
+                args=(deploy -d "${dbname}" -o "${WORKDIR}/enc-refused.sql"
+                    "${WORKDIR}/enc-plain")
+            fi
+            if env PGSERVICEFILE="${WORKDIR}/pg_service.conf" "$@" \
+                    ./target/debug/pglifecycle "${args[@]}" 2> "${err}"; then
+                enc_fail "${command} did not refuse the dump of ${what}"
+            fi
+            if ! grep -q "${enc_live_error}" "${err}" \
+                    || grep -q 'pglifecycle-[^ ]*\.dump' "${err}"; then
+                cat "${err}" >&2
+                enc_fail "${command} refused the dump of ${what} with a wrong error"
+            fi
+        done
+        echo "Convergence gate passed: pull and deploy refuse the dump of ${what}"
+    }
+    enc_refused_live "a connection string with options" \
+        "dbname=deploy_enc_plain options='${enc_off}'"
+    enc_refused_live "a URI with options" \
+        "postgresql:///deploy_enc_plain?options=-c%20standard_conforming_strings%3Doff"
+    enc_refused_live "a service with options" "service=enc_off"
+    enc_refused_live "a service in PGSERVICE" deploy_enc_plain PGSERVICE=enc_off
+    # options without the setting also replace PGOPTIONS, thus the setting
+    # of the database applies
+    enc_refused_live "a service with other options" "service=enc_other"
+    # the advice of the error gives the same project
+    ./target/debug/pglifecycle pull --no-roles --allow-unsupported \
+        -d "dbname=deploy_enc_scs options='${enc_off} -c standard_conforming_strings=on'" \
+        "${WORKDIR}/enc-options"
+    enc_same_project "${WORKDIR}/enc-options" \
+        "a connection string with options that end with the setting on"
+fi
 
 # A connection string or a URI in --dbname selects the server of
 # pg_dump, pg_dumpall and psql. Its host, port and user have priority

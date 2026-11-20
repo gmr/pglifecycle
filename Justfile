@@ -53,7 +53,7 @@ check: fmt-check lint test
 pre-commit:
     pre-commit run --all-files
 
-# --- Database (compose PG17) -----------------------------------------
+# --- Database (compose PG19; PG_VERSION=18 for 18) ------------------
 
 # Start the PostgreSQL container and wait until healthy
 db-up:
