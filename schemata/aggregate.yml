@@ -200,9 +200,9 @@ required:
   - name
 oneOf:
   # sql replaces the other fields: build writes it as it is. The
-  # model needs arguments, sfunc and state_data_type, so sql can come
+  # model needs arguments, sfunc and state_data_type, so sql comes
   # with them; any other field would be ignored, so it is refused.
-  - required: [sql]
+  - required: [sql, arguments, sfunc, state_data_type]
     not:
       anyOf:
         - required: [state_data_size]
