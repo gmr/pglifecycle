@@ -296,6 +296,21 @@ mod tests {
         assert!(!valid(json!({"name": "p", "except_tables": ["s.t"]})));
         assert!(!valid(json!({"name": "p", "all_tables": false,
             "except_tables": ["s.t"]})));
+        // a flag that is false names no publication of all objects
+        assert!(valid(json!({"name": "p", "all_sequences": false,
+            "tables": ["s.t"]})));
+    }
+
+    /// sql replaces every other field of an aggregate, so a project
+    /// that gives both is refused
+    #[test]
+    fn rejects_an_aggregate_with_sql_and_fields() {
+        let valid = |data| validate_object("aggregate", "a", &data);
+        assert!(valid(json!({"name": "a", "schema": "s",
+            "sql": "CREATE AGGREGATE s.a(int) (SFUNC = int4pl, STYPE = int)"})));
+        assert!(!valid(json!({"name": "a", "schema": "s",
+            "sql": "CREATE AGGREGATE s.a(int) (SFUNC = int4pl, STYPE = int)",
+            "support": "s.a_support"})));
     }
 
     #[test]

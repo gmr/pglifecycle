@@ -650,8 +650,12 @@ impl Loader {
                     continue;
                 }
                 let (namespace, tag) = split_sql_name(&reference);
+                // these names have no schema, and a period is part of
+                // the name
                 let (namespace, tag) = match desc {
-                    ObjectType::Schema | ObjectType::ProceduralLanguage => {
+                    ObjectType::Schema
+                    | ObjectType::ProceduralLanguage
+                    | ObjectType::Server => {
                         (String::new(), reference.to_string())
                     }
                     _ if namespace.is_empty() => (own_schema.to_string(), tag),
@@ -2029,6 +2033,38 @@ mod tests {
         let mut loader = Loader::new(dir.path());
         loader.read_object_files(ObjectType::Table).unwrap();
         assert_eq!(loader.errors, 2);
+    }
+
+    /// A subscription depends on its server, and a period in the
+    /// server name is part of the name, not a schema
+    #[test]
+    fn subscription_depends_on_a_server_with_a_period() {
+        let mut loader = Loader::new(Path::new("."));
+        loader.project.inventory.push(Item {
+            id: 0,
+            desc: ObjectType::Server,
+            definition: Definition::Server(crate::models::Server {
+                name: String::from("publisher.eu"),
+                foreign_data_wrapper: String::from("postgres_fdw"),
+                server_type: None,
+                version: None,
+                options: None,
+                comment: None,
+            }),
+            dependencies: BTreeSet::new(),
+        });
+        loader.index.insert(
+            index_key(ObjectType::Server, None, "publisher.eu"),
+            vec![0],
+        );
+        loader.add_definition(
+            ObjectType::Subscription,
+            json!({"name": "s", "server": "publisher.eu",
+                   "publications": ["p"]}),
+            None,
+        );
+        loader.apply_structural_dependencies();
+        assert_eq!(loader.project.inventory[1].dependencies, [0].into());
     }
 
     /// L7: a cast's `dependencies` block is cached under the same tag

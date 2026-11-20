@@ -115,7 +115,13 @@ allOf:
       allOf:
         - anyOf:
             - required: [all_tables]
+              properties:
+                all_tables:
+                  const: true
             - required: [all_sequences]
+              properties:
+                all_sequences:
+                  const: true
         - anyOf:
             - required: [tables]
             - required: [schemas]

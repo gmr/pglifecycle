@@ -199,31 +199,32 @@ required:
   - schema
   - name
 oneOf:
+  # sql replaces every other field: build writes it as it is
   - required: [sql]
     not:
-      required:
-        - arguments
-        - sfunc
-        - state_data_type
-        - state_data_size
-        - ffunc
-        - finalfunc_extra
-        - finalfunc_modify
-        - combinefunc
-        - serialfunc
-        - deserialfunc
-        - initial_condition
-        - msfunc
-        - minvfunc
-        - mstate_data_type
-        - mstate_data_size
-        - mffunc
-        - mfinalfunc_extra
-        - mfinalfunc_modify
-        - minitial_condition
-        - sort_operator
-        - parallel
-        - support
-        - hypothetical
+      anyOf:
+        - required: [arguments]
+        - required: [sfunc]
+        - required: [state_data_type]
+        - required: [state_data_size]
+        - required: [ffunc]
+        - required: [finalfunc_extra]
+        - required: [finalfunc_modify]
+        - required: [combinefunc]
+        - required: [serialfunc]
+        - required: [deserialfunc]
+        - required: [initial_condition]
+        - required: [msfunc]
+        - required: [minvfunc]
+        - required: [mstate_data_type]
+        - required: [mstate_data_size]
+        - required: [mffunc]
+        - required: [mfinalfunc_extra]
+        - required: [mfinalfunc_modify]
+        - required: [minitial_condition]
+        - required: [sort_operator]
+        - required: [parallel]
+        - required: [support]
+        - required: [hypothetical]
   - required: [arguments, sfunc, state_data_type]
     not: {required: [sql]}
