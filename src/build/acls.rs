@@ -474,6 +474,10 @@ struct ObjectIndex<'a> {
     /// (schema, bare name) → matching items, for the unambiguous
     /// bare-name fallback
     functions_by_name: HashMap<(Option<&'a str>, String), Vec<&'a Item>>,
+    /// schema → the extensions in it. A function of an extension is not
+    /// an item, so its ACL belongs to the extension (see
+    /// `find_function`)
+    extensions_by_schema: HashMap<&'a str, Vec<&'a Item>>,
     /// (schema, name) of each identity column's sequence → its table.
     /// The sequence is not an item, so an ACL on it belongs to the table.
     identity_sequences: HashMap<(String, String), &'a Item>,
@@ -484,8 +488,14 @@ impl<'a> ObjectIndex<'a> {
         let mut objects = HashMap::new();
         let mut functions_by_identity = HashMap::new();
         let mut functions_by_name: HashMap<_, Vec<&Item>> = HashMap::new();
+        let mut extensions_by_schema: HashMap<_, Vec<&Item>> = HashMap::new();
         for item in &project.inventory {
             let schema = item.definition.schema();
+            if let (Definition::Extension(_), Some(schema)) =
+                (&item.definition, schema)
+            {
+                extensions_by_schema.entry(schema).or_default().push(item);
+            }
             let key_schema = if item.desc.is_schemaless() {
                 None
             } else {
@@ -509,6 +519,17 @@ impl<'a> ObjectIndex<'a> {
                 }
                 Definition::Function(f) => Some(f.identity()),
                 Definition::Procedure(p) => Some(p.identity()),
+                // pg_dump writes an aggregate's ACL as `ON FUNCTION`,
+                // with only the types of all of its arguments
+                Definition::Aggregate(a) => {
+                    let types: Vec<&str> = a
+                        .arguments
+                        .iter()
+                        .chain(a.order_by.iter().flatten())
+                        .map(|arg| arg.data_type.as_str())
+                        .collect();
+                    Some(format!("{}({})", a.name, types.join(", ")))
+                }
                 _ => None,
             };
             if let Some(identity) = identity {
@@ -577,6 +598,7 @@ impl<'a> ObjectIndex<'a> {
             objects,
             functions_by_identity,
             functions_by_name,
+            extensions_by_schema,
             identity_sequences,
         }
     }
@@ -628,7 +650,12 @@ fn find_object(
 
 /// Function ACLs are keyed `schema.name(args)`: match the identity
 /// signature exactly, falling back to the bare name only when it is
-/// unambiguous, so overloads never bind to the wrong entry
+/// unambiguous, so overloads never bind to the wrong entry. A function
+/// that the project does not have is a function of an extension when
+/// its schema has one extension: pg_dump writes the ACL of a function
+/// of an extension that differs from the ACL that CREATE EXTENSION
+/// gives, for example after ALTER DEFAULT PRIVILEGES. Its ACL belongs
+/// to the extension, so deploy changes it after CREATE EXTENSION.
 fn find_function<'a>(
     index: &ObjectIndex<'a>,
     schema: Option<&str>,
@@ -640,8 +667,13 @@ fn find_function<'a>(
         return Some(*item);
     }
     let base = split_signature(name).map_or(name, |(base, _)| base);
-    let matches = index.functions_by_name.get(&(schema, base.to_string()))?;
-    (matches.len() == 1).then(|| matches[0])
+    match index.functions_by_name.get(&(schema, base.to_string())) {
+        Some(matches) => (matches.len() == 1).then(|| matches[0]),
+        None => match index.extensions_by_schema.get(schema?)?.as_slice() {
+            [extension] => Some(*extension),
+            _ => None,
+        },
+    }
 }
 
 fn section<'a>(acls: &'a Acls, key: &str) -> Option<&'a Map<String, Value>> {
@@ -950,6 +982,75 @@ mod tests {
             }))
             .unwrap(),
         )
+    }
+
+    /// pg_dump writes the ACL of an aggregate ON FUNCTION, and the ACL
+    /// of a function of an extension that the project does not have.
+    /// Each ACL entry depends on the entry of its object: the aggregate,
+    /// or the one extension of the schema
+    #[test]
+    fn attaches_aggregate_and_extension_function_acls() {
+        let aggregate = |arguments: Value| -> models::Aggregate {
+            serde_json::from_value(json!({
+                "name": "total", "schema": "s", "owner": "postgres",
+                "arguments": arguments,
+                "order_by": [{"data_type": "text"}],
+                "sfunc": "int4pl", "state_data_type": "integer",
+            }))
+            .unwrap()
+        };
+        let extension: models::Extension = serde_json::from_value(json!({
+            "name": "tablefunc", "schema": "ext",
+        }))
+        .unwrap();
+        let public: models::Role = serde_json::from_value(json!({
+            "name": "PUBLIC", "create": false,
+            "revocations": {"functions": {
+                "s.total(integer, text)": ["ALL"],
+                "ext.normal_rand(integer, double precision, \
+                 double precision)": ["ALL"],
+            }},
+        }))
+        .unwrap();
+        let project = project_with(vec![
+            item(
+                0,
+                ObjectType::Aggregate,
+                Definition::Aggregate(aggregate(
+                    json!([{"name": "n", "data_type": "integer"}]),
+                )),
+            ),
+            item(
+                3,
+                ObjectType::Aggregate,
+                Definition::Aggregate(aggregate(
+                    json!([{"data_type": "bigint"}]),
+                )),
+            ),
+            item(1, ObjectType::Extension, Definition::Extension(extension)),
+            item(2, ObjectType::Role, Definition::Role(public)),
+        ]);
+        let dump = build_dump(&project);
+        let entry = |desc: libpgdump::ObjectType| {
+            dump.entries()
+                .iter()
+                .find(|e| e.desc == desc)
+                .unwrap()
+                .dump_id
+        };
+        assert_eq!(
+            find_acl(&dump, "FUNCTION total(integer, text)").dependencies,
+            vec![entry(libpgdump::ObjectType::Aggregate)]
+        );
+        assert_eq!(
+            find_acl(
+                &dump,
+                "FUNCTION normal_rand(integer, double precision, double \
+                 precision)"
+            )
+            .dependencies,
+            vec![entry(libpgdump::ObjectType::Extension)]
+        );
     }
 
     #[test]
