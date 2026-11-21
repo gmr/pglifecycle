@@ -1,5 +1,6 @@
 ARG RUST_VERSION=1.96
-ARG ALPINE_VERSION=3.22
+ARG ALPINE_VERSION=3.23
+ARG POSTGRES_VERSION=19
 
 FROM rust:${RUST_VERSION}-alpine${ALPINE_VERSION} AS builder
 
@@ -22,10 +23,24 @@ COPY src ./src
 RUN touch src/main.rs src/lib.rs \
     && cargo build --release --locked
 
+# Alpine does not package the PostgreSQL 19 client yet, so the client
+# tools and libpq come from the official PostgreSQL image of the same
+# Alpine release. pg_dump refuses to dump a server newer than itself,
+# so the client is the newest supported major; it dumps older servers.
+FROM postgres:${POSTGRES_VERSION}-alpine${ALPINE_VERSION} AS pgclient
+
 FROM alpine:${ALPINE_VERSION}
 
-# pull, build, and deploy all shell out to pg_dump/pg_dumpall/pg_restore.
-RUN apk add --no-cache postgresql17-client
+# pull, build, and deploy all shell out to pg_dump/pg_dumpall/pg_restore
+# and psql. The packages are the shared libraries that these tools and
+# libpq link to.
+RUN apk add --no-cache krb5-libs keyutils-libs libcom_err libedit libldap \
+    libsasl libssl3 lz4-libs zlib zstd-libs
+COPY --from=pgclient /usr/local/lib/libpq.so.5* /usr/local/lib/
+COPY --from=pgclient \
+    /usr/local/bin/pg_dump /usr/local/bin/pg_dumpall \
+    /usr/local/bin/pg_restore /usr/local/bin/psql \
+    /usr/local/bin/
 
 COPY --from=builder /src/target/release/pglifecycle /usr/local/bin/pglifecycle
 

@@ -481,6 +481,7 @@ pub fn assemble(project: &Project) -> Result<BuildOutput, String> {
     let mut builder = Builder {
         dump,
         dump_id_map: HashMap::new(),
+        mapping_entries: HashMap::new(),
         text_search_last: HashMap::new(),
         pending_attaches: Vec::new(),
         index_attaches: IndexAttaches::default(),
@@ -533,6 +534,7 @@ pub fn assemble(project: &Project) -> Result<BuildOutput, String> {
             entry.dependencies.extend(deps);
         }
     }
+    builder.apply_subscription_mappings(project);
     builder.apply_calls(project);
     builder.apply_text_search_references();
     builder.apply_attaches(project)?;
@@ -579,6 +581,11 @@ struct IndexAttaches {
 struct Builder {
     dump: libpgdump::Dump,
     dump_id_map: HashMap<usize, i32>,
+    /// The user mapping entries of each server. The item of a user
+    /// mapping stands for its first entry only (see
+    /// `dump_user_mapping`), and a subscription depends on the entries
+    /// of its own server.
+    mapping_entries: HashMap<String, Vec<i32>>,
     /// The last entry each text search container added (see
     /// `add_text_search_item`)
     text_search_last: HashMap<usize, i32>,
@@ -1111,6 +1118,9 @@ impl Builder {
         if let Some(v) = &d.parallel {
             options.push(format!("PARALLEL = {v}"));
         }
+        if let Some(v) = &d.support {
+            options.push(format!("SUPPORT = {v}"));
+        }
         if d.hypothetical == Some(true) {
             options.push("HYPOTHETICAL".into());
         }
@@ -1618,6 +1628,12 @@ impl Builder {
             create.push(validator.clone());
         } else {
             create.push("NO VALIDATOR".into());
+        }
+        // no NO CONNECTION when it is absent: PostgreSQL 18 does not
+        // know the clause
+        if let Some(connection) = &d.connection {
+            create.push("CONNECTION".into());
+            create.push(connection.clone());
         }
         if let Some(options) = d.options.as_ref().filter(|o| !o.is_empty()) {
             create.push(format!("OPTIONS ({})", render_options(options)));
@@ -2215,8 +2231,9 @@ impl Builder {
         };
         let mut create =
             vec!["CREATE".into(), "PUBLICATION".into(), self.item_name(item)];
-        if d.all_tables == Some(true) {
-            create.push("FOR ALL TABLES".into());
+        if let Some(all) = render_publication_all(d) {
+            create.push("FOR".into());
+            create.push(all);
         } else {
             // each table is exactly the one named: pg_dump lists an
             // inheritance child separately and adds each with ONLY
@@ -2524,16 +2541,53 @@ impl Builder {
         self.add_item(item, create, drop, false)
     }
 
+    /// With connect on, CREATE SUBSCRIPTION reads the user mapping of
+    /// its server, so a subscription comes after each mapping entry of
+    /// its server. The item of a user mapping stands for its first entry
+    /// only, so the item edge is not sufficient. This runs after every
+    /// entry exists, as the inventory need not list the mappings first.
+    fn apply_subscription_mappings(&mut self, project: &Project) {
+        for item in &project.inventory {
+            let Definition::Subscription(d) = &item.definition else {
+                continue;
+            };
+            let Some(mappings) =
+                d.server.as_ref().and_then(|s| self.mapping_entries.get(s))
+            else {
+                continue;
+            };
+            if let Some(entry) = self
+                .dump_id_map
+                .get(&item.id)
+                .and_then(|id| self.dump.get_entry_mut(*id))
+            {
+                entry.dependencies.extend(mappings);
+            }
+        }
+    }
+
     fn dump_subscription(&mut self, item: &Item) -> Result<(), String> {
         let Definition::Subscription(d) = &item.definition else {
             unreachable!()
+        };
+        let source = match (&d.server, &d.connection) {
+            (Some(server), _) => format!("SERVER {}", quote_ident(server)),
+            (None, Some(connection)) => format!(
+                "CONNECTION {}",
+                postgres_value(&Value::String(connection.clone()))
+            ),
+            (None, None) => {
+                return Err(format!(
+                    "SUBSCRIPTION {} has neither a connection nor a server",
+                    d.name
+                ));
+            }
         };
         let mut create = vec![
             "CREATE".into(),
             "SUBSCRIPTION".into(),
             self.item_name(item),
-            "CONNECTION".into(),
-            postgres_value(&Value::String(d.connection.clone())),
+            source,
             "PUBLICATION".into(),
             d.publications
                 .iter()
@@ -3975,6 +4029,10 @@ impl Builder {
             ];
             self.add_item(item, create, drop, false)?;
             let dump_id = self.dump_id_map[&item.id];
+            self.mapping_entries
+                .entry(server.name.clone())
+                .or_default()
+                .push(dump_id);
             // the first entry stands for the item, and each later
             // entry comes after the one before (deviation 47)
             if let (Some(first), Some(previous)) = (first, previous) {
@@ -5218,6 +5276,30 @@ pub(crate) fn render_publication_table(
     }
 }
 
+/// The FOR ALL clause of a publication (`ALL TABLES [EXCEPT (...)]`,
+/// `ALL SEQUENCES`, or both), or None for a publication that names its
+/// tables or schemas
+pub(crate) fn render_publication_all(
+    publication: &crate::models::Publication,
+) -> Option<String> {
+    let mut all = Vec::new();
+    if publication.all_tables == Some(true) {
+        let mut tables = String::from("ALL TABLES");
+        if let Some(except) =
+            publication.except_tables.as_ref().filter(|t| !t.is_empty())
+        {
+            let except: Vec<String> =
+                except.iter().map(|t| format!("TABLE ONLY {t}")).collect();
+            tables.push_str(&format!(" EXCEPT ({})", except.join(", ")));
+        }
+        all.push(tables);
+    }
+    if publication.all_sequences == Some(true) {
+        all.push(String::from("ALL SEQUENCES"));
+    }
+    (!all.is_empty()).then(|| all.join(", "))
+}
+
 /// A publication's WITH options. `publish` is a list of operations in
 /// the project and one comma-separated string in SQL.
 pub(crate) fn render_publication_parameters(
@@ -5341,6 +5423,7 @@ mod tests {
         let mut builder = Builder {
             dump,
             dump_id_map: HashMap::new(),
+            mapping_entries: HashMap::new(),
             text_search_last: HashMap::new(),
             pending_attaches: Vec::new(),
             index_attaches: IndexAttaches::default(),
@@ -5835,6 +5918,7 @@ mod tests {
         let mut builder = Builder {
             dump,
             dump_id_map: HashMap::new(),
+            mapping_entries: HashMap::new(),
             text_search_last: HashMap::new(),
             pending_attaches: Vec::new(),
             index_attaches: IndexAttaches::default(),
@@ -5882,6 +5966,7 @@ mod tests {
         let mut builder = Builder {
             dump,
             dump_id_map: HashMap::new(),
+            mapping_entries: HashMap::new(),
             text_search_last: HashMap::new(),
             pending_attaches: Vec::new(),
             index_attaches: IndexAttaches::default(),
@@ -5930,6 +6015,7 @@ mod tests {
         let mut builder = Builder {
             dump,
             dump_id_map: HashMap::new(),
+            mapping_entries: HashMap::new(),
             text_search_last: HashMap::new(),
             pending_attaches: Vec::new(),
             index_attaches: IndexAttaches::default(),
@@ -6236,6 +6322,7 @@ mod tests {
         let mut builder = Builder {
             dump,
             dump_id_map: HashMap::new(),
+            mapping_entries: HashMap::new(),
             text_search_last: HashMap::new(),
             pending_attaches: Vec::new(),
             index_attaches: IndexAttaches::default(),
@@ -6290,6 +6377,7 @@ mod tests {
         let mut builder = Builder {
             dump,
             dump_id_map: HashMap::new(),
+            mapping_entries: HashMap::new(),
             text_search_last: HashMap::new(),
             pending_attaches: Vec::new(),
             index_attaches: IndexAttaches::default(),
@@ -6350,6 +6438,7 @@ mod tests {
         let mut builder = Builder {
             dump,
             dump_id_map: HashMap::new(),
+            mapping_entries: HashMap::new(),
             text_search_last: HashMap::new(),
             pending_attaches: Vec::new(),
             index_attaches: IndexAttaches::default(),
@@ -6395,6 +6484,7 @@ mod tests {
         let mut builder = Builder {
             dump,
             dump_id_map: HashMap::new(),
+            mapping_entries: HashMap::new(),
             text_search_last: HashMap::new(),
             pending_attaches: Vec::new(),
             index_attaches: IndexAttaches::default(),
@@ -6475,6 +6565,7 @@ mod tests {
             let mut builder = Builder {
                 dump: libpgdump::new("t", "UTF-8", "18.0").unwrap(),
                 dump_id_map: HashMap::new(),
+                mapping_entries: HashMap::new(),
                 text_search_last: HashMap::new(),
                 pending_attaches: Vec::new(),
                 index_attaches: IndexAttaches::default(),
@@ -6518,6 +6609,7 @@ mod tests {
         let mut builder = Builder {
             dump,
             dump_id_map: HashMap::new(),
+            mapping_entries: HashMap::new(),
             text_search_last: HashMap::new(),
             pending_attaches: Vec::new(),
             index_attaches: IndexAttaches::default(),
@@ -6754,6 +6846,7 @@ mod tests {
         let mut builder = Builder {
             dump,
             dump_id_map: HashMap::new(),
+            mapping_entries: HashMap::new(),
             text_search_last: HashMap::new(),
             pending_attaches: Vec::new(),
             index_attaches: IndexAttaches::default(),
@@ -6819,6 +6912,7 @@ mod tests {
         let mut builder = Builder {
             dump,
             dump_id_map: HashMap::new(),
+            mapping_entries: HashMap::new(),
             text_search_last: HashMap::new(),
             pending_attaches: Vec::new(),
             index_attaches: IndexAttaches::default(),
@@ -7099,6 +7193,7 @@ mod tests {
         let mut builder = Builder {
             dump,
             dump_id_map: HashMap::new(),
+            mapping_entries: HashMap::new(),
             text_search_last: HashMap::new(),
             pending_attaches: Vec::new(),
             index_attaches: IndexAttaches::default(),

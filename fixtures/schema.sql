@@ -727,6 +727,12 @@ COMMENT ON COLUMN test."Quoted Type"."Field One" IS 'A quoted attribute';
 CREATE STATISTICS test.quoted_stats ON "select", "Id" FROM test.quoted_cols;
 CREATE PUBLICATION quoted_pub FOR TABLE test.quoted_cols ("Id", "Name");
 
+-- The objects of PostgreSQL 19 and later
+SELECT current_setting('server_version_num')::int >= 190000 AS pg19 \gset
+\if :pg19
+\ir schema-pg19.sql
+\endif
+
 -- Default privileges, global and per schema. PUBLIC as the grantee
 -- keeps the fixture free of a cluster-wide role. These come last, so
 -- the objects above are created under the built-in defaults.

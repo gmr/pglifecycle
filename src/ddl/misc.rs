@@ -151,6 +151,7 @@ fn create_aggregate(node: &Node, src: &str) -> Result<Statement, String> {
         mfinalfunc_modify: None,
         minitial_condition: None,
         sort_operator: None,
+        support: None,
         parallel: None,
         hypothetical: None,
         sql: None,
@@ -192,6 +193,7 @@ fn create_aggregate(node: &Node, src: &str) -> Result<Statement, String> {
             "parallel" => {
                 aggregate.parallel = value.map(|v| v.to_uppercase());
             }
+            "support" => aggregate.support = value,
             "hypothetical" => aggregate.hypothetical = Some(true),
             other => {
                 return Ok(Statement::Unsupported(format!(
@@ -913,15 +915,27 @@ pub(crate) fn create_publication(
         .map(|n| unquote(n.text(src)))
         .ok_or_else(|| String::from("CREATE PUBLICATION without a name"))?;
     let mut all_tables = None;
+    let mut except_tables = Vec::new();
+    let mut all_sequences = None;
     if let Some(all) = node.child_of_kind("pub_all_obj_type_list") {
-        if all.find("kw_tables").is_none()
-            || all.find("kw_sequences").is_some()
-        {
-            return Ok(Statement::Unsupported(String::from(
-                "CREATE PUBLICATION FOR ALL other than TABLES",
-            )));
+        for spec in all.find_all("PublicationAllObjSpec") {
+            if spec.child_of_kind("kw_sequences").is_some() {
+                all_sequences = Some(true);
+                continue;
+            }
+            all_tables = Some(true);
+            for table in spec.find_all("PublicationExceptObjSpec") {
+                except_tables.push(
+                    table
+                        .find("qualified_name")
+                        .ok_or_else(|| {
+                            String::from("EXCEPT table without a name")
+                        })?
+                        .text(src)
+                        .to_string(),
+                );
+            }
         }
-        all_tables = Some(true);
     }
     let (tables, schemas) = match node.child_of_kind("pub_obj_list") {
         Some(list) => publication_objects(&list, src)?,
@@ -974,6 +988,8 @@ pub(crate) fn create_publication(
         tables: (!tables.is_empty()).then_some(tables),
         schemas: (!schemas.is_empty()).then_some(schemas),
         all_tables,
+        except_tables: (!except_tables.is_empty()).then_some(except_tables),
+        all_sequences,
         parameters: (!parameters.is_empty()).then_some(parameters),
         comment: None,
         security_labels: None,
@@ -991,6 +1007,7 @@ const SUBSCRIPTION_BOOLEANS: &[&str] = &[
     "enabled",
     "failover",
     "password_required",
+    "retain_dead_tuples",
     "run_as_owner",
     "two_phase",
 ];
@@ -1002,21 +1019,22 @@ pub(crate) fn create_subscription(
     node: &Node,
     src: &str,
 ) -> Result<Statement, String> {
-    if node.child_of_kind("kw_server").is_some() {
-        return Ok(Statement::Unsupported(String::from(
-            "CREATE SUBSCRIPTION ... SERVER",
-        )));
-    }
     let name = node
         .child_of_kind("name")
         .map(|n| unquote(n.text(src)))
         .ok_or_else(|| String::from("CREATE SUBSCRIPTION without a name"))?;
-    let connection = node
-        .child_of_kind("Sconst")
-        .map(|n| string_value(&n, src))
-        .ok_or_else(|| {
-            String::from("CREATE SUBSCRIPTION without a connection")
-        })?;
+    // SERVER name (PostgreSQL 19) or CONNECTION 'conninfo'
+    let server = node
+        .child_of_kind("kw_server")
+        .and_then(|kw| kw.next_named_sibling())
+        .map(|n| unquote(n.text(src)));
+    let connection =
+        node.child_of_kind("Sconst").map(|n| string_value(&n, src));
+    if server.is_none() && connection.is_none() {
+        return Err(String::from(
+            "CREATE SUBSCRIPTION without a connection or a server",
+        ));
+    }
     let publications = node
         .child_of_kind("name_list")
         .map(|list| {
@@ -1034,6 +1052,12 @@ pub(crate) fn create_subscription(
         .unwrap_or_default();
     for (key, value) in options {
         let value = value.unwrap_or_default();
+        // pg_dump quotes a value such as 30s as an identifier
+        let value = if value.starts_with('"') {
+            unquote(&value)
+        } else {
+            value
+        };
         // these are the values that PostgreSQL (defGetBoolean) accepts
         let value = if SUBSCRIPTION_BOOLEANS.contains(&key.as_str()) {
             match value.to_lowercase().as_str() {
@@ -1046,6 +1070,13 @@ pub(crate) fn create_subscription(
                     ));
                 }
             }
+        } else if key == "max_retention_duration" {
+            Value::from(value.parse::<i64>().map_err(|_| {
+                format!(
+                    "CREATE SUBSCRIPTION option {key} = {value} is not an \
+                     integer"
+                )
+            })?)
         } else {
             Value::String(value)
         };
@@ -1054,6 +1085,7 @@ pub(crate) fn create_subscription(
     Ok(Statement::CreateSubscription(Subscription {
         name,
         connection,
+        server,
         publications,
         parameters: (!parameters.is_empty()).then_some(parameters),
         comment: None,
@@ -1419,13 +1451,31 @@ mod tests {
             panic!("expected CreateSubscription")
         };
         assert_eq!(sub.name, "s");
-        assert_eq!(sub.connection, "dbname=x host=h");
+        assert_eq!(sub.connection.as_deref(), Some("dbname=x host=h"));
+        assert_eq!(sub.server, None);
         assert_eq!(sub.publications, vec!["p", "P Two"]);
         let parameters = sub.parameters.unwrap();
         assert_eq!(parameters["connect"], Value::Bool(false));
         assert_eq!(parameters["slot_name"], Value::String("NONE".into()));
         assert_eq!(parameters["two_phase"], Value::Bool(true));
         assert_eq!(parameters["streaming"], Value::String("parallel".into()));
+    }
+
+    #[test]
+    fn parses_create_subscription_with_a_server() {
+        let Statement::CreateSubscription(sub) = parse_one(
+            "CREATE SUBSCRIPTION s SERVER \"Pub Srv\" PUBLICATION p WITH \
+             (connect = false, retain_dead_tuples = true, \
+             max_retention_duration = 60000, wal_receiver_timeout = \"30s\");",
+        ) else {
+            panic!("expected CreateSubscription")
+        };
+        assert_eq!(sub.server.as_deref(), Some("Pub Srv"));
+        assert_eq!(sub.connection, None);
+        let parameters = sub.parameters.unwrap();
+        assert_eq!(parameters["retain_dead_tuples"], Value::Bool(true));
+        assert_eq!(parameters["max_retention_duration"], Value::from(60000));
+        assert_eq!(parameters["wal_receiver_timeout"], Value::from("30s"));
     }
 
     #[test]
@@ -1438,6 +1488,17 @@ mod tests {
             )
             .unwrap_err();
         assert!(error.contains("is not a boolean"), "{error}");
+    }
+
+    #[test]
+    fn parses_an_aggregate_support_function() {
+        let Statement::CreateAggregate(aggregate) = parse_one(
+            "CREATE AGGREGATE s.total(integer) (\n    SFUNC = s.add,\n    \
+             STYPE = bigint,\n    SUPPORT = s.total_support\n);",
+        ) else {
+            panic!("expected CreateAggregate")
+        };
+        assert_eq!(aggregate.support.as_deref(), Some("s.total_support"));
     }
 
     #[test]
@@ -1684,6 +1745,30 @@ mod tests {
             panic!("expected AddToPublication")
         };
         assert_eq!(schemas, vec![String::from("s")]);
+    }
+
+    #[test]
+    fn parses_for_all_publications() {
+        let Statement::CreatePublication(publication) = parse_one(
+            "CREATE PUBLICATION p FOR ALL TABLES EXCEPT (TABLE ONLY s.t, \
+             TABLE ONLY \"S\".u), ALL SEQUENCES WITH (publish = 'insert, \
+             update, delete, truncate');",
+        ) else {
+            panic!("expected CreatePublication")
+        };
+        assert_eq!(publication.all_tables, Some(true));
+        assert_eq!(publication.all_sequences, Some(true));
+        assert_eq!(
+            publication.except_tables,
+            Some(vec![String::from("s.t"), String::from("\"S\".u")])
+        );
+        let Statement::CreatePublication(publication) =
+            parse_one("CREATE PUBLICATION p FOR ALL SEQUENCES;")
+        else {
+            panic!("expected CreatePublication")
+        };
+        assert_eq!(publication.all_tables, None);
+        assert_eq!(publication.all_sequences, Some(true));
     }
 
     #[test]

@@ -1513,10 +1513,15 @@ pub(crate) fn without_redacted_password(
     db: &Subscription,
 ) -> Subscription {
     let mut db = db.clone();
-    if without_password(&repo.connection).is_none()
-        && let Some(connection) = without_password(&db.connection)
+    if repo
+        .connection
+        .as_deref()
+        .and_then(without_password)
+        .is_none()
+        && let Some(connection) =
+            db.connection.as_deref().and_then(without_password)
     {
-        db.connection = connection;
+        db.connection = Some(connection);
     }
     db
 }
@@ -1670,7 +1675,7 @@ fn modifier(chars: &mut std::str::Chars) -> String {
     text
 }
 
-/// The names of the types in pg_catalog on PostgreSQL 18, other than
+/// The names of the types in pg_catalog on PostgreSQL 19, other than
 /// array types and the row types of the system catalogs. A quoted name
 /// in this list is the built-in type. The list does not change in a
 /// major version of PostgreSQL.
@@ -1732,6 +1737,7 @@ const BUILT_IN_TYPES: &[&str] = &[
     "nummultirange",
     "numrange",
     "oid",
+    "oid8",
     "oidvector",
     "path",
     "pg_brin_bloom_summary",
@@ -1750,6 +1756,7 @@ const BUILT_IN_TYPES: &[&str] = &[
     "regclass",
     "regcollation",
     "regconfig",
+    "regdatabase",
     "regdictionary",
     "regnamespace",
     "regoper",

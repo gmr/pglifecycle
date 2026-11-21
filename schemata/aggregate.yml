@@ -168,6 +168,12 @@ properties:
       the parallel-safety markings of the aggregate's support functions are
       not consulted by the planner, only the marking of the aggregate itself.
     enum: [SAFE, RESTRICTED, UNSAFE]
+  support:
+    title: Support Function
+    description: >
+      The planner support function of the aggregate (SUPPORT, PostgreSQL
+      19). It takes one internal argument and returns internal.
+    type: string
   hypothetical:
     title: Hypothetical-Set Aggregate Indicator
     description: >
@@ -193,30 +199,31 @@ required:
   - schema
   - name
 oneOf:
-  - required: [sql]
+  # sql replaces the other fields: build writes it as it is. The
+  # model needs arguments, sfunc and state_data_type, so sql comes
+  # with them; any other field would be ignored, so it is refused.
+  - required: [sql, arguments, sfunc, state_data_type]
     not:
-      required:
-        - arguments
-        - sfunc
-        - state_data_type
-        - state_data_size
-        - ffunc
-        - finalfunc_extra
-        - finalfunc_modify
-        - combinefunc
-        - serialfunc
-        - deserialfunc
-        - initial_condition
-        - msfunc
-        - minvfunc
-        - mstate_data_type
-        - mstate_data_size
-        - mffunc
-        - mfinalfunc_extra
-        - mfinalfunc_modify
-        - minitial_condition
-        - sort_operator
-        - parallel
-        - hypothetical
+      anyOf:
+        - required: [state_data_size]
+        - required: [ffunc]
+        - required: [finalfunc_extra]
+        - required: [finalfunc_modify]
+        - required: [combinefunc]
+        - required: [serialfunc]
+        - required: [deserialfunc]
+        - required: [initial_condition]
+        - required: [msfunc]
+        - required: [minvfunc]
+        - required: [mstate_data_type]
+        - required: [mstate_data_size]
+        - required: [mffunc]
+        - required: [mfinalfunc_extra]
+        - required: [mfinalfunc_modify]
+        - required: [minitial_condition]
+        - required: [sort_operator]
+        - required: [parallel]
+        - required: [support]
+        - required: [hypothetical]
   - required: [arguments, sfunc, state_data_type]
     not: {required: [sql]}

@@ -2822,30 +2822,26 @@ fn canonicalize_columns(columns: &Option<Vec<Column>>) -> Vec<Column> {
         .collect()
 }
 
-/// Foreign-data-wrapper reconciliation: handler, validator, OPTIONS,
-/// and comment are all alterable in place.
+/// Foreign-data-wrapper reconciliation: handler, validator, connection
+/// function, OPTIONS, and comment are all alterable in place.
 fn fdw(repo: &ForeignDataWrapper, db: &ForeignDataWrapper) -> Resolution {
     let name = quote_ident(&repo.name);
     let mut alters = Vec::new();
-    if repo.handler != db.handler {
-        alters.push(Alter::new(match &repo.handler {
-            Some(handler) => format!(
-                "ALTER FOREIGN DATA WRAPPER {name} HANDLER {handler};\n"
-            ),
-            None => {
-                format!("ALTER FOREIGN DATA WRAPPER {name} NO HANDLER;\n")
-            }
-        }));
-    }
-    if repo.validator != db.validator {
-        alters.push(Alter::new(match &repo.validator {
-            Some(validator) => format!(
-                "ALTER FOREIGN DATA WRAPPER {name} VALIDATOR {validator};\n"
-            ),
-            None => {
-                format!("ALTER FOREIGN DATA WRAPPER {name} NO VALIDATOR;\n")
-            }
-        }));
+    let functions = [
+        ("HANDLER", &repo.handler, &db.handler),
+        ("VALIDATOR", &repo.validator, &db.validator),
+        ("CONNECTION", &repo.connection, &db.connection),
+    ];
+    for (keyword, wanted, existing) in functions {
+        if wanted != existing {
+            let clause = match wanted {
+                Some(function) => format!("{keyword} {function}"),
+                None => format!("NO {keyword}"),
+            };
+            alters.push(Alter::new(format!(
+                "ALTER FOREIGN DATA WRAPPER {name} {clause};\n"
+            )));
+        }
     }
     push_options(
         &mut alters,
@@ -5637,6 +5633,26 @@ mod tests {
                 "ALTER FOREIGN DATA WRAPPER wh NO HANDLER;\n",
                 "ALTER FOREIGN DATA WRAPPER wh NO VALIDATOR;\n",
             ]
+        );
+    }
+
+    #[test]
+    fn fdw_connection_function_alters_in_place() {
+        let db = parse_fdw(serde_json::json!({
+            "name": "wc", "owner": "postgres",
+        }));
+        let mut repo = db.clone();
+        repo.connection = Some("public.postgres_fdw_connection".into());
+        assert_eq!(
+            sql(&statements(fdw(&repo, &db))),
+            vec![
+                "ALTER FOREIGN DATA WRAPPER wc CONNECTION \
+                 public.postgres_fdw_connection;\n"
+            ]
+        );
+        assert_eq!(
+            sql(&statements(fdw(&db, &repo))),
+            vec!["ALTER FOREIGN DATA WRAPPER wc NO CONNECTION;\n"]
         );
     }
 

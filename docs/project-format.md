@@ -692,6 +692,25 @@ parameters:
   publish: [insert, update]
 ```
 
+- On PostgreSQL 19, a publication can publish every table except some,
+  and every sequence. `all_tables` and `all_sequences` name no tables
+  or schemas.
+
+```yaml
+---
+name: most_tables
+all_tables: true
+except_tables:
+  - test.audit_log
+all_sequences: true
+```
+
+- On PostgreSQL 19, a subscription can get its connection from a
+  foreign server (`server:` in place of `connection:`). The server's
+  foreign-data wrapper must have a connection function (`connection:`
+  of the wrapper), for example `public.postgres_fdw_connection` of
+  postgres_fdw.
+
 - Grants on views may be written under either `tables:` or `views:`.
   PostgreSQL grants on views with `TABLE` syntax, so both emit
   `GRANT ... ON TABLE` and coalesce into a single ACL entry; `pull`

@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: postgres:18
+    image: postgres:${PG_VERSION:-19}
     healthcheck:
       test: /usr/bin/pg_isready
       interval: 30s

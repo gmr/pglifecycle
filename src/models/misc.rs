@@ -58,6 +58,9 @@ pub struct Aggregate {
     pub sort_operator: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parallel: Option<String>,
+    /// The planner support function (SUPPORT, PostgreSQL 19)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub support: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hypothetical: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -318,6 +321,10 @@ pub struct ForeignDataWrapper {
     pub handler: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub validator: Option<String>,
+    /// The function that makes the connection string of a subscription
+    /// that uses a server of the wrapper (PostgreSQL 19)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connection: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub options: Option<Map<String, Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -504,6 +511,13 @@ pub struct Publication {
     pub schemas: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub all_tables: Option<bool>,
+    /// FOR ALL TABLES EXCEPT (PostgreSQL 19): the qualified tables
+    /// that the publication does not publish
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub except_tables: Option<Vec<String>>,
+    /// FOR ALL SEQUENCES (PostgreSQL 19)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub all_sequences: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parameters: Option<Map<String, Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -548,6 +562,14 @@ impl Publication {
         let mut schemas = self.schemas.clone().unwrap_or_default();
         schemas.sort();
         schemas.dedup();
+        let mut except_tables: Vec<String> = self
+            .except_tables
+            .iter()
+            .flatten()
+            .map(|name| canonical_relation(name))
+            .collect();
+        except_tables.sort();
+        except_tables.dedup();
         let mut parameters = Map::new();
         for (key, value) in self.parameters.iter().flatten() {
             let value = match (key.as_str(), value) {
@@ -577,6 +599,9 @@ impl Publication {
             tables: (!tables.is_empty()).then_some(tables),
             schemas: (!schemas.is_empty()).then_some(schemas),
             all_tables: self.all_tables.filter(|all| *all),
+            except_tables: (!except_tables.is_empty())
+                .then_some(except_tables),
+            all_sequences: self.all_sequences.filter(|all| *all),
             parameters: (!parameters.is_empty()).then_some(parameters),
             comment: self.comment.clone(),
             security_labels: self.security_labels.clone(),
@@ -740,7 +765,13 @@ pub struct Server {
 #[serde(deny_unknown_fields)]
 pub struct Subscription {
     pub name: String,
-    pub connection: String,
+    /// The connection string to the publisher; absent with `server`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connection: Option<String>,
+    /// The foreign server that gives the connection (PostgreSQL 19);
+    /// absent with `connection`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server: Option<String>,
     pub publications: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parameters: Option<Map<String, Value>>,
@@ -759,7 +790,7 @@ const SUBSCRIPTION_CREATE_ONLY: [&str; 4] =
     ["connect", "copy_data", "create_slot", "enabled"];
 
 impl Subscription {
-    /// The value that PostgreSQL 18 uses for an option that is not
+    /// The value that PostgreSQL 19 uses for an option that is not
     /// given. The slot name is the subscription name, so it is not here.
     pub fn parameter_default(key: &str) -> Option<Value> {
         match key {
@@ -769,6 +800,9 @@ impl Subscription {
             "origin" => Some(Value::from("any")),
             "streaming" => Some(Value::from("parallel")),
             "synchronous_commit" => Some(Value::from("off")),
+            "retain_dead_tuples" => Some(Value::Bool(false)),
+            "max_retention_duration" => Some(Value::from(0)),
+            "wal_receiver_timeout" => Some(Value::from("-1")),
             _ => None,
         }
     }
@@ -827,6 +861,7 @@ impl Subscription {
         Subscription {
             name: self.name.clone(),
             connection: self.connection.clone(),
+            server: self.server.clone(),
             publications,
             parameters: (!parameters.is_empty()).then_some(parameters),
             comment: self.comment.clone(),

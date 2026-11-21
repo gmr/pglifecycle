@@ -572,6 +572,18 @@ impl Loader {
                 // body can put the operator before the functions that
                 // it names in the sort, so these need edges too
                 Definition::Operator(o) => calls.extend(operator_calls(o)),
+                Definition::ForeignDataWrapper(w) => {
+                    let fields: [(&Option<String>, &[&str]); 3] = [
+                        (&w.handler, &[]),
+                        (&w.validator, &["text[]", "oid"]),
+                        (&w.connection, &["oid", "oid", "internal"]),
+                    ];
+                    for (function, arguments) in fields {
+                        if let Some(function) = function {
+                            calls.push((function, signatures(&[arguments])));
+                        }
+                    }
+                }
                 Definition::Language(l) => {
                     let fields: [(&Option<String>, &[&str]); 3] = [
                         (&l.handler, &[]),
@@ -601,8 +613,32 @@ impl Loader {
                             table.name().to_string(),
                         ));
                     }
+                    for table in p.except_tables.iter().flatten() {
+                        references.push((ObjectType::Table, table.clone()));
+                    }
                     for schema in p.schemas.iter().flatten() {
                         references.push((ObjectType::Schema, schema.clone()));
+                    }
+                }
+                Definition::Subscription(s) => {
+                    references.extend(
+                        s.server.iter().map(|server| {
+                            (ObjectType::Server, server.clone())
+                        }),
+                    );
+                    // a subscription that connects reads the user
+                    // mapping of its server for the connection
+                    if let Some(server) = &s.server {
+                        for (mapping, other) in
+                            self.project.inventory.iter().enumerate()
+                        {
+                            if let Definition::UserMapping(m) =
+                                &other.definition
+                                && m.servers.iter().any(|s| &s.name == server)
+                            {
+                                edges.push((id, mapping));
+                            }
+                        }
                     }
                 }
                 _ => {}
@@ -628,8 +664,12 @@ impl Loader {
                     continue;
                 }
                 let (namespace, tag) = split_sql_name(&reference);
+                // these names have no schema, and a period is part of
+                // the name
                 let (namespace, tag) = match desc {
-                    ObjectType::Schema | ObjectType::ProceduralLanguage => {
+                    ObjectType::Schema
+                    | ObjectType::ProceduralLanguage
+                    | ObjectType::Server => {
                         (String::new(), reference.to_string())
                     }
                     _ if namespace.is_empty() => (own_schema.to_string(), tag),
@@ -1663,6 +1703,7 @@ fn aggregate_calls(a: &Aggregate) -> Vec<(&str, Vec<Vec<String>>)> {
         (&a.msfunc, with(mstate, &[&direct])),
         (&a.minvfunc, with(mstate, &[&direct])),
         (&a.mffunc, finals(mstate, a.mfinalfunc_extra)),
+        (&a.support, signatures(&[&["internal"]])),
     ];
     for (function, candidates) in fields {
         if let Some(function) = function {
@@ -1985,6 +2026,37 @@ mod tests {
         assert_eq!(loader.project.inventory.len(), 1);
     }
 
+    /// An aggregate in raw SQL loads when it gives the fields that the
+    /// model needs, and the schema refuses it without them
+    #[test]
+    fn raw_sql_aggregate_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let aggregates = dir.path().join("aggregates").join("public");
+        std::fs::create_dir_all(&aggregates).unwrap();
+        let sql = "sql: CREATE AGGREGATE public.total(integer) \
+                   (SFUNC = int4pl, STYPE = integer)\n";
+        std::fs::write(
+            aggregates.join("total.yaml"),
+            format!(
+                "owner: postgres\n{sql}arguments:\n  - data_type: integer\n\
+                 sfunc: int4pl\nstate_data_type: integer\n"
+            ),
+        )
+        .unwrap();
+        let mut loader = Loader::new(dir.path());
+        loader.read_object_files(ObjectType::Aggregate).unwrap();
+        assert_eq!(loader.errors, 0);
+        assert_eq!(loader.project.inventory.len(), 1);
+        std::fs::write(
+            aggregates.join("total.yaml"),
+            format!("owner: postgres\n{sql}"),
+        )
+        .unwrap();
+        let mut loader = Loader::new(dir.path());
+        loader.read_object_files(ObjectType::Aggregate).unwrap();
+        assert_eq!(loader.errors, 1);
+    }
+
     /// PostgreSQL makes a column of the primary key and an identity
     /// column NOT NULL, so `nullable: true` on one is an error
     #[test]
@@ -2006,6 +2078,51 @@ mod tests {
         let mut loader = Loader::new(dir.path());
         loader.read_object_files(ObjectType::Table).unwrap();
         assert_eq!(loader.errors, 2);
+    }
+
+    /// A subscription depends on its server and on the user mappings
+    /// of the server, and a period in the server name is part of the
+    /// name, not a schema
+    #[test]
+    fn subscription_depends_on_a_server_with_a_period() {
+        let mut loader = Loader::new(Path::new("."));
+        loader.project.inventory.push(Item {
+            id: 0,
+            desc: ObjectType::Server,
+            definition: Definition::Server(crate::models::Server {
+                name: String::from("publisher.eu"),
+                foreign_data_wrapper: String::from("postgres_fdw"),
+                server_type: None,
+                version: None,
+                options: None,
+                comment: None,
+            }),
+            dependencies: BTreeSet::new(),
+        });
+        loader.index.insert(
+            index_key(ObjectType::Server, None, "publisher.eu"),
+            vec![0],
+        );
+        loader.project.inventory.push(Item {
+            id: 1,
+            desc: ObjectType::UserMapping,
+            definition: Definition::UserMapping(crate::models::UserMapping {
+                name: String::from("postgres"),
+                servers: vec![crate::models::UserMappingServer {
+                    name: String::from("publisher.eu"),
+                    options: None,
+                }],
+            }),
+            dependencies: BTreeSet::new(),
+        });
+        loader.add_definition(
+            ObjectType::Subscription,
+            json!({"name": "s", "server": "publisher.eu",
+                   "publications": ["p"]}),
+            None,
+        );
+        loader.apply_structural_dependencies();
+        assert_eq!(loader.project.inventory[2].dependencies, [0, 1].into());
     }
 
     /// L7: a cast's `dependencies` block is cached under the same tag

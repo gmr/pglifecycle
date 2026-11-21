@@ -45,6 +45,14 @@ properties:
       catalog containing the options. The return type is ignored; the function
       should report invalid options using the ereport(ERROR) function.
     type: string
+  connection:
+    title: Connection Function
+    description: >
+      The function that makes the connection string when a subscription
+      uses a foreign server of this wrapper (CONNECTION, PostgreSQL 19).
+      It takes the user oid, the server oid and an unused internal
+      argument, and returns text.
+    type: string
   options:
     title: Options
     description: >

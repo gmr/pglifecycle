@@ -587,19 +587,22 @@ compared as sets, a table name as PostgreSQL resolves it, and a
 parameter written at its default is the same as none. A row filter is
 compared without the parentheses that enclose all of it; other than
 that, it is compared as text, and PostgreSQL writes it back in its own
-form, so write it as `pull` does. A change to or from `all_tables`
-drops and makes the publication again (with `--allow-drop`). A change
+form, so write it as `pull` does. A change to `except_tables` is
+`ALTER PUBLICATION ... SET ALL TABLES EXCEPT (...)`. A change to or
+from `all_tables` or `all_sequences` drops and makes the publication
+again (with `--allow-drop`). A change
 to `publish_via_partition_root` is applied with a warning: a subscriber
 of a partitioned table can copy rows two times or lose rows.
 
-A subscription changes in place: `CONNECTION`, `SET PUBLICATION ...
-WITH (refresh = false)`, `SET (...)` and its comment. Deploy runs in
+A subscription changes in place: `CONNECTION` or `SERVER`, `SET
+PUBLICATION ... WITH (refresh = false)`, `SET (...)` and its comment. Deploy runs in
 one transaction, and a refresh cannot, so after a change to the
 publications, run `ALTER SUBSCRIPTION ... REFRESH PUBLICATION` by hand.
 The options that only `CREATE SUBSCRIPTION` reads (`connect`,
 `create_slot`, `copy_data`) are not compared, nor is `enabled`, which
 `pg_dump` does not write; deploy never enables or disables a
-subscription. A change to `slot_name`, `two_phase` or `failover` is
+subscription. A change to `slot_name`, `two_phase`, `failover` or
+`retain_dead_tuples` is
 reported and not made, as it needs the subscription disabled, the
 publisher, or a statement outside a transaction; the script carries
 the statement to run as a comment. A connection that the project gives

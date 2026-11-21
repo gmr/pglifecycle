@@ -1,11 +1,16 @@
 //! Publication reconciliation. The members, the parameters and the
-//! comment change in place. A change to or from FOR ALL TABLES has no
-//! ALTER form, so it drops and makes the publication again.
+//! comment change in place. A change of the EXCEPT tables of a FOR ALL
+//! TABLES publication is `SET ALL TABLES EXCEPT (...)`. A change to or
+//! from FOR ALL TABLES or FOR ALL SEQUENCES drops and makes the
+//! publication again, as PostgreSQL 18 has no ALTER form for it.
 
 use serde_json::Map;
 
 use super::{Alter, Resolution, push_comment, sql_comment};
-use crate::build::{render_publication_parameters, render_publication_table};
+use crate::build::{
+    render_publication_all, render_publication_parameters,
+    render_publication_table,
+};
 use crate::models::{Publication, PublicationTable};
 use crate::utils::quote_ident;
 
@@ -21,12 +26,24 @@ use crate::utils::quote_ident;
 pub(super) fn publication(repo: &Publication, db: &Publication) -> Resolution {
     let wanted = repo.canonical();
     let existing = db.canonical();
-    if wanted.all_tables != existing.all_tables {
+    if wanted.all_tables != existing.all_tables
+        || wanted.all_sequences != existing.all_sequences
+    {
         return Resolution::Replace;
     }
     let name = quote_ident(&repo.name);
     let mut members = Vec::new();
-    if wanted.tables != existing.tables || wanted.schemas != existing.schemas {
+    if wanted.except_tables != existing.except_tables {
+        // SET replaces the EXCEPT list, and keeps ALL SEQUENCES only
+        // when it is given again
+        if let Some(all) = render_publication_all(&wanted) {
+            members.push(Alter::new(format!(
+                "ALTER PUBLICATION {name} SET {all};\n"
+            )));
+        }
+    } else if wanted.tables != existing.tables
+        || wanted.schemas != existing.schemas
+    {
         let objects =
             |publication: &Publication,
              table: fn(&PublicationTable) -> String| {
@@ -267,6 +284,50 @@ mod tests {
         let sql = statements(super::publication(&db, &pulled()));
         assert!(sql[0].contains("DROP TABLE ONLY"));
         assert!(sql[1].contains("publish_via_partition_root = false"));
+    }
+
+    #[test]
+    fn except_tables_change_in_place() {
+        let existing = publication(serde_json::json!({
+            "name": "p", "all_tables": true, "all_sequences": true,
+            "except_tables": ["s.t"],
+        }));
+        let wanted = publication(serde_json::json!({
+            "name": "p", "all_tables": true, "all_sequences": true,
+            "except_tables": ["S.u", "s.T"],
+        }));
+        assert_eq!(
+            statements(super::publication(&wanted, &existing)),
+            vec![
+                "ALTER PUBLICATION p SET ALL TABLES EXCEPT (TABLE ONLY s.t, \
+                 TABLE ONLY s.u), ALL SEQUENCES;\n"
+            ]
+        );
+        let cleared = publication(serde_json::json!({
+            "name": "p", "all_tables": true, "all_sequences": true,
+        }));
+        assert_eq!(
+            statements(super::publication(&cleared, &existing)),
+            vec!["ALTER PUBLICATION p SET ALL TABLES, ALL SEQUENCES;\n"]
+        );
+        // the same tables written another way are no change
+        assert!(
+            statements(super::publication(&existing, &existing)).is_empty()
+        );
+    }
+
+    #[test]
+    fn all_sequences_is_replaced() {
+        let tables = publication(serde_json::json!({
+            "name": "p", "all_tables": true,
+        }));
+        let both = publication(serde_json::json!({
+            "name": "p", "all_tables": true, "all_sequences": true,
+        }));
+        assert!(matches!(
+            super::publication(&both, &tables),
+            Resolution::Replace
+        ));
     }
 
     #[test]

@@ -33,6 +33,10 @@ fn not_changed(key: &str) -> Option<&'static str> {
             "it needs the subscription disabled, and a change to false \
              cannot run in a transaction block",
         ),
+        "retain_dead_tuples" => Some(
+            "it needs the subscription disabled, and a change to false \
+             can drop the pg_conflict_detection slot",
+        ),
         _ => None,
     }
 }
@@ -48,9 +52,22 @@ pub(super) fn subscription(
     let existing = without_redacted_password(repo, db).canonical();
     let name = quote_ident(&repo.name);
     let mut alters = Vec::new();
-    if wanted.connection != existing.connection {
-        if without_password(&repo.connection).is_none()
-            && without_password(&db.connection).is_some()
+    if wanted.server != existing.server
+        && let Some(server) = &repo.server
+    {
+        alters.push(Alter::new(format!(
+            "ALTER SUBSCRIPTION {name} SERVER {};\n",
+            quote_ident(server)
+        )));
+    } else if wanted.connection != existing.connection
+        && let Some(connection) = &repo.connection
+    {
+        if without_password(connection).is_none()
+            && db
+                .connection
+                .as_deref()
+                .and_then(without_password)
+                .is_some()
         {
             alters.push(not_made(
                 &repo.name,
@@ -62,7 +79,7 @@ pub(super) fn subscription(
         } else {
             alters.push(Alter::new(format!(
                 "ALTER SUBSCRIPTION {name} CONNECTION {};\n",
-                postgres_value(&Value::String(repo.connection.clone()))
+                postgres_value(&Value::String(connection.clone()))
             )));
         }
     }
@@ -221,16 +238,48 @@ mod tests {
     }
 
     #[test]
+    fn a_server_and_the_pg19_options_change_in_place() {
+        let db = pulled();
+        let mut repo = pulled();
+        repo.connection = None;
+        repo.server = Some(String::from("Pub Srv"));
+        let parameters = repo.parameters.get_or_insert_default();
+        parameters.insert("max_retention_duration".into(), 60000.into());
+        parameters.insert("wal_receiver_timeout".into(), "30s".into());
+        parameters.insert("retain_dead_tuples".into(), true.into());
+        let sql = statements(super::subscription(&repo, &db));
+        assert_eq!(sql[0], "ALTER SUBSCRIPTION sub SERVER \"Pub Srv\";\n");
+        assert!(
+            sql.iter().any(|s| s.starts_with("-- not applied")
+                && s.contains("retain_dead_tuples")),
+            "{sql:?}"
+        );
+        assert!(
+            sql.iter()
+                .any(|s| s.contains("max_retention_duration = 60000")
+                    && s.contains("wal_receiver_timeout = '30s'")),
+            "{sql:?}"
+        );
+        // the defaults are no change
+        let mut defaults = pulled();
+        let parameters = defaults.parameters.get_or_insert_default();
+        parameters.insert("max_retention_duration".into(), 0.into());
+        parameters.insert("wal_receiver_timeout".into(), "-1".into());
+        parameters.insert("retain_dead_tuples".into(), false.into());
+        assert!(statements(super::subscription(&defaults, &db)).is_empty());
+    }
+
+    #[test]
     fn a_redacted_password_is_not_a_change() {
         let mut db = pulled();
-        db.connection = String::from("dbname=elsewhere password=secret");
+        db.connection = Some(String::from("dbname=elsewhere password=secret"));
         assert_eq!(
             without_redacted_password(&pulled(), &db).canonical(),
             pulled().canonical()
         );
         // a project that carries a password changes it
         let mut repo = pulled();
-        repo.connection = String::from("dbname=elsewhere password=new");
+        repo.connection = Some(String::from("dbname=elsewhere password=new"));
         assert_eq!(
             statements(super::subscription(&repo, &db)),
             vec![
@@ -243,9 +292,9 @@ mod tests {
     #[test]
     fn a_new_connection_keeps_a_password_that_the_project_has_not() {
         let mut repo = pulled();
-        repo.connection = String::from("dbname=other");
+        repo.connection = Some(String::from("dbname=other"));
         let mut db = pulled();
-        db.connection = String::from("dbname=elsewhere password=secret");
+        db.connection = Some(String::from("dbname=elsewhere password=secret"));
         let sql = statements(super::subscription(&repo, &db));
         assert_eq!(sql.len(), 1);
         assert!(sql[0].starts_with("-- not applied: SUBSCRIPTION sub: "));

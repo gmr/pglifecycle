@@ -25,11 +25,13 @@ pub(crate) fn create_fdw(node: &Node, src: &str) -> Result<Statement, String> {
         owner: String::new(),
         handler: None,
         validator: None,
+        connection: None,
         options: generic_options(node, src),
         comment: None,
     };
-    // each fdw_option is HANDLER/VALIDATOR <name> or NO HANDLER/VALIDATOR
-    // (the latter carries kw_no and no handler_name)
+    // each fdw_option is HANDLER/VALIDATOR/CONNECTION <name> or NO
+    // HANDLER/VALIDATOR/CONNECTION (the latter carries kw_no and no
+    // handler_name)
     for option in node.find_all("fdw_option") {
         let Some(handler) = option.child_of_kind("handler_name") else {
             continue;
@@ -39,6 +41,8 @@ pub(crate) fn create_fdw(node: &Node, src: &str) -> Result<Statement, String> {
             fdw.handler = value;
         } else if option.has("kw_validator") {
             fdw.validator = value;
+        } else if option.has("kw_connection") {
+            fdw.connection = value;
         }
     }
     Ok(Statement::CreateForeignDataWrapper(fdw))
@@ -255,6 +259,22 @@ mod tests {
         };
         assert_eq!(fdw.handler, None);
         assert_eq!(fdw.validator, None);
+        assert_eq!(fdw.connection, None);
+    }
+
+    #[test]
+    fn parses_fdw_connection_function() {
+        let Statement::CreateForeignDataWrapper(fdw) = parse_one(
+            "CREATE FOREIGN DATA WRAPPER w CONNECTION \
+             public.postgres_fdw_connection;",
+        ) else {
+            panic!("expected CreateForeignDataWrapper")
+        };
+        assert_eq!(
+            fdw.connection.as_deref(),
+            Some("public.postgres_fdw_connection")
+        );
+        assert_eq!(fdw.handler, None);
     }
 
     #[test]
