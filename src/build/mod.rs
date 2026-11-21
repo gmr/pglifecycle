@@ -481,6 +481,7 @@ pub fn assemble(project: &Project) -> Result<BuildOutput, String> {
     let mut builder = Builder {
         dump,
         dump_id_map: HashMap::new(),
+        mapping_entries: HashMap::new(),
         text_search_last: HashMap::new(),
         pending_attaches: Vec::new(),
         index_attaches: IndexAttaches::default(),
@@ -579,6 +580,11 @@ struct IndexAttaches {
 struct Builder {
     dump: libpgdump::Dump,
     dump_id_map: HashMap<usize, i32>,
+    /// The user mapping entries of each server. The item of a user
+    /// mapping stands for its first entry only (see
+    /// `dump_user_mapping`), and a subscription depends on the entries
+    /// of its own server.
+    mapping_entries: HashMap<String, Vec<i32>>,
     /// The last entry each text search container added (see
     /// `add_text_search_item`)
     text_search_last: HashMap<usize, i32>,
@@ -2583,7 +2589,23 @@ impl Builder {
         }
         let drop =
             vec!["DROP SUBSCRIPTION IF EXISTS".into(), self.item_name(item)];
-        self.add_item(item, create, drop, false)
+        self.add_item(item, create, drop, false)?;
+        // with connect on, CREATE SUBSCRIPTION reads the user mapping of
+        // its server, so it comes after each mapping entry of the server
+        let mappings = d
+            .server
+            .as_ref()
+            .and_then(|server| self.mapping_entries.get(server))
+            .cloned()
+            .unwrap_or_default();
+        if let Some(entry) = self
+            .dump_id_map
+            .get(&item.id)
+            .and_then(|id| self.dump.get_entry_mut(*id))
+        {
+            entry.dependencies.extend(mappings);
+        }
+        Ok(())
     }
 
     fn dump_table(&mut self, item: &Item) -> Result<(), String> {
@@ -3997,6 +4019,10 @@ impl Builder {
             ];
             self.add_item(item, create, drop, false)?;
             let dump_id = self.dump_id_map[&item.id];
+            self.mapping_entries
+                .entry(server.name.clone())
+                .or_default()
+                .push(dump_id);
             // the first entry stands for the item, and each later
             // entry comes after the one before (deviation 47)
             if let (Some(first), Some(previous)) = (first, previous) {
@@ -5387,6 +5413,7 @@ mod tests {
         let mut builder = Builder {
             dump,
             dump_id_map: HashMap::new(),
+            mapping_entries: HashMap::new(),
             text_search_last: HashMap::new(),
             pending_attaches: Vec::new(),
             index_attaches: IndexAttaches::default(),
@@ -5881,6 +5908,7 @@ mod tests {
         let mut builder = Builder {
             dump,
             dump_id_map: HashMap::new(),
+            mapping_entries: HashMap::new(),
             text_search_last: HashMap::new(),
             pending_attaches: Vec::new(),
             index_attaches: IndexAttaches::default(),
@@ -5928,6 +5956,7 @@ mod tests {
         let mut builder = Builder {
             dump,
             dump_id_map: HashMap::new(),
+            mapping_entries: HashMap::new(),
             text_search_last: HashMap::new(),
             pending_attaches: Vec::new(),
             index_attaches: IndexAttaches::default(),
@@ -5976,6 +6005,7 @@ mod tests {
         let mut builder = Builder {
             dump,
             dump_id_map: HashMap::new(),
+            mapping_entries: HashMap::new(),
             text_search_last: HashMap::new(),
             pending_attaches: Vec::new(),
             index_attaches: IndexAttaches::default(),
@@ -6282,6 +6312,7 @@ mod tests {
         let mut builder = Builder {
             dump,
             dump_id_map: HashMap::new(),
+            mapping_entries: HashMap::new(),
             text_search_last: HashMap::new(),
             pending_attaches: Vec::new(),
             index_attaches: IndexAttaches::default(),
@@ -6336,6 +6367,7 @@ mod tests {
         let mut builder = Builder {
             dump,
             dump_id_map: HashMap::new(),
+            mapping_entries: HashMap::new(),
             text_search_last: HashMap::new(),
             pending_attaches: Vec::new(),
             index_attaches: IndexAttaches::default(),
@@ -6396,6 +6428,7 @@ mod tests {
         let mut builder = Builder {
             dump,
             dump_id_map: HashMap::new(),
+            mapping_entries: HashMap::new(),
             text_search_last: HashMap::new(),
             pending_attaches: Vec::new(),
             index_attaches: IndexAttaches::default(),
@@ -6441,6 +6474,7 @@ mod tests {
         let mut builder = Builder {
             dump,
             dump_id_map: HashMap::new(),
+            mapping_entries: HashMap::new(),
             text_search_last: HashMap::new(),
             pending_attaches: Vec::new(),
             index_attaches: IndexAttaches::default(),
@@ -6521,6 +6555,7 @@ mod tests {
             let mut builder = Builder {
                 dump: libpgdump::new("t", "UTF-8", "18.0").unwrap(),
                 dump_id_map: HashMap::new(),
+                mapping_entries: HashMap::new(),
                 text_search_last: HashMap::new(),
                 pending_attaches: Vec::new(),
                 index_attaches: IndexAttaches::default(),
@@ -6564,6 +6599,7 @@ mod tests {
         let mut builder = Builder {
             dump,
             dump_id_map: HashMap::new(),
+            mapping_entries: HashMap::new(),
             text_search_last: HashMap::new(),
             pending_attaches: Vec::new(),
             index_attaches: IndexAttaches::default(),
@@ -6800,6 +6836,7 @@ mod tests {
         let mut builder = Builder {
             dump,
             dump_id_map: HashMap::new(),
+            mapping_entries: HashMap::new(),
             text_search_last: HashMap::new(),
             pending_attaches: Vec::new(),
             index_attaches: IndexAttaches::default(),
@@ -6865,6 +6902,7 @@ mod tests {
         let mut builder = Builder {
             dump,
             dump_id_map: HashMap::new(),
+            mapping_entries: HashMap::new(),
             text_search_last: HashMap::new(),
             pending_attaches: Vec::new(),
             index_attaches: IndexAttaches::default(),
@@ -7145,6 +7183,7 @@ mod tests {
         let mut builder = Builder {
             dump,
             dump_id_map: HashMap::new(),
+            mapping_entries: HashMap::new(),
             text_search_last: HashMap::new(),
             pending_attaches: Vec::new(),
             index_attaches: IndexAttaches::default(),
