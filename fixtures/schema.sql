@@ -739,6 +739,13 @@ SELECT current_setting('server_version_num')::int >= 190000 AS pg19 \gset
 ALTER DEFAULT PRIVILEGES IN SCHEMA test GRANT SELECT ON TABLES TO PUBLIC;
 ALTER DEFAULT PRIVILEGES IN SCHEMA test GRANT USAGE ON SEQUENCES TO PUBLIC;
 ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+-- an aggregate and the functions of an extension made after the
+-- default privileges: PUBLIC cannot run them. pg_dump writes an ACL
+-- for each, and deploy must make the same ACL. The extension has a
+-- schema of its own, as its functions are not items of the project
+CREATE AGGREGATE test.sum_private(INTEGER) (SFUNC = int4pl, STYPE = INTEGER);
+CREATE SCHEMA gate_ext;
+CREATE EXTENSION tablefunc SCHEMA gate_ext;
 
 -- Column attributes pg_dump writes as ALTER COLUMN after CREATE TABLE:
 -- compression, storage, the statistics target and attribute options

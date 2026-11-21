@@ -340,6 +340,7 @@ fn statements(
 /// The types of the items whose privileges deploy compares: the
 /// targets of the ACL sections of build (`build::acls`)
 const COMPARED: &[constants::ObjectType] = &[
+    constants::ObjectType::Aggregate,
     constants::ObjectType::Domain,
     constants::ObjectType::ForeignDataWrapper,
     constants::ObjectType::Function,
@@ -419,8 +420,8 @@ pub(crate) fn plan(
         .collect();
     // the snapshot entry of each project item, for its owner and for
     // the ACL entries that depend on it. Only the types that build
-    // gives ACL entries are compared: pg_dump writes the ACL of an
-    // aggregate ON FUNCTION, which the project cannot attach to it
+    // gives ACL entries are compared. pg_dump writes the ACL of an
+    // aggregate ON FUNCTION, and build attaches it to the aggregate
     let keys: BTreeMap<ObjectKey, usize> = project
         .inventory
         .iter()
@@ -472,9 +473,18 @@ pub(crate) fn plan(
         let item = super::entry_owners(entry, output, &entries_by_id)
             .into_iter()
             .find(|id| diff.items.get(id) != Some(&Change::Skipped));
-        let Some((target, side)) =
-            side(&mut parser, entry, item, &mut skipped)
-        else {
+        // build attaches the ACL of a function of an extension to the
+        // extension, which has many functions, so the function is
+        // compared by its name, as the database side has no item for it
+        let of_extension = item.is_some_and(|id| {
+            matches!(items.get(&id), Some(Definition::Extension(_)))
+        });
+        let Some((target, side)) = side(
+            &mut parser,
+            entry,
+            item.filter(|_| !of_extension),
+            &mut skipped,
+        ) else {
             continue;
         };
         if let Some(item) = item {
@@ -608,9 +618,12 @@ fn side(
     }
     let first = statements.first()?;
     let kind = Kind::of(first.target)?;
+    // a function is compared by its item, as its signature can be
+    // written in more than one way. A function with no item (of an
+    // extension) is compared by name; a function that only the
+    // database has is not compared, as no item makes it a target
     let target = match (kind, item) {
         (Kind::Function, Some(item)) => Target::Item(item),
-        (Kind::Function, None) => return None,
         (kind, _) => Target::Name(kind, first.objects[0].clone()),
     };
     if !readable {
@@ -784,6 +797,19 @@ fn object(entry: &libpgdump::Entry) -> Option<(Kind, String, String)> {
         OT::Function | OT::Procedure => {
             let drop = entry.drop_stmt.as_deref()?.strip_prefix("DROP ")?;
             let on = drop.trim_end_matches(['\n', ';']).to_string();
+            return Some((Kind::Function, on.clone(), on));
+        }
+        // GRANT names an aggregate ON FUNCTION, with all of its
+        // argument types in one list
+        OT::Aggregate => {
+            let drop = entry.drop_stmt.as_deref()?;
+            let on = format!(
+                "FUNCTION {}",
+                drop.strip_prefix("DROP AGGREGATE ")?
+                    .trim_end_matches(['\n', ';'])
+                    .replace("(*)", "()")
+                    .replace(" ORDER BY ", ", ")
+            );
             return Some((Kind::Function, on.clone(), on));
         }
         OT::Type => (Kind::Type, "TYPE"),
@@ -1003,6 +1029,28 @@ mod tests {
             &[],
         )
         .expect("procedure");
+        dump.add_entry(
+            libpgdump::ObjectType::Aggregate,
+            Some("s"),
+            Some("a(integer ORDER BY integer)"),
+            Some("o"),
+            None,
+            Some("DROP AGGREGATE s.a(integer ORDER BY integer);\n"),
+            None,
+            &[],
+        )
+        .expect("aggregate");
+        dump.add_entry(
+            libpgdump::ObjectType::Aggregate,
+            Some("s"),
+            Some("c(*)"),
+            Some("o"),
+            None,
+            Some("DROP AGGREGATE s.c(*);\n"),
+            None,
+            &[],
+        )
+        .expect("aggregate");
         let objects: Vec<_> =
             dump.entries().iter().filter_map(object).collect();
         assert_eq!(
@@ -1017,6 +1065,16 @@ mod tests {
                     Kind::Function,
                     String::from("PROCEDURE s.p(integer)"),
                     String::from("PROCEDURE s.p(integer)"),
+                ),
+                (
+                    Kind::Function,
+                    String::from("FUNCTION s.a(integer, integer)"),
+                    String::from("FUNCTION s.a(integer, integer)"),
+                ),
+                (
+                    Kind::Function,
+                    String::from("FUNCTION s.c()"),
+                    String::from("FUNCTION s.c()"),
                 ),
             ]
         );
