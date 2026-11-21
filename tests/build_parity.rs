@@ -2508,9 +2508,16 @@ fn renders_domain_constraint_comments() {
 
 /// A subscription with a server comes after the user mapping entry of
 /// that server, not only after the first entry of the user mapping.
-/// With connect on, CREATE SUBSCRIPTION reads the mapping.
+/// With connect on, CREATE SUBSCRIPTION reads the mapping. The
+/// inventory can list the subscription before or after the mapping.
 #[test]
 fn orders_a_server_subscription_after_its_mapping_entry() {
+    for subscription_first in [false, true] {
+        server_subscription_after_mapping_entry(subscription_first);
+    }
+}
+
+fn server_subscription_after_mapping_entry(subscription_first: bool) {
     let item = |id, desc, definition| Item {
         id,
         desc,
@@ -2530,7 +2537,7 @@ fn orders_a_server_subscription_after_its_mapping_entry() {
         ),
     );
     subscription.dependencies.insert(1);
-    let inventory = vec![
+    let mut inventory = vec![
         item(
             0,
             ObjectType::User,
@@ -2555,6 +2562,9 @@ fn orders_a_server_subscription_after_its_mapping_entry() {
         ),
         subscription,
     ];
+    if subscription_first {
+        inventory.rotate_right(1);
+    }
     let project = project::Project {
         name: "mappings".into(),
         superuser: "postgres".into(),
@@ -2580,7 +2590,7 @@ fn orders_a_server_subscription_after_its_mapping_entry() {
         .unwrap();
     assert!(
         subscription.dependencies.contains(&mapping.dump_id),
-        "{:?} does not have {}",
+        "{:?} does not have {} (subscription first: {subscription_first})",
         subscription.dependencies,
         mapping.dump_id
     );

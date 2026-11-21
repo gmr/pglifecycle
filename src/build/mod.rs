@@ -534,6 +534,7 @@ pub fn assemble(project: &Project) -> Result<BuildOutput, String> {
             entry.dependencies.extend(deps);
         }
     }
+    builder.apply_subscription_mappings(project);
     builder.apply_calls(project);
     builder.apply_text_search_references();
     builder.apply_attaches(project)?;
@@ -2540,6 +2541,31 @@ impl Builder {
         self.add_item(item, create, drop, false)
     }
 
+    /// With connect on, CREATE SUBSCRIPTION reads the user mapping of
+    /// its server, so a subscription comes after each mapping entry of
+    /// its server. The item of a user mapping stands for its first entry
+    /// only, so the item edge is not sufficient. This runs after every
+    /// entry exists, as the inventory need not list the mappings first.
+    fn apply_subscription_mappings(&mut self, project: &Project) {
+        for item in &project.inventory {
+            let Definition::Subscription(d) = &item.definition else {
+                continue;
+            };
+            let Some(mappings) =
+                d.server.as_ref().and_then(|s| self.mapping_entries.get(s))
+            else {
+                continue;
+            };
+            if let Some(entry) = self
+                .dump_id_map
+                .get(&item.id)
+                .and_then(|id| self.dump.get_entry_mut(*id))
+            {
+                entry.dependencies.extend(mappings);
+            }
+        }
+    }
+
     fn dump_subscription(&mut self, item: &Item) -> Result<(), String> {
         let Definition::Subscription(d) = &item.definition else {
             unreachable!()
@@ -2589,23 +2615,7 @@ impl Builder {
         }
         let drop =
             vec!["DROP SUBSCRIPTION IF EXISTS".into(), self.item_name(item)];
-        self.add_item(item, create, drop, false)?;
-        // with connect on, CREATE SUBSCRIPTION reads the user mapping of
-        // its server, so it comes after each mapping entry of the server
-        let mappings = d
-            .server
-            .as_ref()
-            .and_then(|server| self.mapping_entries.get(server))
-            .cloned()
-            .unwrap_or_default();
-        if let Some(entry) = self
-            .dump_id_map
-            .get(&item.id)
-            .and_then(|id| self.dump.get_entry_mut(*id))
-        {
-            entry.dependencies.extend(mappings);
-        }
-        Ok(())
+        self.add_item(item, create, drop, false)
     }
 
     fn dump_table(&mut self, item: &Item) -> Result<(), String> {
