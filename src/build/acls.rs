@@ -490,12 +490,12 @@ impl<'a> ObjectIndex<'a> {
         let mut functions_by_name: HashMap<_, Vec<&Item>> = HashMap::new();
         let mut extensions_by_schema: HashMap<_, Vec<&Item>> = HashMap::new();
         for item in &project.inventory {
-            if let Definition::Extension(e) = &item.definition
-                && let Some(schema) = e.schema.as_deref()
+            let schema = item.definition.schema();
+            if let (Definition::Extension(_), Some(schema)) =
+                (&item.definition, schema)
             {
                 extensions_by_schema.entry(schema).or_default().push(item);
             }
-            let schema = item.definition.schema();
             let key_schema = if item.desc.is_schemaless() {
                 None
             } else {
@@ -520,12 +520,16 @@ impl<'a> ObjectIndex<'a> {
                 Definition::Function(f) => Some(f.identity()),
                 Definition::Procedure(p) => Some(p.identity()),
                 // pg_dump writes an aggregate's ACL as `ON FUNCTION`,
-                // with the signature of its COMMENT
-                Definition::Aggregate(a) => Some(format!(
-                    "{}{}",
-                    a.name,
-                    crate::pull::aggregate_signature(a)
-                )),
+                // with only the types of all of its arguments
+                Definition::Aggregate(a) => {
+                    let types: Vec<&str> = a
+                        .arguments
+                        .iter()
+                        .chain(a.order_by.iter().flatten())
+                        .map(|arg| arg.data_type.as_str())
+                        .collect();
+                    Some(format!("{}({})", a.name, types.join(", ")))
+                }
                 _ => None,
             };
             if let Some(identity) = identity {
@@ -986,12 +990,15 @@ mod tests {
     /// or the one extension of the schema
     #[test]
     fn attaches_aggregate_and_extension_function_acls() {
-        let aggregate: models::Aggregate = serde_json::from_value(json!({
-            "name": "total", "schema": "s", "owner": "postgres",
-            "arguments": [{"data_type": "integer"}],
-            "sfunc": "int4pl", "state_data_type": "integer",
-        }))
-        .unwrap();
+        let aggregate = |arguments: Value| -> models::Aggregate {
+            serde_json::from_value(json!({
+                "name": "total", "schema": "s", "owner": "postgres",
+                "arguments": arguments,
+                "order_by": [{"data_type": "text"}],
+                "sfunc": "int4pl", "state_data_type": "integer",
+            }))
+            .unwrap()
+        };
         let extension: models::Extension = serde_json::from_value(json!({
             "name": "tablefunc", "schema": "ext",
         }))
@@ -999,14 +1006,27 @@ mod tests {
         let public: models::Role = serde_json::from_value(json!({
             "name": "PUBLIC", "create": false,
             "revocations": {"functions": {
-                "s.total(integer)": ["ALL"],
+                "s.total(integer, text)": ["ALL"],
                 "ext.normal_rand(integer, double precision, \
                  double precision)": ["ALL"],
             }},
         }))
         .unwrap();
         let project = project_with(vec![
-            item(0, ObjectType::Aggregate, Definition::Aggregate(aggregate)),
+            item(
+                0,
+                ObjectType::Aggregate,
+                Definition::Aggregate(aggregate(
+                    json!([{"name": "n", "data_type": "integer"}]),
+                )),
+            ),
+            item(
+                3,
+                ObjectType::Aggregate,
+                Definition::Aggregate(aggregate(
+                    json!([{"data_type": "bigint"}]),
+                )),
+            ),
             item(1, ObjectType::Extension, Definition::Extension(extension)),
             item(2, ObjectType::Role, Definition::Role(public)),
         ]);
@@ -1019,7 +1039,7 @@ mod tests {
                 .dump_id
         };
         assert_eq!(
-            find_acl(&dump, "FUNCTION total(integer)").dependencies,
+            find_acl(&dump, "FUNCTION total(integer, text)").dependencies,
             vec![entry(libpgdump::ObjectType::Aggregate)]
         );
         assert_eq!(

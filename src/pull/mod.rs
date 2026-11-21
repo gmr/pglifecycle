@@ -3041,7 +3041,7 @@ fn set_security_label(
 /// AGGREGATE`: `(integer)`, `(x integer ORDER BY integer)` or `(*)`.
 /// pg_dump uses the identity arguments, which include the argument
 /// names, so each argument is its mode, its name and its type.
-pub(crate) fn aggregate_signature(aggregate: &models::Aggregate) -> String {
+fn aggregate_signature(aggregate: &models::Aggregate) -> String {
     let types = |args: &[models::Argument]| {
         args.iter()
             .map(|a| {

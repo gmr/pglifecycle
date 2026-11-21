@@ -476,15 +476,12 @@ pub(crate) fn plan(
         // build attaches the ACL of a function of an extension to the
         // extension, which has many functions, so the function is
         // compared by its name, as the database side has no item for it
-        let of_extension = item.is_some_and(|id| {
-            matches!(items.get(&id), Some(Definition::Extension(_)))
+        let by_item = item.filter(|id| {
+            !matches!(items.get(id), Some(Definition::Extension(_)))
         });
-        let Some((target, side)) = side(
-            &mut parser,
-            entry,
-            item.filter(|_| !of_extension),
-            &mut skipped,
-        ) else {
+        let Some((target, side)) =
+            side(&mut parser, entry, by_item, &mut skipped)
+        else {
             continue;
         };
         if let Some(item) = item {
@@ -794,22 +791,18 @@ fn object(entry: &libpgdump::Entry) -> Option<(Kind, String, String)> {
             (Kind::Table, "TABLE")
         }
         OT::Sequence => (Kind::Sequence, "SEQUENCE"),
-        OT::Function | OT::Procedure => {
-            let drop = entry.drop_stmt.as_deref()?.strip_prefix("DROP ")?;
-            let on = drop.trim_end_matches(['\n', ';']).to_string();
-            return Some((Kind::Function, on.clone(), on));
-        }
         // GRANT names an aggregate ON FUNCTION, with all of its
         // argument types in one list
-        OT::Aggregate => {
+        OT::Function | OT::Procedure | OT::Aggregate => {
             let drop = entry.drop_stmt.as_deref()?;
-            let on = format!(
-                "FUNCTION {}",
-                drop.strip_prefix("DROP AGGREGATE ")?
-                    .trim_end_matches(['\n', ';'])
-                    .replace("(*)", "()")
-                    .replace(" ORDER BY ", ", ")
-            );
+            let drop = drop.trim_end_matches(['\n', ';']);
+            let on = match drop.strip_prefix("DROP AGGREGATE ") {
+                Some(aggregate) => format!(
+                    "FUNCTION {}",
+                    aggregate.replace("(*)", "()").replace(" ORDER BY ", ", ")
+                ),
+                None => drop.strip_prefix("DROP ")?.to_string(),
+            };
             return Some((Kind::Function, on.clone(), on));
         }
         OT::Type => (Kind::Type, "TYPE"),
