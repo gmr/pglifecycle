@@ -9,7 +9,7 @@
 //! column changes, and the drop+recreate fallback for changes with no
 //! in-place form — are excluded unless `--allow-drop` is given.
 
-mod alter;
+pub(crate) mod alter;
 mod database;
 mod dependents;
 mod diff;

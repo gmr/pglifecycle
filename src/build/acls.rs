@@ -522,11 +522,15 @@ impl<'a> ObjectIndex<'a> {
                 // pg_dump writes an aggregate's ACL as `ON FUNCTION`,
                 // with only the types of all of its arguments
                 Definition::Aggregate(a) => {
-                    let types: Vec<&str> = a
+                    let types: Vec<String> = a
                         .arguments
                         .iter()
                         .chain(a.order_by.iter().flatten())
-                        .map(|arg| arg.data_type.as_str())
+                        .map(|arg| {
+                            crate::deploy::alter::names::argument_type(
+                                &arg.data_type,
+                            )
+                        })
                         .collect();
                     Some(format!("{}({})", a.name, types.join(", ")))
                 }
@@ -1017,7 +1021,7 @@ mod tests {
                 0,
                 ObjectType::Aggregate,
                 Definition::Aggregate(aggregate(
-                    json!([{"name": "n", "data_type": "integer"}]),
+                    json!([{"name": "n", "data_type": "int4"}]),
                 )),
             ),
             item(

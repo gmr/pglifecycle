@@ -799,7 +799,10 @@ fn object(entry: &libpgdump::Entry) -> Option<(Kind, String, String)> {
             let on = match drop.strip_prefix("DROP AGGREGATE ") {
                 Some(aggregate) => format!(
                     "FUNCTION {}",
-                    aggregate.replace("(*)", "()").replace(" ORDER BY ", ", ")
+                    aggregate
+                        .replace("(*)", "()")
+                        .replace("(ORDER BY ", "(")
+                        .replace(" ORDER BY ", ", ")
                 ),
                 None => drop.strip_prefix("DROP ")?.to_string(),
             };
@@ -1044,6 +1047,17 @@ mod tests {
             &[],
         )
         .expect("aggregate");
+        dump.add_entry(
+            libpgdump::ObjectType::Aggregate,
+            Some("s"),
+            Some("o(ORDER BY integer)"),
+            Some("o"),
+            None,
+            Some("DROP AGGREGATE s.o (ORDER BY IN integer);\n"),
+            None,
+            &[],
+        )
+        .expect("aggregate");
         let objects: Vec<_> =
             dump.entries().iter().filter_map(object).collect();
         assert_eq!(
@@ -1068,6 +1082,11 @@ mod tests {
                     Kind::Function,
                     String::from("FUNCTION s.c()"),
                     String::from("FUNCTION s.c()"),
+                ),
+                (
+                    Kind::Function,
+                    String::from("FUNCTION s.o (IN integer)"),
+                    String::from("FUNCTION s.o (IN integer)"),
                 ),
             ]
         );
