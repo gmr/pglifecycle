@@ -366,7 +366,9 @@ fn query_args(conn: &cli::Connection, query: &str) -> Vec<OsString> {
 /// The initial privileges (`pg_init_privs`) of each function of an
 /// extension, as GRANT statements in the form that pg_dump writes.
 /// Each function starts with a REVOKE, thus a function whose initial
-/// ACL is empty also has a statement. pg_dump qualifies the types
+/// ACL is empty also has a statement. pg_dump names an aggregate with
+/// the types of all its arguments only, in one list, and another
+/// function with its identity arguments. pg_dump qualifies the types
 /// with an empty search_path, thus the query does the same
 const INITIAL_PRIVILEGES_QUERY: &str = "SET search_path = '';
 SELECT string_agg(
@@ -381,7 +383,12 @@ SELECT string_agg(
                             ELSE '' END), '')
               FROM aclexplode(f.initprivs) a), ''), E'\\n')
   FROM (SELECT format('%I.%I(%s)', n.nspname, p.proname,
-                      pg_get_function_identity_arguments(p.oid)) signature,
+                      CASE WHEN p.prokind = 'a' THEN (
+                          SELECT coalesce(string_agg(format_type(t, NULL),
+                                              ', ' ORDER BY o), '')
+                            FROM unnest(p.proargtypes) WITH ORDINALITY u(t, o))
+                      ELSE pg_get_function_identity_arguments(p.oid)
+                      END) signature,
                i.initprivs
           FROM pg_catalog.pg_init_privs i
           JOIN pg_catalog.pg_proc p ON p.oid = i.objoid
