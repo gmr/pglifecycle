@@ -401,9 +401,12 @@ pub fn initial_privileges(conn: &cli::Connection) -> Result<String, String> {
     query(conn, INITIAL_PRIVILEGES_QUERY)
 }
 
-/// The output of `sql`, run with psql (see [`query_args`])
+/// The output of `sql`, run with psql (see [`query_args`]). The client
+/// encoding is UTF8, as for the dump, thus the names in the output are
+/// the same as the names in the archive
 fn query(conn: &cli::Connection, sql: &str) -> Result<String, String> {
-    let output = run("psql", &query_args(conn, sql), &[], conn)?;
+    let env = [("PGCLIENTENCODING", OsString::from("UTF8"))];
+    let output = run("psql", &query_args(conn, sql), &env, conn)?;
     if !output.status.success() {
         return Err(stderr_of(&output));
     }
