@@ -477,10 +477,30 @@ struct ObjectIndex<'a> {
     /// schema → the extensions in it. A function of an extension is not
     /// an item, so its ACL belongs to the extension (see
     /// `find_function`)
-    extensions_by_schema: HashMap<&'a str, Vec<&'a Item>>,
+    sole_extensions: HashMap<&'a str, &'a Item>,
     /// (schema, name) of each identity column's sequence → its table.
     /// The sequence is not an item, so an ACL on it belongs to the table.
     identity_sequences: HashMap<(String, String), &'a Item>,
+}
+
+/// The extension of each schema that has only one. A function of an
+/// extension is not an item, so its ACL belongs to that extension
+pub(crate) fn sole_extensions(project: &Project) -> HashMap<&str, &Item> {
+    let mut by_schema: HashMap<&str, Vec<&Item>> = HashMap::new();
+    for item in &project.inventory {
+        if let (Definition::Extension(_), Some(schema)) =
+            (&item.definition, item.definition.schema())
+        {
+            by_schema.entry(schema).or_default().push(item);
+        }
+    }
+    by_schema
+        .into_iter()
+        .filter_map(|(schema, items)| match items.as_slice() {
+            [item] => Some((schema, *item)),
+            _ => None,
+        })
+        .collect()
 }
 
 impl<'a> ObjectIndex<'a> {
@@ -488,14 +508,8 @@ impl<'a> ObjectIndex<'a> {
         let mut objects = HashMap::new();
         let mut functions_by_identity = HashMap::new();
         let mut functions_by_name: HashMap<_, Vec<&Item>> = HashMap::new();
-        let mut extensions_by_schema: HashMap<_, Vec<&Item>> = HashMap::new();
         for item in &project.inventory {
             let schema = item.definition.schema();
-            if let (Definition::Extension(_), Some(schema)) =
-                (&item.definition, schema)
-            {
-                extensions_by_schema.entry(schema).or_default().push(item);
-            }
             let key_schema = if item.desc.is_schemaless() {
                 None
             } else {
@@ -602,7 +616,7 @@ impl<'a> ObjectIndex<'a> {
             objects,
             functions_by_identity,
             functions_by_name,
-            extensions_by_schema,
+            sole_extensions: sole_extensions(project),
             identity_sequences,
         }
     }
@@ -673,10 +687,7 @@ fn find_function<'a>(
     let base = split_signature(name).map_or(name, |(base, _)| base);
     match index.functions_by_name.get(&(schema, base.to_string())) {
         Some(matches) => (matches.len() == 1).then(|| matches[0]),
-        None => match index.extensions_by_schema.get(schema?)?.as_slice() {
-            [extension] => Some(*extension),
-            _ => None,
-        },
+        None => index.sole_extensions.get(schema?).copied(),
     }
 }
 

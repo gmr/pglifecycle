@@ -339,16 +339,13 @@ const READ_LIMITS_QUERY: &str = "SELECT json_build_object(
 /// Read [`ReadLimits`] with psql, as the role of `--role` when it is
 /// given
 pub fn read_limits(conn: &cli::Connection) -> Result<ReadLimits, String> {
-    let output = run("psql", &read_limits_args(conn), &[], conn)?;
-    if !output.status.success() {
-        return Err(stderr_of(&output));
-    }
-    parse_read_limits(&String::from_utf8_lossy(&output.stdout))
+    parse_read_limits(&query(conn, READ_LIMITS_QUERY)?)
 }
 
-/// The psql arguments for [`read_limits`]. psql does not have
-/// `--role`, thus the first command sets the role, as pg_dump does
-fn read_limits_args(conn: &cli::Connection) -> Vec<OsString> {
+/// The psql arguments that run `query` and print only its result.
+/// psql does not have `--role`, thus the first command sets the role,
+/// as pg_dump does
+fn query_args(conn: &cli::Connection, query: &str) -> Vec<OsString> {
     let mut args = connection_args(conn);
     if let Some(dbname) = &conn.dbname {
         args.push("-d".into());
@@ -362,8 +359,48 @@ fn read_limits_args(conn: &cli::Connection) -> Vec<OsString> {
         args.push(format!("SET ROLE {}", quote_ident(role)).into());
     }
     args.push("-c".into());
-    args.push(READ_LIMITS_QUERY.into());
+    args.push(query.into());
     args
+}
+
+/// The initial privileges (`pg_init_privs`) of each function of an
+/// extension, as GRANT statements in the form that pg_dump writes.
+/// Each function starts with a REVOKE, thus a function whose initial
+/// ACL is empty also has a statement. pg_dump qualifies the types
+/// with an empty search_path, thus the query does the same
+const INITIAL_PRIVILEGES_QUERY: &str = "SET search_path = '';
+SELECT string_agg(
+    format('REVOKE ALL ON FUNCTION %s FROM PUBLIC;', f.signature)
+        || coalesce((
+            SELECT string_agg(format('GRANT %s ON FUNCTION %s TO %s%s;',
+                       a.privilege_type, f.signature,
+                       CASE WHEN a.grantee = 0 THEN 'PUBLIC'
+                            ELSE quote_ident(pg_get_userbyid(a.grantee))
+                       END,
+                       CASE WHEN a.is_grantable THEN ' WITH GRANT OPTION'
+                            ELSE '' END), '')
+              FROM aclexplode(f.initprivs) a), ''), E'\\n')
+  FROM (SELECT format('%I.%I(%s)', n.nspname, p.proname,
+                      pg_get_function_identity_arguments(p.oid)) signature,
+               i.initprivs
+          FROM pg_catalog.pg_init_privs i
+          JOIN pg_catalog.pg_proc p ON p.oid = i.objoid
+          JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+         WHERE i.classoid = 'pg_catalog.pg_proc'::pg_catalog.regclass
+           AND i.objsubid = 0 AND i.privtype = 'e') f";
+
+/// Read the statements of [`INITIAL_PRIVILEGES_QUERY`] with psql
+pub fn initial_privileges(conn: &cli::Connection) -> Result<String, String> {
+    query(conn, INITIAL_PRIVILEGES_QUERY)
+}
+
+/// The output of `sql`, run with psql (see [`query_args`])
+fn query(conn: &cli::Connection, sql: &str) -> Result<String, String> {
+    let output = run("psql", &query_args(conn, sql), &[], conn)?;
+    if !output.status.success() {
+        return Err(stderr_of(&output));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 /// The [`ReadLimits`] of the JSON object of [`READ_LIMITS_QUERY`]
@@ -955,7 +992,7 @@ mod tests {
     fn reads_the_limits_as_the_role() {
         let mut conn = connection(false);
         let query = OsString::from(READ_LIMITS_QUERY);
-        let args = read_limits_args(&conn);
+        let args = query_args(&conn, READ_LIMITS_QUERY);
         assert!(has_pair(&args, "-c", READ_LIMITS_QUERY), "{args:?}");
         assert!(
             !args
@@ -963,7 +1000,7 @@ mod tests {
                 .any(|arg| arg.to_string_lossy().contains("SET ROLE"))
         );
         conn.role = Some("Gate Reader".into());
-        let args = read_limits_args(&conn);
+        let args = query_args(&conn, READ_LIMITS_QUERY);
         assert!(!args.contains(&OsString::from("--role")), "{args:?}");
         let set = args
             .iter()

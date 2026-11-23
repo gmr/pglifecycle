@@ -425,7 +425,7 @@
 //!      view. The Python did not render them. The test-project has
 //!      none, thus its archive does not change.
 
-mod acls;
+pub(crate) mod acls;
 mod calls;
 
 pub(crate) use calls::called_functions;
