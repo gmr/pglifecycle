@@ -132,6 +132,17 @@ These limits are new on this page:
   the child keeps a NOT NULL of its own. PostgreSQL cannot remove it
   while the other parent gives the NOT NULL. Give the child that NOT
   NULL in the project, as `pull` writes it.
+- **The privileges of a function of an extension.** pg_dump writes
+  these privileges as changes to the initial privileges of the
+  extension (`pg_init_privs`). `deploy` does not read
+  `pg_init_privs`: it applies the changes to the built-in privileges,
+  which give EXECUTE to PUBLIC. Thus, when the extension revokes
+  EXECUTE from PUBLIC and the database grants it again later,
+  `deploy` does not revoke it. Also, in a schema with two or more
+  extensions, `build` cannot find the extension of a function. It
+  writes the privileges of the function without a dependency on a
+  project object, and it logs this only at debug level. `deploy` then
+  does not compare these privileges. Change these privileges by hand.
 
 ## Connection and CLI
 
