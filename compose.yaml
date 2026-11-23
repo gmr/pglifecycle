@@ -1,6 +1,10 @@
 services:
   postgres:
     image: postgres:${PG_VERSION:-19}
+    # a scratch server for the gates: it does not flush to disk, as
+    # DROP DATABASE and each commit wait for a flush, which is slow in
+    # Docker on macOS (the gates run about 20% faster)
+    command: postgres -c fsync=off -c synchronous_commit=off -c full_page_writes=off
     healthcheck:
       test: /usr/bin/pg_isready
       interval: 30s

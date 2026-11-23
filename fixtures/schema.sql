@@ -746,6 +746,11 @@ ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
 CREATE AGGREGATE test.sum_private(INTEGER) (SFUNC = int4pl, STYPE = INTEGER);
 CREATE SCHEMA gate_ext;
 CREATE EXTENSION tablefunc SCHEMA gate_ext;
+-- the script of pg_buffercache revokes EXECUTE from PUBLIC, thus its
+-- functions have initial privileges (pg_init_privs), and pg_dump
+-- writes their ACLs relative to these
+CREATE SCHEMA gate_buf;
+CREATE EXTENSION pg_buffercache SCHEMA gate_buf;
 
 -- Column attributes pg_dump writes as ALTER COLUMN after CREATE TABLE:
 -- compression, storage, the statistics target and attribute options

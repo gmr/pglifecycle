@@ -2,7 +2,9 @@
 //! privileges that an object has, not the statements as written: the
 //! project and pg_dump write their statements relative to the built-in
 //! privileges of the owner and of PUBLIC (`acldefault`), so each side
-//! starts from these and applies its statements. Both sides are SQL
+//! starts from these and applies its statements. For a function of an
+//! extension, pg_dump starts from its initial privileges
+//! (`pg_init_privs`) instead, when it has them. Both sides are SQL
 //! that the same parser reads: the statements that build writes from
 //! the project, and the statements of the snapshot's ACL entries.
 //!
@@ -463,6 +465,13 @@ pub(crate) fn plan(
         .iter()
         .map(|entry| (entry.dump_id, entry))
         .collect();
+    let extensions = crate::build::acls::sole_extensions(project);
+    // no extension, no function of an extension to compare
+    let initial = if extensions.is_empty() {
+        HashMap::new()
+    } else {
+        initial(&mut parser, args)
+    };
     let mut wanted: HashMap<Target, Side> = HashMap::new();
     let mut targets: HashMap<Target, usize> = HashMap::new();
     let mut skipped: HashSet<Target> = HashSet::new();
@@ -491,6 +500,11 @@ pub(crate) fn plan(
     }
     // the database side: the snapshot's ACL entries, by the entry of
     // their object
+    let dump_ids: HashSet<i32> = snapshot
+        .entries()
+        .iter()
+        .map(|entry| entry.dump_id)
+        .collect();
     let mut existing: HashMap<Target, Side> = HashMap::new();
     for entry in snapshot.entries() {
         if entry.desc != libpgdump::ObjectType::Acl {
@@ -505,6 +519,19 @@ pub(crate) fn plan(
         else {
             continue;
         };
+        // pg_dump writes no entry for a function of an extension, thus
+        // its ACL entry has no item, and it depends on no entry. As in
+        // build, the item is the only extension of its schema
+        let member =
+            || !entry.dependencies.iter().any(|dep| dump_ids.contains(dep));
+        let item = item.or_else(|| match target {
+            Target::Name(Kind::Function, _) if member() => entry
+                .namespace
+                .as_deref()
+                .and_then(|schema| extensions.get(schema))
+                .map(|extension| extension.id),
+            _ => None,
+        });
         if let Some(item) = item {
             targets.entry(target.clone()).or_insert(item);
         }
@@ -531,9 +558,12 @@ pub(crate) fn plan(
         else {
             continue;
         };
+        // a function of an extension with no ACL entry in the database
+        // has no owner there; the owner of the project entry stands in
         let db_owner = have
             .and_then(|side| side.owner.clone())
-            .or_else(|| db_owners.get(&item).cloned());
+            .or_else(|| db_owners.get(&item).cloned())
+            .or_else(|| want.and_then(|side| side.owner.clone()));
         let project_owner = items
             .get(&item)
             .and_then(|definition| definition.owner())
@@ -544,11 +574,18 @@ pub(crate) fn plan(
             continue;
         };
         let db_owner = db_owner.unwrap_or_else(|| owner.clone());
-        let mut desired = built_in(kind, &owner);
+        // pg_dump writes the ACL of a function of an extension relative
+        // to its initial privileges, when it has them
+        let base = match target {
+            Target::Name(Kind::Function, name) => initial.get(name).cloned(),
+            _ => None,
+        }
+        .unwrap_or_else(|| built_in(kind, &db_owner));
+        let mut desired = reowned(base.clone(), &db_owner, &owner);
         if let Some(side) = want {
             apply(&mut desired, kind, &side.statements);
         }
-        let mut current = built_in(kind, &db_owner);
+        let mut current = base;
         if let Some(side) = have {
             apply(&mut current, kind, &side.statements);
         }
@@ -573,6 +610,45 @@ pub(crate) fn plan(
         );
     }
     Ok(privileges)
+}
+
+/// The initial ACL (`pg_init_privs`) of each function of an extension,
+/// by its name as pg_dump writes it. A dump has no initial privileges,
+/// thus with `--dump` the map is empty
+fn initial(
+    parser: &mut ddl::Parser,
+    args: &cli::Deploy,
+) -> HashMap<String, Acl> {
+    if args.dump.is_some() {
+        return HashMap::new();
+    }
+    let sql = match crate::pgdump::initial_privileges(&args.connection)
+        .and_then(|sql| parser.parse(&sql))
+    {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            log::warn!(
+                "Cannot read the initial privileges of the functions of \
+                 extensions, thus deploy compares their privileges with \
+                 the built-in ones: {error}"
+            );
+            return HashMap::new();
+        }
+    };
+    let mut initial: HashMap<String, Acl> = HashMap::new();
+    for statement in sql {
+        if let ddl::Statement::Acl(acl) = statement
+            && let [name] = acl.objects.as_slice()
+        {
+            let acl = std::slice::from_ref(&acl);
+            apply(
+                initial.entry(name.clone()).or_default(),
+                Kind::Function,
+                acl,
+            );
+        }
+    }
+    initial
 }
 
 /// Read the statements of an ACL entry. A target with a statement that
