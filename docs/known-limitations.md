@@ -139,9 +139,10 @@ These limits are new on this page:
   which give EXECUTE to PUBLIC. Thus, when the extension revokes
   EXECUTE from PUBLIC and the database grants it again later,
   `deploy` does not revoke it. Also, in a schema with two or more
-  extensions, `build` cannot find the extension of a function, so it
-  skips the privileges of the function with a warning. Change these
-  privileges by hand.
+  extensions, `build` cannot find the extension of a function. It
+  writes the privileges of the function without a dependency on a
+  project object, and it logs this only at debug level. `deploy` then
+  does not compare these privileges. Change these privileges by hand.
 
 ## Connection and CLI
 

@@ -797,13 +797,27 @@ fn object(entry: &libpgdump::Entry) -> Option<(Kind, String, String)> {
             let drop = entry.drop_stmt.as_deref()?;
             let drop = drop.trim_end_matches(['\n', ';']);
             let on = match drop.strip_prefix("DROP AGGREGATE ") {
-                Some(aggregate) => format!(
-                    "FUNCTION {}",
-                    aggregate
-                        .replace("(*)", "()")
-                        .replace("(ORDER BY ", "(")
-                        .replace(" ORDER BY ", ", ")
-                ),
+                Some(aggregate) => {
+                    // change only the argument list, which starts at
+                    // the first parenthesis outside a quoted name
+                    let mut quoted = false;
+                    let start = aggregate
+                        .char_indices()
+                        .find(|&(_, c)| {
+                            if c == '"' {
+                                quoted = !quoted;
+                            }
+                            c == '(' && !quoted
+                        })
+                        .map_or(aggregate.len(), |(i, _)| i);
+                    let (name, args) = aggregate.split_at(start);
+                    format!(
+                        "FUNCTION {name}{}",
+                        args.replace("(*)", "()")
+                            .replace("(ORDER BY ", "(")
+                            .replace(" ORDER BY ", ", ")
+                    )
+                }
                 None => drop.strip_prefix("DROP ")?.to_string(),
             };
             return Some((Kind::Function, on.clone(), on));
@@ -1058,6 +1072,17 @@ mod tests {
             &[],
         )
         .expect("aggregate");
+        dump.add_entry(
+            libpgdump::ObjectType::Aggregate,
+            Some("s"),
+            Some("a(*)(integer)"),
+            Some("o"),
+            None,
+            Some("DROP AGGREGATE s.\"a(*) ORDER BY \"(integer);\n"),
+            None,
+            &[],
+        )
+        .expect("aggregate");
         let objects: Vec<_> =
             dump.entries().iter().filter_map(object).collect();
         assert_eq!(
@@ -1087,6 +1112,11 @@ mod tests {
                     Kind::Function,
                     String::from("FUNCTION s.o (IN integer)"),
                     String::from("FUNCTION s.o (IN integer)"),
+                ),
+                (
+                    Kind::Function,
+                    String::from("FUNCTION s.\"a(*) ORDER BY \"(integer)"),
+                    String::from("FUNCTION s.\"a(*) ORDER BY \"(integer)"),
                 ),
             ]
         );
