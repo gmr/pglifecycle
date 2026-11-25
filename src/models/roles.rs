@@ -166,6 +166,8 @@ pub struct GroupOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub inherit: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub replication: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub superuser: Option<bool>,
 }
 

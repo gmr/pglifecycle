@@ -424,6 +424,10 @@
 //!      pg_dump writes the labels of all columns in the entry of the
 //!      view. The Python did not render them. The test-project has
 //!      none, thus its archive does not change.
+//! 117. The `replication` option of a role, a user or a group renders
+//!      `REPLICATION` or `NOREPLICATION`. The Python did not render
+//!      it, so a pulled replication role restored as `NOREPLICATION`.
+//!      The test-project user `fwd_user` now renders `NOREPLICATION`.
 
 pub(crate) mod acls;
 mod calls;
@@ -1909,11 +1913,17 @@ impl Builder {
         };
         let mut create =
             vec!["CREATE".into(), "GROUP".into(), quote_ident(&d.name)];
-        if let Some(options) = &d.options {
-            push_bool_option(&mut create, "CREATEDB", options.create_db);
-            push_bool_option(&mut create, "CREATEROLE", options.create_role);
-            push_bool_option(&mut create, "INHERIT", options.inherit);
-            push_bool_option(&mut create, "SUPERUSER", options.superuser);
+        if let Some(o) = &d.options {
+            // A group has a subset of the role options
+            let options = RoleOptions {
+                create_db: o.create_db,
+                create_role: o.create_role,
+                inherit: o.inherit,
+                replication: o.replication,
+                superuser: o.superuser,
+                ..Default::default()
+            };
+            push_role_options(&mut create, &options, false);
         }
         let drop = vec!["DROP GROUP IF EXISTS".into(), quote_ident(&d.name)];
         // pg_restore cannot set the owner of a group (deviation 38)
@@ -4157,7 +4167,8 @@ fn push_bool_option(sql: &mut Vec<String>, name: &str, value: Option<bool>) {
 }
 
 /// Shared role/user option rendering (ports _dump_role / _dump_user,
-/// with the BYPASSRLS-reads-create_db bug fixed)
+/// with the BYPASSRLS-reads-create_db bug fixed and REPLICATION
+/// added, deviation 117)
 fn push_role_options(
     sql: &mut Vec<String>,
     options: &RoleOptions,
@@ -4176,6 +4187,7 @@ fn push_role_options(
     } else {
         push_bool_option(sql, "LOGIN", options.login);
     }
+    push_bool_option(sql, "REPLICATION", options.replication);
     push_bool_option(sql, "SUPERUSER", options.superuser);
 }
 
