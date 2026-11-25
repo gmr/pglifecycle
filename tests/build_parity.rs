@@ -31,6 +31,8 @@ const DEVIATIONS: &[(&str, &str, &str)] = &[
     // Python emitted CREATE ROLE for create: false roles (and
     // rendered BYPASSRLS from create_db); the Rust build skips them
     ("ROLE", "", "postgres"),
+    // deviation 117: Python did not render the replication option
+    ("USER", "", "fwd_user"),
     // deviation 17: pg_restore derives these three types' owner
     // statements from the stored drop statement, so IF EXISTS in one
     // produced `ALTER FUNCTION IF EXISTS ...`, which does not parse
@@ -167,6 +169,14 @@ const OWNERLESS: &[(&str, &str, &str)] = &[
 /// (desc, namespace, tag, required defn fragment) for the corrected
 /// Rust entries replacing the deviations above
 const CORRECTED: &[(&str, &str, &str, &str)] = &[
+    // deviation 117
+    (
+        "USER",
+        "",
+        "fwd_user",
+        "CREATE USER fwd_user NOBYPASSRLS NOCREATEDB NOCREATEROLE INHERIT \
+         LOGIN NOREPLICATION NOSUPERUSER PASSWORD NULL;\n",
+    ),
     // deviation 39: the text is UTF-8, whatever the project says
     ("ENCODING", "", "", "SET client_encoding = 'UTF8';\n"),
     (
@@ -2594,4 +2604,62 @@ fn server_subscription_after_mapping_entry(subscription_first: bool) {
         subscription.dependencies,
         mapping.dump_id
     );
+}
+
+/// Deviation 117: the replication option of a role, a user and a
+/// group renders. The Python did not render it, so a replication role
+/// restored as NOREPLICATION.
+#[test]
+fn renders_the_replication_option() {
+    let item = |id, desc, definition| Item {
+        id,
+        desc,
+        definition,
+        dependencies: BTreeSet::new(),
+    };
+    let named = |name: &str| serde_json::json!({"name": name, "options": {"replication": true}});
+    let inventory = vec![
+        item(
+            0,
+            ObjectType::Role,
+            Definition::Role(
+                serde_json::from_value(named("repl_role")).unwrap(),
+            ),
+        ),
+        item(
+            1,
+            ObjectType::User,
+            Definition::User(
+                serde_json::from_value(named("repl_user")).unwrap(),
+            ),
+        ),
+        item(
+            2,
+            ObjectType::Group,
+            Definition::Group(
+                serde_json::from_value(named("repl_group")).unwrap(),
+            ),
+        ),
+    ];
+    let project = project::Project {
+        name: "replication".into(),
+        superuser: "postgres".into(),
+        default_schema: "public".into(),
+        path: std::path::PathBuf::new(),
+        settings: Default::default(),
+        inventory,
+    };
+    let dump = build::assemble(&project).unwrap().dump;
+    let defns: Vec<&str> = dump
+        .entries()
+        .iter()
+        .filter_map(|e| e.defn.as_deref())
+        .collect();
+    for expected in [
+        "CREATE ROLE repl_role REPLICATION;\n",
+        "CREATE USER repl_user LOGIN REPLICATION PASSWORD NULL;\n",
+        "CREATE GROUP repl_group REPLICATION;\n",
+    ] {
+        assert!(defns.contains(&expected), "{expected:?} in {defns:?}");
+    }
 }
