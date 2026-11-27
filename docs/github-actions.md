@@ -18,7 +18,7 @@ GitHub-hosted Linux and macOS images already carry.
 ```yaml
 - uses: gmr/pglifecycle-action@v1
   with:
-    version: 2.0.0-beta.5
+    version: 2.0.0-beta.6
 - run: pglifecycle build ./schema schema.dump
 ```
 

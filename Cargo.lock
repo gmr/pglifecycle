@@ -719,9 +719,9 @@ dependencies = [
 
 [[package]]
 name = "libpgfmt"
-version = "1.5.3"
+version = "1.5.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "01ce97a2bc60eeda128bf196b9e0db66c19430b60ed3295ad696147031f02b82"
+checksum = "c35ff1bd85a9f821407246775e15fcf35749b4f96f5e3031d8a58f7c5129dd58"
 dependencies = [
  "tree-sitter",
  "tree-sitter-postgres",
@@ -955,7 +955,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "pglifecycle"
-version = "2.0.0-beta.5"
+version = "2.0.0-beta.6"
 dependencies = [
  "clap",
  "ctrlc",
